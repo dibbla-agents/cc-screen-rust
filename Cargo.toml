@@ -1,3 +1,10 @@
+# The root package (the server) doubles as the Cargo workspace root so the
+# rust-embed path, build.sh/install.sh, and the systemd unit don't move. The
+# shared wire types live in crates/protocol; the terminal client in crates/tui.
+[workspace]
+members = ["crates/protocol", "crates/tui"]
+resolver = "2"
+
 [package]
 name = "cc-screen-rust"
 version = "0.1.0"
@@ -9,6 +16,7 @@ name = "cc-screen-rust"
 path = "src/main.rs"
 
 [dependencies]
+cc-screen-protocol = { path = "crates/protocol" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }

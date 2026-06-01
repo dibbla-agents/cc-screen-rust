@@ -19,11 +19,16 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
+use cc_screen_protocol::{
+    key_bytes, wrap_bracketed_paste, CreateReq, CreateResp, DeleteReq, ExtraDirs, Favorite,
+    RestorableSession, SessionInfo, ToolInfo, WsClientFrame,
+};
+
 use crate::confine::resolve_under;
-use crate::engine::{key_bytes, AppState, Session};
+use crate::engine::{AppState, Session};
 use crate::tools::Tool;
 
 #[derive(rust_embed::RustEmbed)]
@@ -37,23 +42,11 @@ fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
 }
 
 // ── GET /api/sessions ────────────────────────────────────────────────────────
-#[derive(Serialize)]
-pub struct SessionDto {
-    name: String,
-    tool: String,
-    short: String,
-    attached: bool,
-    activity: i64,
-    preview: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    cwd: String,
-}
-
-pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionDto>> {
+pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
     let dtos = app
         .list()
         .into_iter()
-        .map(|s| SessionDto {
+        .map(|s| SessionInfo {
             name: s.name.clone(),
             tool: s.tool.clone(),
             short: s.short.clone(),
@@ -67,37 +60,23 @@ pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionDto>> {
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
-pub async fn tools(State(app): State<AppState>) -> Json<Value> {
-    let list: Vec<Value> = app
+pub async fn tools(State(app): State<AppState>) -> Json<Vec<ToolInfo>> {
+    let list: Vec<ToolInfo> = app
         .inner
         .tools
         .iter()
-        .map(|t| {
-            let mut o = json!({ "cmd": t.cmd, "prefix": t.prefix });
-            if t.extra_flag.is_some() {
-                let mut ed = json!({});
-                if t.extra_max > 0 {
-                    ed["max"] = json!(t.extra_max);
-                }
-                o["extraDirs"] = ed;
-            }
-            o
+        .map(|t| ToolInfo {
+            cmd: t.cmd.clone(),
+            prefix: t.prefix.clone(),
+            extra_dirs: t.extra_flag.is_some().then(|| ExtraDirs {
+                max: (t.extra_max > 0).then_some(t.extra_max),
+            }),
         })
         .collect();
-    Json(json!(list))
+    Json(list)
 }
 
 // ── POST /api/session ────────────────────────────────────────────────────────
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateReq {
-    tool: String,
-    name: String,
-    dir: String,
-    #[serde(default)]
-    extra_dirs: Vec<String>,
-}
-
 pub async fn create_session(State(app): State<AppState>, Json(req): Json<CreateReq>) -> ApiResult {
     let tool = app
         .find_tool(&req.tool)
@@ -116,7 +95,7 @@ pub async fn create_session(State(app): State<AppState>, Json(req): Json<CreateR
         name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     }
     match app.create(&tool, &name, &dir.to_string_lossy(), extra, false) {
-        Ok(full) => Ok(Json(json!({ "name": full })).into_response()),
+        Ok(full) => Ok(Json(CreateResp { name: full }).into_response()),
         Err(e) => {
             let msg = e.to_string();
             let code = if msg.contains("already exists") {
@@ -166,13 +145,6 @@ fn validate_extra_dirs(
 }
 
 // ── POST /api/session/delete ─────────────────────────────────────────────────
-#[derive(Deserialize)]
-pub struct DeleteReq {
-    session: String,
-    #[serde(default)]
-    mode: String, // "exit" (graceful) | "kill" (hard)
-}
-
 pub async fn delete_session(State(app): State<AppState>, Json(req): Json<DeleteReq>) -> ApiResult {
     let sess = app
         .get(&req.session)
@@ -243,13 +215,7 @@ pub async fn paste(State(app): State<AppState>, Json(req): Json<PasteReq>) -> Ap
         .get(&req.session)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown session"))?;
     // Bracketed paste so newlines don't submit line-by-line inside a TUI.
-    let mut buf = Vec::with_capacity(req.text.len() + 16);
-    buf.extend_from_slice(b"\x1b[200~");
-    buf.extend_from_slice(req.text.as_bytes());
-    buf.extend_from_slice(b"\x1b[201~");
-    if req.enter {
-        buf.extend_from_slice(b"\r");
-    }
+    let buf = wrap_bracketed_paste(&req.text, req.enter);
     sess.write_input(&buf);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -269,13 +235,18 @@ pub async fn clear_history(State(app): State<AppState>, Json(req): Json<ClearReq
 }
 
 // ── GET /api/sessions/restorable ─────────────────────────────────────────────
-pub async fn restorable(State(app): State<AppState>) -> Json<Value> {
-    let list: Vec<Value> = app
+pub async fn restorable(State(app): State<AppState>) -> Json<Vec<RestorableSession>> {
+    let list: Vec<RestorableSession> = app
         .restorable()
         .into_iter()
-        .map(|e| json!({ "session": e.session, "tool": e.prefix, "short": e.short, "dir": e.dir }))
+        .map(|e| RestorableSession {
+            session: e.session,
+            tool: e.prefix,
+            short: e.short,
+            dir: e.dir,
+        })
         .collect();
-    Json(json!(list))
+    Json(list)
 }
 
 // ── POST /api/sessions/restore ───────────────────────────────────────────────
@@ -289,12 +260,6 @@ pub async fn restore(State(app): State<AppState>) -> Json<Value> {
 }
 
 // ── GET/PUT /api/favorites ───────────────────────────────────────────────────
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Favorite {
-    id: String,
-    text: String,
-}
-
 fn favorites_path(app: &AppState) -> PathBuf {
     app.inner.config_dir.join("favorites.json")
 }
@@ -352,17 +317,7 @@ pub async fn ws(
 }
 
 fn handle_frame(sess: &Session, text: &str) {
-    #[derive(Deserialize)]
-    struct M {
-        t: String,
-        #[serde(default)]
-        d: String,
-        #[serde(default)]
-        c: u16,
-        #[serde(default)]
-        r: u16,
-    }
-    if let Ok(m) = serde_json::from_str::<M>(text) {
+    if let Ok(m) = serde_json::from_str::<WsClientFrame>(text) {
         match m.t.as_str() {
             "i" => sess.write_input(m.d.as_bytes()),
             "r" => sess.resize(m.c, m.r),

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use cc_screen_protocol::SNAPSHOT_RESET;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::{broadcast, watch};
 
@@ -173,7 +174,7 @@ impl Session {
     pub fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Bytes>) {
         let st = self.state.lock().unwrap();
         let mut snap = Vec::with_capacity(st.ring.len() + 2);
-        snap.extend_from_slice(b"\x1bc"); // RIS: full reset so xterm repaints clean
+        snap.extend_from_slice(SNAPSHOT_RESET); // RIS: full reset so a fresh emulator repaints clean
         snap.extend(st.ring.iter().copied());
         (snap, self.tx.subscribe())
     }
@@ -182,7 +183,7 @@ impl Session {
     pub fn snapshot(&self) -> Vec<u8> {
         let st = self.state.lock().unwrap();
         let mut snap = Vec::with_capacity(st.ring.len() + 2);
-        snap.extend_from_slice(b"\x1bc");
+        snap.extend_from_slice(SNAPSHOT_RESET);
         snap.extend(st.ring.iter().copied());
         snap
     }
@@ -197,7 +198,7 @@ impl Session {
         st.ring.clear();
         st.ring.extend(screen.iter().copied());
         let mut payload = Vec::with_capacity(screen.len() + 2);
-        payload.extend_from_slice(b"\x1bc");
+        payload.extend_from_slice(SNAPSHOT_RESET);
         payload.extend_from_slice(&screen);
         let _ = self.tx.send(Bytes::from(payload));
     }
@@ -278,33 +279,6 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
     }
     // PTY hit EOF (the child's slave side closed) → tell attached clients.
     sess.mark_closed();
-}
-
-// ── Key name → byte sequence (the /api/key allow-list) ───────────────────────
-pub fn key_bytes(name: &str) -> Option<&'static [u8]> {
-    let b: &'static [u8] = match name.to_ascii_lowercase().as_str() {
-        "up" => b"\x1b[A",
-        "down" => b"\x1b[B",
-        "right" => b"\x1b[C",
-        "left" => b"\x1b[D",
-        "enter" => b"\r",
-        "escape" | "esc" => b"\x1b",
-        "tab" => b"\t",
-        "btab" => b"\x1b[Z",
-        "space" => b" ",
-        "backspace" => b"\x7f",
-        "home" => b"\x1b[H",
-        "end" => b"\x1b[F",
-        "pageup" => b"\x1b[5~",
-        "pagedown" => b"\x1b[6~",
-        "c-c" => b"\x03",
-        "c-d" => b"\x04",
-        "c-z" => b"\x1a",
-        "c-l" => b"\x0c",
-        "c-r" => b"\x12",
-        _ => return None,
-    };
-    Some(b)
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
