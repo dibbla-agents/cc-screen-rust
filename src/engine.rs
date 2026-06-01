@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::clip::ClipStore;
 use crate::manifest;
@@ -56,6 +56,10 @@ pub struct Session {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     state: Mutex<SessionState>,
     tx: broadcast::Sender<Bytes>,
+    // Flips to true the instant the child process exits, so attached WebSockets
+    // close immediately instead of sitting on a frozen final frame until the
+    // next /api/sessions poll unmounts the pane.
+    closed: watch::Sender<bool>,
 }
 
 impl Session {
@@ -96,6 +100,7 @@ impl Session {
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let (tx, _rx) = broadcast::channel::<Bytes>(BROADCAST_CAP);
+        let (closed, _) = watch::channel(false);
 
         let state = SessionState {
             parser: vt100::Parser::new(INIT_ROWS, INIT_COLS, SCROLLBACK),
@@ -119,6 +124,7 @@ impl Session {
             killer: Mutex::new(killer),
             state: Mutex::new(state),
             tx,
+            closed,
         });
 
         {
@@ -200,6 +206,16 @@ impl Session {
         self.tx.receiver_count() > 0
     }
 
+    /// Receiver that fires when the child process exits (see `closed`).
+    pub fn closed_rx(&self) -> watch::Receiver<bool> {
+        self.closed.subscribe()
+    }
+
+    /// Signal that the child has exited — wakes attached WebSockets to close.
+    pub fn mark_closed(&self) {
+        let _ = self.closed.send(true);
+    }
+
     pub fn last_activity(&self) -> u64 {
         self.state.lock().map(|s| s.last_activity).unwrap_or(0)
     }
@@ -260,6 +276,8 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             Err(_) => break,
         }
     }
+    // PTY hit EOF (the child's slave side closed) → tell attached clients.
+    sess.mark_closed();
 }
 
 // ── Key name → byte sequence (the /api/key allow-list) ───────────────────────
@@ -360,7 +378,7 @@ impl AppState {
         }
         let (sess, mut child) =
             Session::spawn(tool, &short, dir, extra_dirs.clone(), resume, &self.inner.env_path)?;
-        self.inner.registry.lock().unwrap().insert(full.clone(), sess);
+        self.inner.registry.lock().unwrap().insert(full.clone(), sess.clone());
 
         // Record for resume-after-restart (best-effort).
         manifest::record(
@@ -378,8 +396,10 @@ impl AppState {
 
         let inner = self.inner.clone();
         let key = full.clone();
+        let sess_reaper = sess;
         std::thread::spawn(move || {
             let status = child.wait();
+            sess_reaper.mark_closed(); // close attached WS the instant the child exits
             inner.registry.lock().unwrap().remove(&key);
             // A clean exit (the user typed /exit; status 0) is deliberate → drop
             // it from the manifest so it isn't restored. A crash/signal — and a

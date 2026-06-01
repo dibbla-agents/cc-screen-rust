@@ -301,14 +301,31 @@ export default function App() {
   // Per-pane connection state for the header dot and pane-corner indicators.
   // Indexed by pane; entries past `layout` are ignored.
   const [conns, setConns] = useState<ConnState[]>(() => Array(4).fill("closed"));
+  // refresh() is defined further down; a ref lets setPaneConn reach the latest
+  // without a declaration-order dependency.
+  const refreshRef = useRef<() => void>(() => {});
+  const closeRefreshTimer = useRef<number | null>(null);
   const setPaneConn = useCallback(
-    (idx: number, c: ConnState) =>
+    (idx: number, c: ConnState) => {
       setConns((prev) => {
         if (prev[idx] === c) return prev;
         const next = prev.slice();
         next[idx] = c;
         return next;
-      }),
+      });
+      // A socket closing usually means the session just ended — the backend
+      // closes the WS the instant the child process exits. Re-poll promptly
+      // (debounced) so the dead session's pane clears right away instead of on
+      // the 2.5s interval. recover-when-gone only clears a pane whose session is
+      // actually gone, so a transient reconnect blip is harmless.
+      if (c === "closed") {
+        if (closeRefreshTimer.current != null) clearTimeout(closeRefreshTimer.current);
+        closeRefreshTimer.current = window.setTimeout(() => {
+          closeRefreshTimer.current = null;
+          refreshRef.current();
+        }, 150);
+      }
+    },
     []
   );
   const [fontSize, setFontSize] = useState<number>(
@@ -427,6 +444,7 @@ export default function App() {
       setLoading(false);
     }
   }, [updatePanes]);
+  refreshRef.current = refresh; // keep the on-close re-poll pointing at the latest
 
   // Initial load.
   useEffect(() => {

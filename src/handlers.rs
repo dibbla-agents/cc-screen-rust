@@ -375,6 +375,7 @@ async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
     let (mut sink, mut stream) = socket.split();
     // Atomic snapshot + subscribe (see Session::attach).
     let (snap, mut rx) = sess.attach();
+    let mut closed_rx = sess.closed_rx();
 
     let sess_send = sess.clone();
     let mut send_task = tokio::spawn(async move {
@@ -404,6 +405,12 @@ async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
                     if sink.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
+                }
+                // The child exited — close the socket now so the client stops
+                // showing a frozen frame and re-polls (the session is gone).
+                _ = closed_rx.changed() => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
                 }
             }
         }
