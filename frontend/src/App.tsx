@@ -1,0 +1,1557 @@
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import type { Terminal } from "@xterm/xterm";
+import {
+  clearHistory,
+  deleteSession,
+  fetchFavorites,
+  fetchRestorable,
+  fetchSessions,
+  flattenDataTransfer,
+  pasteText,
+  restoreSessions,
+  saveFavorites,
+  sendImage,
+  sendKey,
+  type Favorite,
+  type RestorableSession,
+  type Session,
+  type UploadFile,
+  type UploadResult,
+} from "./api";
+import TerminalView, { type ConnState } from "./components/TerminalView";
+import SessionDrawer from "./components/SessionDrawer";
+import ControlBar from "./components/ControlBar";
+import ComposeSheet, { type ComposeHandle } from "./components/ComposeSheet";
+import ImageSheet from "./components/ImageSheet";
+import FavoritesSheet, { type FavoritesHandle } from "./components/FavoritesSheet";
+import NewSessionPanel from "./components/NewSessionPanel";
+import TileGrid, { type Layout, paneCount } from "./components/TileGrid";
+import LayoutPicker from "./components/LayoutPicker";
+import LayoutPalette from "./components/LayoutPalette";
+import UploadSheet from "./components/UploadSheet";
+// The editor pulls in CodeMirror + react-markdown — a big chunk only needed
+// once the user actually opens a file. Lazy-load it so the terminal app's
+// initial bundle stays light.
+const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
+import { toolColor, toPng } from "./util";
+import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
+
+const LAST_KEY = "ccweb.lastSession"; // legacy single-session key (migrate from)
+const PANES_KEY = "ccweb.panes.v1";   // {layout, panes, active}
+const FONT_KEY = "ccweb.fontSize";
+// One-shot "how to select" hint. `.v2` because the v1 wording said
+// "Shift+drag" universally — wrong on Mac, where the modifier is Option.
+// Bumping the key re-shows the corrected hint to users who already
+// dismissed v1.
+const COPY_HINT_KEY = "ccweb.copyHintSeen.v2";
+
+interface PaneState {
+  layout: Layout;
+  panes: (string | null)[]; // length == layout
+  active: number;            // index into panes
+}
+
+// loadPaneState restores the persisted layout/panes/active. Falls back to a
+// 1-pane view holding whatever the legacy single-session key pointed at, so
+// existing users land where they were. The persisted layout was historically
+// 1-4 (== pane count); layouts 5 (stacked) and 6 (right-tall L) added later
+// have pane counts 2 and 3, so the array length is derived via paneCount(),
+// not from the layout integer.
+function loadPaneState(): PaneState {
+  try {
+    const raw = localStorage.getItem(PANES_KEY);
+    if (raw) {
+      const s = JSON.parse(raw) as Partial<PaneState>;
+      const layout = Math.max(1, Math.min(6, Math.floor(Number(s.layout) || 1))) as Layout;
+      const count = paneCount(layout);
+      const panes = Array.from({ length: count }, (_, i) => {
+        const v = (s.panes as unknown[] | undefined)?.[i];
+        return typeof v === "string" && v ? v : null;
+      });
+      const active = Math.max(0, Math.min(count - 1, Math.floor(Number(s.active) || 0)));
+      return { layout, panes, active };
+    }
+  } catch {
+    /* fall through */
+  }
+  const legacy = localStorage.getItem(LAST_KEY);
+  return { layout: 1, panes: [legacy || null], active: 0 };
+}
+
+// cycleSessionInPane returns the next/prev session name to mount in `paneIdx`,
+// skipping sessions already mounted in other panes (so cycling never yanks
+// another pane — the one-session-per-pane invariant). When the active pane is
+// empty, ↓ starts at the first available session and ↑ at the last. Returns
+// null if there's nothing to cycle to (zero or one available session that's
+// already current).
+function cycleSessionInPane(
+  current: (string | null)[],
+  paneIdx: number,
+  sessions: string[],
+  dir: 1 | -1
+): string | null {
+  const taken = new Set<string>();
+  current.forEach((p, i) => {
+    if (i !== paneIdx && p) taken.add(p);
+  });
+  const avail = sessions.filter((n) => !taken.has(n));
+  if (avail.length === 0) return null;
+  const cur = current[paneIdx];
+  // Empty pane: dir +1 from "-1" lands on 0; dir -1 from "len" lands on last.
+  let idx = cur ? avail.indexOf(cur) : dir > 0 ? -1 : avail.length;
+  if (cur && idx < 0) idx = dir > 0 ? -1 : 0; // current dropped from list
+  const next = avail[(idx + dir + avail.length) % avail.length];
+  return next === cur ? null : next;
+}
+
+// useIsDesktop is true on a wide window with a precise pointer (mouse/trackpad
+// — Chrome desktop). The multi-pane UI is gated on this; phones always render
+// a single pane and never see the layout picker.
+function useIsDesktop(): boolean {
+  const query = "(pointer: fine) and (min-width: 900px)";
+  const get = () => typeof matchMedia !== "undefined" && matchMedia(query).matches;
+  const [d, setD] = useState<boolean>(get);
+  useEffect(() => {
+    const mq = matchMedia(query);
+    const on = () => setD(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return d;
+}
+
+// isCtrlB matches the bare Ctrl+B chord — no Shift/Alt/Meta, case-insensitive.
+function isCtrlB(e: KeyboardEvent): boolean {
+  return (
+    e.ctrlKey &&
+    !e.shiftKey &&
+    !e.altKey &&
+    !e.metaKey &&
+    e.key.toLowerCase() === "b"
+  );
+}
+
+// writeClipboard puts `text` on the system clipboard. On HTTPS / localhost
+// we prefer the modern async API; on the plain-HTTP tailnet deployment that
+// API is gated, so we fall back to the deprecated-but-still-supported
+// execCommand('copy') path. **Must be called inside a user-gesture handler**
+// (keydown / click) — both paths require it, and the fallback also briefly
+// steals focus to a hidden textarea, so we restore the previously-focused
+// element on the way out (otherwise the user's next keystroke would land
+// in the dead textarea instead of xterm).
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      /* fall through to execCommand */
+    }
+  }
+  const prevFocus = document.activeElement as HTMLElement | null;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  ta.style.top = "0";
+  document.body.appendChild(ta);
+  try {
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand("copy");
+    if (!ok) throw new Error("execCommand copy returned false");
+  } finally {
+    document.body.removeChild(ta);
+    prevFocus?.focus?.();
+  }
+}
+
+// shouldSkipShortcut returns true when focus is in a real text input (compose
+// textarea, favourites search, etc.) — but NOT when focus is in xterm.js's
+// hidden helper textarea, which is technically a textarea but is really just
+// the terminal. See AGENTS.md "xterm.js routes all keystrokes through a hidden
+// <textarea>" for the full footgun explanation.
+function shouldSkipShortcut(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  const tag = t?.tagName?.toLowerCase();
+  const isXtermPlumbing = !!t?.classList?.contains("xterm-helper-textarea");
+  return (
+    (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
+    !isXtermPlumbing
+  );
+}
+
+export default function App() {
+  const isDesktop = useIsDesktop();
+
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Sessions a reboot/tmux restart took down that we can bring back. Fetched
+  // lazily when the drawer opens (it's the only place the offer is shown), so
+  // the session-list poll stays a single request.
+  const [restorable, setRestorable] = useState<RestorableSession[]>([]);
+
+  // The whole multi-pane state lives in one object; persisted as one blob.
+  const [paneState, setPaneState] = useState<PaneState>(loadPaneState);
+  const { layout, panes, active } = paneState;
+  const currentSession = panes[active] ?? null;
+
+  // Mirror layout/active/sessions/panes into refs so the keyboard handler can
+  // read fresh values without re-binding (which would reset its in-flight
+  // prefix timer mid-chord). State drives rendering; refs drive the handler.
+  const layoutRef = useRef(layout);
+  const activeRef = useRef(active);
+  const sessionsRef = useRef<Session[]>([]);
+  const panesRef = useRef<(string | null)[]>(panes);
+  // Live xterm.js instance per pane, populated by TerminalView's onTerm
+  // callback. The global Cmd/Ctrl+C handler reads the active slot to decide
+  // whether there's a selection to copy. Length 4 matches the max layout.
+  const termsRef = useRef<(Terminal | null)[]>([null, null, null, null]);
+  useEffect(() => { layoutRef.current = layout; }, [layout]);
+  useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => { panesRef.current = panes; }, [panes]);
+
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [imageOpen, setImageOpen] = useState(false);
+  const [favOpen, setFavOpen] = useState(false);
+  // The file editor is a SINGLETON, app-wide overlay — not per-pane (desktop can
+  // show up to 4 terminals, but only ever one editor, covering the whole
+  // screen). `path` is the file to open; null means "let the user pick from the
+  // desktop tree" (the Ctrl+B e entry). editorOpenRef shadows it so the global
+  // keyboard handler can go inert while the editor owns the screen.
+  const [editor, setEditor] = useState<{ open: boolean; path: string | null }>({
+    open: false,
+    path: null,
+  });
+  const editorOpenRef = useRef(false);
+  useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
+  // File-upload state. The list is captured at trigger time — flattened from
+  // a desktop drop (folders walked via webkitGetAsEntry in api.ts) or from the
+  // phone's file picker — and uploadSession is the pane's session captured at
+  // the same moment, so a later pane switch doesn't retarget the upload.
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFilesList, setUploadFilesList] = useState<UploadFile[]>([]);
+  const [uploadSession, setUploadSession] = useState<string | null>(null);
+  // Hidden <input type="file"> the phone's footer Upload button triggers. iOS
+  // turns this into a Photo Library / Take Photo / Choose Files menu, so one
+  // control covers both "image" and "file" uploads.
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  // Layout palette (desktop-only): floating popover anchored under the
+  // header trigger, navigated by ←/→ + Enter. paletteOpenRef shadows it so
+  // the Ctrl+B chord handler — which captures keys on `window` *before* the
+  // palette's onKeyDown sees them — can bail out and let the palette own
+  // the keyboard. Synchronously updated by openPalette/closePalette so the
+  // gating works on the very next keystroke, not after the next render.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteOpenRef = useRef(false);
+  const openPalette = useCallback(() => {
+    paletteOpenRef.current = true;
+    setPaletteOpen(true);
+  }, []);
+  const closePalette = useCallback(() => {
+    paletteOpenRef.current = false;
+    setPaletteOpen(false);
+  }, []);
+  const [favorites, setFavorites] = useState<Favorite[]>([]);
+  // When the New-Session panel opens we remember which pane to mount the
+  // newly-created session into. -1 means "phone path / default — pane 0".
+  const [newOpen, setNewOpen] = useState(false);
+  const [newForPane, setNewForPane] = useState<number>(-1);
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  // Small ephemeral toast for paste-event feedback (and any other one-shot
+  // confirmation we add later). Auto-dismissed by the show() helper below.
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = useCallback((msg: string, ok: boolean) => {
+    setToast({ msg, ok });
+    if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2500);
+  }, []);
+  const composeRef = useRef<ComposeHandle>(null);
+  const favRef = useRef<FavoritesHandle>(null);
+
+  // Track the visible area (shrinks when the soft keyboard opens) so the app —
+  // terminal, footer, and the compose/image sheets — stays above the keyboard
+  // instead of hiding behind it. iOS Safari overlays the keyboard rather than
+  // resizing the layout viewport, so we resize ourselves to visualViewport.
+  const [appH, setAppH] = useState<number | null>(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      setAppH(vv.height);
+      window.scrollTo(0, 0); // keep the layout viewport pinned to the top
+    };
+    apply();
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    return () => {
+      vv.removeEventListener("resize", apply);
+      vv.removeEventListener("scroll", apply);
+    };
+  }, []);
+
+  // Per-pane connection state for the header dot and pane-corner indicators.
+  // Indexed by pane; entries past `layout` are ignored.
+  const [conns, setConns] = useState<ConnState[]>(() => Array(4).fill("closed"));
+  const setPaneConn = useCallback(
+    (idx: number, c: ConnState) =>
+      setConns((prev) => {
+        if (prev[idx] === c) return prev;
+        const next = prev.slice();
+        next[idx] = c;
+        return next;
+      }),
+    []
+  );
+  const [fontSize, setFontSize] = useState<number>(
+    () => Number(localStorage.getItem(FONT_KEY)) || 13
+  );
+
+  // Pane mutators (all funnel through here so persistence stays consistent).
+  const updatePanes = useCallback(
+    (mut: (s: PaneState) => PaneState) => setPaneState((s) => mut(s)),
+    []
+  );
+
+  // mountAt assigns `name` (or null) to pane `idx`. If the same session is
+  // already mounted in another pane, it's removed from there — each session
+  // can live in at most one pane (tmux pane width is shared, so two attached
+  // clients at different widths would fight every resize).
+  const mountAt = useCallback(
+    (idx: number, name: string | null) => {
+      updatePanes((s) => {
+        const next = s.panes.slice();
+        if (name) {
+          for (let i = 0; i < next.length; i++) if (i !== idx && next[i] === name) next[i] = null;
+        }
+        next[idx] = name;
+        return { ...s, panes: next };
+      });
+    },
+    [updatePanes]
+  );
+
+  const setActive = useCallback(
+    (idx: number) =>
+      updatePanes((s) => ({
+        ...s,
+        active: Math.max(0, Math.min(paneCount(s.layout) - 1, idx)),
+      })),
+    [updatePanes]
+  );
+
+  // setLayout grows/shrinks the panes array to match paneCount(l). Growing
+  // fills with nulls. Shrinking: if the active pane's index falls outside
+  // the new range, the user's focused session is migrated into the last
+  // surviving slot (overwriting whatever was there) before truncation — so
+  // changing to single-pane while focused on pane 3 of a quad doesn't
+  // silently nuke the session the user was looking at. The sessions in the
+  // other dropped slots are still alive in tmux; the drawer is the recovery
+  // path. Active is then clamped into the new range.
+  const setLayout = useCallback(
+    (l: Layout) =>
+      updatePanes((s) => {
+        const newCount = paneCount(l);
+        let next = s.panes.slice();
+        if (s.active >= newCount && next[s.active]) {
+          // Promote the focused session into the last surviving slot.
+          next[newCount - 1] = next[s.active]!;
+        }
+        next = Array.from({ length: newCount }, (_, i) => next[i] ?? null);
+        const active = Math.max(0, Math.min(newCount - 1, s.active));
+        return { layout: l, panes: next, active };
+      }),
+    [updatePanes]
+  );
+
+  // Persist on every change (small payload, debounce not worth it).
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANES_KEY, JSON.stringify(paneState));
+    } catch { /* quota — ignore */ }
+    // Also keep the legacy single-session key in sync so an older client
+    // version still lands somewhere sensible if downgraded.
+    if (currentSession) localStorage.setItem(LAST_KEY, currentSession);
+    else localStorage.removeItem(LAST_KEY);
+  }, [paneState, currentSession]);
+
+  // closeAllSheets centralises the "open the drawer, hide everything else"
+  // dance so it stays consistent across the Ctrl+B and ☰ paths.
+  const closeAllSheets = useCallback(() => {
+    setComposeOpen(false);
+    setImageOpen(false);
+    setFavOpen(false);
+    setNewOpen(false);
+    setUploadOpen(false);
+    closePalette();
+  }, [closePalette]);
+
+  // openEditor surfaces the singleton editor overlay (closing any sheet first
+  // so it doesn't peek through). `path` null = desktop tree-pick entry.
+  const openEditor = useCallback(
+    (path: string | null) => {
+      closeAllSheets();
+      setEditor({ open: true, path });
+    },
+    [closeAllSheets]
+  );
+  const closeEditor = useCallback(() => setEditor({ open: false, path: null }), []);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await fetchSessions();
+      setSessions(list);
+      sessionsRef.current = list; // keep the chord handler's view fresh
+      // Drop any pane holding a now-dead session. We deliberately never
+      // auto-attach to an arbitrary session — landing on someone's live
+      // agent unbidden would resize and disrupt it.
+      const live = new Set(list.map((s) => s.name));
+      updatePanes((s) => {
+        const next = s.panes.map((p) => (p && live.has(p) ? p : null));
+        const changed = next.some((p, i) => p !== s.panes[i]);
+        return changed ? { ...s, panes: next } : s;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [updatePanes]);
+
+  // Initial load.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Refresh the restore offer whenever the drawer opens — cheap, and the only
+  // surface that shows it. Errors are non-fatal (just hides the offer).
+  useEffect(() => {
+    if (!drawerOpen) return;
+    fetchRestorable().then(setRestorable).catch(() => setRestorable([]));
+  }, [drawerOpen]);
+
+  // Bring back every recorded-but-dead session (resuming each tool's
+  // conversation), then re-list and re-check what's still restorable.
+  const onRestore = useCallback(async () => {
+    try {
+      await restoreSessions();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      await refresh();
+      fetchRestorable().then(setRestorable).catch(() => setRestorable([]));
+    }
+  }, [refresh]);
+
+  // Open the switcher whenever the active pane has nothing (first run, last
+  // session in this pane vanished). On desktop the empty pane already shows
+  // an inline picker — but on phones (single pane, no inline picker) the
+  // drawer is the only way to attach, so keep popping it open there.
+  useEffect(() => {
+    if (!isDesktop && currentSession === null) setDrawerOpen(true);
+  }, [isDesktop, currentSession]);
+
+  // Re-list when returning to the app (PWA resume / tab focus).
+  useEffect(() => {
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refresh]);
+
+  // Keyboard:
+  //  Phone: Ctrl+B toggles the drawer immediately (existing behaviour).
+  //  Desktop: Ctrl+B is a tmux-style PREFIX. The next key within 600ms is
+  //  consumed as a chord; if no chord arrives the drawer opens (same end
+  //  state, just slightly delayed when bare). Chords:
+  //    1-4         focus pane N
+  //    ← / →       cycle the active pane (index ±1 with wrap)
+  //    ↑ / ↓       cycle the session shown in the active pane through the
+  //                global session list (skipping sessions already mounted in
+  //                another pane). On an empty pane, ↓ mounts the first
+  //                available, ↑ the last — so you can fill a fresh pane
+  //                without opening the drawer.
+  //    l / Space   open the layout palette (←/→ pick, ⏎ apply, Esc cancel)
+  //    s           open the session drawer (instant — for users who hated
+  //                the 600ms wait of bare Ctrl+B)
+  //    x           unmount the session in the active pane
+  //    Esc         cancel the prefix
+  //
+  // After an arrow chord, the next arrow keypress within ARROW_REPEAT_MS
+  // is also intercepted *without* needing Ctrl+B again (tmux `bind -r`
+  // style). Each arrow extends the window; any non-arrow cancels it and
+  // falls through. This makes `Ctrl+B → → →` cycle panes and `↑ ↓` chain
+  // through sessions without re-pressing the prefix each time, and makes
+  // holding an arrow key naturally drive the cycle via keydown auto-repeat.
+  //
+  // Capture-phase on window so this fires BEFORE xterm.js forwards the
+  // keystroke to tmux (see AGENTS.md). The shouldSkipShortcut guard lets
+  // real text inputs (compose, favourites search) keep their normal keys.
+  useEffect(() => {
+    if (!isDesktop) {
+      const handler = (e: KeyboardEvent) => {
+        if (!isCtrlB(e)) return;
+        if (shouldSkipShortcut(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        closeAllSheets();
+        setDrawerOpen((d) => !d);
+      };
+      window.addEventListener("keydown", handler, { capture: true });
+      return () => window.removeEventListener("keydown", handler, { capture: true });
+    }
+
+    const PREFIX_TIMEOUT_MS = 600;
+    const ARROW_REPEAT_MS = 800; // window for follow-up arrows after a chord
+
+    // Two independent timers:
+    //   `armed`     = inside a fresh Ctrl+B prefix (any chord key consumed)
+    //   `repeating` = follow-up window after an arrow chord (arrows-only)
+    // A new Ctrl+B always supersedes any in-flight repeat.
+    let armed = false;
+    let armTimer: number | null = null;
+    let repeating = false;
+    let repeatTimer: number | null = null;
+
+    const clearArm = () => {
+      armed = false;
+      if (armTimer != null) {
+        window.clearTimeout(armTimer);
+        armTimer = null;
+      }
+    };
+    const clearRepeat = () => {
+      repeating = false;
+      if (repeatTimer != null) {
+        window.clearTimeout(repeatTimer);
+        repeatTimer = null;
+      }
+    };
+    const extendRepeat = () => {
+      if (repeatTimer != null) window.clearTimeout(repeatTimer);
+      repeating = true;
+      repeatTimer = window.setTimeout(() => {
+        repeating = false;
+        repeatTimer = null;
+      }, ARROW_REPEAT_MS);
+    };
+    const openDrawer = () => {
+      closeAllSheets();
+      setDrawerOpen((d) => !d);
+    };
+
+    // The arrow chord behaviour is the same whether we got here from a fresh
+    // Ctrl+B prefix or from the follow-up repeat window — so it lives in one
+    // helper both branches call.
+    const handleArrow = (k: string) => {
+      const lay = layoutRef.current;
+      const cur = activeRef.current;
+      if (k === "ArrowLeft" || k === "ArrowRight") {
+        if (lay > 1) {
+          const delta = k === "ArrowRight" ? 1 : -1;
+          setActive((cur + delta + lay) % lay);
+        }
+        return;
+      }
+      // Up / Down — session cycle in the active pane.
+      const dir: 1 | -1 = k === "ArrowDown" ? 1 : -1;
+      const names = sessionsRef.current.map((x) => x.name);
+      const next = cycleSessionInPane(panesRef.current, cur, names, dir);
+      if (next !== null) mountAt(cur, next);
+    };
+
+    const isArrow = (k: string) =>
+      k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown";
+
+    const handler = (e: KeyboardEvent) => {
+      if (shouldSkipShortcut(e)) return;
+      // The editor overlay owns the whole screen and handles its own keys
+      // (Esc/Cmd+S in its own capture-phase listener); the tmux-style prefix is
+      // inert while it's open so Ctrl+B doesn't cycle panes underneath.
+      if (editorOpenRef.current) return;
+      // While the layout palette is open it owns the keyboard. The palette's
+      // onKeyDown runs in bubble phase; without this gate the window-level
+      // capture handler would also chew on arrows/Enter/Esc and re-arm
+      // prefixes mid-pick. See paletteOpenRef.
+      if (paletteOpenRef.current) return;
+
+      if (isCtrlB(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        clearArm();
+        clearRepeat(); // a fresh prefix supersedes any in-flight repeat
+        armed = true;
+        armTimer = window.setTimeout(() => {
+          armed = false;
+          armTimer = null;
+          openDrawer();
+        }, PREFIX_TIMEOUT_MS);
+        return;
+      }
+
+      const stop = () => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
+      if (armed) {
+        const k = e.key;
+        const lay = layoutRef.current;
+
+        if (k >= "1" && k <= "9") {
+          const n = parseInt(k, 10) - 1;
+          if (n >= 0 && n < paneCount(lay)) {
+            stop();
+            clearArm();
+            setActive(n);
+          } else {
+            // Number outside current layout — cancel the prefix and let xterm
+            // see the key, in case someone's typing into a TUI menu.
+            clearArm();
+          }
+          return;
+        }
+        if (isArrow(k)) {
+          stop();
+          clearArm();
+          handleArrow(k);
+          extendRepeat(); // enter repeat window for follow-up arrows
+          return;
+        }
+        if (k === " " || e.code === "Space" || k === "l" || k === "L") {
+          // Open the layout palette. Space used to cycle 1→2→3→4 in place;
+          // with 6 layouts now and a dedicated picker, both `l` and Space
+          // converge on the same surface (one fewer chord to remember).
+          stop();
+          clearArm();
+          closeAllSheets();
+          openPalette();
+          return;
+        }
+        if (k === "s" || k === "S") {
+          stop();
+          clearArm();
+          openDrawer();
+          return;
+        }
+        if (k === "x" || k === "X") {
+          stop();
+          clearArm();
+          mountAt(activeRef.current, null);
+          return;
+        }
+        if (k === "e" || k === "E") {
+          // Open the file editor (full-screen overlay). No path yet — the
+          // desktop tree lets the user pick, anchored at the active session.
+          stop();
+          clearArm();
+          openEditor(null);
+          return;
+        }
+        if (k === "Escape") {
+          stop();
+          clearArm();
+          return;
+        }
+        // Unrecognised key while armed: cancel prefix, let xterm have the key.
+        clearArm();
+        return;
+      }
+
+      // Not in a fresh prefix — are we in the post-arrow repeat window?
+      if (repeating) {
+        const k = e.key;
+        if (isArrow(k)) {
+          stop();
+          handleArrow(k);
+          extendRepeat();
+          return;
+        }
+        // Any other key while repeating: cancel and let it through to xterm.
+        // This is the escape hatch — start typing into the terminal and the
+        // repeat mode steps out of your way immediately.
+        clearRepeat();
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", handler, { capture: true });
+      clearArm();
+      clearRepeat();
+    };
+  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor]);
+
+  // Suppress xterm.js's own paste-shortcut keydown handler.
+  //
+  // xterm.js converts the paste-shortcut keydown directly into a 0x16 byte
+  // on the PTY's stdin — Claude Code sees that, runs its clipboard probe,
+  // and finds nothing because our `/api/clip` POST hasn't completed staging
+  // yet. Then our POST finally lands and the server fires *another* 0x16 via
+  // tmux send-keys, but it arrives after Claude Code already gave up.
+  //
+  // Fix: stop the keydown from reaching xterm's helper-textarea listener so
+  // it never sends the racing 0x16. We do NOT preventDefault — the browser's
+  // default action (firing the `paste` event) still happens, so our paste
+  // handler below still gets the clipboardData. Net effect: only one 0x16
+  // reaches Claude Code, and it arrives *after* the image is staged.
+  //
+  // CRITICAL: only block the OS's *actual* paste shortcut — the one followed
+  // by a real `paste` event. Browsers only fire the paste event for the
+  // OS-defined shortcut:
+  //   - Mac:   Cmd+V (⌘V)              — followed by `paste`
+  //   - Other: Ctrl+V                    — followed by `paste`
+  //   - Mac + Ctrl+V:                    — NO `paste` event, ever
+  // If we blocked Ctrl+V on Mac we'd kill xterm's 0x16 but get no paste
+  // event to take over — net result: dead key. Mac users who muscle-memory
+  // Ctrl+V still get the old behaviour (xterm forwards 0x16, Claude Code
+  // probes and shows its "no clipboard image" feedback), and Cmd+V is the
+  // path that actually works.
+  //
+  // Real text inputs (compose, favourites search) are exempted by name so
+  // their native paste keeps working; xterm's helper textarea is treated as
+  // the terminal, not a real input — same rule as elsewhere.
+  useEffect(() => {
+    const isMac = /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
+    const handler = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "v") return;
+      const isPasteShortcut = isMac
+        ? e.metaKey && !e.ctrlKey
+        : e.ctrlKey && !e.metaKey;
+      if (!isPasteShortcut || e.shiftKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      const isXtermPlumbing = !!t?.classList?.contains("xterm-helper-textarea");
+      const isRealInput =
+        (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
+        !isXtermPlumbing;
+      if (isRealInput) return; // let the input handle its own paste
+      // stopPropagation (not preventDefault) — the paste event still fires.
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
+  }, []);
+
+  // Cmd+C (Mac) / Ctrl+C (Linux/Windows) — copy the active pane's xterm
+  // selection to the system clipboard.
+  //
+  // The whole job is **disambiguating "copy" from "interrupt"** without
+  // breaking the most-used keystroke in a terminal. Rules:
+  //   - selection present in active pane → copy + suppress the keydown
+  //     (preventDefault stops xterm from forwarding 0x03 to the PTY *and*
+  //     stops the browser's synthetic copy event, so we don't race xterm's
+  //     own copy handler).
+  //   - no selection → DO NOT preventDefault. xterm sends 0x03 → tmux →
+  //     SIGINT. This is the only catastrophic failure mode if we get the
+  //     decision wrong, so it's the default branch.
+  //   - Ctrl+Shift+C (any platform) always tries to copy. Convention from
+  //     gnome-terminal et al.; no SIGINT to worry about because Shift+C
+  //     doesn't produce one.
+  //
+  // Selection comes from xterm.js's force-selection bypass of tmux mouse
+  // mode. The modifier differs by platform — xterm.js's shouldForceSelection
+  // honours Shift on Linux/Windows but only Option (⌥) on Mac (and only with
+  // `macOptionClickForcesSelection: true`, which TerminalView enables). So:
+  //   - Linux/Windows: Shift+drag selects
+  //   - Mac:           Option+drag selects (plus right-click word-selects)
+  // Double-/triple-click also work as usual. First-run hint below picks
+  // the right modifier name based on platform so Mac users aren't sent
+  // down a dead end.
+  //
+  // Capture phase on window for the same reason as the paste path: xterm.js's
+  // helper-textarea handler stopPropagations on Ctrl-letter keys, so a bubble
+  // listener would never see Ctrl+C. Capture runs before the target.
+  //
+  // Real text inputs (compose, favourites search) are exempted by tag so
+  // their native Cmd/Ctrl+C still works; xterm's helper textarea is treated
+  // as the terminal, same exemption rule used elsewhere.
+  useEffect(() => {
+    const isMac = /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
+    const handler = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "c") return;
+      const macCopy = isMac && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+      const linCopy = !isMac && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      const explicitCopy = e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey;
+      if (!macCopy && !linCopy && !explicitCopy) return;
+
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      const isXtermPlumbing = !!t?.classList?.contains("xterm-helper-textarea");
+      const isRealInput =
+        (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
+        !isXtermPlumbing;
+      if (isRealInput) return;
+
+      const term = termsRef.current[activeRef.current];
+      const selection = term?.getSelection?.() ?? "";
+
+      if (!selection) {
+        // Pass through. On Linux/Win this is the SIGINT path — must NOT
+        // preventDefault. On Mac, Cmd+C has no PTY meaning, so this is also
+        // harmless. First-run hint only for the implicit shortcut (not
+        // Ctrl+Shift+C, whose user clearly already knows what they're doing).
+        if ((macCopy || linCopy) && !localStorage.getItem(COPY_HINT_KEY)) {
+          try { localStorage.setItem(COPY_HINT_KEY, "1"); } catch { /* quota */ }
+          // Platform-specific modifier: xterm.js's force-selection check
+          // honours Shift on Linux/Windows but only Option (⌥) on Mac (see
+          // macOptionClickForcesSelection in TerminalView). Telling Mac
+          // users "hold Shift" would send them down a dead end.
+          showToast(
+            isMac
+              ? "Tip — hold ⌥ Option and drag to select (or right-click a word), then ⌘C"
+              : "Tip — hold Shift and drag to select, then Ctrl+C to copy",
+            true
+          );
+        }
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      writeClipboard(selection)
+        .then(() => {
+          // Match OS conventions: silent on success. Clearing the xterm
+          // selection mirrors gnome-terminal — the visual "I just copied
+          // that" acknowledgement without a chrome toast.
+          term?.clearSelection?.();
+        })
+        .catch(() => showToast("Copy failed", false));
+    };
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
+  }, [showToast]);
+
+  // Global Ctrl+V paste — the secure-context-free path.
+  //
+  // The async Clipboard API (navigator.clipboard.read) is gated to HTTPS,
+  // which breaks the ImageSheet "Paste from clipboard" button on our
+  // tailnet-HTTP deployment. The ClipboardEvent path (a real `paste`
+  // event from a Ctrl+V keypress) is *not* gated — it's available
+  // wherever the browser fires the event — so we hook it directly and
+  // route any image in the payload to the active pane's session.
+  //
+  // Routes:
+  //   image in clipboard -> POST /api/clip (stages + tmux send-keys C-v;
+  //     Claude Code's shim then reads the staged PNG)
+  //   text only          -> POST /api/paste (bracketed paste; same path the
+  //     compose sheet uses, so multi-line goes in as one block)
+  //
+  // Since the Ctrl+V keydown above no longer reaches xterm, the only way the
+  // PTY learns about a paste is through these two routes — there's no double
+  // 0x16, no race, no "nothing in clipboard" message.
+  //
+  // Capture-phase on window so we run BEFORE xterm.js's own paste handler
+  // (which would otherwise consume the event and write its text part to
+  // stdin). We skip real text inputs (compose, favourites search) by name
+  // so their native text paste keeps working, and exempt xterm's helper
+  // textarea by class for the same reason as the keyboard handler.
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      const isXtermPlumbing = !!t?.classList?.contains("xterm-helper-textarea");
+      const isRealInput =
+        (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
+        !isXtermPlumbing;
+      if (isRealInput) return; // let native text paste happen in inputs
+
+      const data = e.clipboardData;
+      if (!data) return;
+
+      const target = panesRef.current[activeRef.current] ?? null;
+
+      // Image branch — first File-kind item with an image/* type.
+      let blob: File | null = null;
+      for (let i = 0; i < data.items.length; i++) {
+        const it = data.items[i];
+        if (it.kind === "file" && it.type.startsWith("image/")) {
+          blob = it.getAsFile();
+          if (blob) break;
+        }
+      }
+      if (blob) {
+        if (!target) {
+          showToast("Paste failed — no active session", false);
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        (async () => {
+          try {
+            const png = await toPng(blob!);
+            await sendImage(target, png);
+            showToast("📋 Image pasted", true);
+          } catch (err) {
+            console.error("clipboard image paste:", err);
+            showToast("Paste failed", false);
+          }
+        })();
+        return;
+      }
+
+      // Text branch — bracketed paste via /api/paste, same path the compose
+      // sheet uses. We have to take this over too because we suppressed the
+      // Ctrl+V keydown above (otherwise xterm would have done it).
+      const text = data.getData("text/plain");
+      if (text && target) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        pasteText(target, text, false).catch((err) => {
+          console.error("clipboard text paste:", err);
+          showToast("Text paste failed", false);
+        });
+      }
+    };
+    window.addEventListener("paste", handler, { capture: true });
+    return () => window.removeEventListener("paste", handler, { capture: true });
+  }, [showToast]);
+
+  // Drag-and-drop file upload.
+  //
+  // Per-pane drop handlers live in TileGrid (PaneBox) and call back here
+  // with the DataTransfer; this hub flattens folders (webkitGetAsEntry walk
+  // — see api.ts) and opens the UploadSheet targeting the pane's session.
+  // The session is captured at drop time, not derived from `currentSession`
+  // at render time, so the user can switch panes during the upload without
+  // retargeting it.
+  //
+  // Empty panes are filtered out: a drop on an empty pane has no project
+  // root to anchor against, so we toast a hint and bail. (TileGrid also
+  // refuses to render its overlay on empty panes, so this is belt-and-
+  // braces — covers the case of a fast drop right after unmount.)
+  // startUpload is the common tail for both upload entry points (desktop drop
+  // + phone picker): stash the file list and target session, then open the
+  // UploadSheet so the user picks a destination folder under the project root.
+  const startUpload = useCallback(
+    (session: string | null, list: UploadFile[]) => {
+      if (!session) {
+        showToast("Pick a session first", false);
+        return;
+      }
+      if (list.length === 0) {
+        showToast("No files selected", false);
+        return;
+      }
+      setUploadSession(session);
+      setUploadFilesList(list);
+      closeAllSheets();
+      setUploadOpen(true);
+    },
+    [closeAllSheets, showToast]
+  );
+
+  const onPaneDrop = useCallback(
+    async (idx: number, dt: DataTransfer) => {
+      const target = panesRef.current[idx];
+      if (!target) {
+        showToast("Drop on an empty pane — pick a session first", false);
+        return;
+      }
+      try {
+        startUpload(target, await flattenDataTransfer(dt));
+      } catch (e) {
+        console.error("drop flatten:", e);
+        showToast("Couldn't read the dropped files", false);
+      }
+    },
+    [startUpload, showToast]
+  );
+
+  // Phone Upload button → native file picker → UploadSheet. A multi-select
+  // input with no `accept` so iOS offers Photos, Camera, and Files alike;
+  // webkitRelativePath survives a directory pick (Android/desktop) so the
+  // server still rebuilds the tree. The input value is cleared after reading
+  // so re-picking the same file fires `change` again.
+  const onPickUpload = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const input = e.currentTarget;
+      const list: UploadFile[] = Array.from(input.files ?? []).map((f) => ({
+        relPath: f.webkitRelativePath || f.name,
+        file: f,
+      }));
+      input.value = "";
+      startUpload(currentSession, list);
+    },
+    [currentSession, startUpload]
+  );
+
+  // Global "swallow stray file drops" guard. Without this, releasing a file
+  // drag a few pixels outside a pane navigates the browser to view that
+  // file — which on a tailnet-only single-page app means losing your
+  // session list and having to reload. We only intercept when the drag
+  // actually carries Files, so this never blocks in-app drags (text
+  // selection, future drag-to-reorder, etc.) — only OS file drags.
+  useEffect(() => {
+    const isFileDrag = (e: DragEvent) =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    const onDragOver = (e: DragEvent) => {
+      if (isFileDrag(e)) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      if (isFileDrag(e)) e.preventDefault();
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
+
+  const onUploadResult = useCallback(
+    (r: UploadResult) => {
+      setUploadOpen(false);
+      setUploadFilesList([]);
+      setUploadSession(null);
+      const wrote = r.written.length;
+      const renamed = Object.keys(r.renamed).length;
+      const errors = r.errors ? Object.keys(r.errors).length : 0;
+      if (errors > 0) {
+        showToast(
+          `Uploaded ${wrote}, ${errors} failed${renamed ? `, ${renamed} renamed` : ""}`,
+          false
+        );
+      } else {
+        showToast(
+          `Uploaded ${wrote} file${wrote === 1 ? "" : "s"}${renamed ? ` (${renamed} renamed)` : ""}`,
+          true
+        );
+      }
+    },
+    [showToast]
+  );
+
+  // While a viewed session's connection is unhealthy, poll the session list.
+  // When an agent exits (/exit kills its tmux session) the WebSocket drops for
+  // good; this promptly drops the dead session from the list and clears its
+  // pane (refresh nulls out any pane holding a session tmux no longer
+  // reports). A live, momentarily-dropped session stays in the list, so a
+  // transient blip won't kick you out.
+  const anyUnhealthy = useMemo(
+    () =>
+      panes.some(
+        (p, i) => p !== null && conns[i] !== "open"
+      ),
+    [panes, conns]
+  );
+  useEffect(() => {
+    if (!anyUnhealthy) return;
+    const id = setInterval(refresh, 2500);
+    return () => clearInterval(id);
+  }, [anyUnhealthy, refresh]);
+
+  const setFont = (n: number) => {
+    const v = Math.max(9, Math.min(20, n));
+    setFontSize(v);
+    localStorage.setItem(FONT_KEY, String(v));
+  };
+
+  // Picking from the drawer mounts in the active pane.
+  const pick = (name: string) => {
+    mountAt(active, name);
+    setDrawerOpen(false);
+  };
+
+  // Delete a session: show a spinner on its row, ask the server to end it
+  // (soft = inject /exit, hard = kill), then poll until tmux no longer lists
+  // it and drop it from the list (and from any pane holding it).
+  const removeSession = useCallback(
+    async (name: string, mode: "exit" | "kill") => {
+      setDeleting((d) => new Set(d).add(name));
+      try {
+        await deleteSession(name, mode);
+        const deadline = Date.now() + 25000; // give a soft /exit time to wind down
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 500));
+          let list: Session[];
+          try {
+            list = await fetchSessions();
+          } catch {
+            if (Date.now() > deadline) break;
+            continue;
+          }
+          if (!list.some((s) => s.name === name)) {
+            setSessions(list);
+            updatePanes((s) => {
+              if (!s.panes.includes(name)) return s;
+              return { ...s, panes: s.panes.map((p) => (p === name ? null : p)) };
+            });
+            break;
+          }
+          if (Date.now() > deadline) break; // gave up; leave it for a force-kill
+        }
+      } catch {
+        // ignore; the finally block refreshes the list
+      } finally {
+        setDeleting((d) => {
+          const n = new Set(d);
+          n.delete(name);
+          return n;
+        });
+        refresh();
+      }
+    },
+    [refresh, updatePanes]
+  );
+
+  // Favourites live server-side (durable, shared across devices). Load once, then
+  // keep an optimistic local copy and PUT the whole list on every change,
+  // adopting the server's sanitised result.
+  useEffect(() => {
+    fetchFavorites().then(setFavorites).catch(() => {});
+  }, []);
+  const persistFavorites = useCallback((next: Favorite[]) => {
+    setFavorites(next);
+    saveFavorites(next).then(setFavorites).catch(() => {});
+  }, []);
+  const addFavorite = useCallback(
+    (text: string) => {
+      const t = text.trim();
+      if (!t || favorites.some((f) => f.text === t)) return;
+      const id =
+        crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      persistFavorites([{ id, text: t }, ...favorites]);
+    },
+    [favorites, persistFavorites]
+  );
+  const updateFavorite = useCallback(
+    (id: string, text: string) =>
+      persistFavorites(favorites.map((f) => (f.id === id ? { ...f, text: text.trim() } : f))),
+    [favorites, persistFavorites]
+  );
+  const deleteFavorite = useCallback(
+    (id: string) => persistFavorites(favorites.filter((f) => f.id !== id)),
+    [favorites, persistFavorites]
+  );
+  // Inject = paste the prompt into the active pane's agent AND submit it
+  // (Enter), then close the sheet. One tap fires a favourite straight in.
+  const injectFavorite = useCallback(
+    (text: string) => {
+      if (currentSession) pasteText(currentSession, text, true).catch(() => {});
+      setFavOpen(false);
+    },
+    [currentSession]
+  );
+
+  const onKey = (key: string) => {
+    if (currentSession) sendKey(currentSession, key).catch(() => {});
+  };
+  // Wipe the polluted scrollback that builds up when Claude Code re-renders on
+  // every SIGWINCH (it writes to the normal buffer, so each redraw appends).
+  const onClearHistory = () => {
+    if (currentSession) clearHistory(currentSession).catch(() => {});
+  };
+  const onSend = (text: string, enter: boolean) => {
+    if (currentSession) pasteText(currentSession, text, enter).catch(() => {});
+  };
+  const onImage = (png: Blob) => {
+    if (currentSession) sendImage(currentSession, png).catch(() => {});
+  };
+
+  const cur = sessions.find((s) => s.name === currentSession);
+  const conn = conns[active] ?? "closed";
+  const dot =
+    conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
+
+  // Desktop chrome auto-hide: the header (sessions ☰, conn dot, layout picker,
+  // font, eraser) collapses out of view so the terminal claims the full
+  // viewport, and is summoned by hovering near the top. Phone is unaffected —
+  // it always wants its chrome visible, and there's no mouse to hover anyway.
+  //
+  // Discovery aids: visible briefly on mount, and re-summoned for ~1.6s
+  // whenever the connection state changes, so the dot still announces drops.
+  const [headerVisible, setHeaderVisible] = useState(true);
+  const hideTimerRef = useRef<number | null>(null);
+  const cancelHide = useCallback(() => {
+    if (hideTimerRef.current != null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+  const showHeader = useCallback(() => {
+    cancelHide();
+    setHeaderVisible(true);
+  }, [cancelHide]);
+  const scheduleHide = useCallback(
+    (ms = 350) => {
+      // Never hide while the layout palette is open — it's anchored under
+      // the header trigger button and would float orphaned over the
+      // terminal as the header slid out from underneath it.
+      if (paletteOpenRef.current) return;
+      cancelHide();
+      hideTimerRef.current = window.setTimeout(() => {
+        setHeaderVisible(false);
+        hideTimerRef.current = null;
+      }, ms);
+    },
+    [cancelHide]
+  );
+  // Brief glimpse on (re)mount or when desktop-mode flips on, then hide.
+  useEffect(() => {
+    if (!isDesktop) {
+      cancelHide();
+      setHeaderVisible(true); // phone: always-on
+      return;
+    }
+    scheduleHide(1600);
+    return cancelHide;
+  }, [isDesktop, cancelHide, scheduleHide]);
+  // Re-surface briefly on connection state change so the dot still works
+  // as an indicator even when the header is hidden.
+  useEffect(() => {
+    if (!isDesktop) return;
+    showHeader();
+    scheduleHide(1600);
+  }, [isDesktop, conn, showHeader, scheduleHide]);
+  // Pin the header visible while the palette is open (it's anchored under
+  // the layout trigger). On close, hand back to the normal hide schedule.
+  useEffect(() => {
+    if (!isDesktop) return;
+    if (paletteOpen) showHeader();
+    else scheduleHide(1200);
+  }, [isDesktop, paletteOpen, showHeader, scheduleHide]);
+
+  // openNewFor opens the create-session panel and remembers which pane to
+  // mount the new session into when it returns.
+  const openNewFor = (idx: number) => {
+    setNewForPane(idx);
+    setDrawerOpen(false);
+    setNewOpen(true);
+  };
+
+  return (
+    <div
+      className="relative flex flex-col bg-bar text-slate-200"
+      style={{ height: appH ? `${appH}px` : "100%" }}
+    >
+      {/* Hover sensor: invisible strip at the very top that summons the
+          collapsed header on desktop. Phone never collapses, so no sensor. */}
+      {isDesktop && (
+        <div
+          className="absolute left-0 right-0 top-0 z-30 h-3"
+          onMouseEnter={showHeader}
+        />
+      )}
+
+      {/* Header — collapses out of flow on desktop (position: absolute +
+          translateY off-screen when hidden), so the terminal claims the
+          space underneath. On phone it stays in flow as before. */}
+      <header
+        onMouseEnter={isDesktop ? showHeader : undefined}
+        onMouseLeave={isDesktop ? () => scheduleHide() : undefined}
+        className={`flex items-center gap-2 border-b border-edge px-3 py-2 pt-safe ${
+          isDesktop
+            ? `absolute inset-x-0 top-0 z-30 bg-bar/95 backdrop-blur-sm transition-transform duration-200 ease-out ${
+                headerVisible ? "translate-y-0" : "-translate-y-full"
+              }`
+            : "bg-bar"
+        }`}
+      >
+        <button
+          onClick={() => setDrawerOpen(true)}
+          aria-label="Open sessions"
+          title="Sessions (Ctrl+B)"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-panel px-3 py-2 active:bg-edge"
+        >
+          <span className="text-slate-400">☰</span>
+          {cur ? (
+            <>
+              <span
+                className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase text-bar ${toolColor(
+                  cur.tool
+                )}`}
+              >
+                {cur.tool}
+              </span>
+              <span className="truncate font-medium text-slate-100">{cur.short}</span>
+            </>
+          ) : (
+            <span className="text-slate-400">Pick a session</span>
+          )}
+        </button>
+
+        <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={conn} />
+
+        {isDesktop && (
+          <div className="relative">
+            {/* Wire the trigger to whichever side of the toggle is next.
+                Combined with LayoutPalette's data-layout-trigger exemption,
+                this makes a second click on the button cleanly close it. */}
+            <LayoutPicker
+              layout={layout}
+              onOpen={paletteOpen ? closePalette : openPalette}
+            />
+            {paletteOpen && (
+              <LayoutPalette
+                current={layout}
+                onPick={setLayout}
+                onClose={closePalette}
+              />
+            )}
+          </div>
+        )}
+
+        <div className="flex items-center overflow-hidden rounded-lg bg-panel">
+          <button onClick={() => setFont(fontSize - 1)} className="px-3 py-2 text-slate-300 active:bg-edge">
+            A−
+          </button>
+          <button onClick={() => setFont(fontSize + 1)} className="px-3 py-2 text-slate-300 active:bg-edge">
+            A+
+          </button>
+        </div>
+
+        {/* File editor / browser — desktop top-bar entry point, mirroring the
+            per-pane corner button (same FileEditIcon + accent, same action).
+            Phones use the footer ⬇ instead. Not gated on a session: the editor
+            opens in browse mode and the tree falls back to Home/share when no
+            pane is attached. */}
+        {isDesktop && (
+          <button
+            onClick={() => openEditor(null)}
+            aria-label="Open file browser / editor"
+            title="Files — browse, view, edit, download"
+            className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-accent active:bg-edge"
+          >
+            <FileEditIcon className="h-5 w-5" />
+          </button>
+        )}
+
+        {/* Favourites: desktop-only entry point. Phone has its own button in the
+            footer. Not gated on a session — opening the sheet to add/edit
+            favourites is useful even with no pane attached; Inject is already a
+            no-op without a session. */}
+        {isDesktop && (
+          <button
+            onClick={() => setFavOpen(true)}
+            aria-label="Favourite prompts"
+            title="Favourite prompts"
+            className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-amber active:bg-edge"
+          >
+            <StarIcon filled className="h-5 w-5" />
+          </button>
+        )}
+
+        <button
+          onClick={onClearHistory}
+          disabled={!currentSession}
+          aria-label="Clear scrollback for this session"
+          title="Clear scrollback"
+          className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 active:bg-edge disabled:opacity-40"
+        >
+          <EraserIcon className="h-5 w-5" />
+        </button>
+      </header>
+
+      {/* Terminal(s) */}
+      <main className="relative min-h-0 flex-1">
+        {isDesktop ? (
+          <TileGrid
+            layout={layout}
+            panes={panes}
+            active={active}
+            sessions={sessions}
+            fontSize={fontSize}
+            onActivate={setActive}
+            onConn={setPaneConn}
+            onPickFor={(idx, name) => mountAt(idx, name)}
+            onOpenDrawerFor={(idx) => {
+              setActive(idx);
+              setDrawerOpen(true);
+            }}
+            onNewFor={openNewFor}
+            onOpenEditor={() => openEditor(null)}
+            onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
+            onDropFiles={onPaneDrop}
+          />
+        ) : currentSession ? (
+          // Phone path is unchanged: one terminal, single pane.
+          <TerminalView
+            key={currentSession}
+            session={currentSession}
+            fontSize={fontSize}
+            onState={(c) => setPaneConn(0, c)}
+            onTerm={(t) => { termsRef.current[0] = t; }}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center px-8 text-center text-sm text-slate-500">
+            No session selected. Tap ☰ to choose one.
+          </div>
+        )}
+
+        {/* No global download icon on desktop — each pane has its own that
+            fades in on mouse activity. See PaneBox in TileGrid.tsx. */}
+      </main>
+
+      {/* Footer: phone only — control keys + compose + file transfer /
+          favourites buttons. On desktop you have a hardware keyboard for those
+          keys, Ctrl/Cmd+V for image paste, and drag-and-drop upload + the
+          floating download above. Download (⬇) and Upload (⬆) sit together as a
+          file-transfer pair; Image (🖼) pastes inline into the terminal, which
+          is a different action from uploading a file to the project. */}
+      {!isDesktop && (
+        <>
+          <ControlBar onKey={onKey} disabled={!currentSession} />
+          {/* Hidden picker the Upload button triggers; multiple + no accept so
+              iOS offers Photos / Camera / Files. */}
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={onPickUpload}
+          />
+          <div className="flex gap-2 border-t border-edge bg-bar px-2 py-2 pb-safe">
+            <button
+              onClick={() => openEditor(null)}
+              className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge"
+              aria-label="Browse, view and download files"
+            >
+              <DownloadIcon className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={!currentSession}
+              className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge disabled:opacity-40"
+              aria-label="Upload files or photos"
+            >
+              <UploadIcon className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => setImageOpen(true)}
+              disabled={!currentSession}
+              className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge disabled:opacity-40"
+              aria-label="Paste an image into the terminal"
+            >
+              <ImageIcon className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => {
+                setFavOpen(true);
+                favRef.current?.focus(); // focus in-gesture so iOS shows the keyboard
+              }}
+              disabled={!currentSession}
+              className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-amber active:bg-edge disabled:opacity-40"
+              aria-label="Favourite prompts"
+            >
+              <StarIcon filled className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => {
+                setComposeOpen(true);
+                composeRef.current?.focus(); // focus in-gesture so iOS shows the keyboard
+              }}
+              disabled={!currentSession}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-panel px-4 py-3 text-left text-sm text-slate-400 active:bg-edge disabled:opacity-40"
+            >
+              <PencilIcon className="h-4 w-4 shrink-0" />
+              <span className="truncate">Write a prompt…</span>
+            </button>
+          </div>
+        </>
+      )}
+
+      <SessionDrawer
+        open={drawerOpen}
+        sessions={sessions}
+        current={currentSession}
+        loading={loading}
+        error={error}
+        onPick={pick}
+        onClose={() => setDrawerOpen(false)}
+        onRefresh={refresh}
+        onNew={() => openNewFor(active)}
+        deleting={deleting}
+        onDelete={removeSession}
+        restorable={restorable}
+        onRestore={onRestore}
+      />
+      <NewSessionPanel
+        open={newOpen}
+        onClose={() => setNewOpen(false)}
+        onCreated={(session) => {
+          setNewOpen(false);
+          setDrawerOpen(false);
+          // Mount in the pane the user came from (-1 = active fallback).
+          const target = newForPane >= 0 ? newForPane : active;
+          mountAt(target, session);
+          setActive(target);
+          setNewForPane(-1);
+          refresh();
+        }}
+      />
+      <ComposeSheet
+        ref={composeRef}
+        open={composeOpen}
+        favorites={favorites}
+        onClose={() => setComposeOpen(false)}
+        onSend={onSend}
+      />
+      <ImageSheet open={imageOpen} onClose={() => setImageOpen(false)} onSend={onImage} />
+      <UploadSheet
+        open={uploadOpen}
+        session={uploadSession}
+        files={uploadFilesList}
+        onClose={() => {
+          setUploadOpen(false);
+          setUploadFilesList([]);
+          setUploadSession(null);
+        }}
+        onResult={onUploadResult}
+      />
+      {editor.open && (
+        <Suspense fallback={null}>
+          <EditorOverlay
+            open={editor.open}
+            initialPath={editor.path}
+            session={currentSession}
+            isDesktop={isDesktop}
+            onClose={closeEditor}
+          />
+        </Suspense>
+      )}
+      <FavoritesSheet
+        ref={favRef}
+        open={favOpen}
+        onClose={() => setFavOpen(false)}
+        favorites={favorites}
+        onInject={injectFavorite}
+        onAdd={addFavorite}
+        onUpdate={updateFavorite}
+        onDelete={deleteFavorite}
+      />
+
+      {/* Transient feedback (paste confirmation, future one-shots). */}
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none absolute bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-full px-4 py-2 text-sm font-medium shadow-lg backdrop-blur-sm ${
+            toast.ok
+              ? "bg-emerald-500/85 text-bar"
+              : "bg-red-500/85 text-bar"
+          }`}
+        >
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
