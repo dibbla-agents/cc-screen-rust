@@ -1,9 +1,9 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import type { Session } from "../api";
 import { toolColor } from "../util";
-import { FileEditIcon } from "../icons";
+import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -83,6 +83,11 @@ interface Props {
   // DataTransfer is handed up; the parent flattens it (folders included)
   // and opens the UploadSheet targeting `panes[idx]`.
   onDropFiles?: (idx: number, dt: DataTransfer) => void;
+  // Pane-scoped overlay (the session switcher on desktop): rendered as an
+  // `absolute inset-0` child of pane `paneOverlayIdx`, so it covers exactly
+  // that terminal box rather than the whole screen. Null = nothing to show.
+  paneOverlay?: ReactNode;
+  paneOverlayIdx?: number | null;
 }
 
 // Tile up to four <TerminalView>s in one of four fixed CSS-grid layouts.
@@ -104,6 +109,8 @@ export default function TileGrid({
   onOpenEditor,
   onTermFor,
   onDropFiles,
+  paneOverlay,
+  paneOverlayIdx,
 }: Props) {
   const tpl = TEMPLATES[layout];
 
@@ -133,6 +140,7 @@ export default function TileGrid({
           onOpenEditor={onOpenEditor}
           onTerm={(t) => onTermFor?.(idx, t)}
           onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
+          overlay={paneOverlayIdx === idx ? paneOverlay : null}
         />
       ))}
     </div>
@@ -154,6 +162,7 @@ interface PaneProps {
   onOpenEditor: () => void;
   onTerm?: (term: Terminal | null) => void;
   onDropFiles?: (dt: DataTransfer) => void;
+  overlay?: ReactNode;
 }
 
 function PaneBox({
@@ -171,6 +180,7 @@ function PaneBox({
   onOpenEditor,
   onTerm,
   onDropFiles,
+  overlay,
 }: PaneProps) {
   const meta = sessions.find((s) => s.name === session);
 
@@ -382,6 +392,13 @@ function PaneBox({
           </div>
         </div>
       )}
+
+      {/* Pane-scoped overlay (desktop session switcher). The drawer positions
+          itself `absolute inset-0 z-30` so it covers this terminal box only —
+          PaneBox is `relative overflow-hidden`, which clips it to the pane.
+          Rendered last so it also wins DOM order over the highlight/drop
+          layers. */}
+      {overlay}
     </div>
   );
 }
@@ -406,21 +423,23 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
 
   return (
     <div className="flex h-full w-full flex-col items-stretch justify-center gap-2 p-6 pt-10">
-      <div className="mb-2 text-center text-xs uppercase tracking-wider text-slate-500">
+      <div className="mb-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
         Empty pane — pick a session
       </div>
 
-      <div className="mx-auto flex w-full max-w-sm flex-col gap-1 overflow-y-auto">
+      <div className="mx-auto flex w-full max-w-sm flex-col gap-0.5 overflow-y-auto">
         <button
           onClick={onNew}
-          className="flex items-center gap-2 rounded-md bg-panel px-3 py-2 text-left text-sm text-slate-200 hover:bg-edge"
+          className="flex items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left text-[13px] text-slate-200 transition-colors hover:bg-edge/50"
         >
-          <span className="text-accent">＋</span>
-          <span>New session…</span>
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+            <PlusIcon className="h-4 w-4 text-accent" />
+          </span>
+          <span className="font-medium">New session…</span>
         </button>
 
         {sorted.length === 0 && (
-          <div className="rounded-md bg-panel/50 px-3 py-2 text-center text-xs text-slate-500">
+          <div className="rounded-md px-3 py-2 text-center text-[12px] text-slate-600">
             No sessions yet.
           </div>
         )}
@@ -429,17 +448,13 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
           <button
             key={s.name}
             onClick={() => onPick(s.name)}
-            className="flex items-center gap-2 rounded-md bg-panel px-3 py-2 text-left text-sm hover:bg-edge"
+            className="flex items-center gap-2 rounded-md py-1.5 pl-2 pr-2 text-left text-[13px] transition-colors hover:bg-edge/40"
             title={s.preview}
           >
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase text-bar ${toolColor(
-                s.tool
-              )}`}
-            >
-              {s.tool}
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+              <span className={`h-2 w-2 rounded-full ${toolColor(s.tool)}`} title={s.tool} />
             </span>
-            <span className="min-w-0 flex-1 truncate text-slate-100">{s.short}</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-slate-100">{s.short}</span>
             {s.attached && (
               <span
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber"
@@ -451,9 +466,9 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
 
         <button
           onClick={onOpenDrawer}
-          className="mt-2 rounded-md px-3 py-2 text-center text-xs text-slate-500 hover:text-slate-300"
+          className="mt-2 rounded-md px-3 py-2 text-center text-[11px] text-slate-600 transition-colors hover:text-slate-300"
         >
-          Open the full session drawer ⌃B
+          Open the session switcher ⌃B
         </button>
       </div>
     </div>

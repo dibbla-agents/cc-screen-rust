@@ -245,6 +245,49 @@ export function PencilIcon({ className }: IconProps) {
   );
 }
 
+// A bare plus — "new session" / "new" affordances. Thinner than FilePlusIcon
+// (which frames the plus inside a page) so it reads as a generic add, not a
+// file-specific one.
+export function PlusIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+// Two curved arrows chasing their tails — refresh / restore. Add `animate-spin`
+// via the className while a request is in flight.
+export function RefreshIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+      <path d="M3 21v-5h5" />
+    </svg>
+  );
+}
+
 // Three horizontal dots — the phone editor's overflow ("more actions") menu.
 export function MoreIcon({ className }: IconProps) {
   return (

@@ -1255,6 +1255,30 @@ export default function App() {
     setNewOpen(true);
   };
 
+  // The session switcher, built once and rendered in one of two places:
+  //  - phone  → full-screen takeover at the app root (embedded=false)
+  //  - desktop → scoped to the active terminal pane via TileGrid's
+  //    paneOverlay (embedded=true), so Ctrl+B shows the picker inside the
+  //    box you're looking at, not over the whole screen.
+  const renderDrawer = (embedded: boolean) => (
+    <SessionDrawer
+      open={drawerOpen}
+      embedded={embedded}
+      sessions={sessions}
+      current={currentSession}
+      loading={loading}
+      error={error}
+      onPick={pick}
+      onClose={() => setDrawerOpen(false)}
+      onRefresh={refresh}
+      onNew={() => openNewFor(active)}
+      deleting={deleting}
+      onDelete={removeSession}
+      restorable={restorable}
+      onRestore={onRestore}
+    />
+  );
+
   return (
     <div
       className="relative flex flex-col bg-bar text-slate-200"
@@ -1398,6 +1422,8 @@ export default function App() {
             onOpenEditor={() => openEditor(null)}
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
+            paneOverlay={renderDrawer(true)}
+            paneOverlayIdx={active}
           />
         ) : currentSession ? (
           // Phone path is unchanged: one terminal, single pane.
@@ -1486,21 +1512,9 @@ export default function App() {
         </>
       )}
 
-      <SessionDrawer
-        open={drawerOpen}
-        sessions={sessions}
-        current={currentSession}
-        loading={loading}
-        error={error}
-        onPick={pick}
-        onClose={() => setDrawerOpen(false)}
-        onRefresh={refresh}
-        onNew={() => openNewFor(active)}
-        deleting={deleting}
-        onDelete={removeSession}
-        restorable={restorable}
-        onRestore={onRestore}
-      />
+      {/* Phone: full-screen switcher. Desktop renders it pane-scoped inside
+          TileGrid (see paneOverlay above), so it only covers the active box. */}
+      {!isDesktop && renderDrawer(false)}
       <NewSessionPanel
         open={newOpen}
         onClose={() => setNewOpen(false)}
