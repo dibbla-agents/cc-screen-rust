@@ -101,6 +101,29 @@ body {
   margin: 0.9em 0;
 }
 .cc-prose pre code { background: none; color: var(--cc-ink); padding: 0; font-size: 0.9em; }
+.cc-prose .cc-codeblock { position: relative; }
+.cc-prose .cc-codeblock pre { margin: 0.9em 0; }
+/* Stays visible (not hover-only) so it works on the touch PWA; brightens on hover/focus. */
+.cc-copy-btn {
+  position: absolute;
+  top: 0.55em;
+  right: 0.55em;
+  font-family: var(--cc-mono-font);
+  font-size: 0.72em;
+  line-height: 1;
+  color: var(--cc-ink-faint);
+  background: rgba(11, 17, 24, 0.85);
+  border: 1px solid var(--cc-edge, #243042);
+  border-radius: 6px;
+  padding: 0.32em 0.6em;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.cc-codeblock:hover .cc-copy-btn,
+.cc-copy-btn:hover,
+.cc-copy-btn:focus-visible { opacity: 1; }
+.cc-copy-btn:hover { color: var(--cc-ink); border-color: var(--cc-accent, #38bdf8); }
 .cc-prose blockquote {
   border-left: 3px solid var(--cc-accent, #38bdf8);
   padding: 0.1em 0 0.1em 1em;

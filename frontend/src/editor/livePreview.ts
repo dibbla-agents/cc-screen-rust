@@ -21,6 +21,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import { writeClipboard } from "../util";
 
 // A DecoSpec is a plain description of one decoration. `type`:
 //   - "replace": hide the range entirely (syntax marks off the cursor line)
@@ -28,7 +29,8 @@ import { tags } from "@lezer/highlight";
 //   - "mark":    add a CSS class to the range (inline styling: bold, code, …)
 //   - "line":    add a CSS class to the whole line (headings, blockquotes, …)
 //   - "table":   replace a whole GFM table block with a rendered <table> widget
-export type DecoType = "replace" | "bullet" | "mark" | "line" | "table";
+//   - "copybtn": float a "Copy" button over a code block (carries the code text)
+export type DecoType = "replace" | "bullet" | "mark" | "line" | "table" | "copybtn";
 
 // One column's alignment, parsed from a GFM delimiter row (`:--`, `--:`, `:-:`).
 export type TableAlign = "left" | "right" | "center" | null;
@@ -47,6 +49,7 @@ export interface DecoSpec {
   type: DecoType;
   cls?: string; // for "mark"/"line"
   table?: TableData; // for "table"
+  text?: string; // for "copybtn": the code-block contents to copy
 }
 
 // Heading levels map to CSS classes cm-md-h1..h6.
@@ -120,6 +123,25 @@ export function parseTableSource(src: string): TableData | null {
   });
   const body = lines.slice(2).map(splitRow);
   return { header, align, body };
+}
+
+// codeBlockText extracts what a code block's Copy button should put on the
+// clipboard: for a fenced block, the lines between the ``` / ~~~ fences (the
+// fences themselves are kept literal in the view but never copied); for an
+// indented block, the block with its 4-space / tab indent stripped.
+function codeBlockText(state: EditorState, name: string, from: number, to: number): string {
+  const lastPos = Math.min(to, state.doc.length);
+  if (name === "FencedCode") {
+    const openLine = state.doc.lineAt(from).number;
+    const closeLine = state.doc.lineAt(lastPos);
+    const closingIsFence = /^\s*(`{3,}|~{3,})\s*$/.test(closeLine.text);
+    const fromLine = openLine + 1;
+    const toLine = closingIsFence ? closeLine.number - 1 : closeLine.number;
+    if (toLine < fromLine) return "";
+    return state.doc.sliceString(state.doc.line(fromLine).from, state.doc.line(toLine).to);
+  }
+  // Indented code block: drop the leading 4 spaces / tab from each line.
+  return state.doc.sliceString(from, lastPos).replace(/^(\t| {1,4})/gm, "");
 }
 
 // activeLines returns the set of 1-based line numbers intersecting any part of
@@ -199,14 +221,60 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
         return;
       }
       if (name === "FencedCode" || name === "CodeBlock") {
-        let pos = node.from;
-        while (pos <= node.to) {
-          const line = state.doc.lineAt(pos);
-          specs.push({ from: line.from, to: line.from, type: "line", cls: "cm-md-codeblock" });
-          if (line.to >= node.to) break;
-          pos = line.to + 1;
+        const first = state.doc.lineAt(node.from);
+        const last = state.doc.lineAt(Math.min(node.to, state.doc.length));
+
+        // Whole-block reveal: with the cursor anywhere inside the block, show the
+        // raw source (fences and all) so it stays editable — exactly how the
+        // table and Obsidian behave. Otherwise we hide the ``` and surface the
+        // language instead.
+        let blockActive = false;
+        for (let n = first.number; n <= last.number; n++) {
+          if (active.has(n)) {
+            blockActive = true;
+            break;
+          }
         }
-        return;
+
+        // Dark background on every line of the block.
+        for (let n = first.number; n <= last.number; n++) {
+          const line = state.doc.line(n);
+          specs.push({ from: line.from, to: line.from, type: "line", cls: "cm-md-codeblock" });
+        }
+
+        if (name === "FencedCode" && !blockActive) {
+          // Opening line: hide the ``` (plus any space before the info string)
+          // and style the language that follows as a discrete header label.
+          const fm = first.text.match(/^(\s*)(`{3,}|~{3,})([ \t]*)/);
+          if (fm) {
+            const ticksStart = first.from + fm[1].length;
+            const infoStart = ticksStart + fm[2].length + fm[3].length;
+            specs.push({ from: ticksStart, to: infoStart, type: "replace" });
+            if (infoStart < first.to) {
+              specs.push({ from: infoStart, to: first.to, type: "mark", cls: "cm-md-codeinfo" });
+            }
+          }
+          // Closing line: hide the ``` and collapse the now-empty line into a
+          // slim footer strip so it reads as the block's bottom padding.
+          const closingIsFence = /^\s*(`{3,}|~{3,})\s*$/.test(last.text);
+          if (closingIsFence && last.number > first.number) {
+            const cm = last.text.match(/^(\s*)(`{3,}|~{3,})/);
+            if (cm) {
+              const cStart = last.from + cm[1].length;
+              specs.push({ from: cStart, to: cStart + cm[2].length, type: "replace" });
+            }
+            specs.push({ from: last.from, to: last.from, type: "line", cls: "cm-md-codefoot" });
+          }
+        }
+
+        // A "Copy" button anchored to the opening (header) line, floated
+        // top-right via CSS, carrying the block's contents. Skipped for empty
+        // blocks. Don't descend — code content carries no inline markup.
+        const code = codeBlockText(state, name, node.from, node.to);
+        if (code.length > 0) {
+          specs.push({ from: first.from, to: first.from, type: "copybtn", text: code });
+        }
+        return false;
       }
 
       // Inline content styling (always applied).
@@ -267,6 +335,45 @@ class BulletWidget extends WidgetType {
     span.className = "cm-md-bullet";
     span.textContent = "•";
     return span;
+  }
+}
+
+// CopyButtonWidget is the floating "Copy" button on a code block. It holds the
+// code text so the click can copy without re-reading the doc. writeClipboard
+// handles the HTTPS (async clipboard) vs plain-HTTP (execCommand) split, so it
+// works on the tailnet's http:// deployment too.
+class CopyButtonWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super();
+  }
+  eq(o: CopyButtonWidget) {
+    return o.text === this.text;
+  }
+  toDOM() {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cm-md-copy-btn";
+    btn.textContent = "Copy";
+    btn.setAttribute("aria-label", "Copy code block");
+    // mousedown + preventDefault: stop CodeMirror moving the cursor/selection
+    // into the block (which would re-render this widget), and keep the copy
+    // inside the user gesture so the execCommand fallback stays allowed.
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      writeClipboard(this.text)
+        .then(() => {
+          btn.textContent = "Copied";
+          window.setTimeout(() => {
+            btn.textContent = "Copy";
+          }, 1200);
+        })
+        .catch(() => {});
+    });
+    return btn;
+  }
+  ignoreEvent() {
+    return true;
   }
 }
 
@@ -373,6 +480,11 @@ function buildInlineDecorations(state: EditorState): DecorationSet {
       case "bullet":
         ranges.push(bulletDeco.range(s.from, s.to));
         break;
+      case "copybtn":
+        ranges.push(
+          Decoration.widget({ widget: new CopyButtonWidget(s.text ?? ""), side: 1 }).range(s.from)
+        );
+        break;
       case "replace":
         ranges.push(hideDeco.range(s.from, s.to));
         break;
@@ -466,6 +578,41 @@ const livePreviewTheme = EditorView.baseTheme({
     background: "#0b1118",
     fontFamily: "var(--cc-mono-font)",
     fontSize: "0.9em",
+    position: "relative", // anchor the absolutely-positioned copy button
+  },
+  // The language label that replaces the opening ``` (e.g. "bash", "js") — kept
+  // small and faint so it reads as a discrete tag on the block's header line.
+  ".cm-md-codeinfo": {
+    fontSize: "0.72em",
+    letterSpacing: "0.04em",
+    color: "var(--cc-ink-faint, #9aa6b2)",
+    opacity: "0.75",
+  },
+  // The closing ``` line with its ticks hidden — collapse it to a slim strip so
+  // it reads as the code block's bottom padding rather than a blank row.
+  ".cm-md-codefoot": { fontSize: "0", lineHeight: "10px" },
+  // Floated over the opening fence line's top-right corner. Stays visible (not
+  // hover-only) so it works on the touch PWA; brightens on hover.
+  ".cm-md-copy-btn": {
+    position: "absolute",
+    top: "2px",
+    right: "6px",
+    zIndex: "2",
+    fontFamily: "var(--cc-mono-font)",
+    fontSize: "0.72em",
+    lineHeight: "1",
+    color: "var(--cc-ink-faint, #9aa6b2)",
+    background: "rgba(11,17,24,0.85)",
+    border: "1px solid var(--cc-edge, #243042)",
+    borderRadius: "6px",
+    padding: "0.3em 0.55em",
+    cursor: "pointer",
+    opacity: "0.6",
+  },
+  ".cm-md-copy-btn:hover": {
+    opacity: "1",
+    color: "var(--cc-ink, #d7dade)",
+    borderColor: "var(--cc-accent, #38bdf8)",
   },
   ".cm-md-bullet": { paddingRight: "0.5em", color: "var(--cc-accent, #38bdf8)" },
   // Rendered GFM tables (the TableWidget) — mirrors the reading view's

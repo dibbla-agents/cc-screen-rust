@@ -78,13 +78,51 @@ describe("computeDecorations", () => {
     expect(specsIn(specs, "replace", urlStart, urlStart + 5).length).toBeGreaterThan(0);
   });
 
-  it("backgrounds fenced code lines without hiding the fences", () => {
+  it("backgrounds fenced code lines and hides the fences off the cursor", () => {
     const doc = "```js\nlet a=1;\n```\n\nq\n";
-    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    const specs = computeDecorations(stateFor(doc, doc.length - 1)); // cursor in 'q'
     const cb = specs.filter((s) => s.type === "line" && s.cls === "cm-md-codeblock");
-    expect(cb.length).toBeGreaterThanOrEqual(2); // at least the fence + code line
-    // The fence backticks are NOT hidden (we keep code blocks literal).
-    expect(specsIn(specs, "replace", 0, 3).length).toBe(0);
+    expect(cb.length).toBeGreaterThanOrEqual(2); // every block line gets the bg
+    // The opening ``` (0..3) is hidden, and "js" (3..5) becomes a discrete label.
+    expect(specsIn(specs, "replace", 0, 3).length).toBe(1);
+    expect(
+      specs.some((s) => s.type === "mark" && s.cls === "cm-md-codeinfo" && s.from === 3 && s.to === 5)
+    ).toBe(true);
+    // The closing ``` is hidden too, and its line collapses to a footer strip.
+    const closeAt = doc.lastIndexOf("```");
+    expect(specsIn(specs, "replace", closeAt, closeAt + 3).length).toBe(1);
+    expect(specs.some((s) => s.type === "line" && s.cls === "cm-md-codefoot")).toBe(true);
+  });
+
+  it("reveals the raw fences when the cursor is inside the code block", () => {
+    const doc = "```js\nlet a=1;\n```\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, 8)); // cursor inside 'let a=1;'
+    const closeAt = doc.lastIndexOf("```");
+    expect(specsIn(specs, "replace", 0, 3).length).toBe(0); // opening ``` shown
+    expect(specsIn(specs, "replace", closeAt, closeAt + 3).length).toBe(0); // closing shown
+    expect(specs.some((s) => s.type === "line" && s.cls === "cm-md-codefoot")).toBe(false);
+  });
+
+  it("hides the fences of a language-less block without emitting a label", () => {
+    const doc = "```\nplain\n```\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    expect(specsIn(specs, "replace", 0, 3).length).toBe(1); // opening ``` hidden
+    expect(specs.some((s) => s.type === "mark" && s.cls === "cm-md-codeinfo")).toBe(false);
+  });
+
+  it("emits a copy-button spec carrying the fenced block's inner text (fences excluded)", () => {
+    const doc = "```js\nlet a=1;\nlet b=2;\n```\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    const btn = specs.find((s) => s.type === "copybtn");
+    expect(btn).toBeTruthy();
+    expect(btn!.from).toBe(0); // anchored to the opening fence line
+    expect(btn!.text).toBe("let a=1;\nlet b=2;"); // inner code only
+  });
+
+  it("does not emit a copy button for an empty fenced block", () => {
+    const doc = "```\n```\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    expect(specs.some((s) => s.type === "copybtn")).toBe(false);
   });
 
   it("returns specs sorted by position with line decorations first", () => {

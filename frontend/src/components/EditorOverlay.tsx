@@ -8,9 +8,11 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { writeClipboard } from "../util";
 import {
   readFile,
   writeFile,
@@ -1553,6 +1555,38 @@ function AgentColumn({
   );
 }
 
+// CodeBlock overrides react-markdown's <pre> for fenced (```) code blocks,
+// floating a copy button over it. We read the rendered text off the <pre>
+// via a ref (innerText) instead of walking the markdown AST, so it copies
+// exactly what's shown regardless of nested syntax nodes. writeClipboard
+// handles the HTTPS (async clipboard) vs plain-HTTP (execCommand) split, so
+// copying works on the tailnet's http:// deployment too. Inline `code` is
+// untouched — only fenced blocks render through <pre>.
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(() => {
+    const text = ref.current?.innerText ?? "";
+    if (!text) return;
+    writeClipboard(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      })
+      .catch(() => {});
+  }, []);
+  return (
+    <div className="cc-codeblock">
+      <button type="button" className="cc-copy-btn" onClick={onCopy} aria-label="Copy code">
+        {copied ? "Copied" : "Copy"}
+      </button>
+      <pre ref={ref}>{children}</pre>
+    </div>
+  );
+}
+
+const MARKDOWN_COMPONENTS = { pre: CodeBlock };
+
 // ReadingView renders the markdown fully (Obsidian's "reading mode"). It shares
 // the writing surface's centered measure so toggling Edit<->Read doesn't shift
 // the text column.
@@ -1560,7 +1594,9 @@ function ReadingView({ content }: { content: string }) {
   return (
     <div className="h-full overflow-y-auto px-6 py-10">
       <div className="cc-prose mx-auto" style={{ maxWidth: "var(--cc-measure, 44rem)" }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   );

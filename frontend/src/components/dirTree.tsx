@@ -63,8 +63,8 @@ export function isEditableFile(name: string): boolean {
   const lower = name.toLowerCase();
   const dot = lower.lastIndexOf(".");
   if (dot <= 0) {
-    // No extension (or a dotfile like .gitignore): treat as text. Dotfiles are
-    // hidden by the backend anyway, so this mostly catches README/LICENSE/etc.
+    // No extension (.env, .gitignore, README, LICENSE, Makefile, …): treat as
+    // text. dot === 0 catches dotfiles whose whole name is the "extension".
     return true;
   }
   return EDITABLE_EXTS.has(lower.slice(dot + 1));

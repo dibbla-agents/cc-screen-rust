@@ -33,7 +33,7 @@ import UploadSheet from "./components/UploadSheet";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { toolColor, toPng } from "./util";
+import { toolColor, toPng, writeClipboard } from "./util";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
 
 const LAST_KEY = "ccweb.lastSession"; // legacy single-session key (migrate from)
@@ -129,43 +129,6 @@ function isCtrlB(e: KeyboardEvent): boolean {
     !e.metaKey &&
     e.key.toLowerCase() === "b"
   );
-}
-
-// writeClipboard puts `text` on the system clipboard. On HTTPS / localhost
-// we prefer the modern async API; on the plain-HTTP tailnet deployment that
-// API is gated, so we fall back to the deprecated-but-still-supported
-// execCommand('copy') path. **Must be called inside a user-gesture handler**
-// (keydown / click) — both paths require it, and the fallback also briefly
-// steals focus to a hidden textarea, so we restore the previously-focused
-// element on the way out (otherwise the user's next keystroke would land
-// in the dead textarea instead of xterm).
-async function writeClipboard(text: string): Promise<void> {
-  if (navigator.clipboard && window.isSecureContext) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      /* fall through to execCommand */
-    }
-  }
-  const prevFocus = document.activeElement as HTMLElement | null;
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.position = "fixed";
-  ta.style.left = "-9999px";
-  ta.style.top = "0";
-  document.body.appendChild(ta);
-  try {
-    ta.focus();
-    ta.select();
-    ta.setSelectionRange(0, ta.value.length);
-    const ok = document.execCommand("copy");
-    if (!ok) throw new Error("execCommand copy returned false");
-  } finally {
-    document.body.removeChild(ta);
-    prevFocus?.focus?.();
-  }
 }
 
 // shouldSkipShortcut returns true when focus is in a real text input (compose

@@ -99,9 +99,6 @@ fn read_dirs(dir: &Path) -> Result<Vec<DirEntry>, (StatusCode, String)> {
     let mut out = Vec::new();
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
         if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             out.push(DirEntry {
                 name,
@@ -134,9 +131,6 @@ pub async fn files(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R
     let mut filev: Vec<FileEntry> = Vec::new();
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
         let full = ent.path();
         let Ok(meta) = ent.metadata() else { continue };
         if meta.is_dir() {
