@@ -192,6 +192,16 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
     // A divider that spans the inner width (inset one column each side).
     let sep = || Line::from(Span::styled(format!(" {} ", "─".repeat(inner_w.saturating_sub(2))), dim));
 
+    // Size the name column to the longest name so names show in full; the tool
+    // column is fixed and the preview takes whatever's left (it's the croppable
+    // one). lead = marker (2) + dot (2); the two inter-column gaps add 2 more.
+    const TOOL_W: usize = 7;
+    let lead = 4usize;
+    let longest = v.sessions.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
+    let name_cap = inner_w.saturating_sub(lead + 2 + TOOL_W + 8).max(12); // keep ≥8 for preview
+    let name_w = longest.clamp(12, name_cap);
+    let preview_w = inner_w.saturating_sub(lead + name_w + 2 + TOOL_W);
+
     let mut lines: Vec<Line> = Vec::new();
     lines.push(action(0, "▦", "Change layout"));
     lines.push(action(1, "✚", "New session"));
@@ -208,16 +218,22 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
         for (i, s) in v.sessions.iter().enumerate().skip(start).take(shown) {
             let sel = 2 + i == v.selected;
             let dot = if s.attached { "●" } else { "○" };
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 menu_marker(sel),
                 Span::styled(
                     format!("{dot} "),
                     Style::default().fg(if sel { Color::Cyan } else { Color::DarkGray }),
                 ),
-                Span::styled(format!("{:<24}", truncate(&s.name, 24)), if sel { sel_style } else { gray }),
-                Span::styled(format!("{:<8}", truncate(&s.tool, 8)), dim),
-                Span::styled(truncate(&s.preview, 30), dim),
-            ]));
+                Span::styled(
+                    format!("{:<name_w$} ", truncate(&s.name, name_w)),
+                    if sel { sel_style } else { gray },
+                ),
+                Span::styled(format!("{:<TOOL_W$} ", truncate(&s.tool, TOOL_W)), dim),
+            ];
+            if preview_w > 0 {
+                spans.push(Span::styled(truncate(&s.preview, preview_w), dim));
+            }
+            lines.push(Line::from(spans));
         }
     }
     lines.push(sep());
