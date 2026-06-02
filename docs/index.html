@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>cc-screen — tmux-free terminal sessions for your AI coding agents</title>
-<meta name="description" content="A web-only Rust engine that drives claude, codex, gemini and kimi as long-lived terminal sessions you attach to from your phone or a native terminal client — over your tailnet." />
-<meta name="theme-color" content="#0a0a0c" />
+<title>cc-screen — a Rust engine for your terminal AI agents</title>
+<meta name="description" content="A single Rust binary that owns each AI coding agent's PTY and streams it live to a browser PWA or a native terminal client. No tmux." />
+<meta name="theme-color" content="#060e09" />
 <meta property="og:title" content="cc-screen" />
-<meta property="og:description" content="tmux-free terminal sessions for your AI coding agents — attach from your phone or a native client, over your tailnet." />
+<meta property="og:description" content="A Rust engine that runs claude, codex, gemini & kimi as terminal sessions you attach to — from a browser or a native client." />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,9 +18,8 @@
 <header class="nav">
   <a class="brand" href="#top"><span class="mark">&gt;_</span>cc-screen</a>
   <nav>
-    <a href="#start">Getting&nbsp;started</a>
-    <a href="#how">How&nbsp;it&nbsp;works</a>
-    <a href="#arch">Architecture</a>
+    <a href="#start">Start</a>
+    <a href="#how">How</a>
     <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub&nbsp;↗</a>
   </nav>
 </header>
@@ -28,12 +27,10 @@
 <main id="top">
   <section class="hero">
     <p class="kicker">// web-only · tmux-free · written in rust</p>
-    <h1>Terminal sessions for your <span class="amber">AI&nbsp;coding&nbsp;agents</span>, attached from anywhere.</h1>
+    <h1>AI coding agents, as <span class="g">terminal sessions</span> you attach to.</h1>
     <p class="lede">
-      <strong>cc-screen</strong> runs <code>claude</code>, <code>codex</code>,
-      <code>gemini</code> and <code>kimi</code> as long-lived PTY sessions on one host,
-      and streams them to a phone PWA or a native terminal client — live, over your
-      tailnet. No tmux. No auth. The network is the boundary.
+      A single Rust binary owns each agent's PTY and streams it live to a browser PWA
+      or a native terminal client — no tmux.
     </p>
 
     <div class="term">
@@ -41,63 +38,59 @@
       <div class="body">
         <pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
     .../releases/latest/download/cc-screen-tui-installer.sh | sh</code></pre>
-        <p class="out"><span class="ok">✓</span> ccs installed to <span class="amber">~/.local/bin</span><span class="caret"></span></p>
+        <p class="out"><span class="ok">✓</span> ccs installed to <span class="g">~/.local/bin</span><span class="caret"></span></p>
         <button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh">copy</button>
       </div>
     </div>
 
     <p class="cta">
-      <a class="btn amber-btn" href="#start">Get started</a>
+      <a class="btn solid" href="#start">Get started</a>
       <a class="btn ghost" href="https://github.com/dibbla-agents/cc-screen-rust">Source on GitHub ↗</a>
     </p>
-    <p class="agents">drives&nbsp; claude · codex · gemini · kimi &nbsp;— mac &amp; linux, both arches</p>
+    <p class="agents">claude · codex · gemini · kimi &nbsp;—&nbsp; macOS &amp; Linux, both arches</p>
   </section>
 
   <section id="how">
+    <p class="eyebrow">▸ how it works</p>
     <h2>One engine. Two clients. Zero tmux.</h2>
-    <div class="grid">
-      <div class="card"><h3>Two clients, one wire</h3><p>A React PWA — embedded in the server binary — and <code>ccs</code>, a native multi-pane terminal client, speak the same WebSocket contract.</p></div>
-      <div class="card"><h3>In-process PTY engine</h3><p>Each session owns its pseudo-terminal for life. A screen model plus a raw-byte replay ring repaint any client cleanly on reattach.</p></div>
-      <div class="card"><h3>Tailnet-only by design</h3><p>Agents run with <code>--dangerously-skip-permissions</code>; there's no auth and the server never binds a public interface. Tailscale is the boundary.</p></div>
-      <div class="card"><h3>Resume on restart</h3><p>A redeploy ends the agents; auto-restore relaunches each with its CLI's resume flag, conversation intact.</p></div>
-    </div>
+    <ol class="features">
+      <li class="feature">
+        <span class="idx">01</span>
+        <div><h3>Written in Rust</h3><p>One static binary holds the PTY engine, the wire protocol, and the embedded web UI. No runtime to install, no tmux to wrangle.</p></div>
+      </li>
+      <li class="feature">
+        <span class="idx">02</span>
+        <div><h3>Two clients, one wire</h3><p>A React PWA built into the binary, and <code>ccs</code> — a native multi-pane terminal client — speak the same WebSocket contract from one shared crate.</p></div>
+      </li>
+      <li class="feature">
+        <span class="idx">03</span>
+        <div><h3>Resume on restart</h3><p>Each session owns its PTY for life; a redeploy ends the agents and auto-restore relaunches each with its CLI's resume flag, conversation intact.</p></div>
+      </li>
+    </ol>
   </section>
 
   <section id="start">
-    <h2>Getting started</h2>
-    <p class="sub">Stand the server up on the host where your agent CLIs live; install the client on every device you drive it from. Both ship as checksum-verified binaries for macOS and Linux.</p>
-
+    <p class="eyebrow">▸ getting started</p>
+    <h2>Install in two steps</h2>
     <div class="steps">
       <div class="step">
-        <h3><span class="n">①</span> On your host — the server</h3>
-        <p class="note">Needs Tailscale running, plus the agent CLIs (<code>claude</code>, <code>codex</code>, …) installed &amp; logged in on the host.</p>
+        <h3><span class="n">①</span> The server</h3>
+        <p class="note">On the host where your agent CLIs (<code>claude</code>, <code>codex</code>, …) are installed.</p>
         <div class="cmd"><pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
-    .../releases/latest/download/cc-screen-rust-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh">copy</button></div>
-        <div class="cmd"><pre><code><span class="p">$</span> cc-screen-rust install   <span class="c"># systemd / launchd · binds tailnet IP:8839</span></code></pre><button class="copy" data-clip="cc-screen-rust install">copy</button></div>
-        <p class="after">Then open <code>http://&lt;tailnet-ip&gt;:8839</code> and Add to Home Screen.</p>
+    .../cc-screen-rust-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh">copy</button></div>
+        <div class="cmd"><pre><code><span class="p">$</span> cc-screen-rust install   <span class="c"># systemd / launchd · :8839</span></code></pre><button class="copy" data-clip="cc-screen-rust install">copy</button></div>
+        <p class="after">Then open <code>http://&lt;host&gt;:8839</code> in any browser.</p>
       </div>
 
       <div class="step">
-        <h3><span class="n">②</span> On your devices — the client</h3>
-        <p class="note">Runs on any Mac or Linux box on the tailnet. Lands in <code>~/.local/bin</code> — open a new shell if it isn't on your <code>PATH</code>.</p>
+        <h3><span class="n">②</span> The client</h3>
+        <p class="note">On any Mac or Linux box. Lands in <code>~/.local/bin</code>.</p>
         <div class="cmd"><pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
-    .../releases/latest/download/cc-screen-tui-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh">copy</button></div>
+    .../cc-screen-tui-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh">copy</button></div>
         <div class="cmd"><pre><code><span class="p">$</span> ccs --server http://&lt;host&gt;:8839</code></pre><button class="copy" data-clip="ccs --server http://<host>:8839">copy</button></div>
-        <p class="after">A tmux-style client: session switcher, pane grid, <code>Ctrl-A</code> prefix. Or just open the URL — the PWA is built in.</p>
+        <p class="after">A tmux-style session switcher and pane grid — or just use the browser.</p>
       </div>
     </div>
-  </section>
-
-  <section id="arch">
-    <h2>How the bytes flow</h2>
-    <div class="flow">
-      <div class="row"><span class="box">phone PWA</span><span class="box">ccs (TUI)</span></div>
-      <div class="pipe">│ &nbsp;WebSocket · raw PTY bytes · over Tailscale, no auth</div>
-      <div class="row"><span class="box core">cc-screen-rust &nbsp;— PTY engine · screen model + replay ring · broadcast fan-out</span></div>
-      <div class="pipe">│ &nbsp;spawns as PTY children on the host</div>
-      <div class="row"><span class="box">claude · codex · gemini · kimi</span></div>
-    </div>
-    <p class="sub">One authoritative engine on the host; clients are thin terminals fed raw output and sending back keystrokes. The wire contract lives in one shared crate, so the PWA and <code>ccs</code> never drift.</p>
   </section>
 </main>
 
@@ -108,7 +101,7 @@
     <a href="https://github.com/dibbla-agents/cc-screen-rust/releases">Releases</a>
     <a href="https://github.com/dibbla-agents/cc-screen-rust#readme">README</a>
   </nav>
-  <p>tailnet-only, no auth — by design. Built with Rust, axum &amp; ratatui.</p>
+  <p>Built with Rust · axum · ratatui.</p>
 </footer>
 
 <script src="app.js"></script>
