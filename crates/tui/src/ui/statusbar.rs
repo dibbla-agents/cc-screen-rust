@@ -52,7 +52,7 @@ pub fn render(
         }
         None => {
             left.push(Span::styled(" empty box ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
-            left.push(Span::styled("  ⏎ to pick a session", Style::default().fg(Color::DarkGray)));
+            left.push(Span::styled("  ⏎ for menu", Style::default().fg(Color::DarkGray)));
         }
     }
     if count > 1 {
@@ -70,9 +70,9 @@ pub fn render(
     f.render_widget(Paragraph::new(Line::from(left)), area);
 
     let hint = if count > 1 {
-        format!("{prefix_label} ←/→ focus · l layout · d detach  ")
+        format!("{prefix_label} ←/→ focus · l layout · d menu  ")
     } else {
-        format!("{prefix_label} l layout · d detach  ")
+        format!("{prefix_label} l layout · d menu  ")
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))))

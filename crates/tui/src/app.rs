@@ -44,11 +44,87 @@ enum Mode {
 }
 
 /// A modal over the grid.
-#[derive(Clone, Copy)]
 enum GridOverlay {
     None,
-    Palette(usize),                          // highlighted index in Layout::ALL
-    Pick { target: usize, selected: usize }, // session picker for box `target`
+    Palette(usize), // highlighted index in Layout::ALL
+    /// The unified action menu for box `target`; `selected` indexes
+    /// `menu_items(sessions.len())`.
+    Menu { target: usize, selected: usize },
+    /// Inline new-session form that fills box `target` on submit.
+    NewForm { target: usize, form: NewForm },
+}
+
+/// One selectable row of the grid action menu, in visual (top→bottom) order:
+/// Change layout, New session, the sessions, Clear this box, Quit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuItem {
+    ChangeLayout,
+    NewSession,
+    Session(usize),
+    ClearBox,
+    Quit,
+}
+
+/// The selectable menu rows for `session_count` sessions. Length is always
+/// `session_count + 4`, so navigation wrapping is a plain modulo.
+fn menu_items(session_count: usize) -> Vec<MenuItem> {
+    let mut v = Vec::with_capacity(session_count + 4);
+    v.push(MenuItem::ChangeLayout);
+    v.push(MenuItem::NewSession);
+    v.extend((0..session_count).map(MenuItem::Session));
+    v.push(MenuItem::ClearBox);
+    v.push(MenuItem::Quit);
+    v
+}
+
+/// Initial menu cursor: the box's current session if it's in the list, else the
+/// first session, else New session.
+fn menu_initial(sessions: &[SessionInfo], current: Option<&str>) -> usize {
+    current
+        .and_then(|name| sessions.iter().position(|s| s.name == name))
+        .map(|i| 2 + i)
+        .or((!sessions.is_empty()).then_some(2))
+        .unwrap_or(1)
+}
+
+/// Outcome of feeding a key to the shared new-session form.
+enum NewFormAction {
+    None,
+    Submit,
+    Cancel,
+}
+
+/// Apply one key to a `NewForm` — shared by the switcher form and the grid form.
+fn newform_key(form: &mut NewForm, tools_len: usize, k: KeyEvent) -> NewFormAction {
+    match (k.code, k.modifiers) {
+        (KeyCode::Esc, _) => return NewFormAction::Cancel,
+        (KeyCode::Enter, _) => return NewFormAction::Submit,
+        (KeyCode::Tab, _) | (KeyCode::BackTab, _) => form.field ^= 1,
+        (KeyCode::Left, _) if tools_len > 0 => {
+            form.tool_idx = (form.tool_idx + tools_len - 1) % tools_len;
+        }
+        (KeyCode::Right, _) if tools_len > 0 => {
+            form.tool_idx = (form.tool_idx + 1) % tools_len;
+        }
+        (KeyCode::Backspace, _) => {
+            if form.field == 0 {
+                form.name.pop();
+            } else {
+                form.dir.pop();
+            }
+        }
+        (KeyCode::Char(c), m)
+            if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
+            if form.field == 0 {
+                form.name.push(c);
+            } else {
+                form.dir.push(c);
+            }
+        }
+        _ => {}
+    }
+    NewFormAction::None
 }
 
 #[derive(Clone, Copy)]
@@ -253,6 +329,7 @@ impl App {
         match res {
             Ok(name) => {
                 self.overlay = Overlay::None;
+                self.grid_overlay = GridOverlay::None;
                 // If the create was launched to fill a box, drop it in there;
                 // otherwise it was a plain switcher create.
                 if let Some(target) = self.fill_target.take() {
@@ -262,9 +339,12 @@ impl App {
                 }
                 self.pending_refresh = true;
             }
+            // Surface the error on whichever new-session form is open.
             Err(e) => {
                 if let Overlay::NewSession(f) = &mut self.overlay {
                     f.error = Some(e);
+                } else if let GridOverlay::NewForm { form, .. } = &mut self.grid_overlay {
+                    form.error = Some(e);
                 }
             }
         }
@@ -307,12 +387,12 @@ impl App {
                             p.scroll(d);
                         }
                     }
-                    // Click focuses the box; clicking an empty one opens the picker.
+                    // Click focuses the box; clicking an empty one opens the menu.
                     Down(_) => {
                         if let Some(idx) = self.box_at(me.column, me.row) {
                             self.active = idx;
                             if self.panes.get(idx).and_then(|x| x.as_ref()).is_none() {
-                                self.open_pick(idx);
+                                self.open_menu(idx);
                             }
                         }
                     }
@@ -387,37 +467,14 @@ impl App {
     }
 
     fn key_newform(&mut self, k: KeyEvent) {
-        match (k.code, k.modifiers) {
-            (KeyCode::Esc, _) => self.overlay = Overlay::None,
-            (KeyCode::Enter, _) => self.submit_newform(),
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
-                if let Overlay::NewSession(f) = &mut self.overlay {
-                    f.field ^= 1;
-                }
-            }
-            (KeyCode::Left, _) => self.cycle_tool(-1),
-            (KeyCode::Right, _) => self.cycle_tool(1),
-            (KeyCode::Backspace, _) => {
-                if let Overlay::NewSession(f) = &mut self.overlay {
-                    if f.field == 0 {
-                        f.name.pop();
-                    } else {
-                        f.dir.pop();
-                    }
-                }
-            }
-            (KeyCode::Char(c), m)
-                if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
-            {
-                if let Overlay::NewSession(f) = &mut self.overlay {
-                    if f.field == 0 {
-                        f.name.push(c);
-                    } else {
-                        f.dir.push(c);
-                    }
-                }
-            }
-            _ => {}
+        let tools_len = self.tools.len();
+        let Overlay::NewSession(form) = &mut self.overlay else {
+            return;
+        };
+        match newform_key(form, tools_len, k) {
+            NewFormAction::None => {}
+            NewFormAction::Cancel => self.overlay = Overlay::None,
+            NewFormAction::Submit => self.submit_newform(),
         }
     }
 
@@ -444,30 +501,17 @@ impl App {
         });
     }
 
-    fn cycle_tool(&mut self, d: isize) {
-        let n = self.tools.len();
-        if n == 0 {
+    /// Spawn the create request for `form`; the result arrives as
+    /// `AppMsg::Created` and is routed by `handle_created`.
+    fn spawn_create(&self, form: &NewForm) {
+        let Some(t) = self.tools.get(form.tool_idx) else {
             return;
-        }
-        if let Overlay::NewSession(f) = &mut self.overlay {
-            f.tool_idx = (f.tool_idx as isize + d).rem_euclid(n as isize) as usize;
-        }
-    }
-
-    fn submit_newform(&mut self) {
-        let req = {
-            let Overlay::NewSession(f) = &self.overlay else {
-                return;
-            };
-            let Some(t) = self.tools.get(f.tool_idx) else {
-                return;
-            };
-            CreateReq {
-                tool: t.prefix.clone(),
-                name: f.name.clone(),
-                dir: f.dir.clone(),
-                extra_dirs: Vec::new(),
-            }
+        };
+        let req = CreateReq {
+            tool: t.prefix.clone(),
+            name: form.name.clone(),
+            dir: form.dir.clone(),
+            extra_dirs: Vec::new(),
         };
         let rest = self.rest.clone();
         let tx = self.tx.clone();
@@ -475,6 +519,12 @@ impl App {
             let r = rest.create(&req).await.map_err(|e| e.to_string());
             let _ = tx.send(AppMsg::Created(r)).await;
         });
+    }
+
+    fn submit_newform(&mut self) {
+        if let Overlay::NewSession(form) = &self.overlay {
+            self.spawn_create(form);
+        }
     }
 
     fn confirm_delete(&mut self, graceful: bool) {
@@ -495,11 +545,19 @@ impl App {
 
     // ── grid keys ────────────────────────────────────────────────────────────
     fn key_grid(&mut self, k: KeyEvent) {
-        // A grid overlay (palette / picker), when open, captures all keys.
-        match self.grid_overlay {
-            GridOverlay::None => {}
-            GridOverlay::Palette(_) => return self.key_palette(k),
-            GridOverlay::Pick { .. } => return self.key_pick(k),
+        // A grid overlay, when open, captures all keys. (Match a discriminant so
+        // the borrow ends before we dispatch — GridOverlay isn't Copy.)
+        let overlay = match &self.grid_overlay {
+            GridOverlay::None => 0,
+            GridOverlay::Palette(_) => 1,
+            GridOverlay::Menu { .. } => 2,
+            GridOverlay::NewForm { .. } => 3,
+        };
+        match overlay {
+            1 => return self.key_palette(k),
+            2 => return self.key_menu(k),
+            3 => return self.key_grid_newform(k),
+            _ => {}
         }
         if self.prefix_armed {
             self.prefix_armed = false;
@@ -508,7 +566,7 @@ impl App {
                 return;
             }
             match k.code {
-                KeyCode::Char('d') => self.detach_focused(),
+                KeyCode::Char('d') => self.open_menu(self.active),
                 KeyCode::Char('x') => self.kill_focused(),
                 KeyCode::Char('l') | KeyCode::Char(' ') => self.open_palette(),
                 KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -532,7 +590,7 @@ impl App {
         if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some() {
             self.send_key_to_active(k);
         } else if k.code == KeyCode::Enter {
-            self.open_pick(self.active); // fill this empty box
+            self.open_menu(self.active); // empty box → the action menu
         }
     }
 
@@ -544,9 +602,7 @@ impl App {
     }
 
     fn key_palette(&mut self, k: KeyEvent) {
-        let GridOverlay::Palette(hi) = self.grid_overlay else {
-            return;
-        };
+        let hi = if let GridOverlay::Palette(hi) = &self.grid_overlay { *hi } else { return };
         match k.code {
             KeyCode::Esc => self.grid_overlay = GridOverlay::None,
             KeyCode::Left | KeyCode::Up => self.grid_overlay = GridOverlay::Palette((hi + 5) % 6),
@@ -565,40 +621,94 @@ impl App {
         }
     }
 
-    // ── scoped session picker (fill a box) ───────────────────────────────────
-    fn open_pick(&mut self, target: usize) {
-        self.grid_overlay = GridOverlay::Pick { target, selected: 0 };
+    // ── unified action menu (Ctrl-A d / empty box) ───────────────────────────
+    fn open_menu(&mut self, target: usize) {
+        let target = target.min(self.panes.len().saturating_sub(1));
+        let current = self.panes.get(target).and_then(|p| p.as_ref()).map(|p| p.session.clone());
+        let selected = menu_initial(&self.sessions, current.as_deref());
+        self.grid_overlay = GridOverlay::Menu { target, selected };
         self.prefix_armed = false;
     }
 
-    fn key_pick(&mut self, k: KeyEvent) {
-        let GridOverlay::Pick { target, selected } = self.grid_overlay else {
-            return;
+    fn key_menu(&mut self, k: KeyEvent) {
+        let (target, selected) = match &self.grid_overlay {
+            GridOverlay::Menu { target, selected } => (*target, *selected),
+            _ => return,
         };
-        let n = self.sessions.len();
+        let len = menu_items(self.sessions.len()).len(); // always sessions + 4
         match k.code {
             KeyCode::Esc => self.grid_overlay = GridOverlay::None,
-            KeyCode::Up | KeyCode::Char('k') if n > 0 => {
-                self.grid_overlay = GridOverlay::Pick { target, selected: (selected + n - 1) % n };
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.grid_overlay = GridOverlay::Menu { target, selected: (selected + len - 1) % len };
             }
-            KeyCode::Down | KeyCode::Char('j') if n > 0 => {
-                self.grid_overlay = GridOverlay::Pick { target, selected: (selected + 1) % n };
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.grid_overlay = GridOverlay::Menu { target, selected: (selected + 1) % len };
             }
             KeyCode::Enter => {
-                if let Some(s) = self.sessions.get(selected) {
+                let item = menu_items(self.sessions.len()).get(selected).copied();
+                if let Some(item) = item {
+                    self.activate_menu(target, item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn activate_menu(&mut self, target: usize, item: MenuItem) {
+        match item {
+            // Hand off to the existing centered modals.
+            MenuItem::ChangeLayout => self.open_palette(),
+            MenuItem::NewSession => self.open_grid_newform(target),
+            MenuItem::Session(i) => {
+                if let Some(s) = self.sessions.get(i) {
                     let name = s.name.clone();
                     self.grid_overlay = GridOverlay::None;
                     self.fill_box(target, name);
                 }
             }
-            KeyCode::Char('n') => {
-                // Create a new session into this box (uses the full form).
+            MenuItem::ClearBox => {
                 self.grid_overlay = GridOverlay::None;
-                self.fill_target = Some(target);
-                self.mode = Mode::Switcher;
-                self.open_newform();
+                self.clear_box(target);
             }
-            _ => {}
+            MenuItem::Quit => self.should_quit = true,
+        }
+    }
+
+    // ── inline new-session form (fills a box on submit) ───────────────────────
+    fn open_grid_newform(&mut self, target: usize) {
+        if self.tools.is_empty() {
+            self.status = "no tools available".into();
+            return;
+        }
+        self.grid_overlay = GridOverlay::NewForm {
+            target,
+            form: NewForm {
+                tool_idx: 0,
+                field: 0,
+                name: String::new(),
+                dir: self.home.clone(),
+                error: None,
+            },
+        };
+    }
+
+    fn key_grid_newform(&mut self, k: KeyEvent) {
+        let tools_len = self.tools.len();
+        let (target, action) = match &mut self.grid_overlay {
+            GridOverlay::NewForm { target, form } => (*target, newform_key(form, tools_len, k)),
+            _ => return,
+        };
+        match action {
+            NewFormAction::None => {}
+            NewFormAction::Cancel => self.grid_overlay = GridOverlay::None,
+            NewFormAction::Submit => {
+                // Keep the form open until Created lands (handle_created routes
+                // success into the box and failure back into the form).
+                self.fill_target = Some(target);
+                if let GridOverlay::NewForm { form, .. } = &self.grid_overlay {
+                    self.spawn_create(form);
+                }
+            }
         }
     }
 
@@ -722,11 +832,17 @@ impl App {
         self.relayout();
     }
 
-    fn detach_focused(&mut self) {
-        if let Some(slot) = self.panes.get_mut(self.active) {
-            *slot = None; // Drop aborts the WS task
+    /// Remove the session view from box `target` (the PTY keeps running on the
+    /// server; Drop just aborts the local WS task).
+    fn clear_box(&mut self, target: usize) {
+        if let Some(slot) = self.panes.get_mut(target) {
+            *slot = None;
         }
         self.after_box_removed();
+    }
+
+    fn detach_focused(&mut self) {
+        self.clear_box(self.active);
     }
 
     fn kill_focused(&mut self) {
@@ -828,16 +944,32 @@ impl App {
                     &self.prefix_label(),
                     self.prefix_armed,
                 );
-                match self.grid_overlay {
+                match &self.grid_overlay {
                     GridOverlay::None => {}
-                    GridOverlay::Palette(hi) => ui::overlay::layout_palette(f, hi),
-                    GridOverlay::Pick { target, selected } => ui::overlay::session_picker(
+                    GridOverlay::Palette(hi) => ui::overlay::layout_palette(f, *hi),
+                    GridOverlay::Menu { target, selected } => ui::overlay::grid_menu(
                         f,
-                        &self.sessions,
-                        selected,
-                        target + 1,
-                        self.panes.len(),
+                        &ui::overlay::MenuView {
+                            sessions: &self.sessions,
+                            selected: *selected,
+                            box_num: *target + 1,
+                            box_count: self.panes.len(),
+                        },
                     ),
+                    GridOverlay::NewForm { form, .. } => {
+                        let tool =
+                            self.tools.get(form.tool_idx).map(|t| t.prefix.as_str()).unwrap_or("-");
+                        ui::overlay::new_session(
+                            f,
+                            &ui::overlay::NewSessionView {
+                                tool,
+                                name: &form.name,
+                                dir: &form.dir,
+                                field: form.field as usize,
+                                error: form.error.as_deref(),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -885,5 +1017,83 @@ impl App {
         a.sessions = sessions;
         a.status = status.into();
         a
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn sess(name: &str) -> SessionInfo {
+        SessionInfo {
+            name: name.into(),
+            tool: "claude".into(),
+            short: name.into(),
+            attached: false,
+            activity: 0,
+            preview: String::new(),
+            cwd: String::new(),
+        }
+    }
+
+    #[test]
+    fn menu_items_order_and_length() {
+        let it = menu_items(2);
+        assert_eq!(it.len(), 6); // 2 sessions + 4 actions
+        assert_eq!(
+            it,
+            vec![
+                MenuItem::ChangeLayout,
+                MenuItem::NewSession,
+                MenuItem::Session(0),
+                MenuItem::Session(1),
+                MenuItem::ClearBox,
+                MenuItem::Quit,
+            ]
+        );
+        // No sessions still yields the four action rows.
+        assert_eq!(menu_items(0).len(), 4);
+    }
+
+    #[test]
+    fn menu_initial_prefers_current_then_first_then_new() {
+        let list = vec![sess("a"), sess("b"), sess("c")];
+        assert_eq!(menu_initial(&list, Some("b")), 3); // 2 + index 1
+        assert_eq!(menu_initial(&list, Some("missing")), 2); // falls back to first session
+        assert_eq!(menu_initial(&list, None), 2); // first session
+        assert_eq!(menu_initial(&[], None), 1); // New session when there are none
+    }
+
+    #[test]
+    fn menu_navigation_wraps_over_the_whole_list() {
+        // 1 session → [layout, new, session0, clear, quit] = len 5.
+        let len = menu_items(1).len();
+        assert_eq!(len, 5);
+        assert_eq!((0 + len - 1) % len, len - 1); // up from the top wraps to Quit
+        assert_eq!((len - 1 + 1) % len, 0); // down from the bottom wraps to the top
+    }
+
+    fn form() -> NewForm {
+        NewForm { tool_idx: 0, field: 0, name: String::new(), dir: String::new(), error: None }
+    }
+    fn key(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn newform_key_edits_cycles_submits_and_cancels() {
+        let mut f = form();
+        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Char('x'))), NewFormAction::None));
+        assert_eq!(f.name, "x");
+        newform_key(&mut f, 3, key(KeyCode::Tab)); // → dir field
+        newform_key(&mut f, 3, key(KeyCode::Char('/')));
+        assert_eq!(f.dir, "/");
+        newform_key(&mut f, 3, key(KeyCode::Right)); // cycle tool
+        assert_eq!(f.tool_idx, 1);
+        newform_key(&mut f, 3, key(KeyCode::Left)); // and back
+        assert_eq!(f.tool_idx, 0);
+        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Enter)), NewFormAction::Submit));
+        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Esc)), NewFormAction::Cancel));
     }
 }

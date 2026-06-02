@@ -67,7 +67,7 @@ fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, sin
 }
 
 fn empty_hint() -> Paragraph<'static> {
-    Paragraph::new("⏎ to pick a session")
+    Paragraph::new("⏎ for menu")
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::DarkGray))
 }
@@ -91,7 +91,7 @@ mod tests {
         t.draw(|f| render(f, Layout::Quad, &panes, 0, "^A", false)).unwrap();
         let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("shell-a"), "filled box title: {s:?}");
-        assert!(s.contains("to pick"), "empty box hint: {s:?}");
+        assert!(s.contains("for menu"), "empty box hint: {s:?}");
         assert!(s.contains("quad"), "bar layout label: {s:?}");
         assert!(s.contains("box 1/4"), "bar focus indicator: {s:?}");
     }
