@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>cc-screen — a Rust engine for your terminal AI agents</title>
-<meta name="description" content="A single Rust binary that owns each AI coding agent's PTY and streams it live to a browser PWA or a native terminal client. No tmux." />
+<title>cc-screen — your AI coding agents, running 24/7, always a tap away</title>
+<meta name="description" content="Keep a team of AI coding agents — Anthropic, Google, OpenAI, Kimi — working around the clock, and check in on any of them from your phone or laptop. Review, edit and move their files. Built in Rust." />
 <meta name="theme-color" content="#060e09" />
 <meta property="og:title" content="cc-screen" />
-<meta property="og:description" content="A Rust engine that runs claude, codex, gemini & kimi as terminal sessions you attach to — from a browser or a native client." />
+<meta property="og:description" content="Your AI coding agents, running 24/7 and always a tap away. Check in from anywhere, cowork on their files — Anthropic, Google, OpenAI, Kimi." />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,77 +18,80 @@
 <header class="nav">
   <a class="brand" href="#top"><span class="mark">&gt;_</span>cc-screen</a>
   <nav>
+    <a href="#features">Features</a>
     <a href="#start">Start</a>
-    <a href="#how">How</a>
     <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub&nbsp;↗</a>
   </nav>
 </header>
 
 <main id="top">
   <section class="hero">
-    <p class="kicker">// web-only · tmux-free · written in rust</p>
-    <h1>AI coding agents, as <span class="g">terminal sessions</span> you attach to.</h1>
+    <p class="kicker">// always-on AI coding agents · built in rust</p>
+    <h1>Your coding agents, running <span class="g">24/7</span> — and always a tap away.</h1>
     <p class="lede">
-      A single Rust binary owns each agent's PTY and streams it live to a browser PWA
-      or a native terminal client — no tmux.
+      Keep a whole team of AI agents working at once, and drop in on any of them from your
+      phone or laptop — on the couch, on your commute, wherever you are. See what they've
+      done, work on their files, and keep the conversation going.
     </p>
 
     <div class="term">
-      <div class="bar"><i></i><i></i><i></i><span>ccs — install</span></div>
+      <div class="bar"><i></i><i></i><i></i><span>cc-screen — 4 agents running</span></div>
       <div class="body">
-        <pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
-    .../releases/latest/download/cc-screen-tui-installer.sh | sh</code></pre>
-        <p class="out"><span class="ok">✓</span> ccs installed to <span class="g">~/.local/bin</span><span class="caret"></span></p>
-        <button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh">copy</button>
+        <ul class="sess">
+          <li><span class="live"></span><b>claude</b><span class="repo">~/app</span><span class="act">building the login flow</span></li>
+          <li><span class="live"></span><b>gemini</b><span class="repo">~/api</span><span class="act">refactoring the endpoints</span></li>
+          <li><span class="live"></span><b>codex</b><span class="repo">~/web</span><span class="act">writing the tests</span></li>
+          <li><span class="live"></span><b>kimi</b><span class="repo">~/docs</span><span class="act">tidying the README<span class="caret"></span></span></li>
+        </ul>
       </div>
     </div>
 
     <p class="cta">
       <a class="btn solid" href="#start">Get started</a>
-      <a class="btn ghost" href="https://github.com/dibbla-agents/cc-screen-rust">Source on GitHub ↗</a>
+      <a class="btn ghost" href="https://github.com/dibbla-agents/cc-screen-rust">See it on GitHub ↗</a>
     </p>
-    <p class="agents">claude · codex · gemini · kimi &nbsp;—&nbsp; macOS &amp; Linux, both arches</p>
+    <p class="agents">Anthropic · Google · OpenAI · Kimi — your pick, all at once.</p>
   </section>
 
-  <section id="how">
-    <p class="eyebrow">▸ how it works</p>
-    <h2>One engine. Two clients. Zero tmux.</h2>
+  <section id="features">
+    <p class="eyebrow">▸ what it's for</p>
+    <h2>Built for keeping a lot of agents on the go.</h2>
     <ol class="features">
       <li class="feature">
         <span class="idx">01</span>
-        <div><h3>Written in Rust</h3><p>One static binary holds the PTY engine, the wire protocol, and the embedded web UI. No runtime to install, no tmux to wrangle.</p></div>
+        <div><h3>A whole team, always on</h3><p>Run as many agents as you like, side by side, around the clock — Anthropic, Google, OpenAI, Kimi, you name it. They keep working whether you're watching or not.</p></div>
       </li>
       <li class="feature">
         <span class="idx">02</span>
-        <div><h3>Two clients, one wire</h3><p>A React PWA built into the binary, and <code>ccs</code> — a native multi-pane terminal client — speak the same WebSocket contract from one shared crate.</p></div>
+        <div><h3>Check in from anywhere</h3><p>Open them on your phone or your laptop and jump straight into any one of them. Watching TV or heading to work — your agents are a tap away.</p></div>
       </li>
       <li class="feature">
         <span class="idx">03</span>
-        <div><h3>Resume on restart</h3><p>Each session owns its PTY for life; a redeploy ends the agents and auto-restore relaunches each with its CLI's resume flag, conversation intact.</p></div>
+        <div><h3>Cowork on the files</h3><p>Browse, view, edit, and move files in and out — everything your agents are working on. It's a real working session, not just a chat box.</p></div>
       </li>
     </ol>
   </section>
 
   <section id="start">
     <p class="eyebrow">▸ getting started</p>
-    <h2>Install in two steps</h2>
+    <h2>Up and running in two steps.</h2>
     <div class="steps">
       <div class="step">
-        <h3><span class="n">①</span> The server</h3>
-        <p class="note">On the host where your agent CLIs (<code>claude</code>, <code>codex</code>, …) are installed.</p>
+        <h3><span class="n">①</span> Start it on your computer</h3>
+        <p class="note">The machine where your coding agents already live.</p>
         <div class="cmd"><pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
     .../cc-screen-rust-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh">copy</button></div>
-        <div class="cmd"><pre><code><span class="p">$</span> cc-screen-rust install   <span class="c"># systemd / launchd · :8839</span></code></pre><button class="copy" data-clip="cc-screen-rust install">copy</button></div>
-        <p class="after">Then open <code>http://&lt;host&gt;:8839</code> in any browser.</p>
+        <div class="cmd"><pre><code><span class="p">$</span> cc-screen-rust install   <span class="c"># keeps it running in the background</span></code></pre><button class="copy" data-clip="cc-screen-rust install">copy</button></div>
+        <p class="after">Then open it in any browser and <span class="g">Add to Home Screen</span> on your phone.</p>
       </div>
 
       <div class="step">
-        <h3><span class="n">②</span> The client</h3>
-        <p class="note">On any Mac or Linux box. Lands in <code>~/.local/bin</code>.</p>
+        <h3><span class="n">②</span> Or use the native app</h3>
+        <p class="note">A fast desktop companion for Mac and Linux.</p>
         <div class="cmd"><pre><code><span class="p">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
     .../cc-screen-tui-installer.sh | sh</code></pre><button class="copy" data-clip="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh">copy</button></div>
-        <div class="cmd"><pre><code><span class="p">$</span> ccs --server http://&lt;host&gt;:8839</code></pre><button class="copy" data-clip="ccs --server http://<host>:8839">copy</button></div>
-        <p class="after">A tmux-style session switcher and pane grid — or just use the browser.</p>
+        <div class="cmd"><pre><code><span class="p">$</span> ccs --server http://&lt;your-computer&gt;:8839</code></pre><button class="copy" data-clip="ccs --server http://<your-computer>:8839">copy</button></div>
+        <p class="after">Switch between agents, watch them work, and jump in any time.</p>
       </div>
     </div>
   </section>
@@ -101,7 +104,7 @@
     <a href="https://github.com/dibbla-agents/cc-screen-rust/releases">Releases</a>
     <a href="https://github.com/dibbla-agents/cc-screen-rust#readme">README</a>
   </nav>
-  <p>Built with Rust · axum · ratatui.</p>
+  <p>Built in Rust — for people who keep their agents on.</p>
 </footer>
 
 <script src="app.js"></script>
