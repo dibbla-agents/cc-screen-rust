@@ -10,7 +10,9 @@ ci = "github"
 # Steps run in each build job BEFORE `dist build`. The server embeds the React
 # PWA via rust-embed (#[folder = "frontend/dist"]), so frontend/dist must exist
 # before cargo compiles it. This sets up Node and builds the frontend.
-github-build-setup = "build-setup.yml"
+# Path is relative to .github/workflows/; the leading ../ keeps the fragment in
+# .github/ so GitHub doesn't try to run it as a (malformed) standalone workflow.
+github-build-setup = "../build-setup.yml"
 # The installers to generate for each app (curl | sh). Produces one per app:
 # cc-screen-tui-installer.sh (the ccs client) and cc-screen-rust-installer.sh
 # (the server binary; run `cc-screen-rust install` after to wire the service).
