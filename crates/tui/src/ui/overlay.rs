@@ -176,6 +176,12 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
     let dim = Style::default().fg(Color::DarkGray);
     let gray = Style::default().fg(Color::Gray);
 
+    // ~75% of the terminal width (the box is the focus while it's open), clamped
+    // to something usable on tiny terminals and never wider than the screen.
+    let area_w = f.area().width;
+    let w = (area_w as u32 * 3 / 4).max(40).min(area_w as u32) as u16;
+    let inner_w = w.saturating_sub(2) as usize; // panel borders take one col each side
+
     let action = |flat: usize, glyph: &str, label: &str| {
         let sel = flat == v.selected;
         Line::from(vec![
@@ -183,7 +189,8 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
             Span::styled(format!("{glyph}  {label}"), if sel { sel_style } else { gray }),
         ])
     };
-    let sep = || Line::from(Span::styled("   ──────────────────────────────", dim));
+    // A divider that spans the inner width (inset one column each side).
+    let sep = || Line::from(Span::styled(format!(" {} ", "─".repeat(inner_w.saturating_sub(2))), dim));
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(action(0, "▦", "Change layout"));
@@ -207,9 +214,9 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
                     format!("{dot} "),
                     Style::default().fg(if sel { Color::Cyan } else { Color::DarkGray }),
                 ),
-                Span::styled(format!("{:<22}", truncate(&s.name, 22)), if sel { sel_style } else { gray }),
-                Span::styled(format!("{:<7}", truncate(&s.tool, 7)), dim),
-                Span::styled(truncate(&s.preview, 18), dim),
+                Span::styled(format!("{:<24}", truncate(&s.name, 24)), if sel { sel_style } else { gray }),
+                Span::styled(format!("{:<8}", truncate(&s.tool, 8)), dim),
+                Span::styled(truncate(&s.preview, 30), dim),
             ]));
         }
     }
@@ -220,7 +227,7 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
     lines.push(Line::from(Span::styled(" ↑↓ move · ⏎ select · esc cancel", dim)));
 
     let h = lines.len() as u16 + 2;
-    let inner = panel(f, centered(f.area(), 64, h), &format!(" box {}/{} ", v.box_num, v.box_count));
+    let inner = panel(f, centered(f.area(), w, h), &format!(" box {}/{} ", v.box_num, v.box_count));
     f.render_widget(Paragraph::new(lines), inner);
 }
 

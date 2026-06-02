@@ -222,6 +222,7 @@ impl App {
 
         self.sync_area(term);
         self.refresh().await;
+        self.start_in_menu();
         term.draw(|f| self.render(f))?;
 
         while let Some(msg) = rx.recv().await {
@@ -619,6 +620,21 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Startup: go straight into the grid with the action menu open — attached
+    /// to the first session if there is one, otherwise an empty box (the menu's
+    /// New session / Quit still work, and clearing the empty box falls back to
+    /// the switcher).
+    fn start_in_menu(&mut self) {
+        match self.sessions.first() {
+            Some(first) => {
+                let name = first.name.clone();
+                self.fill_box(0, name); // → Grid mode, box 0
+            }
+            None => self.mode = Mode::Grid,
+        }
+        self.open_menu(0);
     }
 
     // ── unified action menu (Ctrl-A d / empty box) ───────────────────────────
