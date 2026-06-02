@@ -3,6 +3,12 @@ name = "cc-screen-tui"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal client for cc-screen-rust"
+repository = "https://github.com/dibbla-agents/cc-screen-rust"
+
+# `ccs` is the pure-Rust, rustls-based terminal client — the one binary we ship
+# as cross-platform release artifacts (mac + linux) for the `curl | sh` installer.
+[package.metadata.dist]
+dist = true
 
 [[bin]]
 name = "ccs"

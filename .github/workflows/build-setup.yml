@@ -1,0 +1,15 @@
+# Injected by dist (via `github-build-setup` in dist-workspace.toml) into every
+# release build job, run BEFORE `dist build`. The server crate embeds the React
+# PWA with rust-embed (#[folder = "frontend/dist"]), so frontend/dist must exist
+# before cargo compiles it. The `ccs` client doesn't need this, but the server is
+# built in every target job, so the build runs unconditionally. Vite output is
+# platform-independent, so building it once per runner is redundant but harmless.
+- name: Set up Node (for the embedded frontend build)
+  uses: actions/setup-node@v4
+  with:
+    node-version: "20"
+- name: Build the frontend (embedded into the server binary)
+  run: |
+    cd frontend
+    npm ci
+    npm run build

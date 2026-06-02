@@ -50,63 +50,18 @@ fi
 BIN="$(pwd)/target/release/cc-screen-rust"
 [ -x "$BIN" ] || { echo "binary not found: $BIN — run without --no-build first." >&2; exit 1; }
 
-CFG_DIR="$HOME/.config/cc-screen-rust"
-mkdir -p "$CFG_DIR"
-printf 'CCWEB_ADDR=%s\n' "$ADDR" > "$CFG_DIR/web.env"
-
-systemd_ok() {
-  command -v systemctl >/dev/null 2>&1 &&
-    [ -n "${XDG_RUNTIME_DIR:-}" ] &&
-    systemctl --user show-environment >/dev/null 2>&1
-}
-
-start_systemd() {
-  local unit_dir="$HOME/.config/systemd/user"
-  mkdir -p "$unit_dir"
-  # Bake a PATH with ~/.local/bin so the engine can find the tool binaries
-  # (claude, …); the binary also re-prepends it, but be explicit.
-  local svc_path="$HOME/.local/bin:$PATH"
-  local norestore=""
-  [ "$RESTORE" = 1 ] || norestore=" --no-restore"
-  cat > "$unit_dir/cc-screen-rust.service" <<EOF
-[Unit]
-Description=cc-screen-rust — tmux-free phone UI for AI CLIs
-After=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Environment=PATH=$svc_path
-EnvironmentFile=$CFG_DIR/web.env
-# Resume-only model: the agents are in-process PTY children, so a restart ends
-# them and auto-restore-on-startup brings them back (resuming each conversation).
-# No KillMode tweak needed (unlike the tmux build).
-ExecStartPre=/bin/sh -c 'a="\${CCWEB_ADDR}"; ip="\${a%%:*}"; case "\$ip" in ""|0.0.0.0|127.0.0.1|localhost) exit 0;; esac; for i in \$(seq 1 60); do ip -o addr show 2>/dev/null | grep -Fqw "\$ip" && exit 0; sleep 1; done; exit 0'
-ExecStart=$BIN$norestore
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-EOF
-  systemctl --user daemon-reload
-  systemctl --user enable cc-screen-rust.service >/dev/null 2>&1 || true
-  systemctl --user restart cc-screen-rust.service
-  loginctl enable-linger "$USER" >/dev/null 2>&1 || true
-  echo "→ systemd --user service 'cc-screen-rust' running (auto-restart, auto-resume)"
-}
-
+# Service setup now lives in the binary itself (`cc-screen-rust install`), so the
+# systemd-unit / launchd-plist logic has a single source of truth and works on
+# macOS too. The subcommand writes ~/.config/cc-screen-rust/web.env, (re)starts
+# the service, and prints the serving URL + tailnet hint.
 if [ "$SERVICE" = 1 ]; then
-  if systemd_ok; then
-    start_systemd
-  else
-    echo "→ no systemd --user; start it yourself:  $BIN --addr $ADDR"
-  fi
+  norestore=""
+  [ "$RESTORE" = 1 ] || norestore="--no-restore"
+  # shellcheck disable=SC2086  # norestore is intentionally word-split (empty or one flag)
+  "$BIN" install --bind "$BIND" --port "$PORT" $norestore
 else
+  CFG_DIR="$HOME/.config/cc-screen-rust"
+  mkdir -p "$CFG_DIR"
+  printf 'CCWEB_ADDR=%s\n' "$ADDR" > "$CFG_DIR/web.env"
   echo "→ built $BIN (not started; --no-service). Run: $BIN --addr $ADDR"
-fi
-
-echo
-echo "cc-screen-rust is serving on http://$ADDR"
-if printf '%s' "$BIND" | grep -q '^100\.'; then
-  echo "From a tailnet device, open  http://$ADDR  and Add to Home Screen."
 fi

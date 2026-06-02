@@ -13,6 +13,7 @@ mod files;
 mod handlers;
 mod manifest;
 mod render;
+mod service;
 mod tools;
 mod upload;
 mod watch;
@@ -28,6 +29,27 @@ const CLIP_MAX: usize = 25 << 20; // 25 MiB
 
 #[tokio::main]
 async fn main() {
+    // `install` / `uninstall` wire up (or tear down) this binary's own service
+    // (systemd on Linux, launchd on macOS) and exit — no server, no tracing.
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.get(1).map(String::as_str) {
+        Some("install") => {
+            if let Err(e) = service::install(&argv[2..]) {
+                eprintln!("install failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("uninstall") => {
+            if let Err(e) = service::uninstall() {
+                eprintln!("uninstall failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
