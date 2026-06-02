@@ -34,10 +34,13 @@ Requires the Rust toolchain (`rustup`) and Node (for the Vite build).
 
 Both binaries ship as prebuilt artifacts (macOS arm64/x86_64, Linux arm64/x86_64
 static musl) via GitHub Releases, built by `dist` (`.github/workflows/release.yml`,
-config in `dist-workspace.toml`). Cutting a release is just a tag:
-`git tag v0.1.0 && git push origin v0.1.0` triggers the build. Each installer
-detects OS/arch, verifies the SHA-256 checksum, and drops the binary into
-`~/.local/bin`.
+config in `dist-workspace.toml`). To cut a release, run **`./release.sh`** — it
+tags, waits for the CI build, and publishes the GitHub Release from the built
+artifacts. (The org enforces a read-only Actions token, so CI builds the binaries
+but can't create the Release itself; `release.sh` does that with your `gh` creds.
+If the org setting is ever changed, it detects the CI-published release and
+no-ops.) Each installer detects OS/arch, verifies the SHA-256 checksum, and drops
+the binary into `~/.local/bin`.
 
 **The `ccs` client** — install on any Mac or Linux box on your tailnet:
 
