@@ -33,6 +33,7 @@ export default function TerminalView({ session, fontSize, onState, active = true
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const fitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Build the terminal once.
   useEffect(() => {
@@ -99,8 +100,10 @@ export default function TerminalView({ session, fontSize, onState, active = true
     const fit = fitRef.current;
     if (!term || !fit) return;
     term.options.fontSize = fontSize;
-    fit.fit();
-    sendResize();
+    // A deliberate font change legitimately changes cols, so let it reflow now
+    // (applyFit resizes + reports). Unlike incidental jitter, the user asked for
+    // this, and the agent repaints its visible frame crisply at the new width.
+    applyFit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize]);
 
@@ -109,6 +112,43 @@ export default function TerminalView({ session, fontSize, onState, active = true
     const ws = wsRef.current;
     if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+  }
+
+  // Resize the grid to fit the host — but only when the column/row count
+  // genuinely changes, and with a one-column deadband. xterm reflows its ENTIRE
+  // buffer whenever `cols` changes, and the agent emits width-locked output
+  // (each word placed with an absolute cursor-column escape, computed for the
+  // PTY width), so reflowing that to a different width shreds the scrollback
+  // into the per-word "staircase" the phone was showing. Incidental viewport
+  // churn — soft-keyboard show/hide, address-bar collapse, sub-pixel rounding —
+  // must therefore NOT trigger a reflow. The PTY tracks whatever width we settle
+  // on (the server pins it to the narrowest attached client), so swallowing a
+  // ±1-column wobble costs at most a sliver of right-edge padding, never
+  // correctness. Rows may change freely: vertical growth/shrink adds or removes
+  // lines, it never rewraps.
+  function applyFit() {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    const dims = fit.proposeDimensions();
+    if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
+    if (dims.cols < 1 || dims.rows < 1) return;
+    let cols = dims.cols;
+    if (term.cols > 0 && Math.abs(cols - term.cols) < 2) cols = term.cols; // deadband
+    if (cols === term.cols && dims.rows === term.rows) return;
+    term.resize(cols, dims.rows);
+    sendResize();
+  }
+
+  // Debounce viewport-driven fits: a keyboard animation or rotation fires a
+  // burst of resize events, and we want a single fit once the layout settles —
+  // not a reflow per intermediate frame.
+  function scheduleFit() {
+    if (fitTimer.current) clearTimeout(fitTimer.current);
+    fitTimer.current = setTimeout(() => {
+      fitTimer.current = null;
+      applyFit();
+    }, 150);
   }
 
   // Connect (and reconnect) the WebSocket for the lifetime of this session.
@@ -127,7 +167,9 @@ export default function TerminalView({ session, fontSize, onState, active = true
         backoff = 500;
         onState("open");
         const term = termRef.current!;
-        fitRef.current?.fit();
+        applyFit();
+        // Always report the size on (re)attach, even if applyFit found no change
+        // — the server needs it to register this client in its min-size pool.
         ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
         // Don't grab focus on touch devices: it pops the soft keyboard, which
         // then eats the first tap on the compose/image buttons. Tap the
@@ -204,15 +246,19 @@ export default function TerminalView({ session, fontSize, onState, active = true
     return () => host.removeEventListener("contextmenu", onCtx);
   }, []);
 
-  // Refit on container resize (rotation, keyboard show/hide, drawer close).
+  // Refit on container resize (rotation, keyboard show/hide, drawer close),
+  // debounced + change-gated so incidental viewport churn never reflows the
+  // buffer (see applyFit). The keyboard, in particular, only changes height, so
+  // this settles to a rows-only resize with no horizontal rewrap.
   useEffect(() => {
     const host = hostRef.current!;
-    const ro = new ResizeObserver(() => {
-      fitRef.current?.fit();
-      sendResize();
-    });
+    const ro = new ResizeObserver(() => scheduleFit());
     ro.observe(host);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (fitTimer.current) clearTimeout(fitTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Swipe-to-scroll with inertia. Phones emit no wheel events, and because the

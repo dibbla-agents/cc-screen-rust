@@ -22,8 +22,16 @@ tokio-util = { version = "0.7", features = ["io"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 futures-util = "0.3"
 portable-pty = "0.8"
-vt100 = "0.15"
+# Server-side terminal emulator: interprets the PTY byte stream into a grid +
+# scrollback so (re)attach can be served as a clean, size-agnostic repaint
+# instead of replaying the raw size-locked byte history (which duplicated /
+# staircased at any client size != the size that produced it). Same crate the
+# `ccs` TUI renders with, so behaviour matches across clients.
+alacritty_terminal = "0.26"
 rust-embed = { version = "8", features = ["mime-guess"] }
+# Real-time filesystem watching for the editor (inotify on Linux), debounced so
+# an agent/editor writing a file in several syscalls collapses to one event.
+notify-debouncer-mini = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"

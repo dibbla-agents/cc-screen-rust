@@ -29,6 +29,7 @@ import ContextMenu, { type CtxTarget } from "./ContextMenu";
 import { errMsg, isMarkdownFile, isPdfFile, useDirTree, type DirTreeOpts, type TreeCtxInfo } from "./dirTree";
 import MarkdownEditor from "./MarkdownEditor";
 import EditorTree from "./EditorTree";
+import AgentMirror, { type ConnState } from "./AgentMirror";
 
 // pdf.js is heavy and only needed for PDFs — keep it (and its worker) out of the
 // editor's chunk, loaded only when a PDF is first opened.
@@ -43,6 +44,8 @@ import {
   TrashIcon,
   MoreIcon,
   DownloadIcon,
+  TerminalIcon,
+  KeyboardIcon,
 } from "../icons";
 
 // A faint top-down glow so the centered writing column sits on a surface with
@@ -55,10 +58,19 @@ interface Props {
   // File to open when the overlay opens (from a Files-sheet tap). Null on a
   // desktop Ctrl+B e, where the user picks from the tree.
   initialPath: string | null;
-  // Active session — anchors the tree's "project" section at its tmux cwd.
+  // Active session — anchors the tree's "project" section at its tmux cwd, and
+  // is the agent shown in the right-hand mirror column.
   session: string | null;
   isDesktop: boolean;
   onClose: () => void;
+  // Authoritative grid size of the active session's terminal (the active grid
+  // pane's xterm cols/rows). The mirror renders at exactly this grid so it
+  // never reports a size and can't shrink the shared, width-locked PTY. Falls
+  // back to 80×24 when the grid term isn't ready.
+  agentCols?: number;
+  agentRows?: number;
+  // Terminal font size — the upper bound for the mirror's auto-fitted font.
+  termFontSize?: number;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -95,6 +107,21 @@ function loadTreeWidth(): number {
   return Number.isFinite(n) ? clampTreeW(n) : TREE_W_DEFAULT;
 }
 
+// Desktop agent-mirror column width (px) + open/closed state. The right column
+// shows the active session's live agent; drag the splitter on its LEFT edge to
+// resize (the mirror image of the tree splitter). Both persisted.
+const AGENT_W_KEY = "ccweb.editorAgentWidth";
+const AGENT_W_MIN = 280;
+const AGENT_W_MAX = 760;
+const AGENT_W_DEFAULT = 420;
+const clampAgentW = (n: number) => Math.max(AGENT_W_MIN, Math.min(AGENT_W_MAX, n));
+function loadAgentWidth(): number {
+  const n = parseInt(localStorage.getItem(AGENT_W_KEY) || "", 10);
+  return Number.isFinite(n) ? clampAgentW(n) : AGENT_W_DEFAULT;
+}
+const AGENT_OPEN_KEY = "ccweb.editorAgentOpen";
+const loadAgentOpen = () => localStorage.getItem(AGENT_OPEN_KEY) !== "0";
+
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 // The editor reads the tree as a working-tree (vault) view, not a download
@@ -117,7 +144,16 @@ const dirname = (p: string) => {
 // over the single terminal on phone), with its own toolbar. Live-preview
 // markdown editing via CodeMirror; a left file tree on desktop. Saves are
 // $HOME-confined and mtime-guarded server-side (see editor.go).
-export default function EditorOverlay({ open, initialPath, session, isDesktop, onClose }: Props) {
+export default function EditorOverlay({
+  open,
+  initialPath,
+  session,
+  isDesktop,
+  onClose,
+  agentCols = 0,
+  agentRows = 0,
+  termFontSize = 14,
+}: Props) {
   const [activePath, setActivePath] = useState<string | null>(initialPath);
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(""); // last-saved/loaded content (for dirty)
@@ -143,6 +179,29 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
   const [treeWidth, setTreeWidth] = useState(loadTreeWidth);
   const [resizingTree, setResizingTree] = useState(false);
   const treeRef = useRef<HTMLDivElement | null>(null);
+  // Right-hand agent mirror: open/closed + drag-resizable width (mirror of the
+  // tree), its connection state for the header dot, and `agentControl` — phase
+  // 2's keyboard takeover. agentControlRef lets the capture-phase keydown
+  // handler below go inert (so Esc/Ctrl+S reach the focused terminal, and the
+  // editor's own shortcuts don't leak to the agent) without re-binding.
+  const [agentOpen, setAgentOpen] = useState(loadAgentOpen);
+  const [agentWidth, setAgentWidth] = useState(loadAgentWidth);
+  const [resizingAgent, setResizingAgent] = useState(false);
+  const [agentConn, setAgentConn] = useState<ConnState>("connecting");
+  const [agentControl, setAgentControl] = useState(false);
+  // Bumped by the splitter's double-click to re-fit the mirror's column count to
+  // the current width (between bumps a drag only zooms the font — see
+  // AgentMirror).
+  const [agentRecalibrate, setAgentRecalibrate] = useState(0);
+  const agentRef = useRef<HTMLDivElement | null>(null);
+  const agentControlRef = useRef(false);
+  useEffect(() => { agentControlRef.current = agentControl; }, [agentControl]);
+  // Releasing control whenever focus returns to the writing surface or the tree
+  // keeps the rule simple: the agent owns the keyboard only while you're
+  // pointed at it. Engaged explicitly via the column's keyboard toggle.
+  const releaseControl = useCallback(() => {
+    if (agentControlRef.current) setAgentControl(false);
+  }, []);
   // Phone equivalents: the desktop sidebar has no room on a phone, so file
   // navigation lives in a slide-over panel (treePanelOpen) summoned from the
   // toolbar, and the secondary toolbar actions (font, auto-save, new, delete)
@@ -311,6 +370,18 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
   const dirty = status === "ready" && content !== loaded;
   const isMd = isMarkdownFile(name);
 
+  // Refs so the filesystem-watch listener (registered once) reads fresh values.
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  // Suppress watch echoes from our own writes. mtime is 1s-granular (so an
+  // external edit in the same second can't be told apart by mtime); a short
+  // time window after each write is the robust guard.
+  const ignoreWatchUntil = useRef(0);
+
   // Live document stats for the status bar. Words/reading-time are the useful
   // numbers for prose; code files get lines instead.
   const stats = useMemo(() => {
@@ -344,6 +415,14 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
     localStorage.setItem(TREE_W_KEY, String(treeWidth));
   }, [treeWidth]);
 
+  useEffect(() => {
+    localStorage.setItem(AGENT_W_KEY, String(agentWidth));
+  }, [agentWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(AGENT_OPEN_KEY, agentOpen ? "1" : "0");
+  }, [agentOpen]);
+
   // Desktop sidebar resize: drag the splitter on the tree's right edge. We track
   // the pointer on window (so the drag keeps up even when the cursor outruns the
   // thin handle) and set width = cursor-x minus the sidebar's left edge, clamped.
@@ -354,6 +433,23 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
     const onMove = (ev: PointerEvent) => setTreeWidth(clampTreeW(ev.clientX - left));
     const onUp = () => {
       setResizingTree(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
+  // Agent column resize: the mirror image of the tree splitter — its handle is
+  // on the column's LEFT edge and the width grows as the cursor moves left, so
+  // we anchor on the column's (fixed) right edge and subtract the cursor x.
+  const startAgentResize = useCallback((e: ReactPointerEvent) => {
+    e.preventDefault();
+    const right = agentRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+    setResizingAgent(true);
+    const onMove = (ev: PointerEvent) => setAgentWidth(clampAgentW(right - ev.clientX));
+    const onUp = () => {
+      setResizingAgent(false);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
@@ -453,6 +549,7 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
         setLoaded(content);
         setBaseMtime(r.mtime);
         setConflict(false);
+        ignoreWatchUntil.current = Date.now() + 900; // don't reload our own write
       } catch (e) {
         if (e instanceof FileChangedOnDisk) {
           setConflict(true);
@@ -473,6 +570,48 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
     const t = setTimeout(() => void doSave(), LIVE_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [liveSave, status, dirty, conflict, saving, content, doSave]);
+
+  // Silently re-read the open file from disk (clean-buffer case).
+  const reloadFromDisk = useCallback(async () => {
+    const p = activePathRef.current;
+    if (!p) return;
+    try {
+      const r = await readFile(p);
+      setContent(r.content);
+      setLoaded(r.content);
+      setBaseMtime(r.mtime);
+      setName(r.name);
+      setConflict(false);
+    } catch {
+      // Vanished/unreadable mid-edit; the tree reflects any deletion and a save
+      // would surface a real error.
+    }
+  }, []);
+
+  // Real-time open-file reflection: watch the file's directory so an external
+  // edit (the agent rewriting it) shows immediately — live-reload a clean
+  // buffer, or raise the existing conflict banner when you have unsaved edits
+  // (never clobber them). Subscription is ref-counted and shared with the tree.
+  useEffect(() => {
+    if (!open || !activePath) return;
+    const dir = dirname(activePath);
+    tree.watch.subscribe(dir);
+    return () => tree.watch.unsubscribe(dir);
+  }, [open, activePath, tree.watch]);
+
+  useEffect(() => {
+    if (!open) return;
+    return tree.watch.addListener((evDir, paths) => {
+      const p = activePathRef.current;
+      if (!p || statusRef.current !== "ready") return;
+      if (evDir !== dirname(p)) return; // only the open file's directory
+      if (Date.now() < ignoreWatchUntil.current) return; // our own write echo
+      const base = p.slice(p.lastIndexOf("/") + 1);
+      if (!paths.some((x) => x === p || x.endsWith("/" + base) || x === base)) return;
+      if (dirtyRef.current) setConflict(true);
+      else void reloadFromDisk();
+    });
+  }, [open, tree.watch, reloadFromDisk]);
 
   const requestClose = useCallback(() => {
     // In live-save mode a settled doc is already on disk; only warn if a write
@@ -508,6 +647,10 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      // Phase 2: while the agent column holds the keyboard, the editor's
+      // shortcuts go inert so every key (including Esc / Ctrl+S) reaches the
+      // focused terminal instead of leaking into the editor.
+      if (agentControlRef.current) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -600,7 +743,7 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
   return (
     <div
       className={`fixed inset-0 z-[60] flex flex-col bg-bar text-slate-200 ${
-        resizingTree ? "cursor-col-resize select-none" : ""
+        resizingTree || resizingAgent ? "cursor-col-resize select-none" : ""
       }`}
       style={vh ? { height: `${vh}px` } : undefined}
     >
@@ -622,14 +765,24 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
         </button>
 
         {isDesktop ? (
-          <button
-            onClick={() => setTreeOpen((v) => !v)}
-            className={`${ghostBtn} ${treeOpen ? "text-accent" : ""}`}
-            title={treeOpen ? "Hide file tree" : "Show file tree"}
-            aria-label="Toggle file tree"
-          >
-            <SidebarIcon className="h-[18px] w-[18px]" />
-          </button>
+          <>
+            <button
+              onClick={() => setTreeOpen((v) => !v)}
+              className={`${ghostBtn} ${treeOpen ? "text-accent" : ""}`}
+              title={treeOpen ? "Hide file tree" : "Show file tree"}
+              aria-label="Toggle file tree"
+            >
+              <SidebarIcon className="h-[18px] w-[18px]" />
+            </button>
+            <button
+              onClick={() => setAgentOpen((v) => !v)}
+              className={`${ghostBtn} ${agentOpen ? "text-accent" : ""}`}
+              title={agentOpen ? "Hide live agent" : "Show live agent"}
+              aria-label="Toggle live agent view"
+            >
+              <TerminalIcon className="h-[18px] w-[18px]" />
+            </button>
+          </>
         ) : (
           // Phone: no room for a persistent sidebar, so this summons the
           // slide-over file tree (the sidebar's mobile twin).
@@ -984,6 +1137,7 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
         {isDesktop && treeOpen && (
           <div
             ref={treeRef}
+            onPointerDownCapture={releaseControl}
             className="relative shrink-0"
             style={{ width: `${treeWidth}px` }}
           >
@@ -1015,10 +1169,17 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
             </div>
           </div>
         )}
-        <div
-          className="min-w-0 flex-1 overflow-hidden"
-          style={{ "--cc-editor-font": `${fontSize}px`, background: SURFACE_BG } as CSSProperties}
-        >
+        {/* Center column: the writing surface + (when a file is open) the
+            status bar. Wrapping these two means the footer only consumes height
+            HERE — the tree and the agent mirror keep their full height, so
+            opening a file never relayouts (and re-fits the font of) the agent
+            column. */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div
+            onPointerDownCapture={releaseControl}
+            className="min-h-0 flex-1 overflow-hidden"
+            style={{ "--cc-editor-font": `${fontSize}px`, background: SURFACE_BG } as CSSProperties}
+          >
           {status === "loading" && (
             <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading…</div>
           )}
@@ -1071,27 +1232,69 @@ export default function EditorOverlay({ open, initialPath, session, isDesktop, o
                 onSave={() => void doSave()}
               />
             ))}
-        </div>
-      </div>
+          </div>
 
-      {/* ── Status bar ────────────────────────────────────────────────────── */}
-      {showFooter && (
-        <div className="flex items-center gap-3 border-t border-edge bg-bar/95 px-3 py-1 text-[11px] text-slate-500 pb-safe">
-          <span className="min-w-0 flex-1 truncate font-mono">{relDir}</span>
-          <span className="shrink-0 tabular-nums">
-            {isMd
-              ? `${stats.words.toLocaleString()} ${stats.words === 1 ? "word" : "words"} · ${stats.mins} min read`
-              : `${stats.lines.toLocaleString()} ${stats.lines === 1 ? "line" : "lines"} · ${stats.chars.toLocaleString()} chars`}
-          </span>
-          <span
-            className={`shrink-0 font-medium ${
-              saving ? "text-accent" : dirty ? "text-amber" : "text-slate-600"
-            }`}
-          >
-            {saving ? "Saving…" : dirty ? "Unsaved" : "Saved"}
-          </span>
+          {/* ── Status bar (lives in the center column, under the editor only,
+              so it never shortens the tree or the agent mirror) ───────────── */}
+          {showFooter && (
+            <div className="flex items-center gap-3 border-t border-edge bg-bar/95 px-3 py-1 text-[11px] text-slate-500 pb-safe">
+              <span className="min-w-0 flex-1 truncate font-mono">{relDir}</span>
+              <span className="shrink-0 tabular-nums">
+                {isMd
+                  ? `${stats.words.toLocaleString()} ${stats.words === 1 ? "word" : "words"} · ${stats.mins} min read`
+                  : `${stats.lines.toLocaleString()} ${stats.lines === 1 ? "line" : "lines"} · ${stats.chars.toLocaleString()} chars`}
+              </span>
+              <span
+                className={`shrink-0 font-medium ${
+                  saving ? "text-accent" : dirty ? "text-amber" : "text-slate-600"
+                }`}
+              >
+                {saving ? "Saving…" : dirty ? "Unsaved" : "Saved"}
+              </span>
+            </div>
+          )}
         </div>
-      )}
+
+        {/* ── Live agent mirror (desktop) ─────────────────────────────────
+            A read-only (optionally interactive) view of the active session's
+            agent. It NEVER reports its size — see AgentMirror — so showing it
+            here can't shrink the width-locked PTY the grid pane is also using.
+            Drag the left-edge splitter to resize (mirror of the tree). */}
+        {isDesktop && agentOpen && (
+          <div
+            ref={agentRef}
+            className="relative shrink-0"
+            style={{ width: `${agentWidth}px` }}
+          >
+            <div
+              onPointerDown={startAgentResize}
+              onDoubleClick={() => setAgentRecalibrate((n) => n + 1)}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize agent view — drag to zoom, double-click to refit columns"
+              className="group absolute inset-y-0 -left-1 z-10 flex w-2 cursor-col-resize touch-none justify-center"
+            >
+              <span
+                className={`w-px transition-colors ${
+                  resizingAgent ? "bg-accent" : "bg-transparent group-hover:bg-accent/60"
+                }`}
+              />
+            </div>
+            <AgentColumn
+              session={session}
+              cols={agentCols}
+              rows={agentRows}
+              fontSize={termFontSize}
+              control={agentControl}
+              conn={agentConn}
+              recalibrate={agentRecalibrate}
+              onToggleControl={() => setAgentControl((v) => !v)}
+              onEngageControl={() => setAgentControl(true)}
+              onConn={setAgentConn}
+            />
+          </div>
+        )}
+      </div>
 
       {/* ── Phone file tree ────────────────────────────────────────────────────
           The desktop sidebar's mobile twin, in two guises:
@@ -1255,6 +1458,97 @@ function EmptyState({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// AgentColumn — the editor's right-hand live-agent column: a thin header (the
+// session, a connection dot, and the phase-2 "take control" keyboard toggle)
+// over the AgentMirror. When control is engaged the column border accents and
+// keystrokes are forwarded to the agent; clicking back into the editor or tree
+// releases it (see releaseControl). No session → a quiet placeholder.
+function AgentColumn({
+  session,
+  cols,
+  rows,
+  fontSize,
+  control,
+  conn,
+  recalibrate,
+  onToggleControl,
+  onEngageControl,
+  onConn,
+}: {
+  session: string | null;
+  cols: number;
+  rows: number;
+  fontSize: number;
+  control: boolean;
+  conn: ConnState;
+  recalibrate: number;
+  onToggleControl: () => void;
+  onEngageControl: () => void;
+  onConn: (c: ConnState) => void;
+}) {
+  const dot =
+    conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
+  return (
+    <div className={`flex h-full flex-col border-l bg-bar ${control ? "border-accent" : "border-edge"}`}>
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-edge px-2.5">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+          Agent
+        </span>
+        {session ? (
+          <>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate text-xs text-slate-300">{session}</span>
+            <button
+              onClick={onToggleControl}
+              className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium ring-1 ring-inset transition-colors ${
+                control
+                  ? "bg-accent/15 text-accent ring-accent/60"
+                  : "text-slate-400 ring-edge hover:bg-panel hover:text-slate-200"
+              }`}
+              title={
+                control
+                  ? "Typing goes to the agent — click (or click the editor) to release"
+                  : "Take control — forward keystrokes to the agent"
+              }
+              aria-pressed={control}
+            >
+              <KeyboardIcon className="h-3.5 w-3.5" />
+              {control ? "Live" : "Control"}
+            </button>
+          </>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-xs text-slate-600">No active session</span>
+        )}
+      </div>
+      {/* Click anywhere in the terminal area to engage control (→ "Live");
+          clicking the editor or tree releases it (see releaseControl). Capture
+          phase so it registers before xterm focuses its textarea. */}
+      <div
+        className="min-h-0 flex-1"
+        onPointerDownCapture={session ? onEngageControl : undefined}
+      >
+        {session ? (
+          <AgentMirror
+            key={session}
+            session={session}
+            cols={cols}
+            rows={rows}
+            maxFontSize={fontSize}
+            control={control}
+            recalibrateSignal={recalibrate}
+            onState={onConn}
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-slate-600">
+            <TerminalIcon className="h-6 w-6 opacity-40" />
+            <span>Focus a terminal pane to mirror its agent here.</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

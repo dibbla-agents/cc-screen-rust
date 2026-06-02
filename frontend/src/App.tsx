@@ -1556,6 +1556,12 @@ export default function App() {
             session={currentSession}
             isDesktop={isDesktop}
             onClose={closeEditor}
+            // The agent mirror renders at the active pane's true grid size so it
+            // never has to report a size of its own (which would re-pin the
+            // width-locked PTY). Falls back to 80×24 if the term isn't ready.
+            agentCols={termsRef.current[active]?.cols}
+            agentRows={termsRef.current[active]?.rows}
+            termFontSize={fontSize}
           />
         </Suspense>
       )}

@@ -1,28 +1,27 @@
 // The session engine — the tmux replacement. Each Session owns a PTY master for
 // its whole lifetime (NOT per-WebSocket, unlike the Go `tmux attach` PTY): that
 // is what lets input (key/paste/clip) work with no client attached, and what a
-// WebSocket attaches to. A blocking reader thread pumps PTY output into three
-// sinks: a vt100 parser (authoritative screen → preview), a bounded raw-byte
-// ring (replayed on (re)attach so a reconnecting xterm.js repaints correctly),
-// and a broadcast channel (live fan-out to attached clients).
+// WebSocket attaches to. A blocking reader thread pumps PTY output into two
+// sinks: a server-side terminal emulator (render::Emulator — the authoritative
+// screen + scrollback, serialized into a clean size-agnostic repaint on
+// (re)attach) and a broadcast channel (live raw fan-out to attached clients).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cc_screen_protocol::SNAPSHOT_RESET;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::{broadcast, watch};
 
 use crate::clip::ClipStore;
 use crate::manifest;
+use crate::render::Emulator;
 use crate::tools::{self, Tool};
 
-const RING_CAP: usize = 768 * 1024; // ~768 KB raw-output replay buffer per session
-const SCROLLBACK: usize = 5000;
 const BROADCAST_CAP: usize = 2048;
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
@@ -32,11 +31,21 @@ pub fn now_secs() -> u64 {
 }
 
 struct SessionState {
-    parser: vt100::Parser,
-    ring: VecDeque<u8>,
+    emu: Emulator,
     last_activity: u64,
     cols: u16,
     rows: u16,
+    // Per-attached-client requested sizes, keyed by connection id. The PTY is
+    // sized to the MINIMUM cols/rows across these (tmux's `window-size smallest`
+    // model). Why min, not last-writer: the tool (Claude/codex/…) renders with
+    // *absolute* cursor-column positioning computed for the PTY width, so the
+    // byte stream is width-locked — it only lays out correctly in a grid of that
+    // exact width. Pinning the PTY to the narrowest client means that client
+    // renders perfectly, and every wider client's columns all fit (no clamp /
+    // pending-wrap), so they render the same content left-aligned with blank
+    // space — also correct. Last-writer-wins instead let two clients (e.g. the
+    // web PWA + the `ccs` TUI) of different widths fight and garble each other.
+    client_sizes: HashMap<u64, (u16, u16)>,
 }
 
 pub struct Session {
@@ -61,6 +70,9 @@ pub struct Session {
     // close immediately instead of sitting on a frozen final frame until the
     // next /api/sessions poll unmounts the pane.
     closed: watch::Sender<bool>,
+    // Hands out a unique id per attached client so `client_sizes` can track each
+    // connection's requested size independently (and drop it on disconnect).
+    next_client_id: AtomicU64,
 }
 
 impl Session {
@@ -104,11 +116,11 @@ impl Session {
         let (closed, _) = watch::channel(false);
 
         let state = SessionState {
-            parser: vt100::Parser::new(INIT_ROWS, INIT_COLS, SCROLLBACK),
-            ring: VecDeque::new(),
+            emu: Emulator::new(INIT_COLS, INIT_ROWS),
             last_activity: now_secs(),
             cols: INIT_COLS,
             rows: INIT_ROWS,
+            client_sizes: HashMap::new(),
         };
 
         let sess = Arc::new(Session {
@@ -126,6 +138,7 @@ impl Session {
             state: Mutex::new(state),
             tx,
             closed,
+            next_client_id: AtomicU64::new(0),
         });
 
         {
@@ -142,6 +155,10 @@ impl Session {
         }
     }
 
+    /// Low-level PTY + emulator resize. Prefer the per-client API
+    /// (`register_client` / `resize_client` / `unregister_client`) over calling
+    /// this directly — it does no min-size reconciliation, so a raw call would be
+    /// overridden the next time any client's size changes.
     pub fn resize(&self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 {
             return;
@@ -150,10 +167,72 @@ impl Session {
             let _ = m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
         }
         if let Ok(mut st) = self.state.lock() {
-            st.parser.set_size(rows, cols);
+            st.emu.resize(cols, rows);
             st.cols = cols;
             st.rows = rows;
         }
+    }
+
+    /// Register a freshly-attached client and return its connection id. The
+    /// client starts with no size constraint (it sends its real size in a `"r"`
+    /// frame right after attaching) so registering alone never resizes the PTY.
+    pub fn register_client(&self) -> u64 {
+        let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut st) = self.state.lock() {
+            st.client_sizes.insert(id, (0, 0));
+        }
+        id
+    }
+
+    /// Record `client`'s requested size and re-pin the PTY to the minimum across
+    /// all attached clients (see `client_sizes`). No-op if the min is unchanged.
+    pub fn resize_client(&self, client: u64, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        if let Some((c, r)) = self.reconcile(|sizes| {
+            sizes.insert(client, (cols, rows));
+        }) {
+            self.resize(c, r);
+        }
+    }
+
+    /// Drop a client (on disconnect) and re-pin the PTY to the new minimum. When
+    /// the narrowest client leaves, the PTY grows back for those remaining.
+    pub fn unregister_client(&self, client: u64) {
+        if let Some((c, r)) = self.reconcile(|sizes| {
+            sizes.remove(&client);
+        }) {
+            self.resize(c, r);
+        }
+    }
+
+    /// Apply `mutate` to the client-size map under the state lock, then compute
+    /// the new target PTY size as the per-axis minimum over clients that have
+    /// reported a real size. Returns `Some((cols, rows))` only when that target
+    /// differs from the current PTY size — i.e. when a `resize` is actually
+    /// needed. Returns `None` while no client has reported yet (keeps the PTY at
+    /// its current/initial size).
+    fn reconcile<F: FnOnce(&mut HashMap<u64, (u16, u16)>)>(&self, mutate: F) -> Option<(u16, u16)> {
+        let mut st = self.state.lock().ok()?;
+        mutate(&mut st.client_sizes);
+        let min = st
+            .client_sizes
+            .values()
+            .filter(|&&(c, r)| c > 0 && r > 0)
+            .copied()
+            .reduce(|(ac, ar), (c, r)| (ac.min(c), ar.min(r)));
+        match min {
+            Some((c, r)) if (c, r) != (st.cols, st.rows) => Some((c, r)),
+            _ => None,
+        }
+    }
+
+    /// Current PTY/parser size — test-only introspection for the min-size logic.
+    #[cfg(test)]
+    pub fn current_size(&self) -> (u16, u16) {
+        let st = self.state.lock().unwrap();
+        (st.cols, st.rows)
     }
 
     pub fn kill(&self) {
@@ -170,36 +249,28 @@ impl Session {
 
     /// Subscribe to the live output stream AND capture the current repaint
     /// snapshot atomically, so no byte is both replayed and streamed (and none
-    /// is missed). Relies on the pump broadcasting under the same state lock.
+    /// is missed). Relies on the pump processing+broadcasting under the same
+    /// state lock. The snapshot is a clean, size-agnostic repaint of the
+    /// emulator's scrollback + screen (RIS-prefixed) — NOT the raw byte history,
+    /// whose size-locked redraws duplicated/staircased at mismatched client sizes.
     pub fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Bytes>) {
         let st = self.state.lock().unwrap();
-        let mut snap = Vec::with_capacity(st.ring.len() + 2);
-        snap.extend_from_slice(SNAPSHOT_RESET); // RIS: full reset so a fresh emulator repaints clean
-        snap.extend(st.ring.iter().copied());
-        (snap, self.tx.subscribe())
+        (st.emu.snapshot(), self.tx.subscribe())
     }
 
     /// Standalone repaint snapshot (used to resync a lagged client).
     pub fn snapshot(&self) -> Vec<u8> {
-        let st = self.state.lock().unwrap();
-        let mut snap = Vec::with_capacity(st.ring.len() + 2);
-        snap.extend_from_slice(SNAPSHOT_RESET);
-        snap.extend(st.ring.iter().copied());
-        snap
+        self.state.lock().unwrap().emu.snapshot()
     }
 
     /// Clear scrollback but keep the visible screen (tmux clear-history
-    /// semantics): reset the ring to just a repaint of the current screen and
-    /// push that to every attached client. Broadcast under the lock to preserve
-    /// the attach invariant.
+    /// semantics): drop the emulator's history, then push a fresh repaint to
+    /// every attached client. Broadcast under the lock to preserve the attach
+    /// invariant.
     pub fn clear_history(&self) {
         let mut st = self.state.lock().unwrap();
-        let screen = st.parser.screen().contents_formatted();
-        st.ring.clear();
-        st.ring.extend(screen.iter().copied());
-        let mut payload = Vec::with_capacity(screen.len() + 2);
-        payload.extend_from_slice(SNAPSHOT_RESET);
-        payload.extend_from_slice(&screen);
+        st.emu.clear_history();
+        let payload = st.emu.snapshot();
         let _ = self.tx.send(Bytes::from(payload));
     }
 
@@ -222,21 +293,10 @@ impl Session {
     }
 
     pub fn preview(&self) -> String {
-        let st = match self.state.lock() {
-            Ok(s) => s,
-            Err(_) => return String::new(),
-        };
-        let contents = st.parser.screen().contents();
-        for line in contents.lines().rev() {
-            let t = line.trim();
-            if !t.is_empty() {
-                if t.chars().count() > 120 {
-                    return t.chars().take(120).collect();
-                }
-                return t.to_string();
-            }
+        match self.state.lock() {
+            Ok(s) => s.emu.preview(),
+            Err(_) => String::new(),
         }
-        String::new()
     }
 
     /// The session's live working dir (the agent may have `cd`'d). Read from
@@ -252,7 +312,7 @@ impl Session {
     }
 }
 
-/// Output pump: blocking-read the PTY and fan out to vt100 + ring + broadcast.
+/// Output pump: blocking-read the PTY and fan out to the emulator + broadcast.
 /// CRITICAL: the broadcast send happens INSIDE the state lock, so a concurrent
 /// `attach()` (which snapshots + subscribes under the same lock) can never see a
 /// byte both in its snapshot and its live stream.
@@ -264,12 +324,7 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             Ok(n) => {
                 let chunk = &buf[..n];
                 if let Ok(mut st) = sess.state.lock() {
-                    st.parser.process(chunk);
-                    st.ring.extend(chunk.iter().copied());
-                    let over = st.ring.len().saturating_sub(RING_CAP);
-                    if over > 0 {
-                        st.ring.drain(0..over);
-                    }
+                    st.emu.process(chunk);
                     st.last_activity = now_secs();
                     let _ = sess.tx.send(Bytes::copy_from_slice(chunk));
                 }
@@ -289,6 +344,7 @@ pub struct Inner {
     pub config_dir: PathBuf,
     pub home: PathBuf,
     pub clip: ClipStore,
+    pub watcher: crate::watch::Watcher,
 }
 
 #[derive(Clone)]
@@ -309,6 +365,7 @@ impl AppState {
                 registry: Mutex::new(HashMap::new()),
                 env_path,
                 config_dir,
+                watcher: crate::watch::Watcher::new(home.clone()),
                 home,
                 clip: ClipStore::default(),
             }),
@@ -472,6 +529,51 @@ mod tests {
         assert!(snap.starts_with('\u{1b}')); // RIS reset prefix
         assert!(snap.contains("READY_MARK"));
         list[0].kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The PTY follows the per-axis minimum across attached clients, so the
+    // narrowest client's width is what the tool renders for (and what every
+    // client therefore renders cleanly).
+    #[tokio::test]
+    async fn pty_pins_to_min_client_size() {
+        let tmp = std::env::temp_dir().join(format!("ccr-size-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = shell_tool("sleep 3");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            tmp.clone(),
+            tmp.clone(),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        // No client has reported a size yet → PTY stays at its init size.
+        assert_eq!(sess.current_size(), (INIT_COLS, INIT_ROWS));
+
+        let a = sess.register_client();
+        let b = sess.register_client();
+        // Registering alone carries no size constraint.
+        assert_eq!(sess.current_size(), (INIT_COLS, INIT_ROWS));
+
+        // One known size → the PTY adopts it.
+        sess.resize_client(a, 100, 40);
+        assert_eq!(sess.current_size(), (100, 40));
+
+        // A second, narrower client pulls the PTY down to the per-axis min.
+        sess.resize_client(b, 60, 30);
+        assert_eq!(sess.current_size(), (60, 30));
+
+        // The wide client growing further can't widen the PTY past the narrow one.
+        sess.resize_client(a, 120, 50);
+        assert_eq!(sess.current_size(), (60, 30));
+
+        // The narrow client detaches → the PTY grows back for the one that's left.
+        sess.unregister_client(b);
+        assert_eq!(sess.current_size(), (120, 50));
+
+        sess.kill();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

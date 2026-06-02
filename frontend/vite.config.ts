@@ -2,6 +2,11 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+// Dev backend the proxy forwards /api (+ /api/ws) to. Defaults to a local
+// server on :8839; set CC_BACKEND=host:port to point at a remote one (e.g. the
+// tailnet-bound service) without editing this file.
+const backend = process.env.CC_BACKEND ?? "127.0.0.1:8839";
+
 // Dev: `npm run dev` serves on :5173 and proxies /api (and the /api/ws
 // WebSocket) to the Rust server on :8839, so you run both during development.
 // Prod: `npm run build` emits into ./dist, which the Rust binary embeds via
@@ -43,8 +48,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api/ws": { target: "ws://127.0.0.1:8839", ws: true },
-      "/api": { target: "http://127.0.0.1:8839" },
+      "/api/ws": { target: `ws://${backend}`, ws: true },
+      "/api": { target: `http://${backend}` },
     },
   },
 });

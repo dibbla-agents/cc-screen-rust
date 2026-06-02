@@ -9,6 +9,7 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import { fetchFiles, type DirEntry, type FileEntry, type FilesResp } from "../api";
+import { useFileWatch } from "./useFileWatch";
 
 // Shared $HOME directory-tree machinery, used by both the phone Files sheet
 // (download browser) and the desktop editor's file tree. The data layer (cache,
@@ -135,6 +136,10 @@ export function useDirTree(
   const [projectPath, setProjectPath] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
 
+  // Real-time filesystem watch (shared with the editor's open-file watcher via
+  // the returned `watch` handle). Active only while the tree is `open`.
+  const watch = useFileWatch(open);
+
   const merge = useCallback((resp: FilesResp) => {
     setCache((m) => {
       const n = new Map(m);
@@ -243,6 +248,32 @@ export function useDirTree(
       .catch((e) => setErrs((p) => ({ ...p, share: errMsg(e) })));
   }, [open, autoExpand, currentSession, loadByPath, loadBySession]);
 
+  // Keep the live filesystem watch tracking exactly the expanded folders: watch
+  // what's on screen, nothing more. Diff each `expanded` change against the
+  // previous set and subscribe/unsubscribe the delta (ref-counted in the hook).
+  const prevExpanded = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const prev = prevExpanded.current;
+    for (const p of expanded) if (p && !prev.has(p)) watch.subscribe(p);
+    for (const p of prev) if (p && !expanded.has(p)) watch.unsubscribe(p);
+    prevExpanded.current = new Set(expanded);
+  }, [expanded, watch]);
+
+  // When a watched folder changes on disk (the agent created/renamed/deleted a
+  // file in it), re-fetch its listing so the tree reflects it live. Registered
+  // once; reads cache/refresh through refs so it never re-binds.
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(
+    () =>
+      watch.addListener((dir) => {
+        if (cacheRef.current.has(dir)) void refreshRef.current(dir);
+      }),
+    [watch]
+  );
+
   const toggle = useCallback(
     async (path: string, opts?: { sectionErrKey?: string; bySession?: string }) => {
       if (expanded.has(path) && path) {
@@ -323,6 +354,7 @@ export function useDirTree(
     expand,
     rel,
     sections,
+    watch,
   };
 }
 

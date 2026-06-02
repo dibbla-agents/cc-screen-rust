@@ -288,6 +288,47 @@ export function RefreshIcon({ className }: IconProps) {
   );
 }
 
+// A terminal window with a prompt chevron — toggle the editor's live agent
+// (terminal mirror) side column.
+export function TerminalIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="m7 9 3 3-3 3" />
+      <path d="M13 15h4" />
+    </svg>
+  );
+}
+
+// A keyboard — the "take control" toggle that forwards keystrokes from the
+// editor's agent column straight to the agent.
+export function KeyboardIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
+    </svg>
+  );
+}
+
 // Three horizontal dots — the phone editor's overflow ("more actions") menu.
 export function MoreIcon({ className }: IconProps) {
   return (

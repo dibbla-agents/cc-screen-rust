@@ -1,8 +1,9 @@
 // cc-screen-rust — a web-only, tmux-free engine for driving AI coding CLIs
 // (claude/kimi/gemini/codex) from a phone. The backend owns each session's PTY
-// directly (no tmux), maintains a vt100 screen model + a raw-output replay ring
-// for correct reattach, and serves the existing React PWA embedded in the
-// binary. See PLAN.md for the design and milestones.
+// directly (no tmux), maintains a real terminal-emulator screen + scrollback
+// model (see render.rs) so (re)attach is served as a clean, size-agnostic
+// repaint, and serves the existing React PWA embedded in the binary. See
+// PLAN.md for the design and milestones.
 
 mod clip;
 mod config;
@@ -11,8 +12,10 @@ mod engine;
 mod files;
 mod handlers;
 mod manifest;
+mod render;
 mod tools;
 mod upload;
+mod watch;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -81,6 +84,8 @@ async fn main() {
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/rmdir", post(files::rmdir))
         .route("/api/rename", post(files::rename))
+        // real-time filesystem watch (editor tree + open file)
+        .route("/api/watch", get(watch::watch_ws))
         // upload (raised body limit)
         .route("/api/upload/check", post(upload::upload_check))
         .route(

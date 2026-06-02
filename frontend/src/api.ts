@@ -395,6 +395,13 @@ export function wsURL(session: string): string {
   return `${proto}://${location.host}/api/ws?session=${encodeURIComponent(session)}`;
 }
 
+// watchURL builds the filesystem-watch WebSocket URL (real-time tree + open-file
+// updates), same scheme rule as wsURL.
+export function watchURL(): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/api/watch`;
+}
+
 // --- Drag-and-drop upload ---
 //
 // Drop files (and folders, via webkitGetAsEntry) onto a terminal pane; the

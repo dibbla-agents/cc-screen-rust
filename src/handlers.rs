@@ -316,11 +316,14 @@ pub async fn ws(
     }
 }
 
-fn handle_frame(sess: &Session, text: &str) {
+fn handle_frame(sess: &Session, client: u64, text: &str) {
     if let Ok(m) = serde_json::from_str::<WsClientFrame>(text) {
         match m.t.as_str() {
             "i" => sess.write_input(m.d.as_bytes()),
-            "r" => sess.resize(m.c, m.r),
+            // Resize is per-client: the session re-pins the PTY to the minimum
+            // across all attached clients rather than obeying this one blindly,
+            // so two clients of different widths can't fight over the width.
+            "r" => sess.resize_client(client, m.c, m.r),
             _ => {} // "s" (scroll) is client-side now — see TerminalView patch
         }
     }
@@ -331,6 +334,9 @@ async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
     // Atomic snapshot + subscribe (see Session::attach).
     let (snap, mut rx) = sess.attach();
     let mut closed_rx = sess.closed_rx();
+    // Track this connection's size so the session can pin the PTY to the
+    // narrowest attached client (see Session::client_sizes). Dropped on exit.
+    let client = sess.register_client();
 
     let sess_send = sess.clone();
     let mut send_task = tokio::spawn(async move {
@@ -375,7 +381,7 @@ async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             match msg {
-                Message::Text(t) => handle_frame(&sess_recv, &t),
+                Message::Text(t) => handle_frame(&sess_recv, client, &t),
                 Message::Binary(b) => sess_recv.write_input(&b),
                 Message::Close(_) => break,
                 _ => {}
@@ -387,6 +393,11 @@ async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
     }
+
+    // Detached: forget this client's size so a narrower client leaving lets the
+    // PTY grow back for the others (and a lone client leaving stops constraining
+    // it at all).
+    sess.unregister_client(client);
 }
 
 // ── Static frontend (embedded) ───────────────────────────────────────────────
