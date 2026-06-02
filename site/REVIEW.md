@@ -17,9 +17,21 @@ One-Sentence-Summary: "Static, read-only public docs server (Rust/axum) — no s
 - Check 5 (URL task files): N/A.
 - Check 6 (multi-service manifest): N/A — single Dockerfile, no `dibbla.yaml`.
 
+**This change:** rebuilt the hand-written page as a **Vite + React + TypeScript +
+Tailwind** app (source in `site/web/`, build output committed to `docs/`), and
+tightened the responsive layout / image alignment. Still purely static content —
+the Rust `ServeDir` server is unchanged; the build is a local dev-time step (Node
+is never in the deploy image or the container). Output is now content-hashed
+assets under `docs/assets/` (JS, CSS, the 8 screenshots) instead of plain
+`styles.css`/`app.js`; `web/` and `tmp-images/` are excluded from the deploy
+context via `.dockerignore`/`.dibblaignore`. No new runtime code paths, network or
+DB surface.
+
 **Compatibility:** Dockerfile at deploy root ✓ · binds `0.0.0.0:$PORT` (8080),
 `EXPOSE 8080`, deploy `--port 8080` ✓ · non-root `USER app` ✓ · no secrets baked
-in ✓ · ephemeral-fs safe (static files live in the image) ✓. Built & smoke-tested
-locally — 13.9 MB image; `/`, `styles.css`, `app.js` all 200.
+in ✓ · ephemeral-fs safe (static files live in the image) ✓. Smoke-tested — `/`,
+`index.html`, the hashed JS/CSS bundles and all 8 `assets/*.png` return 200 (local
+and on the live Dibbla URL); layout verified in headless Chromium at mobile
+(390px) and desktop (1280px) widths.
 
 **Result: OK to deploy** — 1 optional warning (security headers).

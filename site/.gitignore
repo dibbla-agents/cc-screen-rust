@@ -1,4 +1,6 @@
-# public/ is synced from the canonical ../docs at deploy time (see deploy.sh).
+# public/ is built from ../docs at deploy time (see deploy.sh).
 /public/
 /target/
 /Cargo.lock
+# scratch screenshots used to author the site assets — not part of the repo.
+/tmp-images/

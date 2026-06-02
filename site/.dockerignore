@@ -4,3 +4,7 @@ Cargo.lock
 README.md
 .gitignore
 .dibblaignore
+web/
+tmp-images/
+APP.md
+REVIEW.md
