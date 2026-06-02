@@ -1,0 +1,4 @@
+# public/ is synced from the canonical ../docs at deploy time (see deploy.sh).
+/public/
+/target/
+/Cargo.lock

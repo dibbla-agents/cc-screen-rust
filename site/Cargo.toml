@@ -1,0 +1,24 @@
+[package]
+name = "cc-screen-site"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal static-file server for the cc-screen docs site (Dibbla)"
+
+# Standalone crate — intentionally NOT a member of the parent cc-screen-rust
+# workspace. The empty [workspace] table makes this its own workspace root so
+# `cargo`/`docker build` here don't get pulled into the repo workspace.
+[workspace]
+
+[[bin]]
+name = "cc-screen-site"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["fs"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

@@ -62,6 +62,20 @@ cc-screen-rust install            # --port N / --bind ADDR / --no-restore; defau
 Building from source instead (`./install.sh`) delegates the service step to that
 same `cc-screen-rust install`, so the unit/plist has a single source of truth.
 
+## Docs site
+
+The getting-started site lives in **`docs/`** (one source of truth) and is
+deployed through **Dibbla** as the `cc-screen` app — a tiny Rust static server
+(`site/`, axum + tower-http) in a small non-root Alpine container:
+
+- **Live:** https://cc-screen-b4687da9.dibbla.app
+- **Deploy / update:** `cd site && ./deploy.sh` — syncs `docs/` → `site/public`,
+  then `dibbla deploy --alias cc-screen` (first run creates the app; later runs do
+  a zero-downtime `--update`). See `site/README.md`.
+
+(`docs/` is also served by GitHub Pages at
+https://dibbla-agents.github.io/cc-screen-rust/.)
+
 ## Layout
 
 | Path | What |
