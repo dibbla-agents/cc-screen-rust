@@ -369,6 +369,8 @@ pub struct Inner {
     pub watcher: crate::watch::Watcher,
     /// Web Push: VAPID keys + device subscriptions + the "agent finished" sender.
     pub push: crate::push::Push,
+    /// Opt-in auth gate (password / API token). No-op when unconfigured.
+    pub auth: crate::auth::Auth,
 }
 
 #[derive(Clone)]
@@ -382,6 +384,7 @@ impl AppState {
         env_path: String,
         config_dir: PathBuf,
         home: PathBuf,
+        auth: crate::auth::Auth,
     ) -> AppState {
         AppState {
             inner: Arc::new(Inner {
@@ -393,6 +396,7 @@ impl AppState {
                 watcher: crate::watch::Watcher::new(home.clone()),
                 home,
                 clip: ClipStore::default(),
+                auth,
             }),
         }
     }
@@ -550,6 +554,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default(),
             tmp.clone(),
             tmp.clone(),
+            crate::auth::Auth::load(&tmp, None, None),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         assert_eq!(name, "shell-t");
@@ -583,6 +588,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default(),
             tmp.clone(),
             tmp.clone(),
+            crate::auth::Auth::load(&tmp, None, None),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         let sess = state.get(&name).unwrap();

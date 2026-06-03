@@ -275,6 +275,7 @@ mod tests {
             preview: "p".into(),
             waiting: false,
             cwd: String::new(),
+            machine: String::new(),
         }
     }
 

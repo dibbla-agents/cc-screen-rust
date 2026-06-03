@@ -301,11 +301,17 @@ impl App {
                 if self.selected >= self.sessions.len() {
                     self.selected = self.sessions.len().saturating_sub(1);
                 }
-                // Auto-detach any box whose session ended.
-                let live: HashSet<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
+                // Auto-detach any box whose session ended. Keyed by (machine,
+                // name) so a session on one machine doesn't keep a box alive for
+                // a same-named session on another.
+                let live: HashSet<(&str, &str)> =
+                    self.sessions.iter().map(|s| (s.machine.as_str(), s.name.as_str())).collect();
                 let mut changed = false;
                 for slot in self.panes.iter_mut() {
-                    if slot.as_ref().is_some_and(|p| !live.contains(p.session.as_str())) {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|p| !live.contains(&(p.machine.as_str(), p.session.as_str())))
+                    {
                         *slot = None;
                         changed = true;
                     }
@@ -334,7 +340,10 @@ impl App {
                 // If the create was launched to fill a box, drop it in there;
                 // otherwise it was a plain switcher create.
                 if let Some(target) = self.fill_target.take() {
-                    self.fill_box(target, name);
+                    // A just-created session: machine is unknown to the TUI here
+                    // (hub-routed create lands in a later milestone), so attach
+                    // locally with an empty machine.
+                    self.fill_box(target, name, String::new());
                 } else {
                     self.status = format!("created {name}");
                 }
@@ -629,8 +638,8 @@ impl App {
     fn start_in_menu(&mut self) {
         match self.sessions.first() {
             Some(first) => {
-                let name = first.name.clone();
-                self.fill_box(0, name); // → Grid mode, box 0
+                let (name, machine) = (first.name.clone(), first.machine.clone());
+                self.fill_box(0, name, machine); // → Grid mode, box 0
             }
             None => self.mode = Mode::Grid,
         }
@@ -677,9 +686,9 @@ impl App {
             MenuItem::NewSession => self.open_grid_newform(target),
             MenuItem::Session(i) => {
                 if let Some(s) = self.sessions.get(i) {
-                    let name = s.name.clone();
+                    let (name, machine) = (s.name.clone(), s.machine.clone());
                     self.grid_overlay = GridOverlay::None;
-                    self.fill_box(target, name);
+                    self.fill_box(target, name, machine);
                 }
             }
             MenuItem::ClearBox => {
@@ -799,19 +808,22 @@ impl App {
         let Some(s) = self.sessions.get(self.selected) else {
             return;
         };
-        let session = s.name.clone();
+        let (session, machine) = (s.name.clone(), s.machine.clone());
         let target = self.fill_target.take().unwrap_or(0).min(self.panes.len().saturating_sub(1));
-        self.fill_box(target, session);
+        self.fill_box(target, session, machine);
     }
 
-    fn fill_box(&mut self, idx: usize, session: String) {
+    fn fill_box(&mut self, idx: usize, session: String, machine: String) {
         if idx >= self.panes.len() {
             return;
         }
-        // Dedupe: a session may live in at most one box (else they fight over
-        // the single PTY's width).
+        // Dedupe: a (machine, session) may live in at most one box (else they
+        // fight over the single PTY's width). Same name on different machines is
+        // distinct, so both halves of the key matter.
         for (j, slot) in self.panes.iter_mut().enumerate() {
-            if j != idx && slot.as_ref().is_some_and(|p| p.session == session) {
+            if j != idx
+                && slot.as_ref().is_some_and(|p| p.session == session && p.machine == machine)
+            {
                 *slot = None;
             }
         }
@@ -819,11 +831,12 @@ impl App {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
         let (out_tx, out_rx) = mpsc::channel::<WsOut>(1024);
-        let url = self.rest.urls().ws(&session);
-        let task = tokio::spawn(ws::run(url, id, cols, rows, out_rx, self.tx.clone()));
+        let url = self.rest.urls().ws(&session, &machine);
+        let token = self.rest.token().map(str::to_owned);
+        let task = tokio::spawn(ws::run(url, token, id, cols, rows, out_rx, self.tx.clone()));
 
         self.remember(&session);
-        self.panes[idx] = Some(Pane::new(id, session, cols, rows, out_tx, task));
+        self.panes[idx] = Some(Pane::new(id, session, machine, cols, rows, out_tx, task));
         self.active = idx;
         self.mode = Mode::Grid;
         self.prefix_armed = false;
@@ -1028,7 +1041,7 @@ impl App {
     /// Build an app with a fixed session list + status for render tests (no
     /// network — `Rest` only builds an HTTP client, it doesn't connect).
     pub fn test_fixture(sessions: Vec<SessionInfo>, status: &str) -> Self {
-        let rest = Rest::new("http://127.0.0.1:9", false).unwrap();
+        let rest = Rest::new("http://127.0.0.1:9", false, None).unwrap();
         let mut a = App::new(rest, Config::default());
         a.sessions = sessions;
         a.status = status.into();
@@ -1051,6 +1064,7 @@ mod tests {
             preview: String::new(),
             waiting: false,
             cwd: String::new(),
+            machine: String::new(),
         }
     }
 

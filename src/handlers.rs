@@ -11,26 +11,31 @@ use std::sync::Arc;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Query, RawQuery, State,
     },
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
+#[cfg(feature = "frontend")]
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use cc_screen_protocol::{
-    key_bytes, wrap_bracketed_paste, CreateReq, CreateResp, DeleteReq, ExtraDirs, Favorite,
-    RestorableSession, SessionInfo, ToolInfo, WsClientFrame,
+    key_bytes, wrap_bracketed_paste, AuthStatus, CreateReq, CreateResp, DeleteReq, Favorite,
+    LoginReq, RestorableSession, SessionInfo, ToolInfo, WsClientFrame,
 };
 
 use crate::confine::resolve_under;
 use crate::engine::{AppState, Session};
 use crate::tools::Tool;
 
+// The React PWA, embedded at build time. Gated behind the default-on `frontend`
+// feature so a fleet agent that only talks to a hub can build headless
+// (`--no-default-features`) without `frontend/dist` or the rust-embed compile.
+#[cfg(feature = "frontend")]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "frontend/dist"]
 struct Assets;
@@ -41,10 +46,56 @@ fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
     (code, msg.into())
 }
 
+// ── Auth (opt-in; see auth.rs) ────────────────────────────────────────────────
+// These three are exempt from the auth middleware so the login flow can run
+// before a client is authenticated.
+
+// POST /api/login — `{secret}` matching the password OR the API token mints the
+// 2-week session cookie. A wrong secret gets a fixed delay to blunt guessing.
+pub async fn login(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<LoginReq>,
+) -> Response {
+    let auth = &app.inner.auth;
+    if auth.verify_login(&req.secret) {
+        let cookie = auth.issue_cookie(crate::auth::is_https(&headers));
+        return (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(json!({ "ok": true })))
+            .into_response();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false }))).into_response()
+}
+
+// GET /api/auth — the frontend gates itself on this at boot (and the middleware
+// 401s here if the cookie later expires). `authed` is always true when the gate
+// is off.
+pub async fn auth_status(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    RawQuery(q): RawQuery,
+) -> Json<AuthStatus> {
+    let auth = &app.inner.auth;
+    Json(AuthStatus {
+        auth_required: auth.enabled(),
+        authed: !auth.enabled() || auth.is_authed(&headers, q.as_deref()),
+    })
+}
+
+// POST /api/logout — clear the session cookie.
+pub async fn logout(State(app): State<AppState>) -> Response {
+    let cookie = app.inner.auth.clear_cookie();
+    (StatusCode::OK, [(header::SET_COOKIE, cookie)]).into_response()
+}
+
 // ── GET /api/sessions ────────────────────────────────────────────────────────
-pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
-    let dtos = app
-        .list()
+/// Build the live session list. Shared by the `/api/sessions` handler and the
+/// hub uplink (`src/uplink.rs`), so both report sessions identically. `machine`
+/// is left empty: a standalone agent doesn't know its own hub-assigned name, and
+/// the hub stamps it when aggregating (empty is omitted on the wire, so the
+/// single-machine UI is unchanged).
+pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
+    app.list()
         .into_iter()
         .map(|s| SessionInfo {
             name: s.name.clone(),
@@ -55,30 +106,26 @@ pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
             preview: s.preview(),
             waiting: s.waiting(),
             cwd: s.live_cwd(),
+            machine: String::new(),
         })
-        .collect();
-    Json(dtos)
+        .collect()
+}
+
+pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
+    Json(session_list(&app))
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
 pub async fn tools(State(app): State<AppState>) -> Json<Vec<ToolInfo>> {
-    let list: Vec<ToolInfo> = app
-        .inner
-        .tools
-        .iter()
-        .map(|t| ToolInfo {
-            cmd: t.cmd.clone(),
-            prefix: t.prefix.clone(),
-            extra_dirs: t.extra_flag.is_some().then(|| ExtraDirs {
-                max: (t.extra_max > 0).then_some(t.extra_max),
-            }),
-        })
-        .collect();
+    let list: Vec<ToolInfo> = app.inner.tools.iter().map(crate::tools::tool_info).collect();
     Json(list)
 }
 
 // ── POST /api/session ────────────────────────────────────────────────────────
-pub async fn create_session(State(app): State<AppState>, Json(req): Json<CreateReq>) -> ApiResult {
+/// Validate + create a session. Shared by the `/api/session` handler and the hub
+/// `Cmd::Create` dispatch (`crate::ops`), so a hub-routed create runs the exact
+/// same confinement + validation as a direct one.
+pub fn create_core(app: &AppState, req: &CreateReq) -> Result<String, (StatusCode, String)> {
     let tool = app
         .find_tool(&req.tool)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("unknown tool: {}", req.tool)))?;
@@ -89,23 +136,24 @@ pub async fn create_session(State(app): State<AppState>, Json(req): Json<CreateR
     if !dir.is_dir() {
         return Err(err(StatusCode::BAD_REQUEST, "not a directory"));
     }
-    let extra = validate_extra_dirs(&app, &tool, &dir, &req.extra_dirs)?;
+    let extra = validate_extra_dirs(app, &tool, &dir, &req.extra_dirs)?;
     // Empty name defaults to the dir's basename (mirrors the Go build).
     let mut name = req.name.trim().to_string();
     if name.is_empty() {
         name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     }
-    match app.create(&tool, &name, &dir.to_string_lossy(), extra, false) {
+    app.create(&tool, &name, &dir.to_string_lossy(), extra, false).map_err(|e| {
+        let msg = e.to_string();
+        let code =
+            if msg.contains("already exists") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+        (code, msg)
+    })
+}
+
+pub async fn create_session(State(app): State<AppState>, Json(req): Json<CreateReq>) -> ApiResult {
+    match create_core(&app, &req) {
         Ok(full) => Ok(Json(CreateResp { name: full }).into_response()),
-        Err(e) => {
-            let msg = e.to_string();
-            let code = if msg.contains("already exists") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            Err(err(code, msg))
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -374,91 +422,78 @@ pub async fn ws(
     }
 }
 
-fn handle_frame(sess: &Session, client: u64, text: &str) {
-    if let Ok(m) = serde_json::from_str::<WsClientFrame>(text) {
-        match m.t.as_str() {
-            "i" => sess.write_input(m.d.as_bytes()),
-            // Resize is per-client: the session re-pins the PTY to the minimum
-            // across all attached clients rather than obeying this one blindly,
-            // so two clients of different widths can't fight over the width.
-            "r" => sess.resize_client(client, m.c, m.r),
-            _ => {} // "s" (scroll) is client-side now — see TerminalView patch
-        }
-    }
-}
-
 async fn handle_socket(socket: WebSocket, sess: Arc<Session>) {
-    let (mut sink, mut stream) = socket.split();
-    // Atomic snapshot + subscribe (see Session::attach).
-    let (snap, mut rx) = sess.attach();
-    let mut closed_rx = sess.closed_rx();
-    // Track this connection's size so the session can pin the PTY to the
-    // narrowest attached client (see Session::client_sizes). Dropped on exit.
-    let client = sess.register_client();
+    use crate::attach::{attach_loop, AttachOut, ClientEvent};
 
-    let sess_send = sess.clone();
-    let mut send_task = tokio::spawn(async move {
-        if sink.send(Message::Binary(snap)).await.is_err() {
-            return;
-        }
-        // Keepalive so phone NAT/proxies don't reap an idle socket.
+    let (mut sink, mut stream) = socket.split();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<AttachOut>(256);
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::channel::<ClientEvent>(256);
+
+    // Transport writer: engine→client frames + a 30s keepalive ping so phone
+    // NAT/proxies don't reap an idle socket.
+    let send_task = tokio::spawn(async move {
         let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
         ping.tick().await; // consume the immediate first tick
         loop {
             tokio::select! {
-                r = rx.recv() => match r {
-                    Ok(b) => {
-                        if sink.send(Message::Binary(b.to_vec())).await.is_err() {
+                o = out_rx.recv() => match o {
+                    Some(AttachOut::Snapshot(b)) | Some(AttachOut::Output(b)) => {
+                        if sink.send(Message::Binary(b)).await.is_err() {
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // A slow client fell behind the ring; resync with a fresh snapshot.
-                        if sink.send(Message::Binary(sess_send.snapshot())).await.is_err() {
-                            break;
-                        }
+                    // The child exited — close the socket so the client stops
+                    // showing a frozen frame and re-polls (the session is gone).
+                    Some(AttachOut::Closed) => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        break;
                     }
-                    Err(_) => break,
+                    None => break,
                 },
                 _ = ping.tick() => {
                     if sink.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
                 }
-                // The child exited — close the socket now so the client stops
-                // showing a frozen frame and re-polls (the session is gone).
-                _ = closed_rx.changed() => {
-                    let _ = sink.send(Message::Close(None)).await;
+            }
+        }
+    });
+
+    // Transport reader: client→engine events. Input is a {t:"i"} text frame or a
+    // raw binary frame; {t:"r"} is a resize. ("s"/scroll is client-side now.)
+    let recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            let ev = match msg {
+                Message::Text(t) => match serde_json::from_str::<WsClientFrame>(&t) {
+                    Ok(m) => match m.t.as_str() {
+                        "i" => Some(ClientEvent::Input(m.d.into_bytes())),
+                        "r" => Some(ClientEvent::Resize(m.c, m.r)),
+                        _ => None,
+                    },
+                    Err(_) => None,
+                },
+                Message::Binary(b) => Some(ClientEvent::Input(b)),
+                Message::Close(_) => break,
+                _ => None,
+            };
+            if let Some(ev) = ev {
+                if ev_tx.send(ev).await.is_err() {
                     break;
                 }
             }
         }
     });
 
-    let sess_recv = sess.clone();
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = stream.next().await {
-            match msg {
-                Message::Text(t) => handle_frame(&sess_recv, client, &t),
-                Message::Binary(b) => sess_recv.write_input(&b),
-                Message::Close(_) => break,
-                _ => {}
-            }
-        }
-    });
-
-    tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
-    }
-
-    // Detached: forget this client's size so a narrower client leaving lets the
-    // PTY grow back for the others (and a lone client leaving stops constraining
-    // it at all).
-    sess.unregister_client(client);
+    // Drive the engine here; attach_loop ALWAYS unregisters on exit (releasing the
+    // PTY min-size pin). When it returns, out_tx drops → send_task drains its final
+    // frame (incl. a Close) and ends; the reader is blocked on the socket, abort it.
+    attach_loop(sess, out_tx, ev_rx).await;
+    recv_task.abort();
+    let _ = send_task.await;
 }
 
 // ── Static frontend (embedded) ───────────────────────────────────────────────
+#[cfg(feature = "frontend")]
 fn content_type(path: &str) -> String {
     if path.ends_with(".mjs") {
         // pdf.js's module worker; strict module MIME rejects octet-stream.
@@ -470,6 +505,7 @@ fn content_type(path: &str) -> String {
     mime_guess::from_path(path).first_or_octet_stream().to_string()
 }
 
+#[cfg(feature = "frontend")]
 pub async fn static_handler(uri: Uri) -> Response {
     let raw = uri.path().trim_start_matches('/');
     let path = if raw.is_empty() { "index.html" } else { raw };
@@ -486,4 +522,11 @@ pub async fn static_handler(uri: Uri) -> Response {
             .into_response();
     }
     (StatusCode::NOT_FOUND, "frontend not built").into_response()
+}
+
+// Headless build: no embedded PWA. The agent serves only the API; reach its UI
+// through the hub (which embeds the frontend) or run a non-headless agent.
+#[cfg(not(feature = "frontend"))]
+pub async fn static_handler(_uri: Uri) -> Response {
+    (StatusCode::NOT_FOUND, "frontend not embedded (headless agent build)").into_response()
 }

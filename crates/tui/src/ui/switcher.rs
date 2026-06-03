@@ -112,6 +112,7 @@ mod tests {
             preview: preview.into(),
             waiting,
             cwd: String::new(),
+            machine: String::new(),
         }
     }
 

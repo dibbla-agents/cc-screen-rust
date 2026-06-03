@@ -50,10 +50,20 @@ echo "  staged $(find "$DEST" -name '*.tar.xz' | wc -l | tr -d ' ') tarballs in 
 sed "s#$GH_BASE#$SITE_URL/dl#g" "$TMP/artifacts-build-global/cc-screen-tui-installer.sh"  > dl/install-ccs.sh
 sed "s#$GH_BASE#$SITE_URL/dl#g" "$TMP/artifacts-build-global/cc-screen-rust-installer.sh" > dl/install-cc-screen.sh
 chmod +x dl/install-ccs.sh dl/install-cc-screen.sh
+# The hub installer exists from the release where the hub joined `dist`; guard it
+# so re-hosting an older tag still works.
+HUB_SRC="$TMP/artifacts-build-global/cc-screen-hub-installer.sh"
+if [ -f "$HUB_SRC" ]; then
+  sed "s#$GH_BASE#$SITE_URL/dl#g" "$HUB_SRC" > dl/install-cc-screen-hub.sh
+  chmod +x dl/install-cc-screen-hub.sh
+  echo "  + hub installer → dl/install-cc-screen-hub.sh"
+else
+  echo "  (no cc-screen-hub-installer.sh in this build — skipping)"
+fi
 printf '%s\n' "$VERSION" > dl/version
 
 # Sanity: the rewritten installers must point at us, not GitHub.
-if grep -q "github.com/$REPO/releases/download" dl/install-ccs.sh dl/install-cc-screen.sh; then
+if grep -ql "github.com/$REPO/releases/download" dl/install-ccs.sh dl/install-cc-screen.sh dl/install-cc-screen-hub.sh 2>/dev/null; then
   echo "ERROR: a github download URL survived the rewrite" >&2; exit 1
 fi
 echo "  installers rewritten → $SITE_URL/dl"
@@ -66,5 +76,6 @@ cat <<EOF
 
 ✓ hosted $VERSION. Install one-liners:
     ccs    : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-ccs.sh | sh
-    server : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen.sh | sh
+    agent  : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen.sh | sh
+    hub    : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen-hub.sh | sh
 EOF

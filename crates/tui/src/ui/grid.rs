@@ -52,7 +52,7 @@ fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, sin
     } else {
         (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray))
     };
-    let title = pane.map(|p| p.session.as_str()).unwrap_or("empty");
+    let title = pane.map(|p| p.title()).unwrap_or_else(|| "empty".to_string());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(bs)
@@ -81,7 +81,7 @@ mod tests {
 
     fn dummy(id: u64, name: &str) -> Pane {
         let (tx, _rx) = mpsc::channel(4);
-        Pane::new(id, name.into(), 40, 10, tx, tokio::spawn(async {}))
+        Pane::new(id, name.into(), String::new(), 40, 10, tx, tokio::spawn(async {}))
     }
 
     #[tokio::test]

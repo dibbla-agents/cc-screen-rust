@@ -22,6 +22,9 @@ const RUST_INSTALL =
   "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh";
 const TUI_INSTALL =
   "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh";
+const HUB_INSTALL =
+  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen-hub.sh | sh";
+const HUB_SLAVE = "cc-screen-rust install --hub https://<hub>:8840 --machine-id <name>";
 
 function Step({
   badge,
@@ -98,6 +101,43 @@ export function Start() {
           <Cmd clip="ccs --server http://<your-computer>:8839">
             <Prompt />
             {"ccs --server http://<your-computer>:8839"}
+          </Cmd>
+        </Step>
+      </div>
+
+      <div className="mt-4">
+        <Step
+          badge="③"
+          title="Got more than one machine?"
+          note="Run the hub once — then every machine shows up under a single address."
+          after={
+            <>
+              Open the hub's address (or point the app at it) and see all your
+              agents in one list. Full guide:{" "}
+              <a
+                className="text-green-soft underline"
+                href="https://github.com/dibbla-agents/cc-screen-rust/blob/main/HUB.md"
+              >
+                HUB.md
+              </a>
+              .
+            </>
+          }
+        >
+          <Cmd clip={HUB_INSTALL}>
+            <Prompt />
+            {HUB_INSTALL}
+          </Cmd>
+          <Cmd clip="cc-screen-hub install">
+            <Prompt />
+            cc-screen-hub install{"   "}
+            <span className="text-faint"># the front door (its own address)</span>
+          </Cmd>
+          <Cmd clip={HUB_SLAVE}>
+            <Prompt />
+            {HUB_SLAVE}
+            {"   "}
+            <span className="text-faint"># on each machine</span>
           </Cmd>
         </Step>
       </div>

@@ -21,9 +21,10 @@ impl ServerUrls {
         format!("{}/{}", self.base, path.trim_start_matches('/'))
     }
 
-    /// `ws(s)://…/api/ws?session=<name>` for attaching to a session's terminal.
-    #[allow(dead_code)] // used from M2 (WebSocket attach)
-    pub fn ws(&self, session: &str) -> String {
+    /// `ws(s)://…/api/ws?session=<name>` for attaching to a session's terminal,
+    /// plus `&machine=<id>` when talking to a hub (empty `machine` = a single
+    /// agent, so the URL is unchanged and a hub-less server still matches).
+    pub fn ws(&self, session: &str, machine: &str) -> String {
         let ws_base = if let Some(rest) = self.base.strip_prefix("https://") {
             format!("wss://{rest}")
         } else if let Some(rest) = self.base.strip_prefix("http://") {
@@ -32,7 +33,11 @@ impl ServerUrls {
             // Already a ws(s) scheme, or a bare host — pass through.
             self.base.clone()
         };
-        format!("{ws_base}/api/ws?session={}", encode_component(session))
+        let mut url = format!("{ws_base}/api/ws?session={}", encode_component(session));
+        if !machine.is_empty() {
+            url.push_str(&format!("&machine={}", encode_component(machine)));
+        }
+        url
     }
 }
 
@@ -64,11 +69,11 @@ mod tests {
     #[test]
     fn ws_scheme_swap() {
         assert_eq!(
-            ServerUrls::new("http://127.0.0.1:8839").ws("claude-x"),
+            ServerUrls::new("http://127.0.0.1:8839").ws("claude-x", ""),
             "ws://127.0.0.1:8839/api/ws?session=claude-x"
         );
         assert_eq!(
-            ServerUrls::new("https://host.ts.net").ws("codex-y"),
+            ServerUrls::new("https://host.ts.net").ws("codex-y", ""),
             "wss://host.ts.net/api/ws?session=codex-y"
         );
     }
@@ -76,8 +81,30 @@ mod tests {
     #[test]
     fn ws_encodes_session() {
         assert_eq!(
-            ServerUrls::new("http://h").ws("a b/c"),
+            ServerUrls::new("http://h").ws("a b/c", ""),
             "ws://h/api/ws?session=a%20b%2Fc"
+        );
+    }
+
+    #[test]
+    fn ws_appends_machine_when_set() {
+        // Hub mode: machine is appended and percent-encoded.
+        assert_eq!(
+            ServerUrls::new("http://hub:8840").ws("claude-x", "laptop"),
+            "ws://hub:8840/api/ws?session=claude-x&machine=laptop"
+        );
+        assert_eq!(
+            ServerUrls::new("http://h").ws("s", "a b"),
+            "ws://h/api/ws?session=s&machine=a%20b"
+        );
+    }
+
+    #[test]
+    fn ws_omits_machine_when_empty() {
+        // Single-agent (hub-less) mode: identical to the pre-hub URL.
+        assert_eq!(
+            ServerUrls::new("http://h:8839").ws("claude-x", ""),
+            "ws://h:8839/api/ws?session=claude-x"
         );
     }
 }

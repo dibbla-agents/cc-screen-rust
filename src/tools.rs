@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+use cc_screen_protocol::{ExtraDirs, ToolInfo};
+
 #[derive(Clone)]
 pub struct Tool {
     pub cmd: String,    // shell command, e.g. cc
@@ -29,6 +31,19 @@ impl Tool {
             resume_suffix: None,
             resume_keep_extra: false,
         }
+    }
+}
+
+/// The wire DTO for a tool. Shared by `GET /api/tools` and the hub uplink's
+/// `Register` so both advertise the registry identically.
+pub fn tool_info(t: &Tool) -> ToolInfo {
+    ToolInfo {
+        cmd: t.cmd.clone(),
+        prefix: t.prefix.clone(),
+        extra_dirs: t
+            .extra_flag
+            .is_some()
+            .then(|| ExtraDirs { max: (t.extra_max > 0).then_some(t.extra_max) }),
     }
 }
 

@@ -1,5 +1,9 @@
 [workspace]
-members = ["cargo:."]
+# The server (root) + the ccs TUI + the aggregator hub. Each produces its own
+# `curl | sh` installer; the server and hub embed frontend/dist (built first by
+# the github-build-setup step), and the hub then `cc-screen-hub install`s its
+# service.
+members = ["cargo:.", "cargo:crates/hub"]
 
 # Config for 'dist'
 [dist]

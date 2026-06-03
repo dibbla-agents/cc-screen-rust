@@ -1,0 +1,21 @@
+# Shared opt-in auth: the Auth struct + signed-session-cookie / API-token logic,
+# used by BOTH the cc-screen-rust agent and the cc-screen-hub. Deliberately free
+# of axum/tokio — it operates on `http::HeaderMap` and raw query strings, so the
+# axum `require_auth` middleware (which is coupled to each binary's app state)
+# stays in the binaries, not here.
+[package]
+name = "cc-screen-auth"
+version = "0.2.2"
+edition = "2021"
+description = "Opt-in password/API-token auth with signed session cookies for cc-screen-rust"
+
+[dependencies]
+# `http::HeaderMap` is the same type axum re-exports, so a binary can pass
+# `req.headers()` straight in. All crypto is pure-Rust RustCrypto (no system deps).
+http = "1"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["getrandom"] }
+tracing = "0.1"

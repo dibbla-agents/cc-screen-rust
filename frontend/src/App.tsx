@@ -7,11 +7,13 @@ import {
   fetchRestorable,
   fetchSessions,
   flattenDataTransfer,
+  getAuthStatus,
   pasteText,
   restoreSessions,
   saveFavorites,
   sendImage,
   sendKey,
+  setUnauthorizedHandler,
   type Favorite,
   type RestorableSession,
   type Session,
@@ -29,6 +31,7 @@ import TileGrid, { type Layout, paneCount } from "./components/TileGrid";
 import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
 import UploadSheet from "./components/UploadSheet";
+import LoginScreen from "./components/LoginScreen";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
@@ -152,6 +155,10 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Auth gate (opt-in server-side). null = still checking; false = show the
+  // login screen; true = authed (or auth is off). The session cookie rides all
+  // requests automatically, so the rest of the app is unchanged.
+  const [authed, setAuthed] = useState<boolean | null>(null);
   // Sessions a reboot/tmux restart took down that we can bring back. Fetched
   // lazily when the drawer opens (it's the only place the offer is shown), so
   // the session-list poll stays a single request.
@@ -403,6 +410,20 @@ export default function App() {
     },
     [updatePanes]
   );
+
+  // Boot-time auth check + 401 handler. With auth off this resolves to authed
+  // immediately; with auth on it shows the login screen until a valid cookie or
+  // token is present. A later 401 from the poll (expired cookie / logged out
+  // elsewhere) flips us back to login. If /api/auth itself fails (an older
+  // server with no such endpoint, or a transient error) we don't hard-block an
+  // unprotected box — treat it as "no gate".
+  useEffect(() => {
+    setUnauthorizedHandler(() => setAuthed(false));
+    getAuthStatus()
+      .then((s) => setAuthed(!s.authRequired || s.authed))
+      .catch(() => setAuthed(true));
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1277,6 +1298,15 @@ export default function App() {
       onRestore={onRestore}
     />
   );
+
+  // Auth gate (after all hooks, so the rules of hooks hold): a blank splash
+  // while checking, the login screen when locked, otherwise the app.
+  if (authed === null) {
+    return <div className="fixed inset-0 bg-bar" />;
+  }
+  if (!authed) {
+    return <LoginScreen onSuccess={() => setAuthed(true)} />;
+  }
 
   return (
     <div

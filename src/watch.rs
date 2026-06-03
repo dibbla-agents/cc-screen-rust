@@ -92,8 +92,9 @@ impl Watcher {
         }
     }
 
-    /// Register a connected client and hand back its id + event receiver.
-    fn register(&self) -> (u64, mpsc::UnboundedReceiver<FsEvent>) {
+    /// Register a connected client and hand back its id + event receiver. `pub(crate)`
+    /// so the hub uplink can drive a relayed watch channel with the same API.
+    pub(crate) fn register(&self) -> (u64, mpsc::UnboundedReceiver<FsEvent>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
         self.state.clients.lock().unwrap().insert(id, tx);
@@ -102,7 +103,7 @@ impl Watcher {
 
     /// Drop a client on disconnect: forget its channel and all its subscriptions,
     /// unwatching any directory that loses its last subscriber.
-    fn unregister(&self, id: u64) {
+    pub(crate) fn unregister(&self, id: u64) {
         self.state.clients.lock().unwrap().remove(&id);
         let orphans = {
             let mut subs = self.state.subs.lock().unwrap();
@@ -128,7 +129,7 @@ impl Watcher {
     /// Subscribe `id` to a directory (confined to $HOME). Watches it on the first
     /// subscriber; ignores paths outside $HOME, non-directories, and any beyond
     /// the per-client cap.
-    fn subscribe(&self, id: u64, raw: &str) {
+    pub(crate) fn subscribe(&self, id: u64, raw: &str) {
         let dir = match resolve_under(&self.home, raw) {
             Some(d) => d,
             None => return,
@@ -164,7 +165,7 @@ impl Watcher {
     }
 
     /// Unsubscribe `id`; unwatch when the directory loses its last subscriber.
-    fn unsubscribe(&self, id: u64, raw: &str) {
+    pub(crate) fn unsubscribe(&self, id: u64, raw: &str) {
         let dir = match resolve_under(&self.home, raw) {
             Some(d) => d,
             None => return,

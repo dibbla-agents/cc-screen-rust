@@ -1,0 +1,46 @@
+# The aggregator. Agents dial IN over a WebSocket (`/agent/ws`) and register;
+# clients (PWA + `ccs`) hit the same client-facing wire contract the agent serves,
+# but the hub routes each request to the owning agent. The hub owns NO PTY and NO
+# filesystem — it's a registry + auth gate + transparent byte relay.
+[package]
+name = "cc-screen-hub"
+version = "0.2.2"
+edition = "2021"
+description = "Aggregator hub for cc-screen-rust: one endpoint over many agents"
+
+# Cross-built + shipped by `dist` like the server: embeds frontend/dist (built
+# first by the github-build-setup step). Produces cc-screen-hub-installer.sh,
+# re-hosted on the site as /dl/install-cc-screen-hub.sh.
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "cc-screen-hub"
+path = "src/main.rs"
+
+[dependencies]
+# `hub` brings in the agent↔hub envelope. The hub reuses the client-facing wire
+# types (SessionInfo, …) and cc-screen-auth verbatim.
+cc-screen-protocol = { path = "../protocol", features = ["hub"] }
+cc-screen-auth = { path = "../auth" }
+# Centralized Web Push: one VAPID keypair + sub store for the whole fleet.
+cc-screen-push = { path = "../push" }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+bytes = "1"
+mime_guess = "2"
+# The hub serves the same embedded React PWA as the agent, so the phone opens the
+# hub URL and gets the UI. Same frontend/dist the agent embeds (built first).
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+[dev-dependencies]
+# In-process e2e: a fake agent + a fake client over loopback WebSockets, and HTTP
+# assertions. Same pure-Rust rustls stack as the TUI; no system TLS.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -2,7 +2,7 @@
 # rust-embed path, build.sh/install.sh, and the systemd unit don't move. The
 # shared wire types live in crates/protocol; the terminal client in crates/tui.
 [workspace]
-members = ["crates/protocol", "crates/tui"]
+members = ["crates/protocol", "crates/auth", "crates/push", "crates/tui", "crates/hub"]
 resolver = "2"
 
 [package]
@@ -22,12 +22,26 @@ dist = true
 name = "cc-screen-rust"
 path = "src/main.rs"
 
+[features]
+default = ["frontend"]
+# Embed the React PWA into the binary (via rust-embed). On by default. A fleet
+# agent that only talks to a hub can build headless with `--no-default-features`
+# — no `frontend/dist` and no rust-embed compile. The hub embeds the frontend.
+frontend = ["dep:rust-embed"]
+
 [dependencies]
-cc-screen-protocol = { path = "crates/protocol" }
+# `hub` enables the agent↔hub envelope (used by src/uplink.rs).
+cc-screen-protocol = { path = "crates/protocol", features = ["hub"] }
+# Shared opt-in auth (Auth struct, signed session cookies, token matching). The
+# agent keeps the axum `require_auth` middleware locally (see src/auth.rs).
+cc-screen-auth = { path = "crates/auth" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 futures-util = "0.3"
+# Outbound WebSocket client for the hub uplink (src/uplink.rs). Same pure-Rust
+# rustls stack the TUI uses, so no system TLS deps.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 portable-pty = "0.8"
 # Server-side terminal emulator: interprets the PTY byte stream into a grid +
 # scrollback so (re)attach can be served as a clean, size-agnostic repaint
@@ -35,7 +49,7 @@ portable-pty = "0.8"
 # staircased at any client size != the size that produced it). Same crate the
 # `ccs` TUI renders with, so behaviour matches across clients.
 alacritty_terminal = "0.26"
-rust-embed = { version = "8", features = ["mime-guess"] }
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
 # Real-time filesystem watching for the editor (inotify on Linux), debounced so
 # an agent/editor writing a file in several syscalls collapses to one event.
 notify-debouncer-mini = "0.4"
@@ -46,16 +60,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mime_guess = "2"
-# Web Push ("agent finished" phone notifications). web-push-native is pure-Rust
-# (RustCrypto + jwt-simple) — unlike the `web-push` crate, whose `ece` dep needs
-# system OpenSSL this box doesn't have. It builds the VAPID-signed, aes128gcm
-# `http::Request`; we send it with ureq (pure-Rust rustls+ring, no system deps).
-# p256 generates the VAPID P-256 keypair in-process.
-web-push-native = "0.4"
-ureq = "2"
-p256 = "0.13"
-rand_core = { version = "0.6", features = ["getrandom"] }
-base64 = "0.22"
+# Web Push ("agent finished" phone notifications). The VAPID + aes128gcm send
+# machinery lives in cc-screen-push (shared with the hub); the agent keeps the
+# busy→waiting sweep (push::finish_watcher).
+cc-screen-push = { path = "crates/push" }
 http = "1"
 
 [profile.release]

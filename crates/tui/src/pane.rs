@@ -58,6 +58,10 @@ pub struct Pane {
     /// routes bytes to the right box (and drops stragglers from a dropped box).
     pub id: u64,
     pub session: String,
+    /// The machine the session lives on (empty for a single agent / hub-less).
+    /// Part of the box's identity so the same session name on two machines stays
+    /// distinct.
+    pub machine: String,
     term: Term<VoidListener>,
     processor: Processor,
     cols: u16,
@@ -71,6 +75,7 @@ impl Pane {
     pub fn new(
         id: u64,
         session: String,
+        machine: String,
         cols: u16,
         rows: u16,
         out_tx: mpsc::Sender<WsOut>,
@@ -80,6 +85,7 @@ impl Pane {
         Self {
             id,
             session,
+            machine,
             term: new_term(cols, rows),
             processor: Processor::new(),
             cols,
@@ -87,6 +93,16 @@ impl Pane {
             conn: ConnState::Connecting,
             out_tx,
             task,
+        }
+    }
+
+    /// The box title: `machine/session` when aggregated through a hub, else just
+    /// the session name.
+    pub fn title(&self) -> String {
+        if self.machine.is_empty() {
+            self.session.clone()
+        } else {
+            format!("{}/{}", self.machine, self.session)
         }
     }
 
@@ -273,7 +289,7 @@ mod tests {
     fn pane(cols: u16, rows: u16) -> Pane {
         let (tx, _rx) = mpsc::channel(4);
         let task = tokio::spawn(async {});
-        Pane::new(1, "s".into(), cols, rows, tx, task)
+        Pane::new(1, "s".into(), String::new(), cols, rows, tx, task)
     }
 
     fn render(p: &Pane, w: u16, h: u16) -> String {

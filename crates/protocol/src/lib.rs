@@ -8,10 +8,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The agent↔hub envelope (multiplexed control + terminal/file streams). Behind
+/// the `hub` feature so a standalone TUI build doesn't compile it.
+#[cfg(feature = "hub")]
+pub mod hub;
+
+/// Where the `curl | sh` installers are hosted (the Dibbla docs site, off our own
+/// domain — see README "Install"). The `update` subcommand on each binary re-runs
+/// its installer from here: `<RELEASE_BASE_URL>/install-<name>.sh`. Single source
+/// of truth shared by the agent, the hub, and the TUI.
+pub const RELEASE_BASE_URL: &str = "https://cc-screen-b4687da9.dibbla.app/dl";
+
 // ── GET /api/sessions ────────────────────────────────────────────────────────
 /// One entry in the session list. (Named `SessionInfo`, not `Session`, so it
 /// doesn't collide with the server's live `engine::Session`.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub name: String,
     pub tool: String,
@@ -29,10 +40,17 @@ pub struct SessionInfo {
     /// The session's live cwd; omitted when empty (the server can't read it).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
+    /// The machine (agent) this session lives on. Stamped by the hub when it
+    /// aggregates several agents; empty for a single agent talking to a client
+    /// directly — then it's omitted on the wire, so an older client still parses
+    /// it and the single-machine UI is unchanged. `#[serde(default)]` so a client
+    /// talking to a hub-less server reads it as "".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine: String,
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub cmd: String,
@@ -42,7 +60,7 @@ pub struct ToolInfo {
     pub extra_dirs: Option<ExtraDirs>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtraDirs {
     /// Max extra dirs (omitted when unlimited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,7 +68,7 @@ pub struct ExtraDirs {
 }
 
 // ── GET /api/sessions/restorable ─────────────────────────────────────────────
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestorableSession {
     pub session: String,
     pub tool: String,
@@ -59,14 +77,32 @@ pub struct RestorableSession {
 }
 
 // ── GET/PUT /api/favorites ───────────────────────────────────────────────────
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Favorite {
     pub id: String,
     pub text: String,
 }
 
-// ── POST /api/session ────────────────────────────────────────────────────────
+// ── Auth (opt-in password / API-token gate) ──────────────────────────────────
+/// `POST /api/login` body. `secret` is the password *or* the API token — the
+/// web login accepts either; a match mints the 2-week session cookie.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoginReq {
+    pub secret: String,
+}
+
+/// `GET /api/auth` reply. The frontend gates itself on this at boot:
+/// `authRequired=false` → no login screen; else show it unless already `authed`
+/// (via a valid cookie or token).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatus {
+    pub auth_required: bool,
+    pub authed: bool,
+}
+
+// ── POST /api/session ────────────────────────────────────────────────────────
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateReq {
     pub tool: String,
@@ -82,7 +118,7 @@ pub struct CreateResp {
 }
 
 // ── POST /api/session/delete ─────────────────────────────────────────────────
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeleteReq {
     pub session: String,
     /// "exit" (graceful) | "kill" (hard); empty defaults to kill server-side.
@@ -241,10 +277,55 @@ mod tests {
             preview: "p".into(),
             waiting: false,
             cwd: String::new(),
+            machine: String::new(),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
+        assert!(!v.contains("machine"), "empty machine should be omitted: {v}");
         assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
+    }
+
+    #[test]
+    fn session_info_machine_roundtrips_and_is_back_compat() {
+        // Present when set (hub-aggregated): key appears.
+        let s = SessionInfo {
+            name: "claude-x".into(),
+            tool: "claude".into(),
+            short: "x".into(),
+            attached: false,
+            activity: 0,
+            preview: String::new(),
+            waiting: false,
+            cwd: String::new(),
+            machine: "laptop".into(),
+        };
+        let v = serde_json::to_string(&s).unwrap();
+        assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
+
+        // A NEW client parsing an OLD payload (no `machine`) reads it as "".
+        let old: SessionInfo = serde_json::from_str(
+            r#"{"name":"claude-x","tool":"claude","short":"x","attached":false,"activity":0,"preview":"p","waiting":false}"#,
+        )
+        .unwrap();
+        assert_eq!(old.machine, "");
+
+        // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
+        // needs — the rest still parses (forward-compat); round-trip the value.
+        let back: SessionInfo = serde_json::from_str(&v).unwrap();
+        assert_eq!(back.machine, "laptop");
+    }
+
+    #[test]
+    fn auth_types_json_parity() {
+        // Login request the React PWA POSTs.
+        let r: LoginReq = serde_json::from_str(r#"{"secret":"hunter2"}"#).unwrap();
+        assert_eq!(r.secret, "hunter2");
+        // Auth status the frontend gates on — camelCase keys.
+        let s = AuthStatus { auth_required: true, authed: false };
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"authRequired":true,"authed":false}"#
+        );
     }
 
     #[test]

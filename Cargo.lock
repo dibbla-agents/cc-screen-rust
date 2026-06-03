@@ -366,11 +366,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-screen-auth"
+version = "0.2.2"
+dependencies = [
+ "base64",
+ "hmac",
+ "http",
+ "rand_core 0.6.4",
+ "sha2",
+ "subtle",
+ "tracing",
+]
+
+[[package]]
+name = "cc-screen-hub"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "cc-screen-auth",
+ "cc-screen-protocol",
+ "cc-screen-push",
+ "futures-util",
+ "mime_guess",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cc-screen-protocol"
 version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cc-screen-push"
+version = "0.2.2"
+dependencies = [
+ "base64",
+ "http",
+ "p256",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "ureq",
+ "web-push-native",
 ]
 
 [[package]]
@@ -380,25 +431,23 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
- "base64",
  "bytes",
+ "cc-screen-auth",
  "cc-screen-protocol",
+ "cc-screen-push",
  "futures-util",
  "http",
  "mime_guess",
  "notify-debouncer-mini",
- "p256",
  "portable-pty",
- "rand_core 0.6.4",
  "rust-embed",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "ureq",
- "web-push-native",
 ]
 
 [[package]]

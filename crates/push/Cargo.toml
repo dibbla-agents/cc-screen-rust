@@ -1,0 +1,21 @@
+# Web Push machinery (VAPID keypair + subscription store + send), shared by the
+# agent (for directly-connected clients) and the hub (centralized, fleet-wide).
+# All pure-Rust crypto/TLS (RustCrypto + rustls), no system OpenSSL. The
+# AppState-coupled busy→waiting sweep (`finish_watcher`) stays in the agent.
+[package]
+name = "cc-screen-push"
+version = "0.2.2"
+edition = "2021"
+description = "Web Push (VAPID + aes128gcm) for cc-screen-rust"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+web-push-native = "0.4"
+ureq = "2"
+p256 = "0.13"
+rand_core = { version = "0.6", features = ["getrandom"] }
+http = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt"] }

@@ -12,10 +12,57 @@ export interface Session {
   // actively working (the CLIs animate a sub-second spinner). Server-computed;
   // see engine.rs IDLE_AFTER_SECS.
   waiting: boolean;
+  // The machine (agent) this session lives on, set by the hub when it aggregates
+  // several agents. Absent/empty when talking to a single agent directly.
+  machine?: string;
+}
+
+// ── Auth (opt-in password / API-token gate) ─────────────────────────────────
+// The browser authenticates with a same-origin session cookie the server sets
+// on login, so individual fetches and WebSockets need no extra headers — the
+// cookie rides along automatically. We only (a) ask the server whether a gate
+// is up and whether we're already in, and (b) notice when a request 401s (an
+// expired cookie) so the app can drop back to the login screen.
+
+export interface AuthStatus {
+  authRequired: boolean;
+  authed: boolean;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const r = await fetch("/api/auth");
+  if (!r.ok) throw new Error(`auth: ${r.status}`);
+  return r.json();
+}
+
+// login posts the password or API token; on success the server sets the 2-week
+// session cookie. Returns true on success, false on a wrong secret.
+export async function login(secret: string): Promise<boolean> {
+  const r = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ secret }),
+  });
+  return r.ok;
+}
+
+export async function logout(): Promise<void> {
+  await fetch("/api/logout", { method: "POST" });
+}
+
+let unauthorizedHandler: (() => void) | null = null;
+// Register a callback fired when the heartbeat sees a 401 (cookie expired /
+// logged out elsewhere). The app uses it to show the login screen again.
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
 }
 
 export async function fetchSessions(): Promise<Session[]> {
   const r = await fetch("/api/sessions");
+  if (r.status === 401) {
+    unauthorizedHandler?.();
+    throw new Error("unauthorized");
+  }
   if (!r.ok) throw new Error(`sessions: ${r.status}`);
   return r.json();
 }
@@ -394,10 +441,16 @@ export async function deleteSession(session: string, mode: "exit" | "kill"): Pro
 }
 
 // wsURL builds the terminal WebSocket URL for a session, honouring the page's
-// scheme (wss under tailscale serve / https).
-export function wsURL(session: string): string {
+// scheme (wss under tailscale serve / https). When talking to a hub, pass the
+// session's `machine` so the hub routes to the owning agent; omitted/empty for a
+// single agent (unchanged URL).
+export function wsURL(session: string, machine?: string): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/api/ws?session=${encodeURIComponent(session)}`;
+  let url = `${proto}://${location.host}/api/ws?session=${encodeURIComponent(session)}`;
+  if (machine) {
+    url += `&machine=${encodeURIComponent(machine)}`;
+  }
+  return url;
 }
 
 // watchURL builds the filesystem-watch WebSocket URL (real-time tree + open-file

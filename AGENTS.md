@@ -17,9 +17,11 @@ Two clients speak the same wire contract:
   and a multi-pane grid.
 
 It is **tailnet-only by design**: the agents launch with
-`--dangerously-skip-permissions` / YOLO, there is **no auth**, and the server must
-never bind a public interface. "Remote" means another machine on your Tailscale
-network.
+`--dangerously-skip-permissions` / YOLO and the server must never bind a public
+interface. "Remote" means another machine on your Tailscale network. Auth is
+**opt-in** (off by default): set `CCWEB_PASSWORD` and/or `CCWEB_API_TOKEN` (see
+`src/auth.rs`) to gate it — a thin guard against *other* tailnet users, not a
+public-internet hardening.
 
 ## Workspace layout
 
@@ -94,10 +96,57 @@ crossterm `KeyEvent`s → VT byte sequences. Module map: `client/{rest,ws,url}`,
 `ui/{switcher,grid,statusbar,overlay,util}`, `config.rs`, `term.rs` (RAII
 terminal guard + panic hook).
 
+## The hub (aggregator) — `crates/hub`
+
+An optional **hub** lets one endpoint front many machines. Each machine runs the
+**agent** (this server) which dials *out* to the hub over a single WebSocket
+(`src/uplink.rs` → `/agent/ws`) and registers; clients (PWA + `ccs`) talk to the
+**hub**, which transparently relays each request to the owning agent. The hub
+**owns no PTY and no filesystem** — it's a registry + client-auth gate + byte
+relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
+`handlers`). The agent stays **dual-mode** (still serves direct clients) unless
+`--hub-only`.
+
+- **The load-bearing invariant:** every browser/`ccs` client maps 1:1 to a real
+  `register_client()` subscriber on the owning agent, tunneled over a logical
+  channel. The transport-agnostic `attach_loop` (`src/attach.rs`) is driven by
+  both the local axum WS handler and the uplink, so the engine (`engine.rs`) is
+  untouched and the snapshot-first / per-client-min-size / `Lagged`→resync
+  invariants hold across the relay. **Don't break that 1:1 mapping.**
+- **The envelope is the contract** (`crates/protocol/src/hub.rs`, feature `hub`):
+  manual length-prefixed frames (`[u32 header_len][JSON header][raw payload]`);
+  PTY bytes ride the raw tail, never base64/serde. `machine` is added to
+  `SessionInfo` (`#[serde(default, skip_serializing_if)]` — omitted = single
+  agent, so older clients still parse). Lifecycle/small-file ops route via
+  `Cmd`/`Reply` (req-id correlated); terminal + fs-watch are per-`ch` channels.
+- **Two independent credentials:** clients authenticate to the hub with the same
+  `cc-screen-auth` gate (cookie/bearer); agents authenticate to the hub with a
+  **separate per-agent uplink token** (`CCHUB_AGENT_TOKENS=machine:token,…`).
+  A leaked client password can't impersonate an agent; a leaked agent token
+  scopes to one machine.
+- **Not yet relayed (documented gap):** bulk binary transfers — download with
+  `Range`, 500 MiB upload, clipboard-image — over the dedicated `/agent/bulk`
+  stream. Browse/edit (small file ops) + fs-watch + terminal + lifecycle ARE
+  relayed. The PWA also still needs `machine` threaded through its components
+  (the `ccs` TUI is fully threaded; `wsURL` already accepts `machine`).
+
 ## Conventions & gotchas
 
-- **Tailnet-only, no auth, YOLO agents.** Never add a public bind. The TUI takes
-  one base URL and derives `ws`/`wss` by scheme-swap.
+- **Tailnet-only, YOLO agents.** Never add a public bind *to an agent*. The TUI
+  takes one base URL and derives `ws`/`wss` by scheme-swap.
+- **Hub security model.** The rule isn't "never aggregate" — it's "the YOLO box
+  never accepts inbound (it only dials out; `--hub-only` drops its local bind)
+  and the relay never touches a filesystem." The hub concentrates access to every
+  connected agent's PTYs/filesystem, so hub compromise = fleet blast radius:
+  enable client auth in multi-machine mode, use per-agent uplink tokens, bind the
+  hub's tailnet IP by default, and for off-tailnet use front it with a TLS
+  reverse proxy (mTLS on the uplink). The agent's `confine.rs` ($HOME confinement)
+  stays the authoritative guard — the hub can't widen it (file ops run on the agent).
+- **Auth is opt-in (`src/auth.rs`).** Off unless `CCWEB_PASSWORD`/`CCWEB_API_TOKEN`
+  is set. The browser rides a signed 2-week session cookie (so individual
+  fetches/WS need no token); headless clients (`ccs`, scripts) send
+  `Authorization: Bearer <token>`. The middleware exempts static assets +
+  `/api/{login,auth,logout}`; everything else under `/api/` is gated.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).
@@ -114,8 +163,40 @@ to the host's Tailscale IP, **side-by-side** with the Go `cc-screen-web` (port
 the `tools.conf` format. `./install.sh` builds + installs the unit. The `ccs`
 binary is typically installed to `~/.local/bin/`.
 
+To turn on auth, `cc-screen-rust install --password PW` writes `CCWEB_PASSWORD`
+to `web.env` and auto-generates a `CCWEB_API_TOKEN` (printed once, for the TUI);
+both are editable in `~/.config/cc-screen-rust/web.env`. Point the TUI at it via
+`api_token` in `~/.config/cc-screen-tui/config.toml`, `ccs --token`, or
+`CCS_API_TOKEN`/`CCWEB_API_TOKEN`. **Don't run `install`/`uninstall` to test** —
+`systemctl --user` hits the live service.
+
+The **hub** is its own binary + service: `cc-screen-hub install [--port N]
+[--password PW] [--token TOK] [--agents machine:token,…]` (systemd `--user`
+`cc-screen-hub.service`, default **port 8840**, config dir
+`~/.config/cc-screen-hub/`). Agents opt in with `cc-screen-rust ... --hub
+http://HUB:8840 --token <uplink-token> --machine-id NAME` (env:
+`CCWEB_HUB_URL`/`CCWEB_HUB_TOKEN`/`CCWEB_MACHINE_ID`); `--hub-only` suppresses the
+local bind. Same **don't run `install`/`uninstall` to test** rule applies to the
+hub. Local two-process smoke: run both binaries on `127.0.0.1:18840`/`:18839`
+under a temp `$HOME` (see the `examples/hub_attach_smoke.rs` client).
+
 ## Further reading
 
 - **`PLAN.md`** — server design, decisions, parity notes.
 - **`TUI_PLAN.md`** — the `ccs` design and milestones (M0–M5), including the
   emulator choice and the grid.
+- **`HUB.md`** — the aggregator: setup for the hub + slaves + TUI, env-var
+  reference, security model, what's relayed, and troubleshooting.
+
+<!-- >>> dibbla skill >>> -->
+## Dibbla CLI
+
+This project uses the Dibbla CLI. Detailed guidance for agents using it lives at:
+
+- `.claude/skills/dibbla/SKILL.md` — entry point (commands, flags, agent guidelines)
+- `.claude/skills/dibbla/reference.md` — full command reference
+- `.claude/skills/dibbla/examples.md` — example flows
+- `.claude/skills/dibbla/guardrails.md` — safety checks
+
+Installed by `dibbla skills install dibbla` (CLI 1.2.39). Re-run to refresh.
+<!-- <<< dibbla skill <<< -->

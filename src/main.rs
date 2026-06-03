@@ -5,17 +5,22 @@
 // repaint, and serves the existing React PWA embedded in the binary. See
 // PLAN.md for the design and milestones.
 
+mod attach;
+mod auth;
 mod clip;
 mod config;
 mod confine;
 mod engine;
+mod fileops;
 mod files;
 mod handlers;
 mod manifest;
+mod ops;
 mod push;
 mod render;
 mod service;
 mod tools;
+mod uplink;
 mod upload;
 mod watch;
 
@@ -28,10 +33,43 @@ use axum::{
 const UPLOAD_MAX: usize = 500 << 20; // 500 MiB
 const CLIP_MAX: usize = 25 << 20; // 25 MiB
 
+/// Runtime usage (when you run the binary directly). Service setup is a separate
+/// subcommand — see `cc-screen-rust install --help`.
+fn print_usage() {
+    println!(
+        r#"cc-screen-rust — the per-machine agent: drives AI coding CLIs (claude, codex,
+gemini, kimi) as long-lived terminal sessions you attach to from a phone/browser
+or the `ccs` TUI. Tailnet-only by design.
+
+USAGE
+  cc-screen-rust [--addr HOST:PORT] [--no-restore] [slave flags]
+  cc-screen-rust install [--help]    set it up as an auto-starting service (usual way)
+  cc-screen-rust update              fetch the latest release + restart the service
+  cc-screen-rust uninstall           remove that service
+
+RUN-DIRECTLY FLAGS (for one-off / foreground runs)
+  --addr HOST:PORT    bind address (default 127.0.0.1:8839; env CCWEB_ADDR)
+  --no-restore        don't auto-resume recorded sessions at startup
+
+SLAVE MODE (also register with a central hub; env in parens)
+  --hub URL           hub to dial out to and register with     (CCWEB_HUB_URL)
+  --hub-token TOK     this machine's per-agent uplink token    (CCWEB_HUB_TOKEN)
+  --machine-id NAME   name shown in the hub's list (default hostname, CCWEB_MACHINE_ID)
+  --hub-only          bind no local port; reachable only via the hub (CCWEB_HUB_ONLY)
+
+AUTH (opt-in): set CCWEB_PASSWORD and/or CCWEB_API_TOKEN (see `install --help`).
+
+Most people use `cc-screen-rust install` (which writes ~/.config/cc-screen-rust/
+web.env and runs it in the background). To aggregate many machines under one
+address, run a hub (`cc-screen-hub install`) and point agents at it with --hub."#
+    );
+}
+
 #[tokio::main]
 async fn main() {
     // `install` / `uninstall` wire up (or tear down) this binary's own service
     // (systemd on Linux, launchd on macOS) and exit — no server, no tracing.
+    // `--help` prints runtime usage; otherwise we start serving.
     let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(String::as_str) {
         Some("install") => {
@@ -46,6 +84,17 @@ async fn main() {
                 eprintln!("uninstall failed: {e}");
                 std::process::exit(1);
             }
+            return;
+        }
+        Some("update") => {
+            if let Err(e) = service::update() {
+                eprintln!("update failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("-h") | Some("--help") | Some("help") => {
+            print_usage();
             return;
         }
         _ => {}
@@ -67,7 +116,19 @@ async fn main() {
         cfg.config_dir.display()
     );
 
-    let state = engine::AppState::new(tools, cfg.env_path.clone(), cfg.config_dir.clone(), cfg.home.clone());
+    let auth = auth::Auth::load(&cfg.config_dir, cfg.password.clone(), cfg.api_token.clone());
+    tracing::info!(
+        "cc-screen-rust: auth {}",
+        if auth.enabled() { "ENABLED (password/token required)" } else { "disabled (tailnet-only, no gate)" }
+    );
+
+    let state = engine::AppState::new(
+        tools,
+        cfg.env_path.clone(),
+        cfg.config_dir.clone(),
+        cfg.home.clone(),
+        auth,
+    );
 
     // Auto-restore recorded sessions at startup (resume-only model: a redeploy /
     // reboot ended the agents, so bring them back resuming each conversation).
@@ -83,6 +144,17 @@ async fn main() {
     // Watch for agents finishing their turn (busy→waiting) and buzz subscribed
     // phones via Web Push. Cheap idle poll; no-op until a device subscribes.
     tokio::spawn(push::finish_watcher(state.clone()));
+
+    // If pointed at a hub, also dial out and register. Dual-mode: the local bind
+    // below still serves direct clients unless --hub-only.
+    if let Some(hub) = cfg.hub_url.clone() {
+        tokio::spawn(uplink::run(
+            state.clone(),
+            hub,
+            cfg.hub_token.clone(),
+            cfg.machine_id.clone(),
+        ));
+    }
 
     let app = Router::new()
         // terminal core
@@ -131,8 +203,25 @@ async fn main() {
         )
         .route("/api/clip/targets", get(clip::clip_targets))
         .route("/api/clip/image.png", get(clip::clip_image))
+        // auth (opt-in; these three are exempt inside the middleware)
+        .route("/api/login", post(handlers::login))
+        .route("/api/auth", get(handlers::auth_status))
+        .route("/api/logout", post(handlers::logout))
         .fallback(handlers::static_handler)
+        // Gate everything above; a no-op when no password/token is configured.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_auth))
         .with_state(state);
+
+    // --hub-only: bind NO inbound socket — the YOLO box is reachable only through
+    // the hub (the uplink task spawned above does the work). Park until killed.
+    if cfg.hub_only && cfg.hub_url.is_some() {
+        tracing::info!(
+            "cc-screen-rust: --hub-only; not binding a local port (reachable only via the hub)"
+        );
+        let _ = app; // built but unused in this mode
+        std::future::pending::<()>().await;
+        return;
+    }
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr)
         .await

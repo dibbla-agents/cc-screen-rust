@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# cc-screen-rust installer — the web-only, tmux-free sibling. Runs SIDE-BY-SIDE
-# with the Go cc-screen-web (own service name, own config dir, own port 8839).
+# cc-screen-rust installer — build this machine's agent from source + wire up the
+# service. Runs SIDE-BY-SIDE with the Go cc-screen-web (own service, config dir,
+# port 8839). Service setup is delegated to `cc-screen-rust install`.
 #
-#   ./install.sh                 build + run on the Tailscale IP, port 8839
-#   ./install.sh -p 9001         choose the port
-#   ./install.sh --bind 0.0.0.0  choose the bind address (default: tailnet IP)
-#   ./install.sh --no-build      (re)install the service without rebuilding
-#   ./install.sh --no-service    just build the binary, don't run it
-#   ./install.sh --no-restore    don't auto-resume sessions at startup
+#   ./install.sh                      build + run on the Tailscale IP, port 8839
+#   ./install.sh -p 9001              choose the port
+#   ./install.sh --bind 0.0.0.0       choose the bind address (default: tailnet IP)
+#   ./install.sh --no-build           (re)install the service without rebuilding
+#   ./install.sh --no-service         just build the binary, don't run it
+#   ./install.sh --no-restore         don't auto-resume sessions at startup
+#
+# Slave mode — also register with a hub (see HUB.md / `cc-screen-hub install`):
+#   ./install.sh --hub URL --hub-token TOK --machine-id NAME [--hub-only]
 #
 # tailnet-only by design: the agents launch with --dangerously-skip-permissions.
 set -euo pipefail
@@ -19,17 +23,28 @@ BIND=""
 BUILD=1
 SERVICE=1
 RESTORE=1
+HUB=""
+HUB_TOKEN=""
+MACHINE_ID=""
+HUB_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -p|--port)    PORT="$2"; shift 2 ;;
-    --port=*)     PORT="${1#*=}"; shift ;;
-    -b|--bind)    BIND="$2"; shift 2 ;;
-    --bind=*)     BIND="${1#*=}"; shift ;;
-    --no-build)   BUILD=0; shift ;;
-    --no-service) SERVICE=0; shift ;;
-    --no-restore) RESTORE=0; shift ;;
-    -h|--help)    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -p|--port)      PORT="$2"; shift 2 ;;
+    --port=*)       PORT="${1#*=}"; shift ;;
+    -b|--bind)      BIND="$2"; shift 2 ;;
+    --bind=*)       BIND="${1#*=}"; shift ;;
+    --no-build)     BUILD=0; shift ;;
+    --no-service)   SERVICE=0; shift ;;
+    --no-restore)   RESTORE=0; shift ;;
+    --hub)          HUB="$2"; shift 2 ;;
+    --hub=*)        HUB="${1#*=}"; shift ;;
+    --hub-token)    HUB_TOKEN="$2"; shift 2 ;;
+    --hub-token=*)  HUB_TOKEN="${1#*=}"; shift ;;
+    --machine-id)   MACHINE_ID="$2"; shift 2 ;;
+    --machine-id=*) MACHINE_ID="${1#*=}"; shift ;;
+    --hub-only)     HUB_ONLY=1; shift ;;
+    -h|--help)      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -55,10 +70,13 @@ BIN="$(pwd)/target/release/cc-screen-rust"
 # macOS too. The subcommand writes ~/.config/cc-screen-rust/web.env, (re)starts
 # the service, and prints the serving URL + tailnet hint.
 if [ "$SERVICE" = 1 ]; then
-  norestore=""
-  [ "$RESTORE" = 1 ] || norestore="--no-restore"
-  # shellcheck disable=SC2086  # norestore is intentionally word-split (empty or one flag)
-  "$BIN" install --bind "$BIND" --port "$PORT" $norestore
+  set -- install --bind "$BIND" --port "$PORT"
+  [ "$RESTORE" = 1 ] || set -- "$@" --no-restore
+  [ -n "$HUB" ]        && set -- "$@" --hub "$HUB"
+  [ -n "$HUB_TOKEN" ]  && set -- "$@" --hub-token "$HUB_TOKEN"
+  [ -n "$MACHINE_ID" ] && set -- "$@" --machine-id "$MACHINE_ID"
+  [ "$HUB_ONLY" = 1 ]  && set -- "$@" --hub-only
+  "$BIN" "$@"
 else
   CFG_DIR="$HOME/.config/cc-screen-rust"
   mkdir -p "$CFG_DIR"

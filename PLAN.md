@@ -19,6 +19,15 @@ in-process session engine.
 - **Deployment: side-by-side.** Own config dir `~/.config/cc-screen-rust/`, own
   port (default **8839**), reusing the `tools.conf` *format* (and the existing
   shared file if present) but a separate session store.
+- **Auth: opt-in, cookie + token (`src/auth.rs`).** Off unless `CCWEB_PASSWORD`
+  or `CCWEB_API_TOKEN` is set. Threat model is *other tailnet users*, not the
+  public internet. The browser logs in once and rides a **stateless HMAC-signed
+  2-week session cookie** (so every fetch/WS/download authenticates
+  automatically — no per-request token plumbing); headless clients (`ccs`,
+  scripts) present the token as `Authorization: Bearer`. The signing key is a
+  random `session.key` persisted in the config dir, so 2-week sessions survive
+  restarts with no server-side session store. An axum middleware gates `/api/*`
+  except `login`/`auth`/`logout` and the static app shell.
 
 ## Architecture: the session engine (replaces tmux)
 

@@ -9,6 +9,10 @@ use cc_screen_protocol::WsClientFrame;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::app::{AppMsg, PaneMsg};
@@ -16,6 +20,7 @@ use crate::pane::{ConnState, WsOut};
 
 pub async fn run(
     url: String,
+    token: Option<String>,
     id: u64,
     init_cols: u16,
     init_rows: u16,
@@ -30,7 +35,19 @@ pub async fn run(
     loop {
         let _ = app_tx.send(state(ConnState::Connecting)).await;
 
-        let stream = match tokio_tungstenite::connect_async(url.clone()).await {
+        // The browser authenticates the WS handshake with its session cookie;
+        // the TUI has no cookie jar, so it sends the API token on the handshake
+        // (rebuilt each attempt — the Request isn't reusable across reconnects).
+        let req = match client_request(&url, token.as_deref()) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = app_tx.send(state(ConnState::Closed)).await;
+                sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(5000);
+                continue;
+            }
+        };
+        let stream = match tokio_tungstenite::connect_async(req).await {
             Ok((s, _resp)) => s,
             Err(_) => {
                 let _ = app_tx.send(state(ConnState::Closed)).await;
@@ -94,4 +111,16 @@ pub async fn run(
 
 fn resize_json(cols: u16, rows: u16) -> String {
     serde_json::to_string(&WsClientFrame::resize(cols, rows)).unwrap()
+}
+
+/// Build the WS handshake request for `url`, attaching `Authorization: Bearer`
+/// when a token is configured (a no-op against an unauthenticated server).
+fn client_request(url: &str, token: Option<&str>) -> Result<Request, anyhow::Error> {
+    let mut req = url.into_client_request()?;
+    if let Some(t) = token {
+        let mut val = HeaderValue::from_str(&format!("Bearer {t}"))?;
+        val.set_sensitive(true);
+        req.headers_mut().insert(AUTHORIZATION, val);
+    }
+    Ok(req)
 }

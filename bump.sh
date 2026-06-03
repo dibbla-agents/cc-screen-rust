@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # bump.sh X.Y.Z — lockstep version bump across the workspace crates.
 #
-# cc-screen-rust ships the server, the `ccs` TUI, and the protocol crate as ONE
-# version (cargo-dist releases them in lockstep off a vX.Y.Z tag). This edits the
-# three [package] version lines, refreshes Cargo.lock, and stages them. It does
-# NOT commit, tag, or push — review, then:
+# cc-screen-rust ships the server, the `ccs` TUI, the hub, and the shared crates
+# as ONE version (cargo-dist releases the dist=true binaries in lockstep off a
+# vX.Y.Z tag). This edits every workspace [package] version line, refreshes
+# Cargo.lock, and stages them. It does NOT commit, tag, or push — review, then:
 #     git commit -m "Release X.Y.Z" && git push
 #     ./release.sh && site/release-host.sh
 set -euo pipefail
@@ -17,7 +17,8 @@ case "$NEW" in
   *) echo "usage: ./bump.sh X.Y.Z   (e.g. ./bump.sh 0.2.3)" >&2; exit 1 ;;
 esac
 
-FILES="Cargo.toml crates/tui/Cargo.toml crates/protocol/Cargo.toml"
+FILES="Cargo.toml crates/tui/Cargo.toml crates/protocol/Cargo.toml \
+crates/auth/Cargo.toml crates/push/Cargo.toml crates/hub/Cargo.toml"
 OLD="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 [ -n "$OLD" ] || { echo "could not read current version from Cargo.toml" >&2; exit 1; }
 if [ "$OLD" = "$NEW" ]; then echo "already at $NEW" >&2; exit 1; fi
