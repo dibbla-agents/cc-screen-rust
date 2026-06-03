@@ -204,6 +204,38 @@ impl Registry {
         self.inner.lock().unwrap().get(machine_id).cloned()
     }
 
+    /// Resolve which agent a client request targets.
+    ///
+    /// With an explicit `machine`, that agent (if online). Without one — e.g. the
+    /// React PWA, which doesn't thread `machine` through yet — fall back: the
+    /// single online agent that owns `session`, or (when `session` is `None`, e.g.
+    /// restore/file ops) the only online agent. `None` if unknown / offline /
+    /// ambiguous (more than one machine could match). A client that DOES send
+    /// `machine` is always unambiguous; this only kicks in for machine-less ones.
+    pub fn resolve(&self, machine: &str, session: Option<&str>) -> Option<Arc<AgentConn>> {
+        if !machine.is_empty() {
+            return self.get(machine).filter(|a| a.online());
+        }
+        let g = self.inner.lock().unwrap();
+        let online: Vec<&Arc<AgentConn>> = g.values().filter(|a| a.online()).collect();
+        match session {
+            Some(name) => {
+                let mut owners = online.into_iter().filter(|a| a.owns(name));
+                let first = owners.next()?;
+                // Ambiguous if a second machine also has a session by that name.
+                if owners.next().is_some() {
+                    return None;
+                }
+                Some(first.clone())
+            }
+            // No session to disambiguate by: only safe when there's exactly one.
+            None => match online.as_slice() {
+                [only] => Some((*only).clone()),
+                _ => None,
+            },
+        }
+    }
+
     pub fn is_online(&self, machine_id: &str) -> bool {
         self.get(machine_id).is_some_and(|c| c.online())
     }
@@ -238,6 +270,12 @@ impl AgentConn {
     /// carrying it across a reconnect — `sessions_tagged` re-stamps on read).
     fn sessions_tagged_raw(&self) -> Vec<SessionInfo> {
         self.last_sessions.lock().unwrap().clone()
+    }
+
+    /// Does this agent currently report a session by this name? (Used by
+    /// `Registry::resolve` to route a machine-less request to its owner.)
+    fn owns(&self, name: &str) -> bool {
+        self.last_sessions.lock().unwrap().iter().any(|s| s.name == name)
     }
 }
 
@@ -334,6 +372,36 @@ mod tests {
         a.go_offline();
         assert!(matches!(b1_rx.recv().await, Some(ToBrowser::Close)), "browser told to close");
         assert!(!a.online());
+    }
+
+    #[test]
+    fn resolve_by_machine_session_or_single_online() {
+        let r = Registry::new();
+        let a = r.register("alpha", "a", vec![], dummy_agent());
+        let b = r.register("beta", "b", vec![], dummy_agent());
+        a.set_sessions(vec![sess("claude-x")]);
+        b.set_sessions(vec![sess("codex-y"), sess("dup")]);
+        a.set_sessions(vec![sess("claude-x"), sess("dup")]); // both have "dup"
+
+        let id = |c: Option<Arc<AgentConn>>| c.map(|x| x.machine_id.clone());
+
+        // Explicit machine wins.
+        assert_eq!(id(r.resolve("beta", None)), Some("beta".into()));
+        // Machine-less: resolved by the unique owner of the session.
+        assert_eq!(id(r.resolve("", Some("claude-x"))), Some("alpha".into()));
+        assert_eq!(id(r.resolve("", Some("codex-y"))), Some("beta".into()));
+        // Ambiguous (two machines own "dup") or unknown → None.
+        assert!(r.resolve("", Some("dup")).is_none());
+        assert!(r.resolve("", Some("nope")).is_none());
+        // Machine-less with no session + >1 online → ambiguous.
+        assert!(r.resolve("", None).is_none());
+
+        // Offline machines don't resolve; once only one is online, the no-session
+        // fallback picks it.
+        a.go_offline();
+        assert!(r.resolve("alpha", None).is_none());
+        assert!(r.resolve("", Some("claude-x")).is_none());
+        assert_eq!(id(r.resolve("", None)), Some("beta".into()));
     }
 
     #[tokio::test]

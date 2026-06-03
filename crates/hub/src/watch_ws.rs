@@ -21,6 +21,7 @@ use crate::state::HubState;
 
 #[derive(Deserialize)]
 pub struct WatchQuery {
+    #[serde(default)]
     machine: String,
 }
 
@@ -32,12 +33,11 @@ struct WatchFrame {
 }
 
 pub async fn ws(State(hub): State<HubState>, Query(q): Query<WatchQuery>, ws: WebSocketUpgrade) -> Response {
-    let Some(agent) = hub.registry.get(&q.machine) else {
-        return (StatusCode::NOT_FOUND, "unknown machine").into_response();
+    // Watch has no session to disambiguate by; resolve to the single online
+    // machine when the client (the PWA) omits `machine`.
+    let Some(agent) = hub.registry.resolve(&q.machine, None) else {
+        return (StatusCode::NOT_FOUND, "specify ?machine= (more than one is online)").into_response();
     };
-    if !agent.online() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response();
-    }
     ws.on_upgrade(move |socket| bridge(agent, socket))
 }
 

@@ -67,6 +67,7 @@ pub async fn logout(State(hub): State<HubState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct MachineQ {
+    #[serde(default)]
     machine: String,
 }
 
@@ -74,6 +75,7 @@ pub struct MachineQ {
 pub struct RootQ {
     #[serde(default)]
     session: Option<String>,
+    #[serde(default)]
     machine: String,
 }
 
@@ -96,16 +98,18 @@ pub struct SessionBody {
     session: String,
 }
 
-/// Look up the agent, send the op, await the reply. The `Err` arm is a ready-made
-/// HTTP error response (unknown machine / offline / timeout).
-async fn route(hub: &HubState, machine: &str, cmd: Cmd) -> Result<CmdResult, Response> {
-    let agent = hub
-        .registry
-        .get(machine)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "unknown machine").into_response())?;
-    if !agent.online() {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response());
-    }
+/// Resolve the target agent (by explicit `machine`, else by `session` owner / the
+/// single online machine — for machine-less clients like the PWA), send the op,
+/// await the reply. The `Err` arm is a ready-made HTTP error response.
+async fn route(
+    hub: &HubState,
+    machine: &str,
+    session: Option<&str>,
+    cmd: Cmd,
+) -> Result<CmdResult, Response> {
+    let agent = hub.registry.resolve(machine, session).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
+    })?;
     agent.request(cmd).await.map_err(|e| match e {
         RequestErr::Offline => (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response(),
         RequestErr::Timeout => (StatusCode::GATEWAY_TIMEOUT, "agent did not respond").into_response(),
@@ -128,7 +132,9 @@ pub async fn create(
     Query(q): Query<MachineQ>,
     Json(req): Json<CreateReq>,
 ) -> Response {
-    match route(&hub, &q.machine, Cmd::Create(req)).await {
+    // A create has no existing session to disambiguate by — route to the chosen
+    // (or single online) machine.
+    match route(&hub, &q.machine, None, Cmd::Create(req)).await {
         Ok(CmdResult::Created(name)) => (StatusCode::OK, Json(json!({ "name": name }))).into_response(),
         Ok(CmdResult::Error { code, msg }) => {
             (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
@@ -143,7 +149,8 @@ pub async fn delete(
     Query(q): Query<MachineQ>,
     Json(req): Json<DeleteReq>,
 ) -> Response {
-    match route(&hub, &q.machine, Cmd::Delete(req)).await {
+    let session = req.session.clone();
+    match route(&hub, &q.machine, Some(&session), Cmd::Delete(req)).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -154,7 +161,8 @@ pub async fn key(
     Query(q): Query<MachineQ>,
     Json(b): Json<KeyBody>,
 ) -> Response {
-    match route(&hub, &q.machine, Cmd::Key { session: b.session, key: b.key }).await {
+    let session = b.session.clone();
+    match route(&hub, &q.machine, Some(&session), Cmd::Key { session: b.session, key: b.key }).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -165,8 +173,9 @@ pub async fn paste(
     Query(q): Query<MachineQ>,
     Json(b): Json<PasteBody>,
 ) -> Response {
+    let session = b.session.clone();
     let cmd = Cmd::Paste { session: b.session, text: b.text, enter: b.enter };
-    match route(&hub, &q.machine, cmd).await {
+    match route(&hub, &q.machine, Some(&session), cmd).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -177,14 +186,16 @@ pub async fn clear_history(
     Query(q): Query<MachineQ>,
     Json(b): Json<SessionBody>,
 ) -> Response {
-    match route(&hub, &q.machine, Cmd::ClearHistory { session: b.session }).await {
+    let session = b.session.clone();
+    match route(&hub, &q.machine, Some(&session), Cmd::ClearHistory { session: b.session }).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
 }
 
 pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -> Response {
-    match route(&hub, &q.machine, Cmd::SessionRoot { session: q.session }).await {
+    let session = q.session.clone();
+    match route(&hub, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {
         Ok(CmdResult::SessionRoot { root, home }) => {
             Json(json!({ "root": root, "home": home })).into_response()
         }
@@ -194,7 +205,7 @@ pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -
 }
 
 pub async fn restorable(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Response {
-    match route(&hub, &q.machine, Cmd::Restorable).await {
+    match route(&hub, &q.machine, None, Cmd::Restorable).await {
         Ok(CmdResult::Restorable(list)) => Json(list).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
         Err(resp) => resp,
@@ -202,7 +213,7 @@ pub async fn restorable(State(hub): State<HubState>, Query(q): Query<MachineQ>) 
 }
 
 pub async fn restore(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Response {
-    match route(&hub, &q.machine, Cmd::Restore).await {
+    match route(&hub, &q.machine, None, Cmd::Restore).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
         Err(resp) => resp,
@@ -262,13 +273,20 @@ pub struct FileGetQ {
     path: String,
     #[serde(default)]
     session: String,
+    #[serde(default)]
     machine: String,
 }
 
-/// Route a file op and map its `CmdResult` to the JSON / 204 / error the PWA
-/// expects.
-async fn file_route(hub: &HubState, machine: &str, op: &str, args: Value) -> Response {
-    match route(hub, machine, Cmd::File { op: op.to_string(), args }).await {
+/// Route a file op (resolving the machine by `session` owner / single online box
+/// when the PWA omits it) and map its `CmdResult` to JSON / 204 / error.
+async fn file_route(
+    hub: &HubState,
+    machine: &str,
+    session: Option<&str>,
+    op: &str,
+    args: Value,
+) -> Response {
+    match route(hub, machine, session, Cmd::File { op: op.to_string(), args }).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Ok) => StatusCode::NO_CONTENT.into_response(),
         Ok(CmdResult::Error { code, msg }) => {
@@ -279,25 +297,36 @@ async fn file_route(hub: &HubState, machine: &str, op: &str, args: Value) -> Res
     }
 }
 
+// `dirs`/`files` can disambiguate by the session whose cwd is being browsed;
+// otherwise (and for the path-only ops) we fall back to the single online machine.
+fn opt(s: &str) -> Option<&str> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 pub async fn dirs(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, "dirs", json!({ "path": q.path, "session": q.session })).await
+    file_route(&hub, &q.machine, opt(&q.session), "dirs", json!({ "path": q.path, "session": q.session })).await
 }
 
 pub async fn files(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, "files", json!({ "path": q.path, "session": q.session })).await
+    file_route(&hub, &q.machine, opt(&q.session), "files", json!({ "path": q.path, "session": q.session })).await
 }
 
 pub async fn file_read(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, "read", json!({ "path": q.path })).await
+    file_route(&hub, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
 }
 
-// POST handlers forward the client's JSON body straight through as the op args.
+// POST handlers forward the client's JSON body straight through as the op args;
+// path-only, so they route to the explicit (or single online) machine.
 pub async fn file_write(
     State(hub): State<HubState>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, "write", body).await
+    file_route(&hub, &q.machine, None, "write", body).await
 }
 
 pub async fn file_delete(
@@ -305,7 +334,7 @@ pub async fn file_delete(
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, "delete", body).await
+    file_route(&hub, &q.machine, None, "delete", body).await
 }
 
 pub async fn mkdir(
@@ -313,7 +342,7 @@ pub async fn mkdir(
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, "mkdir", body).await
+    file_route(&hub, &q.machine, None, "mkdir", body).await
 }
 
 pub async fn rmdir(
@@ -321,7 +350,7 @@ pub async fn rmdir(
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, "rmdir", body).await
+    file_route(&hub, &q.machine, None, "rmdir", body).await
 }
 
 pub async fn rename(
@@ -329,7 +358,7 @@ pub async fn rename(
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, "rename", body).await
+    file_route(&hub, &q.machine, None, "rename", body).await
 }
 
 // ── Web Push (hub-local: one VAPID key + sub store for the whole fleet) ───────

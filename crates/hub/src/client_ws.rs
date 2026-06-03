@@ -25,17 +25,17 @@ use crate::state::HubState;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
+    /// Optional: a client that doesn't thread it (the React PWA) omits it, and the
+    /// hub resolves the owning machine from the session name.
+    #[serde(default)]
     machine: String,
     session: String,
 }
 
 pub async fn ws(State(hub): State<HubState>, Query(q): Query<WsQuery>, ws: WebSocketUpgrade) -> Response {
-    let Some(agent) = hub.registry.get(&q.machine) else {
-        return (StatusCode::NOT_FOUND, "unknown machine").into_response();
+    let Some(agent) = hub.registry.resolve(&q.machine, Some(&q.session)) else {
+        return (StatusCode::NOT_FOUND, "no online machine for that session").into_response();
     };
-    if !agent.online() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response();
-    }
     ws.on_upgrade(move |socket| bridge(agent, q.session, socket))
 }
 
