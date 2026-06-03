@@ -19,9 +19,9 @@ const Prompt = () => (
 );
 
 const RUST_INSTALL =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh";
+  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh";
 const TUI_INSTALL =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh";
+  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh";
 
 function Step({
   badge,
@@ -76,7 +76,7 @@ export function Start() {
         >
           <Cmd clip={RUST_INSTALL}>
             <Prompt />
-            {"curl --proto '=https' --tlsv1.2 -LsSf \\\n    .../cc-screen-rust-installer.sh | sh"}
+            {RUST_INSTALL}
           </Cmd>
           <Cmd clip="cc-screen-rust install">
             <Prompt />
@@ -93,7 +93,7 @@ export function Start() {
         >
           <Cmd clip={TUI_INSTALL}>
             <Prompt />
-            {"curl --proto '=https' --tlsv1.2 -LsSf \\\n    .../cc-screen-tui-installer.sh | sh"}
+            {TUI_INSTALL}
           </Cmd>
           <Cmd clip="ccs --server http://<your-computer>:8839">
             <Prompt />
