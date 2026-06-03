@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RestorableSession, Session } from "../api";
 import { ago, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
+import NotificationsButton from "./NotificationsButton";
 
 interface Props {
   open: boolean;
@@ -147,6 +148,7 @@ export default function SessionDrawer({
         <span className="ml-auto hidden text-[10px] text-slate-600 sm:inline">
           ↑↓ ⏎ · Esc · ⌃B
         </span>
+        <NotificationsButton className={`${iconBtn} ml-auto sm:ml-0`} />
         <button onClick={onRefresh} aria-label="Refresh sessions" className={iconBtn}>
           <RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
         </button>

@@ -12,6 +12,7 @@ mod engine;
 mod files;
 mod handlers;
 mod manifest;
+mod push;
 mod render;
 mod service;
 mod tools;
@@ -79,6 +80,10 @@ async fn main() {
         }
     }
 
+    // Watch for agents finishing their turn (busy→waiting) and buzz subscribed
+    // phones via Web Push. Cheap idle poll; no-op until a device subscribes.
+    tokio::spawn(push::finish_watcher(state.clone()));
+
     let app = Router::new()
         // terminal core
         .route("/api/sessions", get(handlers::sessions))
@@ -96,6 +101,11 @@ async fn main() {
             "/api/favorites",
             get(handlers::get_favorites).put(handlers::put_favorites),
         )
+        // web push ("agent finished" phone notifications)
+        .route("/api/push/key", get(handlers::push_key))
+        .route("/api/push/subscribe", post(handlers::push_subscribe))
+        .route("/api/push/unsubscribe", post(handlers::push_unsubscribe))
+        .route("/api/push/test", post(handlers::push_test))
         // files / editor
         .route("/api/dirs", get(files::dirs))
         .route("/api/files", get(files::files))

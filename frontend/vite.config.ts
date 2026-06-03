@@ -39,6 +39,9 @@ export default defineConfig({
       workbox: {
         // Never cache the API; the terminal must always hit the live server.
         navigateFallbackDenylist: [/^\/api/],
+        // Pull in the Web Push handlers (push / notificationclick) — a plain-JS
+        // static asset, so the generated SW keeps doing precaching as before.
+        importScripts: ["push-sw.js"],
       },
     }),
   ],

@@ -367,6 +367,8 @@ pub struct Inner {
     pub home: PathBuf,
     pub clip: ClipStore,
     pub watcher: crate::watch::Watcher,
+    /// Web Push: VAPID keys + device subscriptions + the "agent finished" sender.
+    pub push: crate::push::Push,
 }
 
 #[derive(Clone)]
@@ -386,6 +388,7 @@ impl AppState {
                 tools,
                 registry: Mutex::new(HashMap::new()),
                 env_path,
+                push: crate::push::Push::new(&config_dir),
                 config_dir,
                 watcher: crate::watch::Watcher::new(home.clone()),
                 home,

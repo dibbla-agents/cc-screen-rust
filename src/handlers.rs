@@ -300,6 +300,63 @@ pub async fn put_favorites(State(app): State<AppState>, Json(list): Json<Vec<Fav
     Ok(Json(clean).into_response())
 }
 
+// ── Web Push ("agent finished" phone notifications) ──────────────────────────
+// GET /api/push/key returns the VAPID public (application server) key the client
+// subscribes with. POST subscribe/unsubscribe manage the device list; POST test
+// fires a buzz on demand so the user can confirm the wiring on their phone.
+
+pub async fn push_key(State(app): State<AppState>) -> Json<Value> {
+    Json(json!({ "key": app.inner.push.application_server_key() }))
+}
+
+/// The browser's `PushSubscription` shape (the bits we need).
+#[derive(Deserialize)]
+pub struct SubscribeReq {
+    endpoint: String,
+    keys: SubKeys,
+}
+#[derive(Deserialize)]
+pub struct SubKeys {
+    p256dh: String,
+    auth: String,
+}
+
+pub async fn push_subscribe(
+    State(app): State<AppState>,
+    Json(req): Json<SubscribeReq>,
+) -> ApiResult {
+    if req.endpoint.is_empty() || req.keys.p256dh.is_empty() || req.keys.auth.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "incomplete subscription"));
+    }
+    app.inner.push.add_sub(crate::push::StoredSub {
+        endpoint: req.endpoint,
+        p256dh: req.keys.p256dh,
+        auth: req.keys.auth,
+    });
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct UnsubscribeReq {
+    endpoint: String,
+}
+
+pub async fn push_unsubscribe(
+    State(app): State<AppState>,
+    Json(req): Json<UnsubscribeReq>,
+) -> ApiResult {
+    app.inner.push.remove_sub(&req.endpoint);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn push_test(State(app): State<AppState>) -> ApiResult {
+    app.inner
+        .push
+        .notify("cc-screen", "🔔 Test buzz — notifications are on", "")
+        .await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 // ── GET /api/ws ──────────────────────────────────────────────────────────────
 #[derive(Deserialize)]
 pub struct WsQuery {
