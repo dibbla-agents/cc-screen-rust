@@ -98,6 +98,7 @@ async fn main() {
         client_auth: auth,
         push: Arc::new(cc_screen_push::Push::new(&cfg.config_dir)),
         config_dir: cfg.config_dir,
+        bulk: Default::default(),
     };
 
     let app = build_router(hub);

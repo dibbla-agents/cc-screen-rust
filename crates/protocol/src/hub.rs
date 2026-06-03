@@ -139,17 +139,31 @@ pub enum CmdResult {
     Json(serde_json::Value),
 }
 
-/// What a bulk transfer (its own short-lived WS) moves. Kept minimal here;
-/// fleshed out with the file-relay milestone.
+/// A bulk HTTP transfer relayed over the dedicated `/agent/bulk` WS (download,
+/// upload, clipboard image). The hub fills this from the client's request; the
+/// agent replays it against its **real** file-transfer handlers (so Range,
+/// multipart, and `$HOME` confinement behave exactly as a direct connection).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum BulkSpec {
-    /// Stream a file down (optionally a single `Range`), relayed to the client.
-    Download { session: Option<String>, path: String, range: Option<String> },
-    /// Receive a (multipart) upload destined for `session`'s cwd (or `$HOME`).
-    Upload { session: Option<String> },
-    /// Receive a clipboard PNG, stage it, and write Ctrl-V to the session's PTY.
-    ClipImage { session: String },
+pub struct BulkSpec {
+    pub method: String,
+    /// Path + query, e.g. `/api/download?path=…&inline=1`.
+    pub uri: String,
+    /// Relayed request headers (Range, Content-Type/boundary, …); hop-by-hop
+    /// headers are dropped by the hub.
+    pub headers: Vec<(String, String)>,
 }
+
+/// The response head the agent sends back (as the first text frame) on the bulk
+/// WS, before streaming the body as binary frames.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkRespHead {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Sentinel text frame marking end-of-request-body (hub→agent) on the bulk WS.
+/// The agent ends its response with a WebSocket Close instead.
+pub const BULK_BODY_END: &str = "\u{4}";
 
 // ── framing ─────────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +276,7 @@ mod tests {
             HubMsg::Command { req: 2, cmd: Cmd::Delete(DeleteReq { session: "claude-x".into(), mode: "kill".into() }) },
             HubMsg::Command { req: 3, cmd: Cmd::Key { session: "claude-x".into(), key: "enter".into() } },
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
-            HubMsg::OpenBulk { req: 5, bulk: BulkSpec::Download { session: None, path: "/home/u/f".into(), range: Some("bytes=0-99".into()) } },
+            HubMsg::OpenBulk { req: 5, bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::Ping,
         ];
         for m in cases {

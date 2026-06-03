@@ -64,7 +64,7 @@ pub async fn run(state: AppState, hub_url: String, token: Option<String>, machin
     tracing::info!("uplink: hub={url} machine_id={machine_id}");
     let mut attempt = 0u32;
     loop {
-        match connect_and_serve(&state, &url, token.as_deref(), &machine_id).await {
+        match connect_and_serve(&state, &url, &hub_url, token.as_deref(), &machine_id).await {
             Err(e) => {
                 tracing::warn!("uplink: connect failed: {e}");
                 attempt = attempt.saturating_add(1);
@@ -83,6 +83,7 @@ pub async fn run(state: AppState, hub_url: String, token: Option<String>, machin
 async fn connect_and_serve(
     state: &AppState,
     url: &str,
+    hub_base: &str,
     token: Option<&str>,
     machine_id: &str,
 ) -> anyhow::Result<()> {
@@ -158,7 +159,7 @@ async fn connect_and_serve(
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Binary(buf))) => match decode_frame::<HubMsg>(&buf) {
                     Ok((msg, payload)) => {
-                        if !handle_hub(state, &out_tx, &mut chans, msg, payload).await {
+                        if !handle_hub(state, hub_base, token, &out_tx, &mut chans, msg, payload).await {
                             break;
                         }
                     }
@@ -210,6 +211,8 @@ struct ChannelMaps {
 /// Handle one `HubMsg`. Returns `false` only when the writer is gone (stop).
 async fn handle_hub(
     state: &AppState,
+    hub_base: &str,
+    token: Option<&str>,
     out_tx: &mpsc::Sender<WsOut>,
     chans: &mut ChannelMaps,
     msg: HubMsg,
@@ -282,8 +285,16 @@ async fn handle_hub(
                 return false;
             }
         }
-        // OpenBulk (bulk binary transfers) lands in a later pass.
-        other => tracing::debug!("uplink: unhandled hub msg: {other:?}"),
+        HubMsg::OpenBulk { req, bulk } => {
+            // Big transfers run on a fresh, dedicated WS (off the control channel).
+            tokio::spawn(crate::bulk::serve(
+                state.clone(),
+                hub_base.to_string(),
+                token.map(str::to_string),
+                req,
+                bulk,
+            ));
+        }
     }
     true
 }

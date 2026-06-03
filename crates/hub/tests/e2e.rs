@@ -37,6 +37,7 @@ async fn start_hub(client_auth: Auth, agent_tokens: &[(&str, &str)]) -> String {
         client_auth,
         config_dir: tmp.clone(),
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
+        bulk: Default::default(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -4,6 +4,7 @@
 //! identical router + relay on an ephemeral port.
 
 pub mod assets;
+pub mod bulk;
 pub mod client_ws;
 pub mod config;
 pub mod handlers;
@@ -23,8 +24,17 @@ use state::HubState;
 /// Everything under `/api/` rides the client-auth middleware.
 pub fn build_router(hub: HubState) -> Router {
     Router::new()
-        // The agent uplink.
+        // The agent uplink + the dedicated bulk dial-back.
         .route("/agent/ws", get(uplink_server::agent_ws))
+        .route("/agent/bulk", get(bulk::agent_bulk))
+        // Bulk file transfers (download / upload / clipboard image), relayed to
+        // the owning agent's real handlers over the dedicated bulk WS.
+        .route("/api/download", get(bulk::proxy))
+        .route("/api/upload", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/api/upload/check", post(bulk::proxy))
+        .route("/api/clip", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/api/clip/targets", get(bulk::proxy))
+        .route("/api/clip/image.png", get(bulk::proxy))
         // Client-facing aggregation + auth.
         .route("/api/sessions", get(handlers::sessions))
         .route("/api/machines", get(handlers::machines))

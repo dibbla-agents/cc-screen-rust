@@ -7,6 +7,7 @@
 
 mod attach;
 mod auth;
+mod bulk;
 mod clip;
 mod config;
 mod confine;

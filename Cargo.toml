@@ -42,6 +42,9 @@ futures-util = "0.3"
 # Outbound WebSocket client for the hub uplink (src/uplink.rs). Same pure-Rust
 # rustls stack the TUI uses, so no system TLS deps.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# `ServiceExt::oneshot` to replay a hub-relayed bulk request against the agent's
+# own file-transfer router (src/bulk.rs) — true parity, real handlers.
+tower = { version = "0.5", features = ["util"] }
 portable-pty = "0.8"
 # Server-side terminal emulator: interprets the PTY byte stream into a grid +
 # scrollback so (re)attach can be served as a clean, size-agnostic repaint

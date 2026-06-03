@@ -23,6 +23,8 @@ pub struct HubState {
     /// Centralized Web Push: one VAPID keypair + subscription store for the whole
     /// fleet (a phone gets one subscription regardless of how many machines).
     pub push: Arc<cc_screen_push::Push>,
+    /// In-flight bulk transfers (download/upload/clip) over the dedicated WS.
+    pub bulk: crate::bulk::BulkRegistry,
 }
 
 impl HubState {
@@ -63,6 +65,7 @@ mod tests {
             client_auth: Auth::new(None, None, [0u8; 32]),
             config_dir: std::env::temp_dir(),
             push: Arc::new(cc_screen_push::Push::new(&std::env::temp_dir())),
+            bulk: crate::bulk::BulkRegistry::default(),
         }
     }
 
