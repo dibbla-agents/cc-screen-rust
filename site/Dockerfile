@@ -14,6 +14,9 @@ RUN adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=build /app/target/release/cc-screen-site /usr/local/bin/cc-screen-site
 COPY public ./public
+# Hosted release assets (installers + binaries), served at /dl. Staged by
+# release-host.sh from the CI build artifacts; just a .gitkeep on a fresh checkout.
+COPY dl ./public/dl
 USER app
 ENV PORT=8080
 EXPOSE 8080

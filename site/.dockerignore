@@ -8,3 +8,7 @@ web/
 tmp-images/
 APP.md
 REVIEW.md
+# …but keep the hosted release assets served at /dl (installers are *.sh,
+# excluded above; re-include the whole dir so the Dockerfile can COPY it).
+!dl
+!dl/**
