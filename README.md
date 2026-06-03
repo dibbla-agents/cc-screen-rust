@@ -59,10 +59,12 @@ cc-screen-rust install            # --port N / --bind ADDR / --no-restore; defau
 Building from source instead (`./install.sh`) delegates the service step to that
 same `cc-screen-rust install`, so the unit/plist has a single source of truth.
 
-**Cutting a release.** `./release.sh` tags and waits for the CI cross-build (which
-also publishes a GitHub Release as a mirror). Then `site/release-host.sh [vX.Y.Z]`
-pulls those CI artifacts, rewrites the cargo-dist installers to fetch from the
-site, and deploys them under `/dl` — exactly what the one-liners above serve.
+**Cutting a release.** Bump the version with `./bump.sh X.Y.Z` (lockstep across the
+three crates + `Cargo.lock`) and commit it; then `./release.sh` tags + waits for
+the CI cross-build (which also publishes a GitHub Release as a mirror); then
+`site/release-host.sh` re-hosts those CI artifacts on the site under `/dl` —
+exactly what the one-liners above serve. (The `/release` skill walks an agent
+through the whole thing, including updating the running server vs. the docs site.)
 
 ## Docs site
 
