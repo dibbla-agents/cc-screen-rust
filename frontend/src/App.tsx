@@ -385,29 +385,65 @@ export default function App() {
   );
   const closeEditor = useCallback(() => setEditor({ open: false, path: null }), []);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const list = await fetchSessions();
+  // Adopt a freshly-fetched session list: render it, keep the chord handler's
+  // ref fresh, and drop any pane holding a now-dead session. We deliberately
+  // never auto-attach to an arbitrary session — landing on someone's live agent
+  // unbidden would resize and disrupt it. Split out from `refresh` so the quiet
+  // background poll can reuse it without touching the loading/error UI.
+  const applySessionList = useCallback(
+    (list: Session[]) => {
       setSessions(list);
-      sessionsRef.current = list; // keep the chord handler's view fresh
-      // Drop any pane holding a now-dead session. We deliberately never
-      // auto-attach to an arbitrary session — landing on someone's live
-      // agent unbidden would resize and disrupt it.
+      sessionsRef.current = list;
       const live = new Set(list.map((s) => s.name));
       updatePanes((s) => {
         const next = s.panes.map((p) => (p && live.has(p) ? p : null));
         const changed = next.some((p, i) => p !== s.panes[i]);
         return changed ? { ...s, panes: next } : s;
       });
+    },
+    [updatePanes]
+  );
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      applySessionList(await fetchSessions());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [updatePanes]);
+  }, [applySessionList]);
   refreshRef.current = refresh; // keep the on-close re-poll pointing at the latest
+
+  // Quiet background poll so the working/idle state (and the title + app-icon
+  // badge below) stays current while the app is open — without the manual
+  // refresh button's spinner or clobbering an error banner. Browsers throttle
+  // this to ~1×/min in a backgrounded tab, which is fine for an at-a-glance
+  // signal; `focus` (below) also forces an immediate refresh on return.
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchSessions().then(applySessionList).catch(() => {});
+    }, 4000);
+    return () => clearInterval(id);
+  }, [applySessionList]);
+
+  // Ambient "are my agents still running?" signal: the tab title and (installed
+  // PWA) app-icon badge show how many sessions are actively producing output.
+  // `waiting` is an idle agent's resting state, so we surface the inverse — the
+  // count of *working* agents — which falls to zero once everything has
+  // finished and is waiting for you. (See the server's IDLE_AFTER_SECS.)
+  useEffect(() => {
+    const working = sessions.filter((s) => !s.waiting).length;
+    document.title = working > 0 ? `${working} running — Pine` : "Pine";
+    const nav = navigator as Navigator & {
+      setAppBadge?: (n?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    if (working > 0) nav.setAppBadge?.(working).catch(() => {});
+    else nav.clearAppBadge?.().catch(() => {});
+  }, [sessions]);
 
   // Initial load.
   useEffect(() => {

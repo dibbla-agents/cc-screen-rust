@@ -248,6 +248,16 @@ export default function SessionDrawer({
                     <span className="truncate text-[13px] font-medium text-slate-100">
                       {s.short}
                     </span>
+                    {/* `waiting` is an idle agent's resting state, so we mark the
+                        inverse: an amber pulse on agents still producing output.
+                        A glance shows which are working vs done. (See the
+                        server's IDLE_AFTER_SECS.) */}
+                    {!s.waiting && (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400"
+                        title="working"
+                      />
+                    )}
                     {s.attached && (
                       <span
                         className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"

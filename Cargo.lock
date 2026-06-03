@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-rust"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-tui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

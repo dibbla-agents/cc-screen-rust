@@ -1049,6 +1049,7 @@ mod tests {
             attached: false,
             activity: 0,
             preview: String::new(),
+            waiting: false,
             cwd: String::new(),
         }
     }

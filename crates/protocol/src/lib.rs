@@ -19,6 +19,13 @@ pub struct SessionInfo {
     pub attached: bool,
     pub activity: i64,
     pub preview: String,
+    /// True when the agent has produced no output for a few seconds — it has
+    /// stopped streaming and is (almost always) waiting for input. `false` while
+    /// it's actively working (the CLIs animate a sub-second spinner). The server
+    /// computes this from `activity`; see the server's `IDLE_AFTER_SECS`.
+    /// `#[serde(default)]` so a TUI talking to an older server still parses.
+    #[serde(default)]
+    pub waiting: bool,
     /// The session's live cwd; omitted when empty (the server can't read it).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
@@ -232,10 +239,12 @@ mod tests {
             attached: false,
             activity: 0,
             preview: "p".into(),
+            waiting: false,
             cwd: String::new(),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
+        assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
     }
 
     #[test]

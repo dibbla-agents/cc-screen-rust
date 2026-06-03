@@ -26,8 +26,23 @@ const BROADCAST_CAP: usize = 2048;
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
 
+/// How long a session must produce *no* PTY output before we call its agent
+/// "waiting for input". The AI CLIs animate a sub-second spinner while they
+/// work — Claude's elapsed-time counter ticks ~1×/s, codex/gemini similar, and
+/// the spinner keeps moving even while a tool/sub-process runs — so a few
+/// seconds of total quiet cleanly separates "still going" from "your turn".
+/// Deliberately conservative: a false *busy* (we're a touch slow to flag a
+/// finish) is harmless; a false *waiting* mid-task would be a wrong signal.
+pub const IDLE_AFTER_SECS: u64 = 4;
+
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Pure predicate behind `Session::waiting`, split out so it's testable without
+/// a real clock: the session has gone quiet for at least `IDLE_AFTER_SECS`.
+fn is_waiting(last_activity: u64, now: u64) -> bool {
+    now.saturating_sub(last_activity) >= IDLE_AFTER_SECS
 }
 
 struct SessionState {
@@ -292,6 +307,13 @@ impl Session {
         self.state.lock().map(|s| s.last_activity).unwrap_or(0)
     }
 
+    /// True when the agent has stopped streaming for `IDLE_AFTER_SECS` and is
+    /// (almost always) waiting for input — the "your turn" signal the clients
+    /// surface. A pure function of last-output time; see `is_waiting`.
+    pub fn waiting(&self) -> bool {
+        is_waiting(self.last_activity(), now_secs())
+    }
+
     pub fn preview(&self) -> String {
         match self.state.lock() {
             Ok(s) => s.emu.preview(),
@@ -498,6 +520,19 @@ mod tests {
             resume_suffix: None,
             resume_keep_extra: false,
         }
+    }
+
+    #[test]
+    fn waiting_after_idle_threshold() {
+        // Fresh output → working; quiet past the threshold → waiting. Boundary at
+        // exactly IDLE_AFTER_SECS counts as waiting (>=).
+        let now = 1_000_000;
+        assert!(!is_waiting(now, now), "just produced output → working");
+        assert!(!is_waiting(now - (IDLE_AFTER_SECS - 1), now), "one second short → still working");
+        assert!(is_waiting(now - IDLE_AFTER_SECS, now), "quiet for the threshold → waiting");
+        assert!(is_waiting(now - 3600, now), "quiet for an hour → waiting");
+        // A clock that went backwards must not underflow into "waiting".
+        assert!(!is_waiting(now + 5, now), "future last-activity → working, not underflow");
     }
 
     // Spawns a real PTY (no tmux) and asserts the engine sees its output through

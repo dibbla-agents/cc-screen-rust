@@ -455,6 +455,15 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
               <span className={`h-2 w-2 rounded-full ${toolColor(s.tool)}`} title={s.tool} />
             </span>
             <span className="min-w-0 flex-1 truncate font-medium text-slate-100">{s.short}</span>
+            {/* Amber pulse = still producing output (working); see App.tsx /
+                the server's IDLE_AFTER_SECS. The pulse distinguishes it from the
+                solid "already shown" dot below. */}
+            {!s.waiting && (
+              <span
+                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400"
+                title="working"
+              />
+            )}
             {s.attached && (
               <span
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber"

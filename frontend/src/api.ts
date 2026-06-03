@@ -7,6 +7,11 @@ export interface Session {
   attached: boolean;
   activity: number;
   preview: string;
+  // True when the agent has gone quiet for a few seconds — it has stopped
+  // streaming and is (almost always) waiting for input. False while it's
+  // actively working (the CLIs animate a sub-second spinner). Server-computed;
+  // see engine.rs IDLE_AFTER_SECS.
+  waiting: boolean;
 }
 
 export async function fetchSessions(): Promise<Session[]> {

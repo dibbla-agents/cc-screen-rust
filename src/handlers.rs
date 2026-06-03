@@ -53,6 +53,7 @@ pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
             attached: s.attached(),
             activity: s.last_activity() as i64,
             preview: s.preview(),
+            waiting: s.waiting(),
             cwd: s.live_cwd(),
         })
         .collect();

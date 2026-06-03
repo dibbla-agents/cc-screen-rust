@@ -60,6 +60,11 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             } else {
                 ("○", Color::DarkGray)
             };
+            // `waiting` is the resting state for an idle agent, so we surface the
+            // inverse: an amber marker on sessions still producing output. A
+            // glance then shows which agents are working vs done — mirrors the
+            // web PWA's "running" badge. (See the server's IDLE_AFTER_SECS.)
+            let work = if s.waiting { "  " } else { "● " };
             let line = Line::from(vec![
                 Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                 Span::styled(
@@ -68,7 +73,8 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 ),
                 Span::styled(format!("{:<8}", truncate(&s.tool, 8)), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:>5}  ", ago(s.activity)), Style::default().fg(Color::DarkGray)),
-                Span::styled(truncate(&s.preview, 64), Style::default().fg(Color::Gray)),
+                Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(truncate(&s.preview, 62), Style::default().fg(Color::Gray)),
             ]);
             ListItem::new(line)
         })
@@ -96,7 +102,7 @@ mod tests {
     use cc_screen_protocol::SessionInfo;
     use ratatui::{backend::TestBackend, Terminal};
 
-    fn sess(name: &str, tool: &str, attached: bool, preview: &str) -> SessionInfo {
+    fn sess(name: &str, tool: &str, attached: bool, waiting: bool, preview: &str) -> SessionInfo {
         SessionInfo {
             name: name.into(),
             tool: tool.into(),
@@ -104,6 +110,7 @@ mod tests {
             attached,
             activity: 0,
             preview: preview.into(),
+            waiting,
             cwd: String::new(),
         }
     }
@@ -118,8 +125,8 @@ mod tests {
     fn lists_sessions_with_header_and_bar() {
         let app = App::test_fixture(
             vec![
-                sess("claude-myproj", "claude", true, "Running tests"),
-                sess("codex-api", "codex", false, "Done."),
+                sess("claude-myproj", "claude", true, false, "Running tests"),
+                sess("codex-api", "codex", false, true, "Done."),
             ],
             "2 session(s) · http://127.0.0.1:8839",
         );
@@ -129,6 +136,17 @@ mod tests {
         assert!(text.contains("codex-api"), "session 2 missing:\n{text}");
         assert!(text.contains("Running tests"), "preview missing:\n{text}");
         assert!(text.contains("2 session(s)"), "status bar missing:\n{text}");
+    }
+
+    #[test]
+    fn working_session_shows_amber_marker() {
+        // Both sessions are detached (leading "○"), so the only "●" in the frame
+        // is the working marker — present for the active agent, absent for the
+        // idle/waiting one.
+        let working = App::test_fixture(vec![sess("claude-x", "claude", false, false, "thinking")], "s");
+        let idle = App::test_fixture(vec![sess("claude-x", "claude", false, true, "done")], "s");
+        assert!(rendered(&working, 90, 6).contains('●'), "working row should show the ● marker");
+        assert!(!rendered(&idle, 90, 6).contains('●'), "idle/waiting row should not show the ● marker");
     }
 
     #[test]

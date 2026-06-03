@@ -273,6 +273,7 @@ mod tests {
             attached: false,
             activity: 0,
             preview: "p".into(),
+            waiting: false,
             cwd: String::new(),
         }
     }
