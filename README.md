@@ -40,50 +40,49 @@ so install runs off our own domain — no GitHub account in the path. Each insta
 detects OS/arch, verifies the embedded SHA-256 checksum, and drops the binary into
 `~/.local/bin`.
 
-**The `ccs` client** — install on any Mac or Linux box on your tailnet:
+The hub is the front door: run one hub, point every machine's agent at it, and
+reach all of them from one address. Three pieces, in order.
+
+**① The hub — your front door.** Its own binary + service (default port 8840);
+it's the address you open and the clients connect to:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh
+  https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen-hub.sh | sh
+cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
+# cc-screen-hub uninstall          # tear the service back down
 ```
 
-**The server** — install the binary, then wire up the service (systemd on Linux,
-launchd on macOS) with the binary's own `install` subcommand:
+**② The machines — headless hosts.** On each computer where your coding agents
+live, install the agent and point it at the hub. `--hub-only` keeps it a pure host:
+it runs the agents and dials out, with no inbound and nothing to open directly.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh
-cc-screen-rust install            # --port N / --bind ADDR / --no-restore; defaults to the tailnet IP:8839
-# cc-screen-rust uninstall        # tear the service back down
-# cc-screen-rust install --help   # all flags, including slave/hub mode
+cc-screen-rust install --hub https://hub:8840 --hub-token T1 --machine-id laptop --hub-only
+# cc-screen-rust uninstall         # tear the service back down
+# cc-screen-rust install --help    # all flags
 ```
 
-Building from source instead (`./install.sh`) delegates the service step to that
-same `cc-screen-rust install`, so the unit/plist has a single source of truth.
+One machine? Run the hub and the host on the same box.
 
-### Many machines: the hub
-
-To put **one address in front of all your machines**, run a **hub**
-(`cc-screen-hub`): each machine's agent dials out and registers, and you point
-your browser / `ccs` at the hub to see every machine's sessions in one list. See
-**[HUB.md](HUB.md)** for the full guide; the short version:
+**③ The clients — point them at the hub.** The web app is served by the hub (open
+it and Add to Home Screen); `ccs` is the native terminal client:
 
 ```sh
-# on the hub box (its own binary + service, default port 8840):
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen-hub.sh | sh
-cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
-
-# on each machine, point its agent at the hub ("slave" mode):
-cc-screen-rust install --hub https://hub:8840 --hub-token T1 --machine-id laptop
-
-# then, from anywhere:
-#   browser → https://hub:8840   (or)   ccs --server https://hub:8840 --token <client-token>
+  https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh
+#   browser → https://hub:8840
+#   ccs --server https://hub:8840 --token <client-token>
 ```
 
-The agent keeps owning its PTYs (a hub restart never kills sessions) and, unless
-`--hub-only`, still serves directly on its tailnet too. `cc-screen-hub --help` and
-`cc-screen-hub install --help` explain every flag.
+See **[HUB.md](HUB.md)** for the full guide (per-agent uplink tokens, the security
+model, TLS for off-tailnet). The agent keeps owning its PTYs, so a hub restart
+never kills sessions. (A single agent can also serve directly — drop the hub flags
+and open `http://machine:8839` — but the hub is the front door for everything.)
+Building from source (`./install.sh`) delegates the service step to that same
+`cc-screen-rust install`, so the unit/plist has a single source of truth.
 
 ### Updating
 
@@ -100,19 +99,21 @@ ccs            update     # TUI:   fetch the latest ccs binary
 
 Auth is **off by default** — it's tailnet-only, so the gate is just basic
 protection against *other* people on your Tailscale network, not the public
-internet. Turn it on at install time:
+internet. Clients connect to the hub, so turn the gate on **there**:
 
 ```sh
-cc-screen-rust install --password 'your-passphrase'
-# → also auto-generates an API token (printed once) for the ccs TUI
+cc-screen-hub install --password 'your-passphrase' --token '<client-token>'
 ```
 
 The web UI then shows a login screen; a correct password (or the token) sets a
-**2-week session cookie**. For the `ccs` TUI, drop the printed token into
+**2-week session cookie**. For the `ccs` TUI, drop the token into
 `~/.config/cc-screen-tui/config.toml` as `api_token = "…"` (or pass `ccs --token`,
-or set `CCS_API_TOKEN`). Both secrets live in `~/.config/cc-screen-rust/web.env`
-(`CCWEB_PASSWORD`, `CCWEB_API_TOKEN`) and can be edited there; re-running
-`install` preserves them.
+or set `CCS_API_TOKEN`). This client gate is **separate** from how agents
+authenticate to the hub — those use per-agent uplink tokens
+(`--agents 'machine:token,…'` on the hub, `--hub-token` on the agent), so a leaked
+client password can't impersonate a machine. A standalone agent (no hub) takes the
+same `--password`/`--token` via `cc-screen-rust install`; secrets live in each
+tool's `web.env` and survive re-running `install`. See [HUB.md](HUB.md).
 
 **Cutting a release.** Bump the version with `./bump.sh X.Y.Z` (lockstep across the
 three crates + `Cargo.lock`) and commit it; then `./release.sh` tags + waits for
