@@ -367,6 +367,14 @@ export default function App() {
   );
   const closeEditor = useCallback(() => setEditor({ open: false, path: null }), []);
 
+  // Sessions just created via New Session, keyed `machine/name` → grace expiry
+  // (ms). A create confirms the agent made the session, but the hub's union list
+  // can lag a push behind — so for a short window we DON'T let applySessionList
+  // null the freshly-mounted pane merely because the session hasn't propagated
+  // yet (which would bounce the user to the switcher). Cleared once it appears.
+  const recentMounts = useRef<Map<string, number>>(new Map());
+  const refKey = (r: { name: string; machine: string }) => `${r.machine}/${r.name}`;
+
   // Adopt a freshly-fetched session list: render it, keep the chord handler's
   // ref fresh, and drop any pane holding a now-dead session. We deliberately
   // never auto-attach to an arbitrary session — landing on someone's live agent
@@ -377,8 +385,19 @@ export default function App() {
       setSessions(list);
       sessionsRef.current = list;
       const live = new Set(list.map((s) => s.name));
+      const now = Date.now();
       updatePanes((s) => {
-        const next = s.panes.map((p) => (p && live.has(p.name) ? p : null));
+        const next = s.panes.map((p) => {
+          if (!p) return null;
+          if (live.has(p.name)) {
+            recentMounts.current.delete(refKey(p)); // propagated — drop the grace
+            return p;
+          }
+          // Not (yet) in the list: keep it only if it's a just-created session
+          // still inside its propagation grace window; otherwise it's dead.
+          const exp = recentMounts.current.get(refKey(p));
+          return exp && now < exp ? p : null;
+        });
         const changed = next.some((p, i) => p !== s.panes[i]);
         return changed ? { ...s, panes: next } : s;
       });
@@ -1556,7 +1575,11 @@ export default function App() {
         onCreated={(session) => {
           setNewOpen(false);
           setDrawerOpen(false);
-          // Mount in the pane the user came from (-1 = active fallback).
+          // Mount in the pane the user came from (-1 = active fallback). Mark a
+          // propagation grace window so the immediate refresh() (and the
+          // background poll) don't null this pane before the hub's session list
+          // catches up — otherwise we'd bounce straight back to the switcher.
+          recentMounts.current.set(refKey(session), Date.now() + 15000);
           const target = newForPane >= 0 ? newForPane : active;
           mountAt(target, session);
           setActive(target);
