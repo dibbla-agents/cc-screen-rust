@@ -49,6 +49,11 @@ pub async fn attach_loop(
     // min across attached clients). The snapshot is the FIRST frame — the engine
     // guarantees no byte is both replayed and streamed.
     let (snap, mut rx) = sess.attach();
+    // Width the snapshot was serialized at. The client registers unconstrained
+    // and only reports its real size on its first `Resize` (below), so if it
+    // turns out narrower than this the snapshot's rows are too wide and re-wrap
+    // into a ghosted/staircased scrollback — corrected by a refit snapshot then.
+    let snap_cols = sess.current_size().0;
     let mut closed_rx = sess.closed_rx();
     let client = sess.register_client();
 
@@ -65,6 +70,9 @@ pub async fn attach_loop(
         sess.unregister_client(client);
         return;
     }
+
+    // Whether this client has reported its real size yet (its first `Resize`).
+    let mut sized = false;
 
     loop {
         tokio::select! {
@@ -84,7 +92,21 @@ pub async fn attach_loop(
             },
             event = ev.recv() => match event {
                 Some(ClientEvent::Input(b)) => sess.write_input(&b),
-                Some(ClientEvent::Resize(c, r)) => sess.resize_client(client, c, r),
+                Some(ClientEvent::Resize(c, r)) => {
+                    let first = !sized;
+                    sized = true;
+                    sess.resize_client(client, c, r);
+                    // The initial snapshot was serialized at `snap_cols`, before
+                    // this client's size was known. Min-size has now pinned the
+                    // PTY to ≤ this client's width, so if the client is narrower
+                    // than that snapshot, resend one that fits — otherwise its
+                    // over-wide rows stay re-wrapped (ghosted) in the scrollback.
+                    if first && c < snap_cols {
+                        if out.send(AttachOut::Snapshot(sess.snapshot())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
                 None => break, // client detached
             },
             _ = closed_rx.changed() => {
@@ -177,6 +199,41 @@ mod tests {
         assert!(saw_marker, "the PTY's printed marker reaches the client through the loop");
 
         drop(ev_tx); // detach
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn narrow_first_resize_resends_a_fit_to_width_snapshot() {
+        // The PTY starts at INIT (80 cols), so the initial snapshot is serialized
+        // at 80. A client whose first reported size is *narrower* must receive a
+        // second snapshot — the 80-wide one would re-wrap (ghost) in its grid.
+        let tool = shell_tool("printf hi; sleep 5");
+        let (state, tmp) = app_with(&tool, "refit");
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        let (out_tx, mut out_rx) = mpsc::channel::<AttachOut>(64);
+        let (ev_tx, ev_rx) = mpsc::channel::<ClientEvent>(64);
+        let task = tokio::spawn(attach_loop(sess.clone(), out_tx, ev_rx));
+
+        // First frame is the initial (80-wide) snapshot.
+        assert!(matches!(next_out(&mut out_rx).await, AttachOut::Snapshot(_)));
+
+        // Report a narrower width → a fresh, fit-to-width snapshot must follow
+        // (scanning past any interleaved Output frames).
+        ev_tx.send(ClientEvent::Resize(40, 20)).await.unwrap();
+        let mut refit = false;
+        for _ in 0..20 {
+            if let AttachOut::Snapshot(_) = next_out(&mut out_rx).await {
+                refit = true;
+                break;
+            }
+        }
+        assert!(refit, "a narrower first resize resends a fit-to-client snapshot");
+
+        drop(ev_tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
         sess.kill();
         let _ = std::fs::remove_dir_all(&tmp);

@@ -243,8 +243,9 @@ impl Session {
         }
     }
 
-    /// Current PTY/parser size — test-only introspection for the min-size logic.
-    #[cfg(test)]
+    /// Current PTY/parser size `(cols, rows)`. Read on attach to decide whether a
+    /// just-serialized snapshot is too wide for a narrower client (see
+    /// `attach::attach_loop`); also drives the min-size tests.
     pub fn current_size(&self) -> (u16, u16) {
         let st = self.state.lock().unwrap();
         (st.cols, st.rows)
