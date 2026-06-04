@@ -189,8 +189,13 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
         }
       };
       ws.onclose = () => {
-        onState("closed");
+        // Only report a drop we didn't cause. On unmount/reconnect-teardown
+        // (closedByUs) the cleanup closes this socket deliberately — and because
+        // the pane's conn slot is shared, a new session may already own it and
+        // have reported "open". Stamping "closed" here would clobber that new
+        // session's state, leaving its dot red while its socket is wide open.
         if (closedByUs) return;
+        onState("closed");
         retry = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, 5000);
       };

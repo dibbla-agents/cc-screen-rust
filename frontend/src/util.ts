@@ -71,6 +71,49 @@ export async function writeClipboard(text: string): Promise<void> {
   }
 }
 
+// One dot, three meanings — shared by the header dot and every switcher row so
+// the signal reads the same everywhere:
+//   • error   (red)    — the connection is believed broken (WS dropped). Only a
+//                        *closed* socket counts; a still-`connecting` one is just
+//                        establishing and must not flash red on every attach.
+//   • running (amber)  — the agent is producing output (`waiting === false`).
+//   • ready   (green)  — it has gone quiet and is waiting for input
+//                        (`waiting === true`; see the server's IDLE_AFTER_SECS).
+// `conn` is the per-session WebSocket state when we have one (a session open in a
+// pane); omit it for rows we aren't attached to — those can't have a connection
+// problem, so they fall straight through to running/ready.
+export type AgentStatus = "error" | "running" | "ready";
+
+export function agentStatus(
+  waiting: boolean,
+  conn?: "connecting" | "open" | "closed"
+): AgentStatus {
+  if (conn === "closed") return "error";
+  return waiting ? "ready" : "running";
+}
+
+// Tailwind classes for a status dot. Running pulses to read as "live"; ready and
+// error are solid. NB: use `bg-amber` (the custom #f5b942), not `bg-amber-400` —
+// the config overrides the default amber scale, so `amber-<shade>` is a dead class.
+export function statusDot(status: AgentStatus): string {
+  switch (status) {
+    case "error":
+      return "bg-red-500";
+    case "running":
+      return "bg-amber animate-pulse";
+    case "ready":
+      return "bg-emerald-400";
+  }
+}
+
+export function statusTitle(status: AgentStatus): string {
+  return status === "error"
+    ? "connection problem"
+    : status === "running"
+    ? "working"
+    : "ready for input";
+}
+
 // Compact "time since last activity" for the switcher rows.
 export function ago(unixSeconds: number): string {
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));

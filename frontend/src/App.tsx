@@ -46,7 +46,7 @@ import LoginScreen from "./components/LoginScreen";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
@@ -1225,8 +1225,16 @@ export default function App() {
     (s) => s.name === currentSession?.name && (s.machine ?? "") === currentSession?.machine
   );
   const conn = conns[active] ?? "closed";
-  const dot =
-    conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
+  // One unified status dot: connection trouble (red) wins, else the agent is
+  // working (amber) or ready for input (green). See util/agentStatus.
+  const headerStatus = agentStatus(cur?.waiting ?? true, conn);
+  const dot = statusDot(headerStatus);
+  // Per-session WS state for the switcher: only sessions open in a pane have a
+  // connection that can be "wrong"; everything else falls through to waiting.
+  const connByRef: Record<string, string> = {};
+  panes.forEach((p, i) => {
+    if (p) connByRef[`${p.machine ?? ""}/${p.name}`] = conns[i] ?? "closed";
+  });
 
   // Desktop chrome auto-hide: the header (sessions ☰, conn dot, layout picker,
   // font, eraser) collapses out of view so the terminal claims the full
@@ -1304,6 +1312,7 @@ export default function App() {
       open={drawerOpen}
       embedded={embedded}
       sessions={sessions}
+      connByRef={connByRef}
       machines={machines}
       multiMachine={multiMachine}
       current={currentSession}
@@ -1380,7 +1389,7 @@ export default function App() {
           )}
         </button>
 
-        <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={conn} />
+        <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={statusTitle(headerStatus)} />
 
         {isDesktop && (
           <div className="relative">
@@ -1476,14 +1485,21 @@ export default function App() {
             paneOverlayIdx={active}
           />
         ) : currentSession ? (
-          // Phone path is unchanged: one terminal, single pane.
+          // Phone path: one terminal, single pane — but it shows `panes[active]`
+          // (see currentSession), and every shared read keys off `active`: the
+          // header dot reads conns[active], the copy handler reads
+          // termsRef[active], agentCols/Rows read termsRef[active]. So report
+          // this pane's connection and terminal into the SAME `active` slot, not
+          // a hardcoded 0 — otherwise, whenever a persisted layout leaves
+          // `active` non-zero, the dot reads an untouched slot and stays red
+          // while the socket is wide open (and copy reads an empty slot).
           <TerminalView
             key={`${currentSession.machine}/${currentSession.name}`}
             session={currentSession.name}
             machine={currentSession.machine}
             fontSize={fontSize}
-            onState={(c) => setPaneConn(0, c)}
-            onTerm={(t) => { termsRef.current[0] = t; }}
+            onState={(c) => setPaneConn(active, c)}
+            onTerm={(t) => { termsRef.current[active] = t; }}
           />
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-slate-500">

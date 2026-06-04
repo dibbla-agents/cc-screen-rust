@@ -261,8 +261,11 @@ export default function AgentMirror({
         }
       };
       ws.onclose = () => {
-        onState("closed");
+        // Don't report a close we caused ourselves (unmount/reconnect teardown)
+        // — it can clobber the state a freshly-mounted instance already set to
+        // "open". Only surface drops we didn't initiate. See TerminalView.
         if (closedByUs) return;
+        onState("closed");
         retry = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, 5000);
       };

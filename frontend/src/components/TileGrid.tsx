@@ -463,7 +463,7 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
                 solid "already shown" dot below. */}
             {!s.waiting && (
               <span
-                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400"
+                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber"
                 title="working"
               />
             )}

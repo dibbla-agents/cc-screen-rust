@@ -548,6 +548,40 @@ mod tests {
         assert!(!is_waiting(now + 5, now), "future last-activity → working, not underflow");
     }
 
+    // End-to-end over a real PTY + real time: a session streaming output reads as
+    // "working" (waiting=false), and once its output stops for IDLE_AFTER_SECS it
+    // flips to "waiting". This is the live integration behind the pure
+    // `waiting_after_idle_threshold` test above — it exercises the pump thread
+    // stamping `last_activity` on every read.
+    #[tokio::test]
+    async fn waiting_flips_with_live_output() {
+        let tmp = std::env::temp_dir().join(format!("ccr-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Stream a byte every 200ms for ~2s, then go quiet.
+        let tool = shell_tool("for i in $(seq 1 10); do printf x; sleep 0.2; done; sleep 6");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        // ~1s in: mid-stream, output landed well under IDLE_AFTER_SECS ago.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        assert!(!sess.waiting(), "streaming output should read as working");
+
+        // Output stops at ~2s; wait past IDLE_AFTER_SECS of quiet (2s + 5s).
+        tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
+        assert!(sess.waiting(), "after a quiet spell it should read as waiting");
+
+        sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // Spawns a real PTY (no tmux) and asserts the engine sees its output through
     // the vt100 preview and the reattach snapshot — the core M1 path.
     #[tokio::test]

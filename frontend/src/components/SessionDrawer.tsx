@@ -1,6 +1,6 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, PaneRef, RestorableSession, Session } from "../api";
-import { ago, toolColor } from "../util";
+import { ago, agentStatus, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 
@@ -11,6 +11,10 @@ interface Props {
   // same — only the chrome/positioning differs. See App.tsx / TileGrid.
   embedded?: boolean;
   sessions: Session[];
+  // Per-session WebSocket state, keyed `${machine}/${name}`, for sessions open
+  // in a pane — lets a row's status dot go red when its connection drops. Rows
+  // not in the map simply have no connection to be wrong about.
+  connByRef: Record<string, string>;
   // The hub's machine roster — used to render group headers (hostname + offline
   // indicator) and to surface idle machines that have no sessions yet. Empty on
   // a standalone agent.
@@ -43,6 +47,7 @@ export default function SessionDrawer({
   open,
   embedded = false,
   sessions,
+  connByRef,
   machines,
   multiMachine,
   current,
@@ -59,6 +64,21 @@ export default function SessionDrawer({
 }: Props) {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+
+  // Triage order: the agent that *just became ready for input* floats to the top
+  // of its machine group, so finishing work surfaces itself like a priority
+  // queue. Within a group: ready (waiting) before running, then most-recently
+  // active first. Machine stays the primary key so the multiMachine grouping
+  // (contiguous-run header detection below) still holds.
+  const ordered = useMemo(() => {
+    return [...sessions].sort((a, b) => {
+      const ma = a.machine ?? "";
+      const mb = b.machine ?? "";
+      if (ma !== mb) return ma < mb ? -1 : 1;
+      if (a.waiting !== b.waiting) return a.waiting ? -1 : 1;
+      return b.activity - a.activity;
+    });
+  }, [sessions]);
   // Keyboard-cursor index into `sessions`. Separate from the "active"
   // (currently-attached) row so ↑/↓ can park on a different session before
   // committing with Enter. -1 means "no row focused" (e.g. empty list).
@@ -74,11 +94,11 @@ export default function SessionDrawer({
       setConfirmDel(null);
       return;
     }
-    const cur = sessions.findIndex(
+    const cur = ordered.findIndex(
       (s) => s.name === current?.name && (s.machine ?? "") === current?.machine
     );
-    setCursor(cur >= 0 ? cur : sessions.length > 0 ? 0 : -1);
-  }, [open, sessions, current]);
+    setCursor(cur >= 0 ? cur : ordered.length > 0 ? 0 : -1);
+  }, [open, ordered, current]);
 
   // Keep the cursor row in view when it moves off-screen (long lists).
   useEffect(() => {
@@ -107,11 +127,11 @@ export default function SessionDrawer({
         onClose();
         return;
       }
-      if (sessions.length === 0) return;
+      if (ordered.length === 0) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
-        setCursor((i) => (i < 0 ? 0 : Math.min(sessions.length - 1, i + 1)));
+        setCursor((i) => (i < 0 ? 0 : Math.min(ordered.length - 1, i + 1)));
         return;
       }
       if (e.key === "ArrowUp") {
@@ -121,17 +141,17 @@ export default function SessionDrawer({
         return;
       }
       if (e.key === "Enter") {
-        if (cursor >= 0 && cursor < sessions.length) {
+        if (cursor >= 0 && cursor < ordered.length) {
           e.preventDefault();
           e.stopPropagation();
-          onPick(sessions[cursor]);
+          onPick(ordered[cursor]);
         }
       }
     };
     window.addEventListener("keydown", handler, { capture: true });
     return () =>
       window.removeEventListener("keydown", handler, { capture: true });
-  }, [open, sessions, cursor, onClose, onPick]);
+  }, [open, ordered, cursor, onClose, onPick]);
 
   if (!open) return null;
 
@@ -257,18 +277,30 @@ export default function SessionDrawer({
           </div>
         )}
 
-        {sessions.map((s, idx) => {
+        {ordered.map((s, idx) => {
           const active =
             s.name === current?.name && (s.machine ?? "") === current?.machine;
           const focused = idx === cursor;
           const isDeleting = deleting.has(s.name);
+          // One status dot: red (connection down) / amber (working) / green
+          // (ready for input). `waiting` is server-computed and independent of
+          // attachment, so the "ready" green stays put even on sessions you're
+          // not currently viewing — unlike the old attached-only dot.
+          const status = agentStatus(
+            s.waiting,
+            connByRef[`${s.machine ?? ""}/${s.name}`] as
+              | "connecting"
+              | "open"
+              | "closed"
+              | undefined
+          );
           // First row of a new machine run gets a group header. Sessions arrive
           // pre-sorted by (machine, name) from the hub, so a simple
           // change-detect against the previous row groups them; cursor/rowRefs
           // stay indexed over the flat `sessions` array (headers aren't rows).
           const showHeader =
             multiMachine &&
-            (idx === 0 || (sessions[idx - 1].machine ?? "") !== (s.machine ?? ""));
+            (idx === 0 || (ordered[idx - 1].machine ?? "") !== (s.machine ?? ""));
           const rowState = focused
             ? "bg-edge/70 ring-1 ring-inset ring-accent/40"
             : active
@@ -298,22 +330,10 @@ export default function SessionDrawer({
                     <span className="truncate text-[13px] font-medium text-slate-100">
                       {s.short}
                     </span>
-                    {/* `waiting` is an idle agent's resting state, so we mark the
-                        inverse: an amber pulse on agents still producing output.
-                        A glance shows which are working vs done. (See the
-                        server's IDLE_AFTER_SECS.) */}
-                    {!s.waiting && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400"
-                        title="working"
-                      />
-                    )}
-                    {s.attached && (
-                      <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
-                        title="attached"
-                      />
-                    )}
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
+                      title={statusTitle(status)}
+                    />
                     <span className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-slate-500">
                       {ago(s.activity)}
                     </span>
