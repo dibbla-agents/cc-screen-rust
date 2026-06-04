@@ -4,7 +4,7 @@
 # filesystem — it's a registry + auth gate + transparent byte relay.
 [package]
 name = "cc-screen-hub"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Aggregator hub for cc-screen-rust: one endpoint over many agents"
 
