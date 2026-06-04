@@ -1,0 +1,15 @@
+# Trims the build context for root-context image builds (docker/hub/Dockerfile).
+# Only applies when the build context is the repo root; site/ has its own context.
+.git/
+.github/
+target/
+**/target/
+node_modules/
+**/node_modules/
+# Rebuilt fresh inside the image's node stage — never ship a stale local copy.
+frontend/dist/
+# Not needed to build the hub binary.
+site/
+docs/
+**/*.log
+.DS_Store

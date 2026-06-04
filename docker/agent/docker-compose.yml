@@ -1,0 +1,32 @@
+# docker compose for a cc-screen-rust agent (machine host).
+#
+#   cd docker/agent
+#   cp .env.example .env                       # set machine id, creds, hub uplink
+#   mkdir -p home && sudo chown -R 10001:10001 home   # the container user owns it
+#   docker compose up -d --build
+#
+# Two topologies (see README):
+#   • hub-only (recommended): set CCWEB_HUB_* + CCWEB_HUB_ONLY=1 in .env and leave
+#     the `ports:` block commented — the agent dials OUT and accepts no inbound.
+#   • standalone: uncomment `ports:` (bound to loopback) and reach :8839 directly.
+name: cc-screen-agent
+
+services:
+  agent:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    image: ghcr.io/erikknave/cc-screen-agent:latest
+    container_name: cc-screen-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # ONE host dir = the container's whole home: your projects, the CLIs' login
+      # dirs (.claude/.codex/.gemini), and the agent's state all live here and
+      # persist. Own it as uid 10001 first (see the chown line above).
+      - ./home:/home/app
+    # ── Standalone only: expose the UI on the host LOOPBACK (never 0.0.0.0). ──
+    # Leave commented when running hub-only.
+    # ports:
+    #   - "127.0.0.1:8839:8839"

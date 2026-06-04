@@ -1,0 +1,34 @@
+# docker compose for the cc-screen-rust hub.
+#
+#   cd docker/hub
+#   cp .env.example .env      # then edit the tokens
+#   docker compose up -d --build
+#
+# To run a published image instead of building, comment out `build:` and keep
+# `image:` pointing at your registry tag (e.g. ghcr.io/dibbla-agents/cc-screen-hub).
+name: cc-screen-hub
+
+services:
+  hub:
+    # Build from the repo root (the hub is a workspace member). Remove this block
+    # to pull the prebuilt `image:` below instead.
+    build:
+      context: ../..
+      dockerfile: docker/hub/Dockerfile
+    image: ghcr.io/erikknave/cc-screen-hub:latest
+    container_name: cc-screen-hub
+    restart: unless-stopped
+    # Tokens / password come from .env (see .env.example).
+    env_file:
+      - .env
+    ports:
+      # host:container. The hub's security model says don't expose it publicly
+      # without a TLS proxy + agent tokens — for a private/tailnet box prefer
+      # binding a specific host IP, e.g.  "100.x.y.z:8840:8840".
+      - "8840:8840"
+    volumes:
+      # Persists session.key, favorites, VAPID keys, and push subscriptions.
+      - hub-config:/home/app/.config/cc-screen-hub
+
+volumes:
+  hub-config:
