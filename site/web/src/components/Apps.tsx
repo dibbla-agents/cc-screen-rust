@@ -32,9 +32,9 @@ export function Apps() {
         Phone, browser, or a native terminal app.
       </h2>
       <p className="mt-4 max-w-[60ch] text-[1.02rem] text-dim">
-        Two clients, one wire. The web app lives inside the server — add it to your
-        home screen — and <Code>ccs</Code> is a native terminal client. Same agents,
-        whichever you reach for.
+        Two clients, one wire. The web app is served by the hub — add it to your
+        home screen — and <Code>ccs</Code> is a native terminal client. Both connect
+        to the hub; same agents, whichever you reach for.
       </p>
 
       {/* terminal client — two landscape windows */}
