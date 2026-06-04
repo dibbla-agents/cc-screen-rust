@@ -20,7 +20,8 @@ use clap::Parser;
         ccs --server http://laptop:8839                 # one machine\n  \
         ccs --server http://hub:8840 --token <tok>      # a hub (all machines)\n  \
         ccs                                             # reuse the saved server/token\n  \
-        ccs update                                      # fetch the latest ccs build\n\n\
+        ccs update                                      # fetch the latest ccs build\n  \
+        ccs uninstall                                   # remove the ccs binary + config\n\n\
         Auth: if the server/hub has a gate, pass --token (or set api_token in the\n  \
         config, or CCS_API_TOKEN / CCWEB_API_TOKEN). The browser uses a login screen;\n  \
         the TUI uses the token directly."
