@@ -19,7 +19,7 @@ export interface FileWatch {
 // reconnect; `enabled` gates the whole connection (the editor only watches while
 // it's open). The wanted set lives in a ref so it survives reconnects and never
 // re-runs the connect effect.
-export function useFileWatch(enabled: boolean): FileWatch {
+export function useFileWatch(enabled: boolean, machine = ""): FileWatch {
   const wsRef = useRef<WebSocket | null>(null);
   const want = useRef<Map<string, number>>(new Map()); // dir -> refcount
   const listeners = useRef<Set<FsListener>>(new Set());
@@ -36,7 +36,7 @@ export function useFileWatch(enabled: boolean): FileWatch {
     let backoff = 500;
 
     const connect = () => {
-      const ws = new WebSocket(watchURL());
+      const ws = new WebSocket(watchURL(machine));
       wsRef.current = ws;
       ws.onopen = () => {
         backoff = 500;
@@ -72,7 +72,9 @@ export function useFileWatch(enabled: boolean): FileWatch {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [enabled]);
+    // Reconnect when the target machine changes (editor machine switcher) so the
+    // watch follows the browsed agent.
+  }, [enabled, machine]);
 
   const subscribe = useCallback((dir: string) => {
     if (!dir) return;

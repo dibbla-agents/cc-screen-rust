@@ -18,6 +18,9 @@ interface Props {
   path: string;
   // Basename, for the download filename.
   name: string;
+  // The machine (agent) the file lives on, threaded onto the byte-stream URL so
+  // a hub serves it from the right agent. "" for a single agent.
+  machine?: string;
 }
 
 type Status = "loading" | "ready" | "error";
@@ -39,8 +42,8 @@ const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
 // a multiplier on the fit-to-width scale; pages re-render crisply at the new
 // scale (not a CSS stretch). A floating bar carries the page indicator, zoom and
 // a download button. Read-only — PDFs are never edited here.
-export default function PdfViewer({ path, name }: Props) {
-  const url = inlineURL(path);
+export default function PdfViewer({ path, name, machine }: Props) {
+  const url = inlineURL(path, machine);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const docRef = useRef<PDFDocumentProxy | null>(null);
@@ -261,13 +264,13 @@ export default function PdfViewer({ path, name }: Props) {
     if (downloading) return;
     setDownloading(true);
     try {
-      await saveFileToDevice(path, name);
+      await saveFileToDevice(path, name, machine);
     } catch {
       // best-effort; the download path has its own browser fallback
     } finally {
       setDownloading(false);
     }
-  }, [downloading, path, name]);
+  }, [downloading, path, name, machine]);
 
   const pageCssW = fitWidth > 0 ? Math.round(fitWidth * zoom) : 0;
   const estHeight = pageCssW > 0 ? Math.round(pageCssW * (pageAspect || 1.3)) : undefined;

@@ -83,6 +83,9 @@ const FONT_FAMILY = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 interface Props {
   session: string;
+  // The machine (agent) owning this session, threaded onto the mirror's WS URL
+  // so a hub attaches to the right agent. "" / undefined for a single agent.
+  machine?: string;
   // The active grid pane's xterm cols/rows. `cols` is the UPPER BOUND on how
   // wide we report (we never widen the PTY past the grid); `rows` is reported
   // as-is so the agent's height isn't perturbed.
@@ -115,6 +118,7 @@ interface Props {
 // server re-pins the PTY back up to the grid's full width.
 export default function AgentMirror({
   session,
+  machine,
   cols,
   rows,
   maxFontSize,
@@ -239,7 +243,7 @@ export default function AgentMirror({
 
     const connect = () => {
       onState("connecting");
-      const ws = new WebSocket(wsURL(session));
+      const ws = new WebSocket(wsURL(session, machine));
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       ws.onopen = () => {
@@ -273,7 +277,7 @@ export default function AgentMirror({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session]);
+  }, [session, machine]);
 
   // Explicit recalibrate (double-click the splitter): re-fit the locked count to
   // the current column width. Skips the initial mount.

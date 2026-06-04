@@ -123,7 +123,11 @@ export interface DirTreeOpts {
 export function useDirTree(
   open: boolean,
   currentSession: string | null,
-  opts?: DirTreeOpts
+  opts?: DirTreeOpts,
+  // The machine (agent) whose $HOME this tree browses. All listings/watch route
+  // there. "" for a single agent. Changing it re-roots the tree via the
+  // bootstrap effect (keyed on machine).
+  machine = ""
 ) {
   const order = opts?.order;
   const autoExpand = opts?.autoExpand ?? "share";
@@ -138,7 +142,7 @@ export function useDirTree(
 
   // Real-time filesystem watch (shared with the editor's open-file watcher via
   // the returned `watch` handle). Active only while the tree is `open`.
-  const watch = useFileWatch(open);
+  const watch = useFileWatch(open, machine);
 
   const merge = useCallback((resp: FilesResp) => {
     setCache((m) => {
@@ -154,7 +158,7 @@ export function useDirTree(
     async (path: string): Promise<FilesResp> => {
       setLoading((s) => new Set(s).add(path));
       try {
-        const resp = await fetchFiles(path);
+        const resp = await fetchFiles(path, undefined, machine);
         merge(resp);
         return resp;
       } finally {
@@ -165,7 +169,7 @@ export function useDirTree(
         });
       }
     },
-    [merge]
+    [merge, machine]
   );
 
   const loadBySession = useCallback(
@@ -173,7 +177,7 @@ export function useDirTree(
       const k = `session:${session}`;
       setLoading((s) => new Set(s).add(k));
       try {
-        const resp = await fetchFiles(undefined, session);
+        const resp = await fetchFiles(undefined, session, machine);
         merge(resp);
         return resp;
       } finally {
@@ -184,7 +188,7 @@ export function useDirTree(
         });
       }
     },
-    [merge]
+    [merge, machine]
   );
 
   // Re-fetch a folder already in the cache (e.g. after creating a file in it),

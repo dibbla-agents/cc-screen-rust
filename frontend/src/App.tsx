@@ -15,11 +15,21 @@ import {
   sendKey,
   setUnauthorizedHandler,
   type Favorite,
+  type MachineInfo,
+  type PaneRef,
   type RestorableSession,
   type Session,
   type UploadFile,
   type UploadResult,
 } from "./api";
+import { fetchMachines } from "./api";
+import {
+  cycleSessionInPane,
+  LAST_KEY,
+  loadPaneState,
+  PANES_KEY,
+  type PaneState,
+} from "./paneState";
 import TerminalView, { type ConnState } from "./components/TerminalView";
 import SessionDrawer from "./components/SessionDrawer";
 import ControlBar from "./components/ControlBar";
@@ -39,73 +49,12 @@ const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
 import { toolColor, toPng, writeClipboard } from "./util";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
 
-const LAST_KEY = "ccweb.lastSession"; // legacy single-session key (migrate from)
-const PANES_KEY = "ccweb.panes.v1";   // {layout, panes, active}
 const FONT_KEY = "ccweb.fontSize";
 // One-shot "how to select" hint. `.v2` because the v1 wording said
 // "Shift+drag" universally — wrong on Mac, where the modifier is Option.
 // Bumping the key re-shows the corrected hint to users who already
 // dismissed v1.
 const COPY_HINT_KEY = "ccweb.copyHintSeen.v2";
-
-interface PaneState {
-  layout: Layout;
-  panes: (string | null)[]; // length == layout
-  active: number;            // index into panes
-}
-
-// loadPaneState restores the persisted layout/panes/active. Falls back to a
-// 1-pane view holding whatever the legacy single-session key pointed at, so
-// existing users land where they were. The persisted layout was historically
-// 1-4 (== pane count); layouts 5 (stacked) and 6 (right-tall L) added later
-// have pane counts 2 and 3, so the array length is derived via paneCount(),
-// not from the layout integer.
-function loadPaneState(): PaneState {
-  try {
-    const raw = localStorage.getItem(PANES_KEY);
-    if (raw) {
-      const s = JSON.parse(raw) as Partial<PaneState>;
-      const layout = Math.max(1, Math.min(6, Math.floor(Number(s.layout) || 1))) as Layout;
-      const count = paneCount(layout);
-      const panes = Array.from({ length: count }, (_, i) => {
-        const v = (s.panes as unknown[] | undefined)?.[i];
-        return typeof v === "string" && v ? v : null;
-      });
-      const active = Math.max(0, Math.min(count - 1, Math.floor(Number(s.active) || 0)));
-      return { layout, panes, active };
-    }
-  } catch {
-    /* fall through */
-  }
-  const legacy = localStorage.getItem(LAST_KEY);
-  return { layout: 1, panes: [legacy || null], active: 0 };
-}
-
-// cycleSessionInPane returns the next/prev session name to mount in `paneIdx`,
-// skipping sessions already mounted in other panes (so cycling never yanks
-// another pane — the one-session-per-pane invariant). When the active pane is
-// empty, ↓ starts at the first available session and ↑ at the last. Returns
-// null if there's nothing to cycle to (zero or one available session that's
-// already current).
-function cycleSessionInPane(
-  current: (string | null)[],
-  paneIdx: number,
-  sessions: string[],
-  dir: 1 | -1
-): string | null {
-  const taken = new Set<string>();
-  current.forEach((p, i) => {
-    if (i !== paneIdx && p) taken.add(p);
-  });
-  const avail = sessions.filter((n) => !taken.has(n));
-  if (avail.length === 0) return null;
-  const cur = current[paneIdx];
-  // Empty pane: dir +1 from "-1" lands on 0; dir -1 from "len" lands on last.
-  let idx = cur ? avail.indexOf(cur) : dir > 0 ? -1 : avail.length;
-  if (cur && idx < 0) idx = dir > 0 ? -1 : 0; // current dropped from list
-  const next = avail[(idx + dir + avail.length) % avail.length];
-  return next === cur ? null : next;
-}
 
 // useIsDesktop is true on a wide window with a precise pointer (mouse/trackpad
 // — Chrome desktop). The multi-pane UI is gated on this; phones always render
@@ -163,6 +112,15 @@ export default function App() {
   // lazily when the drawer opens (it's the only place the offer is shown), so
   // the session-list poll stays a single request.
   const [restorable, setRestorable] = useState<RestorableSession[]>([]);
+  // The hub's machine roster (id, hostname, online). Empty when talking to a
+  // standalone agent (no /api/machines) — i.e. "no hub, single machine". We
+  // group the session list / show machine pickers only when >1 machine, so a
+  // single-box deployment looks exactly as before.
+  const [machines, setMachines] = useState<MachineInfo[]>([]);
+  const multiMachine = machines.length > 1;
+  // Default machine for session-less surfaces (New Session, standalone editor
+  // browse) when no pane gives one: the first online agent, else "".
+  const firstOnlineMachine = machines.find((m) => m.online)?.machine ?? "";
 
   // The whole multi-pane state lives in one object; persisted as one blob.
   const [paneState, setPaneState] = useState<PaneState>(loadPaneState);
@@ -175,7 +133,17 @@ export default function App() {
   const layoutRef = useRef(layout);
   const activeRef = useRef(active);
   const sessionsRef = useRef<Session[]>([]);
-  const panesRef = useRef<(string | null)[]>(panes);
+  const panesRef = useRef<(PaneRef | null)[]>(panes);
+  // paneRefFor builds a pane identity for a session *name*, resolving its owning
+  // machine from the current session list (machine "" when unknown / single
+  // agent). Used by call sites that only have a name (keyboard cycle).
+  const paneRefFor = useCallback(
+    (name: string): PaneRef => ({
+      name,
+      machine: sessionsRef.current.find((s) => s.name === name)?.machine ?? "",
+    }),
+    []
+  );
   // Live xterm.js instance per pane, populated by TerminalView's onTerm
   // callback. The global Cmd/Ctrl+C handler reads the active slot to decide
   // whether there's a selection to copy. Length 4 matches the max layout.
@@ -201,11 +169,12 @@ export default function App() {
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
   // File-upload state. The list is captured at trigger time — flattened from
   // a desktop drop (folders walked via webkitGetAsEntry in api.ts) or from the
-  // phone's file picker — and uploadSession is the pane's session captured at
-  // the same moment, so a later pane switch doesn't retarget the upload.
+  // phone's file picker — and uploadPane is the pane's session+machine captured
+  // at the same moment, so a later pane switch doesn't retarget the upload (and
+  // the upload routes to the owning machine).
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFilesList, setUploadFilesList] = useState<UploadFile[]>([]);
-  const [uploadSession, setUploadSession] = useState<string | null>(null);
+  const [uploadPane, setUploadPane] = useState<PaneRef | null>(null);
   // Hidden <input type="file"> the phone's footer Upload button triggers. iOS
   // turns this into a Photo Library / Take Photo / Choose Files menu, so one
   // control covers both "image" and "file" uploads.
@@ -308,18 +277,24 @@ export default function App() {
     []
   );
 
-  // mountAt assigns `name` (or null) to pane `idx`. If the same session is
+  // mountAt assigns `ref` (or null) to pane `idx`. If the same session is
   // already mounted in another pane, it's removed from there — each session
-  // can live in at most one pane (tmux pane width is shared, so two attached
-  // clients at different widths would fight every resize).
+  // can live in at most one pane (PTY width is shared, so two attached clients
+  // at different widths would fight every resize). Identity is (name, machine):
+  // a same-named session on a *different* machine is a different session and is
+  // left alone.
   const mountAt = useCallback(
-    (idx: number, name: string | null) => {
+    (idx: number, ref: PaneRef | null) => {
       updatePanes((s) => {
         const next = s.panes.slice();
-        if (name) {
-          for (let i = 0; i < next.length; i++) if (i !== idx && next[i] === name) next[i] = null;
+        if (ref) {
+          for (let i = 0; i < next.length; i++) {
+            if (i !== idx && next[i]?.name === ref.name && next[i]?.machine === ref.machine) {
+              next[i] = null;
+            }
+          }
         }
-        next[idx] = name;
+        next[idx] = ref;
         return { ...s, panes: next };
       });
     },
@@ -366,7 +341,7 @@ export default function App() {
     } catch { /* quota — ignore */ }
     // Also keep the legacy single-session key in sync so an older client
     // version still lands somewhere sensible if downgraded.
-    if (currentSession) localStorage.setItem(LAST_KEY, currentSession);
+    if (currentSession) localStorage.setItem(LAST_KEY, currentSession.name);
     else localStorage.removeItem(LAST_KEY);
   }, [paneState, currentSession]);
 
@@ -403,7 +378,7 @@ export default function App() {
       sessionsRef.current = list;
       const live = new Set(list.map((s) => s.name));
       updatePanes((s) => {
-        const next = s.panes.map((p) => (p && live.has(p) ? p : null));
+        const next = s.panes.map((p) => (p && live.has(p.name) ? p : null));
         const changed = next.some((p, i) => p !== s.panes[i]);
         return changed ? { ...s, panes: next } : s;
       });
@@ -471,25 +446,39 @@ export default function App() {
     refresh();
   }, [refresh]);
 
+  // Poll the hub's machine roster (empty [] on a standalone agent, which has no
+  // /api/machines). Drives the per-machine grouping + pickers; polled slowly
+  // since the roster changes rarely (an agent joining/leaving the fleet).
+  useEffect(() => {
+    const load = () => fetchMachines().then(setMachines).catch(() => {});
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, []);
+
   // Refresh the restore offer whenever the drawer opens — cheap, and the only
   // surface that shows it. Errors are non-fatal (just hides the offer).
+  // With multiple machines, the restore offer is scoped to the focused machine
+  // (else the first online) — a machine-less restore would be ambiguous at the
+  // hub. Single-machine passes "" (unchanged, machine-less) behaviour.
+  const restoreMachine = multiMachine ? currentSession?.machine || firstOnlineMachine : "";
   useEffect(() => {
     if (!drawerOpen) return;
-    fetchRestorable().then(setRestorable).catch(() => setRestorable([]));
-  }, [drawerOpen]);
+    fetchRestorable(restoreMachine).then(setRestorable).catch(() => setRestorable([]));
+  }, [drawerOpen, restoreMachine]);
 
   // Bring back every recorded-but-dead session (resuming each tool's
   // conversation), then re-list and re-check what's still restorable.
   const onRestore = useCallback(async () => {
     try {
-      await restoreSessions();
+      await restoreSessions(restoreMachine);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       await refresh();
-      fetchRestorable().then(setRestorable).catch(() => setRestorable([]));
+      fetchRestorable(restoreMachine).then(setRestorable).catch(() => setRestorable([]));
     }
-  }, [refresh]);
+  }, [refresh, restoreMachine]);
 
   // Open the switcher whenever the active pane has nothing (first run, last
   // session in this pane vanished). On desktop the empty pane already shows
@@ -605,7 +594,7 @@ export default function App() {
       const dir: 1 | -1 = k === "ArrowDown" ? 1 : -1;
       const names = sessionsRef.current.map((x) => x.name);
       const next = cycleSessionInPane(panesRef.current, cur, names, dir);
-      if (next !== null) mountAt(cur, next);
+      if (next !== null) mountAt(cur, paneRefFor(next));
     };
 
     const isArrow = (k: string) =>
@@ -934,7 +923,7 @@ export default function App() {
         (async () => {
           try {
             const png = await toPng(blob!);
-            await sendImage(target, png);
+            await sendImage(target.name, png, target.machine);
             showToast("📋 Image pasted", true);
           } catch (err) {
             console.error("clipboard image paste:", err);
@@ -952,7 +941,7 @@ export default function App() {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
-        pasteText(target, text, false).catch((err) => {
+        pasteText(target.name, text, false, target.machine).catch((err) => {
           console.error("clipboard text paste:", err);
           showToast("Text paste failed", false);
         });
@@ -979,8 +968,8 @@ export default function App() {
   // + phone picker): stash the file list and target session, then open the
   // UploadSheet so the user picks a destination folder under the project root.
   const startUpload = useCallback(
-    (session: string | null, list: UploadFile[]) => {
-      if (!session) {
+    (pane: PaneRef | null, list: UploadFile[]) => {
+      if (!pane) {
         showToast("Pick a session first", false);
         return;
       }
@@ -988,7 +977,7 @@ export default function App() {
         showToast("No files selected", false);
         return;
       }
-      setUploadSession(session);
+      setUploadPane(pane);
       setUploadFilesList(list);
       closeAllSheets();
       setUploadOpen(true);
@@ -1058,7 +1047,7 @@ export default function App() {
     (r: UploadResult) => {
       setUploadOpen(false);
       setUploadFilesList([]);
-      setUploadSession(null);
+      setUploadPane(null);
       const wrote = r.written.length;
       const renamed = Object.keys(r.renamed).length;
       const errors = r.errors ? Object.keys(r.errors).length : 0;
@@ -1102,9 +1091,10 @@ export default function App() {
     localStorage.setItem(FONT_KEY, String(v));
   };
 
-  // Picking from the drawer mounts in the active pane.
-  const pick = (name: string) => {
-    mountAt(active, name);
+  // Picking from the drawer mounts the chosen session (with its owning machine)
+  // in the active pane.
+  const pick = (s: Session) => {
+    mountAt(active, { name: s.name, machine: s.machine ?? "" });
     setDrawerOpen(false);
   };
 
@@ -1112,10 +1102,10 @@ export default function App() {
   // (soft = inject /exit, hard = kill), then poll until tmux no longer lists
   // it and drop it from the list (and from any pane holding it).
   const removeSession = useCallback(
-    async (name: string, mode: "exit" | "kill") => {
+    async (name: string, mode: "exit" | "kill", machine = "") => {
       setDeleting((d) => new Set(d).add(name));
       try {
-        await deleteSession(name, mode);
+        await deleteSession(name, mode, machine);
         const deadline = Date.now() + 25000; // give a soft /exit time to wind down
         for (;;) {
           await new Promise((r) => setTimeout(r, 500));
@@ -1126,11 +1116,17 @@ export default function App() {
             if (Date.now() > deadline) break;
             continue;
           }
-          if (!list.some((s) => s.name === name)) {
+          if (!list.some((s) => s.name === name && (s.machine ?? "") === machine)) {
             setSessions(list);
             updatePanes((s) => {
-              if (!s.panes.includes(name)) return s;
-              return { ...s, panes: s.panes.map((p) => (p === name ? null : p)) };
+              const has = s.panes.some((p) => p?.name === name && p?.machine === machine);
+              if (!has) return s;
+              return {
+                ...s,
+                panes: s.panes.map((p) =>
+                  p?.name === name && p?.machine === machine ? null : p
+                ),
+              };
             });
             break;
           }
@@ -1183,28 +1179,32 @@ export default function App() {
   // (Enter), then close the sheet. One tap fires a favourite straight in.
   const injectFavorite = useCallback(
     (text: string) => {
-      if (currentSession) pasteText(currentSession, text, true).catch(() => {});
+      if (currentSession)
+        pasteText(currentSession.name, text, true, currentSession.machine).catch(() => {});
       setFavOpen(false);
     },
     [currentSession]
   );
 
   const onKey = (key: string) => {
-    if (currentSession) sendKey(currentSession, key).catch(() => {});
+    if (currentSession) sendKey(currentSession.name, key, currentSession.machine).catch(() => {});
   };
   // Wipe the polluted scrollback that builds up when Claude Code re-renders on
   // every SIGWINCH (it writes to the normal buffer, so each redraw appends).
   const onClearHistory = () => {
-    if (currentSession) clearHistory(currentSession).catch(() => {});
+    if (currentSession) clearHistory(currentSession.name, currentSession.machine).catch(() => {});
   };
   const onSend = (text: string, enter: boolean) => {
-    if (currentSession) pasteText(currentSession, text, enter).catch(() => {});
+    if (currentSession)
+      pasteText(currentSession.name, text, enter, currentSession.machine).catch(() => {});
   };
   const onImage = (png: Blob) => {
-    if (currentSession) sendImage(currentSession, png).catch(() => {});
+    if (currentSession) sendImage(currentSession.name, png, currentSession.machine).catch(() => {});
   };
 
-  const cur = sessions.find((s) => s.name === currentSession);
+  const cur = sessions.find(
+    (s) => s.name === currentSession?.name && (s.machine ?? "") === currentSession?.machine
+  );
   const conn = conns[active] ?? "closed";
   const dot =
     conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
@@ -1285,6 +1285,8 @@ export default function App() {
       open={drawerOpen}
       embedded={embedded}
       sessions={sessions}
+      machines={machines}
+      multiMachine={multiMachine}
       current={currentSession}
       loading={loading}
       error={error}
@@ -1442,7 +1444,7 @@ export default function App() {
             fontSize={fontSize}
             onActivate={setActive}
             onConn={setPaneConn}
-            onPickFor={(idx, name) => mountAt(idx, name)}
+            onPickFor={(idx, ref) => mountAt(idx, ref)}
             onOpenDrawerFor={(idx) => {
               setActive(idx);
               setDrawerOpen(true);
@@ -1457,8 +1459,9 @@ export default function App() {
         ) : currentSession ? (
           // Phone path is unchanged: one terminal, single pane.
           <TerminalView
-            key={currentSession}
-            session={currentSession}
+            key={`${currentSession.machine}/${currentSession.name}`}
+            session={currentSession.name}
+            machine={currentSession.machine}
             fontSize={fontSize}
             onState={(c) => setPaneConn(0, c)}
             onTerm={(t) => { termsRef.current[0] = t; }}
@@ -1546,6 +1549,9 @@ export default function App() {
       {!isDesktop && renderDrawer(false)}
       <NewSessionPanel
         open={newOpen}
+        machines={machines}
+        multiMachine={multiMachine}
+        initialMachine={currentSession?.machine || firstOnlineMachine}
         onClose={() => setNewOpen(false)}
         onCreated={(session) => {
           setNewOpen(false);
@@ -1568,12 +1574,13 @@ export default function App() {
       <ImageSheet open={imageOpen} onClose={() => setImageOpen(false)} onSend={onImage} />
       <UploadSheet
         open={uploadOpen}
-        session={uploadSession}
+        session={uploadPane?.name ?? null}
+        machine={uploadPane?.machine ?? ""}
         files={uploadFilesList}
         onClose={() => {
           setUploadOpen(false);
           setUploadFilesList([]);
-          setUploadSession(null);
+          setUploadPane(null);
         }}
         onResult={onUploadResult}
       />
@@ -1582,7 +1589,11 @@ export default function App() {
           <EditorOverlay
             open={editor.open}
             initialPath={editor.path}
-            session={currentSession}
+            session={currentSession?.name ?? null}
+            machines={machines}
+            multiMachine={multiMachine}
+            initialMachine={currentSession?.machine || firstOnlineMachine}
+            agentMachine={currentSession?.machine ?? ""}
             isDesktop={isDesktop}
             onClose={closeEditor}
             // The agent mirror renders at the active pane's true grid size so it

@@ -14,6 +14,10 @@ import {
 interface Props {
   open: boolean;
   session: string | null;
+  // The machine (agent) owning the destination session, so the preflight + dir
+  // browse + upload all route to the right agent's project root. "" for a
+  // single agent.
+  machine?: string;
   files: UploadFile[];
   onClose: () => void;
   onResult: (r: UploadResult) => void;
@@ -87,6 +91,7 @@ function groupFiles(files: UploadFile[]): UploadGroup[] {
 export default function UploadSheet({
   open,
   session,
+  machine = "",
   files,
   onClose,
   onResult,
@@ -133,7 +138,7 @@ export default function UploadSheet({
       if (cache.has(path) || loading.has(path)) return;
       setLoading((s) => new Set(s).add(path));
       try {
-        const d = await fetchDirs(path);
+        const d = await fetchDirs(path, machine);
         setCache((c) => {
           const next = new Map(c);
           next.set(path, d.dirs);
@@ -149,7 +154,7 @@ export default function UploadSheet({
         });
       }
     },
-    [cache, loading]
+    [cache, loading, machine]
   );
 
   // toggle flips a node's expansion. Lazy-loads if first-time. Used by the
@@ -215,7 +220,7 @@ export default function UploadSheet({
     let cancelled = false;
     (async () => {
       try {
-        const { root: r, home: h } = await sessionRoot(session);
+        const { root: r, home: h } = await sessionRoot(session, machine);
         if (cancelled) return;
         setRoot(r);
         setHome(h);
@@ -223,7 +228,7 @@ export default function UploadSheet({
         setExpanded(new Set([r]));
         // Load the root's children eagerly so the tree isn't a single line
         // on open. Subsequent levels load lazily on expand.
-        const d = await fetchDirs(r);
+        const d = await fetchDirs(r, machine);
         if (cancelled) return;
         setCache((c) => new Map(c).set(r, d.dirs));
       } catch (e) {
@@ -233,7 +238,7 @@ export default function UploadSheet({
     return () => {
       cancelled = true;
     };
-  }, [open, session]);
+  }, [open, session, machine]);
 
   // Pre-flight collision check whenever the selected destination changes.
   // Server returns the subset of names already present; we default the
@@ -242,7 +247,7 @@ export default function UploadSheet({
     if (!open || !session || !selectedDir) return;
     let cancelled = false;
     const names = files.map((f) => f.relPath);
-    checkUpload(session, selectedDir, names)
+    checkUpload(session, selectedDir, names, machine)
       .then(({ exists }) => {
         if (cancelled) return;
         setConflicts(exists);
@@ -265,12 +270,12 @@ export default function UploadSheet({
     return () => {
       cancelled = true;
     };
-  }, [open, session, selectedDir, files]);
+  }, [open, session, selectedDir, files, machine]);
 
   const createFolder = async () => {
     if (!selectedDir || !newName.trim()) return;
     try {
-      await makeDir(selectedDir, newName.trim());
+      await makeDir(selectedDir, newName.trim(), machine);
       setCreating(false);
       setNewName("");
       // Invalidate this folder's children cache and re-fetch so the new
@@ -311,7 +316,8 @@ export default function UploadSheet({
         resolution,
         (frac) => {
           if (!cancelledRef.current) setProgress(frac);
-        }
+        },
+        machine
       );
       if (cancelledRef.current) return;
       onResult(result);

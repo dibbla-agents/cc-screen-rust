@@ -8,6 +8,9 @@ export type ConnState = "connecting" | "open" | "closed";
 
 interface Props {
   session: string;
+  // The machine (agent) owning this session, threaded onto the WS URL so a hub
+  // routes the attach to the right agent. "" / undefined for a single agent.
+  machine?: string;
   fontSize: number;
   onState: (s: ConnState) => void;
   // True when this pane is the active one in the parent's TileGrid. Used to
@@ -28,7 +31,7 @@ interface Props {
 // One TerminalView per session (parent remounts via key={session}). It owns the
 // xterm instance and the WebSocket, reconnecting on drop — because all state
 // lives in tmux, a reconnect re-attaches exactly where the agent left off.
-export default function TerminalView({ session, fontSize, onState, active = true, onTerm }: Props) {
+export default function TerminalView({ session, machine, fontSize, onState, active = true, onTerm }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -159,7 +162,7 @@ export default function TerminalView({ session, fontSize, onState, active = true
 
     const connect = () => {
       onState("connecting");
-      const ws = new WebSocket(wsURL(session));
+      const ws = new WebSocket(wsURL(session, machine));
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
 
@@ -213,7 +216,7 @@ export default function TerminalView({ session, fontSize, onState, active = true
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session]);
+  }, [session, machine]);
 
   // Pull keyboard focus into this terminal whenever the parent marks it
   // active. This is the missing half of pane navigation: Ctrl+B + arrow

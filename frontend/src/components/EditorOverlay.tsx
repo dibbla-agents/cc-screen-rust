@@ -26,6 +26,7 @@ import {
   FileNotEditable,
   FileChangedOnDisk,
   type FileEntry,
+  type MachineInfo,
 } from "../api";
 import ContextMenu, { type CtxTarget } from "./ContextMenu";
 import { errMsg, isMarkdownFile, isPdfFile, useDirTree, type DirTreeOpts, type TreeCtxInfo } from "./dirTree";
@@ -63,6 +64,18 @@ interface Props {
   // Active session — anchors the tree's "project" section at its tmux cwd, and
   // is the agent shown in the right-hand mirror column.
   session: string | null;
+  // The hub roster + whether to show the machine switcher in the header.
+  machines: MachineInfo[];
+  multiMachine: boolean;
+  // The machine whose $HOME the editor browses initially: the active pane's
+  // machine when opened from a pane, else the first online agent. The user can
+  // switch it via the header dropdown (multi-machine only); all file ops + the
+  // tree + watch follow the selection.
+  initialMachine: string;
+  // The originating pane's machine — the agent shown in the right-hand mirror.
+  // Kept separate from the file-browse machine so flipping the file switcher
+  // never retargets the mirrored agent.
+  agentMachine: string;
   isDesktop: boolean;
   onClose: () => void;
   // Authoritative grid size of the active session's terminal (the active grid
@@ -150,12 +163,22 @@ export default function EditorOverlay({
   open,
   initialPath,
   session,
+  machines,
+  multiMachine,
+  initialMachine,
+  agentMachine,
   isDesktop,
   onClose,
   agentCols = 0,
   agentRows = 0,
   termFontSize = 14,
 }: Props) {
+  // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
+  // on open; switchable via the header dropdown (multi-machine only).
+  const [fileMachine, setFileMachine] = useState(initialMachine);
+  useEffect(() => {
+    if (open) setFileMachine(initialMachine);
+  }, [open, initialMachine]);
   const [activePath, setActivePath] = useState<string | null>(initialPath);
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(""); // last-saved/loaded content (for dirty)
@@ -217,7 +240,7 @@ export default function EditorOverlay({
   // The file tree backing both the desktop sidebar and the phone slide-over
   // panel. Enabled on both now (it's also what gives the phone a real folder to
   // anchor new files in and the ~-abbreviated status-bar path).
-  const tree = useDirTree(open, session, EDITOR_TREE_OPTS);
+  const tree = useDirTree(open, session, EDITOR_TREE_OPTS, fileMachine);
 
   // Drag-and-drop upload INTO a tree folder. A drop on a folder row, a folder's
   // file listing, or a section header (wired through EditorTree → FolderChildren
@@ -262,8 +285,13 @@ export default function EditorOverlay({
       }
       setUploadStatus({ total: list.length, dir, progress: 0, done: false, errors: 0 });
       try {
-        const r = await uploadFiles(null, dir, list, {}, (frac) =>
-          setUploadStatus((s) => (s && !s.done ? { ...s, progress: frac } : s))
+        const r = await uploadFiles(
+          null,
+          dir,
+          list,
+          {},
+          (frac) => setUploadStatus((s) => (s && !s.done ? { ...s, progress: frac } : s)),
+          fileMachine
         );
         const errs = r.errors ? Object.keys(r.errors).length : 0;
         setUploadStatus({ total: list.length, dir, progress: 1, done: true, errors: errs });
@@ -277,7 +305,7 @@ export default function EditorOverlay({
         setUploadStatus(null);
       }
     },
-    [tree]
+    [tree, fileMachine]
   );
 
   // Per-row download (saves to the device via navigator.share / <a download>).
@@ -288,13 +316,13 @@ export default function EditorOverlay({
     setDownloading(f.path);
     setError("");
     try {
-      await saveFileToDevice(f.path, f.name);
+      await saveFileToDevice(f.path, f.name, fileMachine);
     } catch (e) {
       setError(errMsg(e));
     } finally {
       setDownloading(null);
     }
-  }, []);
+  }, [fileMachine]);
 
   // ── Right-click / long-press file-tree context menu ──────────────────────
   // The tree (EditorTree → FolderChildren) reports a target + cursor; we open a
@@ -324,23 +352,23 @@ export default function EditorOverlay({
   const ctxNewFile = useCallback(
     async (dir: string, n: string) => {
       const p = `${dir}/${n}`;
-      await writeFile(p, "");
+      await writeFile(p, "", undefined, fileMachine);
       await tree.refresh(dir);
       setActivePath(p); // open the new file
       setTreePanelOpen(false); // phone: reveal it (no-op on desktop)
     },
-    [tree]
+    [tree, fileMachine]
   );
   const ctxNewFolder = useCallback(
     async (dir: string, n: string) => {
-      await makeDir(dir, n);
+      await makeDir(dir, n, fileMachine);
       await tree.refresh(dir);
     },
-    [tree]
+    [tree, fileMachine]
   );
   const ctxRename = useCallback(
     async (p: string, n: string) => {
-      const { path: np } = await renamePath(p, n);
+      const { path: np } = await renamePath(p, n, fileMachine);
       await tree.refresh(dirname(p));
       // Keep the open file pointing at its new path (covers renaming the file
       // itself or any ancestor folder of it).
@@ -350,23 +378,23 @@ export default function EditorOverlay({
         return cur;
       });
     },
-    [tree]
+    [tree, fileMachine]
   );
   const ctxDeleteFile = useCallback(
     async (p: string) => {
-      await deleteFile(p);
+      await deleteFile(p, fileMachine);
       await tree.refresh(dirname(p));
       setActivePath((cur) => (cur === p ? null : cur));
     },
-    [tree]
+    [tree, fileMachine]
   );
   const ctxDeleteFolder = useCallback(
     async (p: string) => {
-      await removeDir(p, true);
+      await removeDir(p, true, fileMachine);
       await tree.refresh(dirname(p));
       setActivePath((cur) => (cur === p || (cur && cur.startsWith(p + "/")) ? null : cur));
     },
-    [tree]
+    [tree, fileMachine]
   );
 
   const dirty = status === "ready" && content !== loaded;
@@ -516,7 +544,7 @@ export default function EditorOverlay({
     setStatus("loading");
     setError("");
     setConflict(false);
-    readFile(activePath)
+    readFile(activePath, fileMachine)
       .then((r) => {
         if (cancelled) return;
         setContent(r.content);
@@ -539,7 +567,7 @@ export default function EditorOverlay({
     return () => {
       cancelled = true;
     };
-  }, [open, activePath]);
+  }, [open, activePath, fileMachine]);
 
   const doSave = useCallback(
     async (force = false) => {
@@ -547,7 +575,7 @@ export default function EditorOverlay({
       setSaving(true);
       setError("");
       try {
-        const r = await writeFile(activePath, content, force ? 0 : baseMtime);
+        const r = await writeFile(activePath, content, force ? 0 : baseMtime, fileMachine);
         setLoaded(content);
         setBaseMtime(r.mtime);
         setConflict(false);
@@ -562,7 +590,7 @@ export default function EditorOverlay({
         setSaving(false);
       }
     },
-    [activePath, content, baseMtime, status, saving]
+    [activePath, content, baseMtime, status, saving, fileMachine]
   );
 
   // Live save: debounce a write after edits settle. Skipped while a conflict is
@@ -578,7 +606,7 @@ export default function EditorOverlay({
     const p = activePathRef.current;
     if (!p) return;
     try {
-      const r = await readFile(p);
+      const r = await readFile(p, fileMachine);
       setContent(r.content);
       setLoaded(r.content);
       setBaseMtime(r.mtime);
@@ -588,7 +616,7 @@ export default function EditorOverlay({
       // Vanished/unreadable mid-edit; the tree reflects any deletion and a save
       // would surface a real error.
     }
-  }, []);
+  }, [fileMachine]);
 
   // Real-time open-file reflection: watch the file's directory so an external
   // edit (the agent rewriting it) shows immediately — live-reload a clean
@@ -707,7 +735,7 @@ export default function EditorOverlay({
     }
     const path = `${baseDir}/${n}`;
     try {
-      await writeFile(path, "");
+      await writeFile(path, "", undefined, fileMachine);
       setNewOpen(false);
       setNewName("");
       setActivePath(path);
@@ -715,7 +743,7 @@ export default function EditorOverlay({
     } catch (e) {
       setError(errMsg(e));
     }
-  }, [newName, activePath, tree]);
+  }, [newName, activePath, tree, fileMachine]);
 
   const doDelete = useCallback(async () => {
     if (!activePath || deleting) return;
@@ -723,7 +751,7 @@ export default function EditorOverlay({
     setError("");
     const gone = activePath;
     try {
-      await deleteFile(gone);
+      await deleteFile(gone, fileMachine);
       setConfirmDelete(false);
       setActivePath(null); // → empty state
       if (!isDesktop) setTreePanelOpen(true); // phone: land back on the file tree
@@ -733,7 +761,7 @@ export default function EditorOverlay({
     } finally {
       setDeleting(false);
     }
-  }, [activePath, deleting, isDesktop, tree]);
+  }, [activePath, deleting, isDesktop, tree, fileMachine]);
 
   if (!open) return null;
 
@@ -812,6 +840,26 @@ export default function EditorOverlay({
             {name || "Editor"}
           </span>
         </div>
+
+        {/* Machine switcher — which agent's $HOME the tree/file ops browse. Only
+            with a hub fronting >1 agent. Switching re-roots the tree (the
+            mirrored agent on the right is unaffected — it stays the pane you
+            came from). */}
+        {multiMachine && (
+          <select
+            value={fileMachine}
+            onChange={(e) => setFileMachine(e.target.value)}
+            title="Browse files on this machine"
+            aria-label="File browser machine"
+            className="h-9 max-w-[10rem] shrink-0 rounded-lg bg-panel px-2 text-xs text-slate-200"
+          >
+            {machines.map((m) => (
+              <option key={m.machine} value={m.machine} disabled={!m.online}>
+                {(m.hostname || m.machine) + (m.online ? "" : " (offline)")}
+              </option>
+            ))}
+          </select>
+        )}
 
         {/* Download the open file. Shown for both the text editor and the PDF
             viewer (which gates its other controls off), on desktop and phone —
@@ -1219,7 +1267,7 @@ export default function EditorOverlay({
                 </div>
               }
             >
-              <PdfViewer path={activePath} name={name} />
+              <PdfViewer path={activePath} name={name} machine={fileMachine} />
             </Suspense>
           )}
           {status === "ready" &&
@@ -1284,6 +1332,7 @@ export default function EditorOverlay({
             </div>
             <AgentColumn
               session={session}
+              machine={agentMachine}
               cols={agentCols}
               rows={agentRows}
               fontSize={termFontSize}
@@ -1471,6 +1520,7 @@ function EmptyState({
 // releases it (see releaseControl). No session → a quiet placeholder.
 function AgentColumn({
   session,
+  machine,
   cols,
   rows,
   fontSize,
@@ -1482,6 +1532,7 @@ function AgentColumn({
   onConn,
 }: {
   session: string | null;
+  machine: string;
   cols: number;
   rows: number;
   fontSize: number;
@@ -1535,8 +1586,9 @@ function AgentColumn({
       >
         {session ? (
           <AgentMirror
-            key={session}
+            key={`${machine}/${session}`}
             session={session}
+            machine={machine}
             cols={cols}
             rows={rows}
             maxFontSize={fontSize}

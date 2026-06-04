@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
-import type { Session } from "../api";
+import type { PaneRef, Session } from "../api";
 import { toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
@@ -62,13 +62,13 @@ export function paneCount(l: Layout): number {
 
 interface Props {
   layout: Layout;
-  panes: (string | null)[];
+  panes: (PaneRef | null)[];
   active: number;
   sessions: Session[];
   fontSize: number;
   onActivate: (idx: number) => void;
   onConn: (idx: number, c: ConnState) => void;
-  onPickFor: (idx: number, name: string) => void;
+  onPickFor: (idx: number, ref: PaneRef) => void;
   onOpenDrawerFor: (idx: number) => void;
   onNewFor: (idx: number) => void;
   onOpenEditor: () => void; // opens the file-editor overlay (the single file
@@ -123,18 +123,18 @@ export default function TileGrid({
         gridTemplateAreas: tpl.areas,
       }}
     >
-      {panes.map((session, idx) => (
+      {panes.map((pane, idx) => (
         <PaneBox
           key={idx}
           area={tpl.pane(idx)}
           index={idx}
           active={idx === active}
-          session={session}
+          session={pane}
           sessions={sessions}
           fontSize={fontSize}
           onActivate={() => onActivate(idx)}
           onConn={(c) => onConn(idx, c)}
-          onPick={(name) => onPickFor(idx, name)}
+          onPick={(ref) => onPickFor(idx, ref)}
           onOpenDrawer={() => onOpenDrawerFor(idx)}
           onNew={() => onNewFor(idx)}
           onOpenEditor={onOpenEditor}
@@ -151,12 +151,12 @@ interface PaneProps {
   area: string;
   index: number;
   active: boolean;
-  session: string | null;
+  session: PaneRef | null;
   sessions: Session[];
   fontSize: number;
   onActivate: () => void;
   onConn: (c: ConnState) => void;
-  onPick: (name: string) => void;
+  onPick: (ref: PaneRef) => void;
   onOpenDrawer: () => void;
   onNew: () => void;
   onOpenEditor: () => void;
@@ -182,7 +182,9 @@ function PaneBox({
   onDropFiles,
   overlay,
 }: PaneProps) {
-  const meta = sessions.find((s) => s.name === session);
+  const meta = sessions.find(
+    (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
+  );
 
   // Drag-and-drop overlay state. We track a counter (incremented on
   // dragenter, decremented on dragleave) because dragenter/leave also fire
@@ -326,8 +328,9 @@ function PaneBox({
 
       {session ? (
         <TerminalView
-          key={session}
-          session={session}
+          key={`${session.machine}/${session.name}`}
+          session={session.name}
+          machine={session.machine}
           fontSize={fontSize}
           onState={onConn}
           active={active}
@@ -405,7 +408,7 @@ function PaneBox({
 
 interface PickerProps {
   sessions: Session[];
-  onPick: (name: string) => void;
+  onPick: (ref: PaneRef) => void;
   onOpenDrawer: () => void;
   onNew: () => void;
 }
@@ -446,8 +449,8 @@ function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps)
 
         {sorted.map((s) => (
           <button
-            key={s.name}
-            onClick={() => onPick(s.name)}
+            key={`${s.machine ?? ""}/${s.name}`}
+            onClick={() => onPick({ name: s.name, machine: s.machine ?? "" })}
             className="flex items-center gap-2 rounded-md py-1.5 pl-2 pr-2 text-left text-[13px] transition-colors hover:bg-edge/40"
             title={s.preview}
           >

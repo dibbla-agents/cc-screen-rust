@@ -6,14 +6,23 @@ import {
   makeDir,
   removeDir,
   type DirsResp,
+  type MachineInfo,
+  type PaneRef,
   type Tool,
 } from "../api";
 import { toolColor } from "../util";
 
 interface Props {
   open: boolean;
+  // The hub's machine roster + whether to show the machine selector. Single
+  // machine / standalone agent hides it. The session is created on
+  // `selectedMachine`, which starts at `initialMachine` (the pane the user came
+  // from, else the first online agent).
+  machines: MachineInfo[];
+  multiMachine: boolean;
+  initialMachine: string;
   onClose: () => void;
-  onCreated: (session: string) => void;
+  onCreated: (ref: PaneRef) => void;
 }
 
 function basename(p: string): string {
@@ -24,9 +33,19 @@ function basename(p: string): string {
 // Full-screen, thumb-friendly flow to start a new session: browse the home
 // directory tree (tap a folder to descend, ⬆︎ to go up), pick a tool, name it,
 // Create. The session launches in the browsed folder, exactly like `cc` would.
-export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
+export default function NewSessionPanel({
+  open,
+  machines,
+  multiMachine,
+  initialMachine,
+  onClose,
+  onCreated,
+}: Props) {
   const [tools, setTools] = useState<Tool[]>([]);
   const [tool, setTool] = useState<string>("");
+  // Which machine to create on. Adopted from initialMachine on open; changing it
+  // re-fetches tools + re-browses dirs (both are per-machine).
+  const [selectedMachine, setSelectedMachine] = useState(initialMachine);
   const [dirs, setDirs] = useState<DirsResp | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -50,7 +69,7 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
     setConfirmDel(null);
     setCreating(false);
     try {
-      const d = await fetchDirs(path);
+      const d = await fetchDirs(path, selectedMachine);
       setDirs(d);
       if (!nameEdited.current) setName(d.atHome ? "" : basename(d.path));
     } catch (e) {
@@ -61,7 +80,7 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
   const createFolder = async () => {
     if (!dirs || !newName.trim()) return;
     try {
-      await makeDir(dirs.path, newName.trim());
+      await makeDir(dirs.path, newName.trim(), selectedMachine);
       setCreating(false);
       setNewName("");
       go(dirs.path);
@@ -72,7 +91,7 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
 
   const deleteFolder = async (path: string) => {
     try {
-      await removeDir(path);
+      await removeDir(path, false, selectedMachine);
       setConfirmDel(null);
       go(dirs!.path);
     } catch (e) {
@@ -84,12 +103,20 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
   const goExtra = async (path?: string) => {
     setExtraPickerErr(null);
     try {
-      setExtraPickerDirs(await fetchDirs(path));
+      setExtraPickerDirs(await fetchDirs(path, selectedMachine));
     } catch (e) {
       setExtraPickerErr(e instanceof Error ? e.message : String(e));
     }
   };
 
+  // Adopt the caller's initial machine each time the panel opens.
+  useEffect(() => {
+    if (open) setSelectedMachine(initialMachine);
+  }, [open, initialMachine]);
+
+  // (Re)load tools + the dir browser whenever the panel opens or the chosen
+  // machine changes — both are per-machine ($HOME and tools.conf live on the
+  // agent).
   useEffect(() => {
     if (!open) return;
     nameEdited.current = false;
@@ -99,7 +126,7 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
     setExtraPickerOpen(false);
     setExtraPickerDirs(null);
     setExtraPickerErr(null);
-    fetchTools()
+    fetchTools(selectedMachine)
       .then((ts) => {
         setTools(ts);
         setTool((cur) => cur || ts[0]?.cmd || "");
@@ -107,7 +134,7 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
       .catch(() => {});
     go();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, selectedMachine]);
 
   useEffect(() => {
     if (!dirs) return;
@@ -167,8 +194,14 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
     setBusy(true);
     setErr(null);
     try {
-      const session = await createSession(tool, name, dirs.path, extraSupport ? extraDirs : []);
-      onCreated(session);
+      const ref = await createSession(
+        tool,
+        name,
+        dirs.path,
+        extraSupport ? extraDirs : [],
+        selectedMachine
+      );
+      onCreated(ref);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -187,6 +220,26 @@ export default function NewSessionPanel({ open, onClose, onCreated }: Props) {
           ✕
         </button>
       </div>
+
+      {/* Machine picker — only with a hub fronting >1 agent. Switching re-loads
+          the tool list + dir browser for the chosen machine. */}
+      {multiMachine && (
+        <div className="flex items-center gap-2 border-b border-edge/60 px-3 py-2">
+          <span className="text-slate-500">🖥</span>
+          <span className="shrink-0 text-sm text-slate-400">Machine</span>
+          <select
+            value={selectedMachine}
+            onChange={(e) => setSelectedMachine(e.target.value)}
+            className="min-w-0 flex-1 rounded-md bg-panel px-3 py-2 text-sm text-slate-100"
+          >
+            {machines.map((m) => (
+              <option key={m.machine} value={m.machine} disabled={!m.online}>
+                {(m.hostname || m.machine) + (m.online ? "" : " (offline)")}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* current folder + up + new folder */}
       <div className="flex items-center gap-2 border-b border-edge/60 px-3 py-2">

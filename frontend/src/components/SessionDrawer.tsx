@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { RestorableSession, Session } from "../api";
+import { Fragment, useEffect, useRef, useState } from "react";
+import type { MachineInfo, PaneRef, RestorableSession, Session } from "../api";
 import { ago, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
@@ -11,15 +11,22 @@ interface Props {
   // same — only the chrome/positioning differs. See App.tsx / TileGrid.
   embedded?: boolean;
   sessions: Session[];
-  current: string | null;
+  // The hub's machine roster — used to render group headers (hostname + offline
+  // indicator) and to surface idle machines that have no sessions yet. Empty on
+  // a standalone agent.
+  machines: MachineInfo[];
+  // True when >1 machine is connected: group the list by machine. False keeps
+  // the flat, single-machine layout unchanged.
+  multiMachine: boolean;
+  current: PaneRef | null;
   loading: boolean;
   error: string | null;
-  onPick: (name: string) => void;
+  onPick: (s: Session) => void;
   onClose: () => void;
   onRefresh: () => void;
   onNew: () => void;
   deleting: Set<string>;
-  onDelete: (name: string, mode: "exit" | "kill") => void;
+  onDelete: (name: string, mode: "exit" | "kill", machine?: string) => void;
   // Sessions a reboot/tmux restart took down that can be resumed; the button
   // appears only when non-empty. onRestore brings them all back.
   restorable: RestorableSession[];
@@ -36,6 +43,8 @@ export default function SessionDrawer({
   open,
   embedded = false,
   sessions,
+  machines,
+  multiMachine,
   current,
   loading,
   error,
@@ -65,7 +74,9 @@ export default function SessionDrawer({
       setConfirmDel(null);
       return;
     }
-    const cur = sessions.findIndex((s) => s.name === current);
+    const cur = sessions.findIndex(
+      (s) => s.name === current?.name && (s.machine ?? "") === current?.machine
+    );
     setCursor(cur >= 0 ? cur : sessions.length > 0 ? 0 : -1);
   }, [open, sessions, current]);
 
@@ -113,7 +124,7 @@ export default function SessionDrawer({
         if (cursor >= 0 && cursor < sessions.length) {
           e.preventDefault();
           e.stopPropagation();
-          onPick(sessions[cursor].name);
+          onPick(sessions[cursor]);
         }
       }
     };
@@ -128,6 +139,34 @@ export default function SessionDrawer({
   // editor's toolbar buttons.
   const iconBtn =
     "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-edge/60 hover:text-slate-100";
+
+  // A machine group header (shown only when multiMachine). Resolves the
+  // hostname + online state from the roster; `empty` flags a machine that's in
+  // the roster but has no sessions, so idle/offline boxes stay visible.
+  const renderMachineHeader = (machineId: string, empty = false) => {
+    const m = machines.find((x) => x.machine === machineId);
+    const label = m?.hostname || machineId || "this machine";
+    return (
+      <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-bar/95 px-2 pb-1 pt-2 backdrop-blur-sm">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+          {label}
+        </span>
+        {m && !m.online && (
+          <span className="rounded bg-edge/60 px-1 py-px text-[9px] text-slate-500" title="offline">
+            offline
+          </span>
+        )}
+        {empty && <span className="text-[10px] text-slate-600">· no sessions</span>}
+      </div>
+    );
+  };
+
+  // Machines in the roster that currently have no sessions — rendered as empty
+  // group headers at the end so an idle box is still visible (and a reminder it
+  // exists to start one on). Only when grouping.
+  const emptyMachines = multiMachine
+    ? machines.filter((m) => !sessions.some((s) => (s.machine ?? "") === m.machine))
+    : [];
 
   return (
     <div
@@ -219,24 +258,33 @@ export default function SessionDrawer({
         )}
 
         {sessions.map((s, idx) => {
-          const active = s.name === current;
+          const active =
+            s.name === current?.name && (s.machine ?? "") === current?.machine;
           const focused = idx === cursor;
           const isDeleting = deleting.has(s.name);
+          // First row of a new machine run gets a group header. Sessions arrive
+          // pre-sorted by (machine, name) from the hub, so a simple
+          // change-detect against the previous row groups them; cursor/rowRefs
+          // stay indexed over the flat `sessions` array (headers aren't rows).
+          const showHeader =
+            multiMachine &&
+            (idx === 0 || (sessions[idx - 1].machine ?? "") !== (s.machine ?? ""));
           const rowState = focused
             ? "bg-edge/70 ring-1 ring-inset ring-accent/40"
             : active
             ? "bg-edge/30"
             : "hover:bg-edge/40";
           return (
-            <div
-              key={s.name}
-              ref={(el) => {
-                rowRefs.current[idx] = el;
-              }}
-              className={`group flex items-center rounded-md transition-colors ${rowState}`}
-            >
+            <Fragment key={`${s.machine ?? ""}/${s.name}`}>
+              {showHeader && renderMachineHeader(s.machine ?? "")}
+              <div
+                ref={(el) => {
+                  rowRefs.current[idx] = el;
+                }}
+                className={`group flex items-center rounded-md transition-colors ${rowState}`}
+              >
               <button
-                onClick={() => onPick(s.name)}
+                onClick={() => onPick(s)}
                 className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-2 pr-1 text-left"
               >
                 <span className="flex h-5 w-5 shrink-0 items-center justify-center">
@@ -286,7 +334,7 @@ export default function SessionDrawer({
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => {
-                        onDelete(s.name, "exit");
+                        onDelete(s.name, "exit", s.machine);
                         setConfirmDel(null);
                       }}
                       className="rounded-md bg-edge px-2 py-1 text-[11px] text-slate-200 hover:bg-edge/70"
@@ -296,7 +344,7 @@ export default function SessionDrawer({
                     </button>
                     <button
                       onClick={() => {
-                        onDelete(s.name, "kill");
+                        onDelete(s.name, "kill", s.machine);
                         setConfirmDel(null);
                       }}
                       className="rounded-md bg-red-500/80 px-2 py-1 text-[11px] font-semibold text-bar hover:bg-red-500"
@@ -322,9 +370,16 @@ export default function SessionDrawer({
                   </button>
                 )}
               </div>
-            </div>
+              </div>
+            </Fragment>
           );
         })}
+
+        {/* Idle/offline machines with no sessions — visible so you know they're
+            there (start one via New session). Grouping only. */}
+        {emptyMachines.map((m) => (
+          <Fragment key={`empty/${m.machine}`}>{renderMachineHeader(m.machine, true)}</Fragment>
+        ))}
       </div>
     </div>
   );

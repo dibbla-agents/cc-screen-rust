@@ -225,3 +225,90 @@ async fn agent_with_wrong_uplink_token_is_rejected() {
     }
     assert!(listed, "the correctly-tokened agent registers");
 }
+
+/// Like `spawn_fake_agent` but the attach snapshot carries the machine id, so a
+/// test can tell *which* agent served an attach — needed to prove routing when
+/// two machines own a session of the same name.
+async fn spawn_fake_agent_marked(hub: &str, machine_id: &str, session: &str) {
+    let url = format!("ws://{hub}/agent/ws");
+    let mut ws = connect(&url, None).await.expect("agent connects");
+    let mid = machine_id.to_string();
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: mid.clone(),
+            hostname: mid.clone(),
+            agent_version: "test".into(),
+            tools: vec![],
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![sess(session)] }, b"").await;
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Binary(buf) = msg else { continue };
+            let Ok((hub_msg, _)) = decode_frame::<HubMsg>(&buf) else { continue };
+            match hub_msg {
+                HubMsg::Attach { ch, .. } => {
+                    let snap = format!("\x1bcSNAP_{mid}");
+                    send(&mut ws, &AgentMsg::Snapshot { ch }, snap.as_bytes()).await;
+                }
+                HubMsg::Ping => send(&mut ws, &AgentMsg::Pong, b"").await,
+                _ => {}
+            }
+        }
+    });
+}
+
+/// Two machines, each owning a session of the SAME name. This is the exact case
+/// the PWA's machine-threading closes: a client that sends an explicit
+/// `?machine=` reaches the right agent, whereas a name-only (machine-less)
+/// attach is ambiguous and gets no relay (`registry::resolve` → None).
+#[tokio::test]
+async fn explicit_machine_disambiguates_same_named_session() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    spawn_fake_agent_marked(&hub, "boxA", "shell-x").await;
+    spawn_fake_agent_marked(&hub, "boxB", "shell-x").await;
+
+    // Both same-named sessions list, distinguished only by `machine`.
+    let mut both = false;
+    for _ in 0..50 {
+        let body: Vec<SessionInfo> =
+            reqwest::get(format!("http://{hub}/api/sessions")).await.unwrap().json().await.unwrap();
+        let a = body.iter().any(|s| s.name == "shell-x" && s.machine == "boxA");
+        let b = body.iter().any(|s| s.name == "shell-x" && s.machine == "boxB");
+        if a && b {
+            both = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(both, "both machines' same-named sessions are listed");
+
+    // Explicit machine routes to the matching agent.
+    let mut ca = connect(&format!("ws://{hub}/api/ws?machine=boxA&session=shell-x"), None)
+        .await
+        .expect("attach A");
+    assert!(
+        read_until(&mut ca, |b| b.starts_with(b"\x1bc") && b.windows(9).any(|w| w == b"SNAP_boxA")).await,
+        "machine=boxA reaches boxA"
+    );
+    let mut cb = connect(&format!("ws://{hub}/api/ws?machine=boxB&session=shell-x"), None)
+        .await
+        .expect("attach B");
+    assert!(
+        read_until(&mut cb, |b| b.starts_with(b"\x1bc") && b.windows(9).any(|w| w == b"SNAP_boxB")).await,
+        "machine=boxB reaches boxB"
+    );
+
+    // Name-only attach is ambiguous → the hub refuses or relays nothing. (This
+    // is precisely why the PWA now threads `machine`.)
+    let amb = connect(&format!("ws://{hub}/api/ws?session=shell-x"), None).await;
+    let blocked = match amb {
+        Err(_) => true,
+        Ok(mut c) => !read_until(&mut c, |b| b.starts_with(b"\x1bc")).await,
+    };
+    assert!(blocked, "a machine-less attach to a colliding name gets no relay");
+}

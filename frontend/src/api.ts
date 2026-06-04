@@ -17,6 +17,41 @@ export interface Session {
   machine?: string;
 }
 
+// PaneRef is the identity the app stores for an open session: the session name
+// plus the machine (agent) it lives on. We carry the machine rather than
+// re-deriving it from the session name so a hub fronting several agents routes
+// every request to the owning machine — and two machines with a same-named
+// session never collide. `machine` is "" when talking to a single agent
+// directly (no hub), which appends no query param anywhere downstream.
+export interface PaneRef {
+  name: string;
+  machine: string;
+}
+
+// MachineInfo is one agent in the hub's roster (GET /api/machines). Used for the
+// session-list grouping headers and the New-Session machine picker, so an
+// offline or idle (zero-session) machine is still visible and targetable. A
+// standalone agent has no such endpoint — fetchMachines() returns [] there.
+export interface MachineInfo {
+  machine: string;
+  hostname: string;
+  online: boolean;
+}
+
+// withMachine threads the owning agent onto a request URL — the single shared
+// rule. The hub reads `?machine=` from the query on EVERY endpoint (even POSTs,
+// which carry their data in the body), routing the relayed request to that
+// agent. A non-empty machine is appended with the right separator (`?` or `&`
+// depending on whether the URL already has a query); an empty machine
+// (single-agent / no hub) appends nothing, so the URL is byte-identical to the
+// pre-hub one and the standalone agent — which ignores the param anyway — is
+// unaffected.
+function withMachine(url: string, machine?: string): string {
+  if (!machine) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}machine=${encodeURIComponent(machine)}`;
+}
+
 // ── Auth (opt-in password / API-token gate) ─────────────────────────────────
 // The browser authenticates with a same-origin session cookie the server sets
 // on login, so individual fetches and WebSockets need no extra headers — the
@@ -67,6 +102,20 @@ export async function fetchSessions(): Promise<Session[]> {
   return r.json();
 }
 
+// fetchMachines returns the hub's agent roster (id, hostname, online). Only the
+// hub serves /api/machines; a standalone agent 404s, so we swallow any
+// failure and return [] — the caller reads "[] ⇒ single machine, no hub", which
+// keeps the UI ungrouped and machine-param-free for the common single-box case.
+export async function fetchMachines(): Promise<MachineInfo[]> {
+  try {
+    const r = await fetch("/api/machines");
+    if (!r.ok) return [];
+    return await r.json();
+  } catch {
+    return [];
+  }
+}
+
 // A session a reboot / tmux restart took down that the server recorded and can
 // bring back, resuming the tool's prior conversation. (Restarting just the web
 // daemon keeps sessions live, so this is empty in that case.)
@@ -77,8 +126,8 @@ export interface RestorableSession {
   dir: string;
 }
 
-export async function fetchRestorable(): Promise<RestorableSession[]> {
-  const r = await fetch("/api/sessions/restorable");
+export async function fetchRestorable(machine?: string): Promise<RestorableSession[]> {
+  const r = await fetch(withMachine("/api/sessions/restorable", machine));
   if (!r.ok) throw new Error(`restorable: ${r.status}`);
   return r.json();
 }
@@ -91,8 +140,8 @@ export interface RestoreResult {
 // restoreSessions recreates every restorable session, resuming each tool's
 // conversation where possible (claude --continue, codex resume --last, …).
 // Idempotent: already-live sessions are skipped.
-export async function restoreSessions(): Promise<RestoreResult> {
-  const r = await fetch("/api/sessions/restore", { method: "POST" });
+export async function restoreSessions(machine?: string): Promise<RestoreResult> {
+  const r = await fetch(withMachine("/api/sessions/restore", machine), { method: "POST" });
   if (!r.ok) throw new Error((await r.text()).trim() || `restore: ${r.status}`);
   return r.json();
 }
@@ -100,8 +149,8 @@ export async function restoreSessions(): Promise<RestoreResult> {
 // sendKey injects one named key (out-of-band; no focus needed). Names match
 // the backend allow-list: up/down/left/right/enter/escape/tab/btab/space/
 // backspace/home/end/pageup/pagedown/c-c/c-d/c-z/c-l/c-r.
-export async function sendKey(session: string, key: string): Promise<void> {
-  const r = await fetch("/api/key", {
+export async function sendKey(session: string, key: string, machine?: string): Promise<void> {
+  const r = await fetch(withMachine("/api/key", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session, key }),
@@ -114,9 +163,10 @@ export async function sendKey(session: string, key: string): Promise<void> {
 export async function pasteText(
   session: string,
   text: string,
-  enter: boolean
+  enter: boolean,
+  machine?: string
 ): Promise<void> {
-  const r = await fetch("/api/paste", {
+  const r = await fetch(withMachine("/api/paste", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session, text, enter }),
@@ -130,8 +180,8 @@ export async function pasteText(
 // normal buffer, so every redraw appends). The WS attach also auto-fires this
 // on first connect when the client's reported cols differ from the pane's
 // current width.
-export async function clearHistory(session: string): Promise<void> {
-  const r = await fetch("/api/clear-history", {
+export async function clearHistory(session: string, machine?: string): Promise<void> {
+  const r = await fetch(withMachine("/api/clear-history", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session }),
@@ -142,12 +192,15 @@ export async function clearHistory(session: string): Promise<void> {
 // sendImage stages a PNG as the clipboard for a session and triggers Claude
 // Code to paste it (the server sends the paste key; the xclip/wl-paste shim
 // then fetches this image). Used for pasting phone screenshots.
-export async function sendImage(session: string, png: Blob): Promise<void> {
-  const r = await fetch(`/api/clip?session=${encodeURIComponent(session)}`, {
-    method: "POST",
-    headers: { "Content-Type": "image/png" },
-    body: png,
-  });
+export async function sendImage(session: string, png: Blob, machine?: string): Promise<void> {
+  const r = await fetch(
+    withMachine(`/api/clip?session=${encodeURIComponent(session)}`, machine),
+    {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: png,
+    }
+  );
   if (!r.ok && r.status !== 204) throw new Error(`clip: ${r.status}`);
 }
 
@@ -198,15 +251,15 @@ export interface DirsResp {
   dirs: DirEntry[];
 }
 
-export async function fetchTools(): Promise<Tool[]> {
-  const r = await fetch("/api/tools");
+export async function fetchTools(machine?: string): Promise<Tool[]> {
+  const r = await fetch(withMachine("/api/tools", machine));
   if (!r.ok) throw new Error(`tools: ${r.status}`);
   return r.json();
 }
 
-export async function fetchDirs(path?: string): Promise<DirsResp> {
+export async function fetchDirs(path?: string, machine?: string): Promise<DirsResp> {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
-  const r = await fetch(`/api/dirs${q}`);
+  const r = await fetch(withMachine(`/api/dirs${q}`, machine));
   if (!r.ok) throw new Error(`dirs: ${r.status}`);
   return r.json();
 }
@@ -234,12 +287,16 @@ export interface FilesResp {
 //   - path given           => list that folder
 //   - session given (no path) => list the session's tmux cwd (project root)
 //   - neither              => list the share folder (CCWEB_SHARE_DIR or ~/cc-share/)
-export async function fetchFiles(path?: string, session?: string): Promise<FilesResp> {
+export async function fetchFiles(
+  path?: string,
+  session?: string,
+  machine?: string
+): Promise<FilesResp> {
   const params = new URLSearchParams();
   if (path) params.set("path", path);
   else if (session) params.set("session", session);
   const qs = params.toString();
-  const r = await fetch(`/api/files${qs ? `?${qs}` : ""}`);
+  const r = await fetch(withMachine(`/api/files${qs ? `?${qs}` : ""}`, machine));
   if (!r.ok) throw new Error((await r.text()).trim() || `files: ${r.status}`);
   return r.json();
 }
@@ -247,16 +304,16 @@ export async function fetchFiles(path?: string, session?: string): Promise<Files
 // downloadURL is the streaming download endpoint for a single file; the
 // server attaches a Content-Disposition so the browser saves rather than
 // renders.
-export function downloadURL(path: string): string {
-  return `/api/download?path=${encodeURIComponent(path)}`;
+export function downloadURL(path: string, machine?: string): string {
+  return withMachine(`/api/download?path=${encodeURIComponent(path)}`, machine);
 }
 
 // inlineURL is the same file stream but served inline (Content-Disposition:
 // inline) rather than as an attachment — the editor's PDF viewer points pdf.js
 // at this so it can fetch + render the bytes (Range-supported) in place. See
 // handleDownload's ?inline=1 branch.
-export function inlineURL(path: string): string {
-  return `/api/download?inline=1&path=${encodeURIComponent(path)}`;
+export function inlineURL(path: string, machine?: string): string {
+  return withMachine(`/api/download?inline=1&path=${encodeURIComponent(path)}`, machine);
 }
 
 // saveFileToDevice streams a file and hands it to navigator.share({files}) —
@@ -264,8 +321,8 @@ export function inlineURL(path: string): string {
 // send to Photos. Falls back to a synthesised <a download> click for non-secure
 // contexts (plain HTTP over tailnet) where canShare/share aren't available.
 // Shared by the Files sheet and the PDF viewer's download button.
-export async function saveFileToDevice(path: string, name: string): Promise<void> {
-  const r = await fetch(downloadURL(path));
+export async function saveFileToDevice(path: string, name: string, machine?: string): Promise<void> {
+  const r = await fetch(downloadURL(path, machine));
   if (!r.ok) throw new Error(`download: ${r.status}`);
   const blob = await r.blob();
   const file = new File([blob], name, {
@@ -326,8 +383,8 @@ export class FileNotEditable extends Error {
 
 // readFile loads a text file's contents for the editor. Throws FileNotEditable
 // on a binary file (415), or a generic Error otherwise.
-export async function readFile(path: string): Promise<FileReadResp> {
-  const r = await fetch(`/api/file/read?path=${encodeURIComponent(path)}`);
+export async function readFile(path: string, machine?: string): Promise<FileReadResp> {
+  const r = await fetch(withMachine(`/api/file/read?path=${encodeURIComponent(path)}`, machine));
   if (r.status === 415) throw new FileNotEditable();
   if (!r.ok) throw new Error((await r.text()).trim() || `read: ${r.status}`);
   return r.json();
@@ -346,9 +403,10 @@ export class FileChangedOnDisk extends Error {
 export async function writeFile(
   path: string,
   content: string,
-  baseMtime?: number
+  baseMtime?: number,
+  machine?: string
 ): Promise<FileWriteResp> {
-  const r = await fetch("/api/file/write", {
+  const r = await fetch(withMachine("/api/file/write", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, content, baseMtime: baseMtime ?? 0 }),
@@ -360,8 +418,8 @@ export async function writeFile(
 
 // deleteFile removes a single file under $HOME (the editor's "delete this
 // file"). The server refuses directories — rmdir handles those.
-export async function deleteFile(path: string): Promise<void> {
-  const r = await fetch("/api/file/delete", {
+export async function deleteFile(path: string, machine?: string): Promise<void> {
+  const r = await fetch(withMachine("/api/file/delete", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
@@ -370,8 +428,8 @@ export async function deleteFile(path: string): Promise<void> {
 }
 
 // makeDir creates a folder named `name` inside `dir` (both under $HOME).
-export async function makeDir(dir: string, name: string): Promise<void> {
-  const r = await fetch("/api/mkdir", {
+export async function makeDir(dir: string, name: string, machine?: string): Promise<void> {
+  const r = await fetch(withMachine("/api/mkdir", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dir, name }),
@@ -382,8 +440,8 @@ export async function makeDir(dir: string, name: string): Promise<void> {
 // removeDir deletes a folder (under $HOME). By default only an empty folder is
 // removed (non-empty -> error); pass recursive to delete the whole subtree
 // (the file-tree context menu does, behind a confirm).
-export async function removeDir(path: string, recursive = false): Promise<void> {
-  const r = await fetch("/api/rmdir", {
+export async function removeDir(path: string, recursive = false, machine?: string): Promise<void> {
+  const r = await fetch(withMachine("/api/rmdir", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, recursive }),
@@ -394,8 +452,8 @@ export async function removeDir(path: string, recursive = false): Promise<void> 
 // renamePath renames a file or folder in place (same parent dir) to `name`.
 // $HOME-confined server-side; refuses a path separator / leading dot, and a
 // name that already exists (409). Returns the new {name, path}.
-export async function renamePath(path: string, name: string): Promise<DirEntry> {
-  const r = await fetch("/api/rename", {
+export async function renamePath(path: string, name: string, machine?: string): Promise<DirEntry> {
+  const r = await fetch(withMachine("/api/rename", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, name }),
@@ -411,9 +469,10 @@ export async function createSession(
   tool: string,
   name: string,
   dir: string,
-  extraDirs: string[] = []
-): Promise<string> {
-  const r = await fetch("/api/session", {
+  extraDirs: string[] = [],
+  machine?: string
+): Promise<PaneRef> {
+  const r = await fetch(withMachine("/api/session", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tool, name, dir, extraDirs }),
@@ -423,14 +482,20 @@ export async function createSession(
     throw new Error(msg || `session: ${r.status}`);
   }
   const { name: session } = await r.json();
-  return session;
+  // Return the owning machine alongside the name so the caller can mount the
+  // pane with its full identity (machine is "" for a single agent / no hub).
+  return { name: session, machine: machine ?? "" };
 }
 
 // deleteSession ends a session. "exit" injects the agent's /exit (graceful;
 // the session dies asynchronously when the agent quits); "kill" tears it down
 // immediately. Callers poll fetchSessions until the session is gone.
-export async function deleteSession(session: string, mode: "exit" | "kill"): Promise<void> {
-  const r = await fetch("/api/session/delete", {
+export async function deleteSession(
+  session: string,
+  mode: "exit" | "kill",
+  machine?: string
+): Promise<void> {
+  const r = await fetch(withMachine("/api/session/delete", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session, mode }),
@@ -455,9 +520,9 @@ export function wsURL(session: string, machine?: string): string {
 
 // watchURL builds the filesystem-watch WebSocket URL (real-time tree + open-file
 // updates), same scheme rule as wsURL.
-export function watchURL(): string {
+export function watchURL(machine?: string): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/api/watch`;
+  return withMachine(`${proto}://${location.host}/api/watch`, machine);
 }
 
 // --- Drag-and-drop upload ---
@@ -472,9 +537,12 @@ export function watchURL(): string {
 // constrain its dir browser; the server enforces the same constraint
 // on the upload itself, so a tampered client can't escape.
 export async function sessionRoot(
-  session: string
+  session: string,
+  machine?: string
 ): Promise<{ root: string; home: string }> {
-  const r = await fetch(`/api/session/root?session=${encodeURIComponent(session)}`);
+  const r = await fetch(
+    withMachine(`/api/session/root?session=${encodeURIComponent(session)}`, machine)
+  );
   if (!r.ok) throw new Error((await r.text()).trim() || `session root: ${r.status}`);
   return r.json();
 }
@@ -488,9 +556,10 @@ export async function sessionRoot(
 export async function checkUpload(
   session: string,
   dir: string,
-  names: string[]
+  names: string[],
+  machine?: string
 ): Promise<{ exists: string[] }> {
-  const r = await fetch("/api/upload/check", {
+  const r = await fetch(withMachine("/api/upload/check", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session, dir, names }),
@@ -534,7 +603,8 @@ export function uploadFiles(
   dir: string,
   files: UploadFile[],
   modes: Record<string, UploadMode>,
-  onProgress?: (frac: number) => void
+  onProgress?: (frac: number) => void,
+  machine?: string
 ): Promise<UploadResult> {
   const fd = new FormData();
   // Manifest first so the server sees per-file modes before any file part.
@@ -560,7 +630,10 @@ export function uploadFiles(
     const xhr = new XMLHttpRequest();
     xhr.open(
       "POST",
-      `/api/upload?session=${encodeURIComponent(session ?? "")}&dir=${encodeURIComponent(dir)}`
+      withMachine(
+        `/api/upload?session=${encodeURIComponent(session ?? "")}&dir=${encodeURIComponent(dir)}`,
+        machine
+      )
     );
     xhr.responseType = "json";
     xhr.upload.onprogress = (ev) => {
