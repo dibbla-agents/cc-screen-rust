@@ -14,7 +14,7 @@ use std::time::Duration;
 use cc_screen_auth::Auth;
 use cc_screen_hub::{build_router, registry::Registry, state::HubState};
 use cc_screen_protocol::hub::{decode_frame, encode_frame, AgentMsg, HubMsg, HUB_PROTO_VERSION};
-use cc_screen_protocol::SessionInfo;
+use cc_screen_protocol::{SessionInfo, ToolInfo};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -311,4 +311,44 @@ async fn explicit_machine_disambiguates_same_named_session() {
         Ok(mut c) => !read_until(&mut c, |b| b.starts_with(b"\x1bc")).await,
     };
     assert!(blocked, "a machine-less attach to a colliding name gets no relay");
+}
+
+/// New Session needs the chosen agent's tool list. Agents register their tools at
+/// uplink time; the hub serves them from the registry (no agent round-trip).
+/// Without this route New Session's Create button stays disabled (no tool to
+/// pick), which is exactly the bug this guards against.
+#[tokio::test]
+async fn hub_serves_resolved_agent_tools() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let url = format!("ws://{hub}/agent/ws");
+    let mut ws = connect(&url, None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "boxA".into(),
+            hostname: "boxA".into(),
+            agent_version: "test".into(),
+            tools: vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None }],
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![] }, b"").await;
+
+    let mut got = false;
+    for _ in 0..50 {
+        let body: Vec<ToolInfo> = reqwest::get(format!("http://{hub}/api/tools?machine=boxA"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if body.iter().any(|t| t.cmd == "cc" && t.prefix == "claude") {
+            got = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(got, "hub /api/tools returns the resolved agent's registered tools");
 }

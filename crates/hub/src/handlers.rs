@@ -11,7 +11,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use cc_screen_protocol::hub::{Cmd, CmdResult};
-use cc_screen_protocol::{AuthStatus, CreateReq, DeleteReq, Favorite, LoginReq, SessionInfo};
+use cc_screen_protocol::{AuthStatus, CreateReq, DeleteReq, Favorite, LoginReq, SessionInfo, ToolInfo};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -26,6 +26,20 @@ pub async fn sessions(State(hub): State<HubState>) -> Json<Vec<SessionInfo>> {
 // ── GET /api/machines — for the picker + offline greying ───────────────────────
 pub async fn machines(State(hub): State<HubState>) -> Json<Vec<MachineInfo>> {
     Json(hub.registry.machines())
+}
+
+// ── GET /api/tools — the chosen agent's tool list (used by New Session) ─────────
+// Agents register their tools at uplink time, so the registry already has them —
+// no round-trip to the agent needed. Resolves the explicit `?machine=`, else the
+// single online agent; `[]` when unknown/offline (which leaves New Session's
+// Create disabled, same as a tool-less agent).
+pub async fn tools(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Json<Vec<ToolInfo>> {
+    let tools = hub
+        .registry
+        .resolve(&q.machine, None)
+        .map(|a| a.tools.clone())
+        .unwrap_or_default();
+    Json(tools)
 }
 
 // ── Auth (mirrors the agent's) ─────────────────────────────────────────────────

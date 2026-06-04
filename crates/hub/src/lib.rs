@@ -38,6 +38,7 @@ pub fn build_router(hub: HubState) -> Router {
         // Client-facing aggregation + auth.
         .route("/api/sessions", get(handlers::sessions))
         .route("/api/machines", get(handlers::machines))
+        .route("/api/tools", get(handlers::tools))
         // Terminal + filesystem-watch bridges.
         .route("/api/ws", get(client_ws::ws))
         .route("/api/watch", get(watch_ws::ws))
