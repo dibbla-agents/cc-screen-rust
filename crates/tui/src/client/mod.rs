@@ -2,4 +2,4 @@ pub mod rest;
 pub mod url;
 pub mod ws;
 
-pub use rest::Rest;
+pub use rest::{DirEntry, Rest};

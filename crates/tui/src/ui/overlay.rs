@@ -10,6 +10,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::app::FormField;
+use crate::client::DirEntry;
 use crate::ui::util::truncate;
 
 const PANEL_BG: Color = Color::Rgb(20, 28, 38);
@@ -55,23 +57,47 @@ pub fn confirm(f: &mut Frame, title: &str, body: &str) {
 
 pub struct NewSessionView<'a> {
     pub tool: &'a str,
+    /// The machine to show; `None` hides the row (unknown / no name).
+    pub machine: Option<&'a str>,
+    pub machine_online: bool,
+    /// True in hub mode (the row is a `‹ › ` picker); false in direct mode (a
+    /// read-only label — only one machine, nothing to pick).
+    pub machine_pickable: bool,
     pub name: &'a str,
     pub dir: &'a str,
-    pub field: usize, // 0 = name, 1 = dir
+    pub focus: FormField,
+    /// Dir autocomplete candidates + the highlighted one (shown under the dir).
+    pub candidates: &'a [DirEntry],
+    pub cand_sel: Option<usize>,
     pub error: Option<&'a str>,
 }
 
-/// The new-session form: tool selector + name + dir, with the focused field
-/// marked and a trailing cursor block.
-pub fn new_session(f: &mut Frame, v: &NewSessionView) {
-    let area = centered(f.area(), 64, 10);
-    let inner = panel(f, area, " new session ");
+/// How many dir candidates to show at once.
+const MAX_DIR_CANDS: usize = 6;
 
+/// The new-session form: tool + (machine) selectors, name + dir text fields, with
+/// the focused field marked, and — under the dir — a live directory autocomplete.
+pub fn new_session(f: &mut Frame, v: &NewSessionView) {
+    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+
+    // A selector row: `label  ‹ value ›`, the value accented when focused.
+    let selector = |label: &str, value: &str, focused: bool, suffix: Vec<Span<'static>>| {
+        let marker = if focused { "▸" } else { " " };
+        let mut spans = vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{label:<6}"), dim),
+            Span::styled(format!("‹ {value} ›"), accent),
+        ];
+        spans.extend(suffix);
+        Line::from(spans)
+    };
+    // A text-entry row: `label  value█`, the cursor block shown when focused.
     let field_line = |label: &str, value: &str, focused: bool| {
         let marker = if focused { "▸" } else { " " };
         let mut spans = vec![
             Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
-            Span::styled(format!("{label:<6}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{label:<6}"), dim),
             Span::raw(value.to_string()),
         ];
         if focused {
@@ -80,24 +106,72 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         Line::from(spans)
     };
 
-    let mut lines = vec![
-        Line::from(vec![
+    // A read-only label row: `label  value` (no marker, no selector arrows).
+    let label_line = |label: &str, value: &str, suffix: Vec<Span<'static>>| {
+        let mut spans = vec![
             Span::raw("   "),
-            Span::styled("tool  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("‹ {} ›", v.tool), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        field_line("name", v.name, v.field == 0),
-        field_line("dir", v.dir, v.field == 1),
-        Line::from(""),
-    ];
+            Span::styled(format!("{label:<6}"), dim),
+            Span::styled(value.to_string(), Style::default().fg(Color::Gray)),
+        ];
+        spans.extend(suffix);
+        Line::from(spans)
+    };
+
+    let mut lines = vec![selector("tool", v.tool, v.focus == FormField::Tool, vec![])];
+    if let Some(m) = v.machine {
+        let suffix = if v.machine_online {
+            vec![]
+        } else {
+            vec![Span::styled("  offline", Style::default().fg(Color::Red))]
+        };
+        if v.machine_pickable {
+            lines.push(selector("machine", m, v.focus == FormField::Machine, suffix));
+        } else {
+            lines.push(label_line("machine", m, suffix));
+        }
+    }
+    lines.push(field_line("name", v.name, v.focus == FormField::Name));
+    lines.push(field_line("dir", v.dir, v.focus == FormField::Dir));
+
+    // Dir autocomplete: a windowed list under the dir field, indented to align
+    // under the value, the highlighted candidate accented.
+    let dir_focused = v.focus == FormField::Dir;
+    if dir_focused && !v.candidates.is_empty() {
+        let shown = v.candidates.len().min(MAX_DIR_CANDS);
+        // Keep the highlighted candidate in view.
+        let start = match v.cand_sel {
+            Some(i) if i >= shown => i + 1 - shown,
+            _ => 0,
+        };
+        for (i, c) in v.candidates.iter().enumerate().skip(start).take(shown) {
+            let sel = v.cand_sel == Some(i);
+            let marker = if sel { "›" } else { " " };
+            lines.push(Line::from(vec![
+                Span::styled(format!("       {marker} "), Style::default().fg(Color::Cyan)),
+                Span::styled(c.name.clone(), if sel { accent } else { Style::default().fg(Color::Gray) }),
+            ]));
+        }
+        if v.candidates.len() > shown {
+            lines.push(Line::from(Span::styled(
+                format!("         … {} more", v.candidates.len() - shown),
+                dim,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
     if let Some(e) = v.error {
         lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
     }
-    lines.push(Line::from(Span::styled(
-        " ←/→ tool · tab field · enter create · esc cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
+    let hint = if dir_focused {
+        " ↑↓ pick · tab/→ open · enter create · esc cancel"
+    } else {
+        " ←/→ change · tab field · enter create · esc cancel"
+    };
+    lines.push(Line::from(Span::styled(hint, dim)));
 
+    let h = lines.len() as u16 + 2;
+    let inner = panel(f, centered(f.area(), 64, h), " new session ");
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -319,9 +393,14 @@ mod tests {
     fn new_session_renders_fields_and_error() {
         let v = NewSessionView {
             tool: "claude",
+            machine: None,
+            machine_online: true,
+            machine_pickable: true,
             name: "proj",
             dir: "/home/u",
-            field: 0,
+            focus: FormField::Name,
+            candidates: &[],
+            cand_sel: None,
             error: Some("already exists"),
         };
         let s = render_to(70, 14, |f| new_session(f, &v));
@@ -330,5 +409,73 @@ mod tests {
         assert!(s.contains("proj"), "{s}");
         assert!(s.contains("/home/u"), "{s}");
         assert!(s.contains("already exists"), "{s}");
+        // No machine → the machine row is absent.
+        assert!(!s.contains("machine"), "{s}");
+    }
+
+    #[test]
+    fn new_session_shows_machine_row_when_present() {
+        let v = NewSessionView {
+            tool: "claude",
+            machine: Some("pine"),
+            machine_online: true,
+            machine_pickable: true,
+            name: "proj",
+            dir: "/home/u",
+            focus: FormField::Machine,
+            candidates: &[],
+            cand_sel: None,
+            error: None,
+        };
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(s.contains("machine"), "{s}");
+        assert!(s.contains("pine"), "{s}");
+        // Hub mode → rendered as a `‹ › ` picker.
+        assert!(s.contains("‹ pine ›"), "{s}");
+    }
+
+    #[test]
+    fn new_session_machine_label_readonly_in_direct_mode() {
+        let v = NewSessionView {
+            tool: "claude",
+            machine: Some("pine"),
+            machine_online: true,
+            machine_pickable: false,
+            name: "proj",
+            dir: "/home/u",
+            focus: FormField::Name,
+            candidates: &[],
+            cand_sel: None,
+            error: None,
+        };
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(s.contains("machine"), "{s}");
+        assert!(s.contains("pine"), "{s}");
+        // Direct mode → plain label, no selector arrows.
+        assert!(!s.contains("‹ pine ›"), "{s}");
+    }
+
+    #[test]
+    fn new_session_lists_dir_candidates_when_dir_focused() {
+        let cands = vec![
+            DirEntry { name: "dev".into(), path: "/home/u/dev".into() },
+            DirEntry { name: "docs".into(), path: "/home/u/docs".into() },
+        ];
+        let v = NewSessionView {
+            tool: "claude",
+            machine: None,
+            machine_online: true,
+            machine_pickable: true,
+            name: "",
+            dir: "/home/u/d",
+            focus: FormField::Dir,
+            candidates: &cands,
+            cand_sel: Some(1),
+            error: None,
+        };
+        let s = render_to(70, 18, |f| new_session(f, &v));
+        assert!(s.contains("dev"), "{s}");
+        assert!(s.contains("docs"), "{s}");
+        assert!(s.contains('›'), "selection marker: {s}");
     }
 }

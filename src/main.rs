@@ -128,6 +128,7 @@ async fn main() {
         cfg.env_path.clone(),
         cfg.config_dir.clone(),
         cfg.home.clone(),
+        cfg.machine_id.clone(),
         auth,
     );
 

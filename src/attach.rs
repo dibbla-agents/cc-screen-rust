@@ -129,6 +129,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default(),
             tmp.clone(),
             tmp.clone(),
+            "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
         );
         (state, tmp)

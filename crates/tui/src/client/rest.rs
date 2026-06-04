@@ -1,9 +1,24 @@
 //! Thin async REST client over the `/api/*` endpoints.
 
 use anyhow::{Context, Result};
-use cc_screen_protocol::{CreateReq, CreateResp, DeleteReq, SessionInfo, ToolInfo};
+use cc_screen_protocol::{CreateReq, CreateResp, DeleteReq, MachineInfo, SessionInfo, ToolInfo};
+use serde::Deserialize;
 
 use super::url::ServerUrls;
+
+/// One subdirectory entry from `GET /api/dirs` — drives the new-session dir
+/// autocomplete. `path` is the absolute path (already $HOME-confined server-side).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Deserialize)]
+struct DirsResp {
+    #[serde(default)]
+    dirs: Vec<DirEntry>,
+}
 
 const AUTH_MSG: &str =
     "server requires auth — set `api_token` in ~/.config/cc-screen-tui/config.toml or pass --token";
@@ -59,20 +74,50 @@ impl Rest {
         Ok(r.json().await?)
     }
 
-    /// GET /api/session/root (no session) — the server's $HOME, used as the
-    /// default working dir in the new-session form.
-    pub async fn home(&self) -> Result<String> {
+    /// GET /api/session/root (no session) — the server's $HOME (the default
+    /// working dir in the new-session form) and, in direct mode, this agent's own
+    /// machine name (so the form can label the box without a hub). Returns
+    /// `(home, machine)`; `machine` is "" on an older server that omits it.
+    pub async fn root_info(&self) -> Result<(String, String)> {
         let v: serde_json::Value =
             check(self.http.get(self.urls.rest("/api/session/root")).send().await?)?
                 .json()
                 .await?;
-        Ok(v.get("home").and_then(|h| h.as_str()).unwrap_or_default().to_string())
+        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        Ok((get("home"), get("machine")))
     }
 
     /// GET /api/tools
     pub async fn tools(&self) -> Result<Vec<ToolInfo>> {
         let r = check(self.http.get(self.urls.rest("/api/tools")).send().await?)?;
         Ok(r.json().await?)
+    }
+
+    /// GET /api/machines — the hub's connected agents. A standalone agent has no
+    /// such route, so a 404 means "single, unnamed machine" → `Ok(None)`; the
+    /// caller then hides the machine picker and routes creates locally.
+    pub async fn machines(&self) -> Result<Option<Vec<MachineInfo>>> {
+        let r = self.http.get(self.urls.rest("/api/machines")).send().await?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(check(r)?.json().await?))
+    }
+
+    /// GET /api/dirs?path= — the subdirectories of `parent` (absolute path).
+    /// Feeds the dir-field autocomplete; `machine` routes it on a hub (empty = the
+    /// single/owning agent). A bad path (outside $HOME, missing) yields `[]`.
+    pub async fn dirs(&self, parent: &str, machine: &str) -> Result<Vec<DirEntry>> {
+        let mut req = self.http.get(self.urls.rest("/api/dirs")).query(&[("path", parent)]);
+        if !machine.is_empty() {
+            req = req.query(&[("machine", machine)]);
+        }
+        let r = req.send().await?;
+        if !r.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let resp: DirsResp = r.json().await?;
+        Ok(resp.dirs)
     }
 
     /// POST /api/sessions/restore — bring back every restorable session.
@@ -82,9 +127,15 @@ impl Rest {
     }
 
     /// POST /api/session — returns the full session name. Surfaces the server's
-    /// message (e.g. "already exists") on a 4xx so the form can show it.
-    pub async fn create(&self, req: &CreateReq) -> Result<String> {
-        let r = self.http.post(self.urls.rest("/api/session")).json(req).send().await?;
+    /// message (e.g. "already exists") on a 4xx so the form can show it. `machine`
+    /// routes the create to a hub agent (empty = direct agent / single machine; a
+    /// standalone agent ignores the unknown query param).
+    pub async fn create(&self, req: &CreateReq, machine: &str) -> Result<String> {
+        let mut post = self.http.post(self.urls.rest("/api/session"));
+        if !machine.is_empty() {
+            post = post.query(&[("machine", machine)]);
+        }
+        let r = post.json(req).send().await?;
         if r.status() == reqwest::StatusCode::UNAUTHORIZED {
             anyhow::bail!(AUTH_MSG);
         }

@@ -378,6 +378,7 @@ mod tests {
             String::new(),
             tmp.to_path_buf(),
             tmp.to_path_buf(),
+            "test-agent".into(),
             crate::auth::Auth::load(tmp, None, None),
         )
     }

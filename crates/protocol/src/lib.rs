@@ -117,6 +117,17 @@ pub struct CreateResp {
     pub name: String,
 }
 
+// ── GET /api/machines (hub only) ─────────────────────────────────────────────
+/// One connected agent, as returned by the hub's `/api/machines` (absent on a
+/// standalone agent — clients treat a 404 there as "single, unnamed machine").
+/// Enough for the machine picker + offline greying.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    pub machine: String,
+    pub hostname: String,
+    pub online: bool,
+}
+
 // ── POST /api/session/delete ─────────────────────────────────────────────────
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeleteReq {

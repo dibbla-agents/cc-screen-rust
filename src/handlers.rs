@@ -230,7 +230,10 @@ pub async fn session_root(State(app): State<AppState>, Query(q): Query<RootQuery
         .and_then(|s| app.get(s))
         .map(|s| s.live_cwd())
         .unwrap_or_else(|| home.clone());
-    Json(json!({ "root": root, "home": home }))
+    // `machine` lets a direct client (no hub) name this box in its UI. In hub
+    // mode the client uses `/api/machines` instead (the hub's relay of this route
+    // doesn't carry it), so the field is harmless there.
+    Json(json!({ "root": root, "home": home, "machine": app.inner.machine_id }))
 }
 
 // ── POST /api/key ────────────────────────────────────────────────────────────

@@ -365,6 +365,9 @@ pub struct Inner {
     pub env_path: String,
     pub config_dir: PathBuf,
     pub home: PathBuf,
+    /// This agent's machine identity (hostname / `--machine-id`). Surfaced on
+    /// `/api/session/root` so a direct client can name the box without a hub.
+    pub machine_id: String,
     pub clip: ClipStore,
     pub watcher: crate::watch::Watcher,
     /// Web Push: VAPID keys + device subscriptions + the "agent finished" sender.
@@ -384,6 +387,7 @@ impl AppState {
         env_path: String,
         config_dir: PathBuf,
         home: PathBuf,
+        machine_id: String,
         auth: crate::auth::Auth,
     ) -> AppState {
         AppState {
@@ -395,6 +399,7 @@ impl AppState {
                 config_dir,
                 watcher: crate::watch::Watcher::new(home.clone()),
                 home,
+                machine_id,
                 clip: ClipStore::default(),
                 auth,
             }),
@@ -554,6 +559,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default(),
             tmp.clone(),
             tmp.clone(),
+            "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
@@ -588,6 +594,7 @@ mod tests {
             std::env::var("PATH").unwrap_or_default(),
             tmp.clone(),
             tmp.clone(),
+            "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();

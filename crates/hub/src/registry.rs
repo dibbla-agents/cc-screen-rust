@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cc_screen_protocol::hub::{encode_frame, ChannelId, Cmd, CmdResult, HubMsg, ReqId};
+pub use cc_screen_protocol::MachineInfo;
 use cc_screen_protocol::{SessionInfo, ToolInfo};
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 /// How long the hub waits for an agent to answer a control op before giving up.
@@ -152,14 +152,6 @@ impl AgentConn {
             let _ = s.try_send(ToBrowser::Close);
         }
     }
-}
-
-/// What `GET /api/machines` returns — enough for the picker + offline greying.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct MachineInfo {
-    pub machine: String,
-    pub hostname: String,
-    pub online: bool,
 }
 
 #[derive(Clone, Default)]

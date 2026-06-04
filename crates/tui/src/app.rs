@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::Result;
-use cc_screen_protocol::{CreateReq, SessionInfo, ToolInfo};
+use cc_screen_protocol::{CreateReq, MachineInfo, SessionInfo, ToolInfo};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::layout::Rect;
@@ -15,7 +15,7 @@ use ratatui::Frame;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use crate::client::{ws, Rest};
+use crate::client::{ws, DirEntry, Rest};
 use crate::config::Config;
 use crate::input;
 use crate::layout::{self, Layout};
@@ -29,8 +29,11 @@ pub enum AppMsg {
     Tick,
     /// Bytes/state from a pane's WS task, tagged with the pane's id.
     Pane { id: u64, msg: PaneMsg },
-    /// Result of an async create: Ok(session name) or Err(message).
-    Created(Result<String, String>),
+    /// Result of an async create: Ok((session name, machine)) or Err(message).
+    /// The machine rides along so a fill-a-box create attaches to the right agent.
+    Created(Result<(String, String), String>),
+    /// Subdirectories of `parent` for the new-session dir autocomplete.
+    DirCands { parent: String, entries: Vec<DirEntry> },
 }
 
 pub enum PaneMsg {
@@ -87,44 +90,221 @@ fn menu_initial(sessions: &[SessionInfo], current: Option<&str>) -> usize {
         .unwrap_or(1)
 }
 
+/// Which field of the new-session form is focused. `Machine` is only in the cycle
+/// when the server is a hub (`has_machine`); the two selector fields (`Tool`,
+/// `Machine`) take ←/→, the two text fields (`Name`, `Dir`) take typed input.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormField {
+    Tool,
+    Machine,
+    Name,
+    Dir,
+}
+
+/// The fields in Tab order. `Machine` is skipped unless the server is a hub.
+fn form_fields(has_machine: bool) -> &'static [FormField] {
+    use FormField::*;
+    if has_machine {
+        &[Tool, Machine, Name, Dir]
+    } else {
+        &[Tool, Name, Dir]
+    }
+}
+
+/// Step `field` by `delta` (±1) through the active fields, wrapping.
+fn step_field(field: FormField, has_machine: bool, delta: isize) -> FormField {
+    let fields = form_fields(has_machine);
+    let i = fields.iter().position(|&f| f == field).unwrap_or(0);
+    let n = fields.len() as isize;
+    fields[((i as isize + delta).rem_euclid(n)) as usize]
+}
+
 /// Outcome of feeding a key to the shared new-session form.
 enum NewFormAction {
     None,
     Submit,
     Cancel,
+    /// The dir field's parent changed — fetch its subdirectories (the result
+    /// arrives as `AppMsg::DirCands` and refreshes the candidate list).
+    FetchDirs(String),
 }
 
 /// Apply one key to a `NewForm` — shared by the switcher form and the grid form.
-fn newform_key(form: &mut NewForm, tools_len: usize, k: KeyEvent) -> NewFormAction {
+fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: KeyEvent) -> NewFormAction {
+    let has_machine = machines_len > 0;
     match (k.code, k.modifiers) {
         (KeyCode::Esc, _) => return NewFormAction::Cancel,
+        // In the dir field, an accepted candidate completes the path instead of
+        // submitting / switching fields.
+        (KeyCode::Enter, _) if form.field == FormField::Dir && form.dir_sel.is_some() => {
+            return accept_candidate(form);
+        }
         (KeyCode::Enter, _) => return NewFormAction::Submit,
-        (KeyCode::Tab, _) | (KeyCode::BackTab, _) => form.field ^= 1,
-        (KeyCode::Left, _) if tools_len > 0 => {
-            form.tool_idx = (form.tool_idx + tools_len - 1) % tools_len;
+        (KeyCode::Tab, _) if form.field == FormField::Dir && form.dir_sel.is_some() => {
+            return accept_candidate(form);
         }
-        (KeyCode::Right, _) if tools_len > 0 => {
-            form.tool_idx = (form.tool_idx + 1) % tools_len;
-        }
-        (KeyCode::Backspace, _) => {
-            if form.field == 0 {
-                form.name.pop();
-            } else {
-                form.dir.pop();
+        (KeyCode::Tab, _) => form.field = step_field(form.field, has_machine, 1),
+        (KeyCode::BackTab, _) => form.field = step_field(form.field, has_machine, -1),
+        (KeyCode::Left, _) => match form.field {
+            FormField::Tool if tools_len > 0 => {
+                form.tool_idx = (form.tool_idx + tools_len - 1) % tools_len;
             }
-        }
+            FormField::Machine if machines_len > 0 => {
+                form.machine_idx = (form.machine_idx + machines_len - 1) % machines_len;
+                return invalidate_dirs(form);
+            }
+            _ => {}
+        },
+        (KeyCode::Right, _) => match form.field {
+            FormField::Tool if tools_len > 0 => {
+                form.tool_idx = (form.tool_idx + 1) % tools_len;
+            }
+            FormField::Machine if machines_len > 0 => {
+                form.machine_idx = (form.machine_idx + 1) % machines_len;
+                return invalidate_dirs(form);
+            }
+            // → also accepts a highlighted dir candidate (a quick "drill in").
+            FormField::Dir if form.dir_sel.is_some() => return accept_candidate(form),
+            _ => {}
+        },
+        (KeyCode::Down, _) if form.field == FormField::Dir => move_cand(form, 1),
+        (KeyCode::Up, _) if form.field == FormField::Dir => move_cand(form, -1),
+        (KeyCode::Backspace, _) => match form.field {
+            FormField::Name => {
+                form.name.pop();
+            }
+            FormField::Dir => {
+                form.dir.pop();
+                return after_dir_edit(form);
+            }
+            _ => {}
+        },
         (KeyCode::Char(c), m)
             if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
         {
-            if form.field == 0 {
-                form.name.push(c);
-            } else {
-                form.dir.push(c);
+            match form.field {
+                FormField::Name => form.name.push(c),
+                FormField::Dir => {
+                    form.dir.push(c);
+                    return after_dir_edit(form);
+                }
+                _ => {}
             }
         }
         _ => {}
     }
     NewFormAction::None
+}
+
+/// Move the dir-candidate highlight (None → first → … and back to None at the
+/// top), so the list both opens with ↓ and closes the highlight with ↑.
+fn move_cand(form: &mut NewForm, delta: isize) {
+    let n = form.dir_cands.len();
+    if n == 0 {
+        form.dir_sel = None;
+        return;
+    }
+    form.dir_sel = match (form.dir_sel, delta) {
+        (None, d) if d > 0 => Some(0),
+        (None, _) => None,
+        (Some(0), d) if d < 0 => None,
+        (Some(i), d) => {
+            let ni = (i as isize + d).clamp(0, n as isize - 1) as usize;
+            Some(ni)
+        }
+    };
+}
+
+/// Accept the highlighted dir candidate: complete the path to that directory
+/// (with a trailing slash so the next listing drills into it).
+fn accept_candidate(form: &mut NewForm) -> NewFormAction {
+    if let Some(c) = form.dir_sel.and_then(|i| form.dir_cands.get(i)) {
+        form.dir = format!("{}/", c.path);
+        form.dir_sel = None;
+        return after_dir_edit(form);
+    }
+    NewFormAction::None
+}
+
+/// Force a dir re-fetch (e.g. after switching machines, when the cached listing
+/// belongs to the previous agent).
+fn invalidate_dirs(form: &mut NewForm) -> NewFormAction {
+    form.dir_parent.clear();
+    form.dir_raw.clear();
+    form.dir_cands.clear();
+    form.dir_sel = None;
+    NewFormAction::FetchDirs(dir_parent_of(&form.dir))
+}
+
+/// After the dir text changes: if the parent directory is unchanged, just
+/// re-filter the cached listing; otherwise clear it and ask for the new parent.
+fn after_dir_edit(form: &mut NewForm) -> NewFormAction {
+    let parent = dir_parent_of(&form.dir);
+    if parent == form.dir_parent {
+        refilter_dirs(form);
+        NewFormAction::None
+    } else {
+        form.dir_raw.clear();
+        form.dir_cands.clear();
+        form.dir_sel = None;
+        NewFormAction::FetchDirs(parent)
+    }
+}
+
+/// The directory to list for `dir`: everything up to the last `/`.
+fn dir_parent_of(dir: &str) -> String {
+    match dir.rfind('/') {
+        Some(0) => "/".into(),
+        Some(i) => dir[..i].into(),
+        None => String::new(),
+    }
+}
+
+/// The fragment after the last `/` — what we fuzzy-match candidates against.
+fn dir_partial_of(dir: &str) -> &str {
+    match dir.rfind('/') {
+        Some(i) => &dir[i + 1..],
+        None => dir,
+    }
+}
+
+/// fzf-ish-but-simpler match: higher is better, `None` = no match. Prefix beats
+/// substring beats subsequence; shorter names win ties. An empty query matches.
+fn fuzzy_score(name: &str, q: &str) -> Option<i32> {
+    if q.is_empty() {
+        return Some(-(name.len() as i32));
+    }
+    let nl = name.to_lowercase();
+    let ql = q.to_lowercase();
+    if nl.starts_with(&ql) {
+        return Some(1000 - name.len() as i32);
+    }
+    if let Some(pos) = nl.find(&ql) {
+        return Some(500 - pos as i32 - name.len() as i32);
+    }
+    let mut chars = nl.chars();
+    for qc in ql.chars() {
+        if chars.position(|c| c == qc).is_none() {
+            return None;
+        }
+    }
+    Some(100 - name.len() as i32)
+}
+
+/// Recompute the shown candidates from the cached listing + the current partial.
+/// Hidden directories are excluded unless the partial itself starts with `.`.
+fn refilter_dirs(form: &mut NewForm) {
+    let partial = dir_partial_of(&form.dir);
+    let show_hidden = partial.starts_with('.');
+    let mut scored: Vec<(i32, DirEntry)> = form
+        .dir_raw
+        .iter()
+        .filter(|e| show_hidden || !e.name.starts_with('.'))
+        .filter_map(|e| fuzzy_score(&e.name, partial).map(|s| (s, e.clone())))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    form.dir_cands = scored.into_iter().map(|(_, e)| e).collect();
+    form.dir_sel = None;
 }
 
 #[derive(Clone, Copy)]
@@ -144,10 +324,37 @@ enum Overlay {
 
 struct NewForm {
     tool_idx: usize,
-    field: u8, // 0 = name, 1 = dir
+    machine_idx: usize,
+    field: FormField,
     name: String,
     dir: String,
     error: Option<String>,
+    /// Dir autocomplete state. `dir_parent` is the path `dir_raw` was listed for
+    /// (the cache key); `dir_cands` is `dir_raw` filtered by the current fragment;
+    /// `dir_sel` is the highlighted candidate (None = none, so Enter submits).
+    dir_parent: String,
+    dir_raw: Vec<DirEntry>,
+    dir_cands: Vec<DirEntry>,
+    dir_sel: Option<usize>,
+}
+
+impl NewForm {
+    /// A fresh form seeded with `dir` (trailing slash → its contents list first)
+    /// and the default machine. The caller kicks off the initial dir fetch.
+    fn new(dir: String, machine_idx: usize) -> Self {
+        Self {
+            tool_idx: 0,
+            machine_idx,
+            field: FormField::Name,
+            name: String::new(),
+            dir,
+            error: None,
+            dir_parent: String::new(),
+            dir_raw: Vec::new(),
+            dir_cands: Vec::new(),
+            dir_sel: None,
+        }
+    }
 }
 
 const MOUSE_STEP: isize = 3;
@@ -156,6 +363,13 @@ pub struct App {
     rest: Rest,
     cfg: Config,
     tools: Vec<ToolInfo>,
+    /// Connected agents (hub mode). Empty + `hub_mode == false` means a direct,
+    /// single, unnamed agent — then the new-session form hides the machine row.
+    machines: Vec<MachineInfo>,
+    hub_mode: bool,
+    /// In direct mode, this agent's own machine name (from `/api/session/root`),
+    /// shown read-only in the new-session form. Empty when unknown / in hub mode.
+    self_machine: String,
     home: String,
     sessions: Vec<SessionInfo>,
     selected: usize,
@@ -190,6 +404,9 @@ impl App {
             rest,
             cfg,
             tools: Vec::new(),
+            machines: Vec::new(),
+            hub_mode: false,
+            self_machine: String::new(),
             home: String::new(),
             sessions: Vec::new(),
             selected: 0,
@@ -218,7 +435,17 @@ impl App {
         self.spawn_ticker();
 
         self.tools = self.rest.tools().await.unwrap_or_default();
-        self.home = self.rest.home().await.unwrap_or_default();
+        if let Ok((home, machine)) = self.rest.root_info().await {
+            self.home = home;
+            self.self_machine = machine;
+        }
+        // Probe for a hub: Some(list) → hub (show the machine picker), None → a
+        // direct agent with no /api/machines route (single machine, named by
+        // `self_machine`).
+        if let Ok(Some(list)) = self.rest.machines().await {
+            self.hub_mode = true;
+            self.machines = list;
+        }
 
         self.sync_area(term);
         self.refresh().await;
@@ -285,6 +512,7 @@ impl App {
             AppMsg::Term(ev) => self.handle_term(ev),
             AppMsg::Pane { id, msg } => self.handle_pane(id, msg),
             AppMsg::Created(res) => self.handle_created(res),
+            AppMsg::DirCands { parent, entries } => self.handle_dir_cands(parent, entries),
         }
         if self.pending_refresh {
             self.pending_refresh = false;
@@ -294,6 +522,13 @@ impl App {
 
     // ── session list ─────────────────────────────────────────────────────────
     async fn refresh(&mut self) {
+        // Keep the machine list fresh so agents going on/offline reflect in the
+        // picker. Only when we know it's a hub (else there's no such route).
+        if self.hub_mode {
+            if let Ok(Some(list)) = self.rest.machines().await {
+                self.machines = list;
+            }
+        }
         match self.rest.sessions().await {
             Ok(mut list) => {
                 list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -332,18 +567,16 @@ impl App {
         }
     }
 
-    fn handle_created(&mut self, res: Result<String, String>) {
+    fn handle_created(&mut self, res: Result<(String, String), String>) {
         match res {
-            Ok(name) => {
+            Ok((name, machine)) => {
                 self.overlay = Overlay::None;
                 self.grid_overlay = GridOverlay::None;
-                // If the create was launched to fill a box, drop it in there;
-                // otherwise it was a plain switcher create.
+                // If the create was launched to fill a box, drop it in there on
+                // the machine we routed it to; otherwise it was a plain switcher
+                // create.
                 if let Some(target) = self.fill_target.take() {
-                    // A just-created session: machine is unknown to the TUI here
-                    // (hub-routed create lands in a later milestone), so attach
-                    // locally with an empty machine.
-                    self.fill_box(target, name, String::new());
+                    self.fill_box(target, name, machine);
                 } else {
                     self.status = format!("created {name}");
                 }
@@ -356,6 +589,25 @@ impl App {
                 } else if let GridOverlay::NewForm { form, .. } = &mut self.grid_overlay {
                     form.error = Some(e);
                 }
+            }
+        }
+    }
+
+    /// Apply a dir listing to whichever new-session form is open, but only if its
+    /// dir still wants that parent (a later keystroke may have moved on).
+    fn handle_dir_cands(&mut self, parent: String, entries: Vec<DirEntry>) {
+        let form = match &mut self.overlay {
+            Overlay::NewSession(f) => Some(f),
+            _ => match &mut self.grid_overlay {
+                GridOverlay::NewForm { form, .. } => Some(form),
+                _ => None,
+            },
+        };
+        if let Some(f) = form {
+            if dir_parent_of(&f.dir) == parent {
+                f.dir_parent = parent;
+                f.dir_raw = entries;
+                refilter_dirs(f);
             }
         }
     }
@@ -478,13 +730,15 @@ impl App {
 
     fn key_newform(&mut self, k: KeyEvent) {
         let tools_len = self.tools.len();
+        let machines_len = self.machines.len();
         let Overlay::NewSession(form) = &mut self.overlay else {
             return;
         };
-        match newform_key(form, tools_len, k) {
+        match newform_key(form, tools_len, machines_len, k) {
             NewFormAction::None => {}
             NewFormAction::Cancel => self.overlay = Overlay::None,
             NewFormAction::Submit => self.submit_newform(),
+            NewFormAction::FetchDirs(parent) => self.spawn_dir_fetch(parent),
         }
     }
 
@@ -497,18 +751,55 @@ impl App {
     }
 
     // ── lifecycle (create / kill / restore) ──────────────────────────────────
+    /// The machine selected by default: the first online one, else the first.
+    fn default_machine_idx(&self) -> usize {
+        self.machines.iter().position(|m| m.online).unwrap_or(0)
+    }
+
+    /// The dir to seed a new form with: $HOME plus a trailing slash, so the very
+    /// first listing shows home's contents to pick from.
+    fn seed_dir(&self) -> String {
+        if self.home.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.home.trim_end_matches('/'))
+        }
+    }
+
     fn open_newform(&mut self) {
         if self.tools.is_empty() {
             self.status = "no tools available".into();
             return;
         }
-        self.overlay = Overlay::NewSession(NewForm {
-            tool_idx: 0,
-            field: 0,
-            name: String::new(),
-            dir: self.home.clone(),
-            error: None,
+        let form = NewForm::new(self.seed_dir(), self.default_machine_idx());
+        let parent = dir_parent_of(&form.dir);
+        self.overlay = Overlay::NewSession(form);
+        self.spawn_dir_fetch(parent);
+    }
+
+    /// Fetch the subdirectories of `parent` (on the form's selected machine) and
+    /// post them back as `AppMsg::DirCands`.
+    fn spawn_dir_fetch(&self, parent: String) {
+        let machine = self.form_machine();
+        let rest = self.rest.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let entries = rest.dirs(&parent, &machine).await.unwrap_or_default();
+            let _ = tx.send(AppMsg::DirCands { parent, entries }).await;
         });
+    }
+
+    /// The machine name selected on whichever new-session form is open ("" when
+    /// none open or in direct-agent mode).
+    fn form_machine(&self) -> String {
+        let idx = match &self.overlay {
+            Overlay::NewSession(f) => Some(f.machine_idx),
+            _ => match &self.grid_overlay {
+                GridOverlay::NewForm { form, .. } => Some(form.machine_idx),
+                _ => None,
+            },
+        };
+        idx.and_then(|i| self.machines.get(i)).map(|m| m.machine.clone()).unwrap_or_default()
     }
 
     /// Spawn the create request for `form`; the result arrives as
@@ -517,6 +808,8 @@ impl App {
         let Some(t) = self.tools.get(form.tool_idx) else {
             return;
         };
+        let machine =
+            self.machines.get(form.machine_idx).map(|m| m.machine.clone()).unwrap_or_default();
         let req = CreateReq {
             tool: t.prefix.clone(),
             name: form.name.clone(),
@@ -526,7 +819,11 @@ impl App {
         let rest = self.rest.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let r = rest.create(&req).await.map_err(|e| e.to_string());
+            let r = rest
+                .create(&req, &machine)
+                .await
+                .map(|name| (name, machine))
+                .map_err(|e| e.to_string());
             let _ = tx.send(AppMsg::Created(r)).await;
         });
     }
@@ -705,27 +1002,25 @@ impl App {
             self.status = "no tools available".into();
             return;
         }
-        self.grid_overlay = GridOverlay::NewForm {
-            target,
-            form: NewForm {
-                tool_idx: 0,
-                field: 0,
-                name: String::new(),
-                dir: self.home.clone(),
-                error: None,
-            },
-        };
+        let form = NewForm::new(self.seed_dir(), self.default_machine_idx());
+        let parent = dir_parent_of(&form.dir);
+        self.grid_overlay = GridOverlay::NewForm { target, form };
+        self.spawn_dir_fetch(parent);
     }
 
     fn key_grid_newform(&mut self, k: KeyEvent) {
         let tools_len = self.tools.len();
+        let machines_len = self.machines.len();
         let (target, action) = match &mut self.grid_overlay {
-            GridOverlay::NewForm { target, form } => (*target, newform_key(form, tools_len, k)),
+            GridOverlay::NewForm { target, form } => {
+                (*target, newform_key(form, tools_len, machines_len, k))
+            }
             _ => return,
         };
         match action {
             NewFormAction::None => {}
             NewFormAction::Cancel => self.grid_overlay = GridOverlay::None,
+            NewFormAction::FetchDirs(parent) => self.spawn_dir_fetch(parent),
             NewFormAction::Submit => {
                 // Keep the form open until Created lands (handle_created routes
                 // success into the box and failure back into the form).
@@ -937,6 +1232,36 @@ impl App {
         let _ = self.cfg.save();
     }
 
+    /// Build the render view for a new-session form (shared by both overlays).
+    /// In hub mode the machine row is a picker over the connected agents; in
+    /// direct mode it's a read-only label naming this single box (`pickable`
+    /// false), shown only once we know the name.
+    fn new_session_view<'a>(&'a self, form: &'a NewForm) -> ui::overlay::NewSessionView<'a> {
+        let tool = self.tools.get(form.tool_idx).map(|t| t.prefix.as_str()).unwrap_or("-");
+        let (machine, machine_online, pickable) = if self.hub_mode {
+            match self.machines.get(form.machine_idx) {
+                Some(m) => (Some(m.machine.as_str()), m.online, true),
+                None => (None, true, true),
+            }
+        } else if !self.self_machine.is_empty() {
+            (Some(self.self_machine.as_str()), true, false)
+        } else {
+            (None, true, false)
+        };
+        ui::overlay::NewSessionView {
+            tool,
+            machine,
+            machine_online,
+            machine_pickable: pickable,
+            name: &form.name,
+            dir: &form.dir,
+            focus: form.field,
+            candidates: &form.dir_cands,
+            cand_sel: form.dir_sel,
+            error: form.error.as_deref(),
+        }
+    }
+
     // ── render ───────────────────────────────────────────────────────────────
     fn render(&self, f: &mut Frame) {
         match self.mode {
@@ -949,18 +1274,7 @@ impl App {
                         ui::overlay::confirm(f, " confirm ", &format!("{verb} session {session}?"));
                     }
                     Overlay::NewSession(form) => {
-                        let tool =
-                            self.tools.get(form.tool_idx).map(|t| t.prefix.as_str()).unwrap_or("-");
-                        ui::overlay::new_session(
-                            f,
-                            &ui::overlay::NewSessionView {
-                                tool,
-                                name: &form.name,
-                                dir: &form.dir,
-                                field: form.field as usize,
-                                error: form.error.as_deref(),
-                            },
-                        );
+                        ui::overlay::new_session(f, &self.new_session_view(form));
                     }
                 }
             }
@@ -986,18 +1300,7 @@ impl App {
                         },
                     ),
                     GridOverlay::NewForm { form, .. } => {
-                        let tool =
-                            self.tools.get(form.tool_idx).map(|t| t.prefix.as_str()).unwrap_or("-");
-                        ui::overlay::new_session(
-                            f,
-                            &ui::overlay::NewSessionView {
-                                tool,
-                                name: &form.name,
-                                dir: &form.dir,
-                                field: form.field as usize,
-                                error: form.error.as_deref(),
-                            },
-                        );
+                        ui::overlay::new_session(f, &self.new_session_view(form));
                     }
                 }
             }
@@ -1106,25 +1409,116 @@ mod tests {
     }
 
     fn form() -> NewForm {
-        NewForm { tool_idx: 0, field: 0, name: String::new(), dir: String::new(), error: None }
+        NewForm::new(String::new(), 0)
     }
     fn key(c: KeyCode) -> KeyEvent {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
+    fn entry(name: &str) -> DirEntry {
+        DirEntry { name: name.into(), path: format!("/home/u/{name}") }
+    }
 
     #[test]
-    fn newform_key_edits_cycles_submits_and_cancels() {
-        let mut f = form();
-        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Char('x'))), NewFormAction::None));
+    fn newform_key_edits_submits_and_cancels() {
+        let mut f = form(); // starts on the name field
+        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Char('x'))), NewFormAction::None));
         assert_eq!(f.name, "x");
-        newform_key(&mut f, 3, key(KeyCode::Tab)); // → dir field
-        newform_key(&mut f, 3, key(KeyCode::Char('/')));
+        // Tab: name → dir (no machine field with machines_len == 0).
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Dir);
+        // Typing a separator changes the parent dir → triggers a fetch.
+        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Char('/'))), NewFormAction::FetchDirs(_)));
         assert_eq!(f.dir, "/");
-        newform_key(&mut f, 3, key(KeyCode::Right)); // cycle tool
+        // Submit / cancel from the dir field (no candidate highlighted).
+        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Enter)), NewFormAction::Submit));
+        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Esc)), NewFormAction::Cancel));
+    }
+
+    #[test]
+    fn newform_tab_cycles_fields_with_and_without_machine() {
+        let mut f = form();
+        f.field = FormField::Tool;
+        // No machines: Tool → Name → Dir → Tool.
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Name);
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Dir);
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Tool);
+        // With machines: Tool → Machine → Name.
+        newform_key(&mut f, 3, 2, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Machine);
+        newform_key(&mut f, 3, 2, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Name);
+    }
+
+    #[test]
+    fn newform_arrows_cycle_focused_selector_only() {
+        let mut f = form();
+        // Tool field: ←/→ cycles the tool.
+        f.field = FormField::Tool;
+        newform_key(&mut f, 3, 2, key(KeyCode::Right));
         assert_eq!(f.tool_idx, 1);
-        newform_key(&mut f, 3, key(KeyCode::Left)); // and back
+        assert_eq!(f.machine_idx, 0); // machine untouched
+        newform_key(&mut f, 3, 2, key(KeyCode::Left));
         assert_eq!(f.tool_idx, 0);
-        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Enter)), NewFormAction::Submit));
-        assert!(matches!(newform_key(&mut f, 3, key(KeyCode::Esc)), NewFormAction::Cancel));
+        // Machine field: ←/→ cycles the machine and re-fetches dirs for it.
+        f.field = FormField::Machine;
+        assert!(matches!(newform_key(&mut f, 3, 2, key(KeyCode::Right)), NewFormAction::FetchDirs(_)));
+        assert_eq!(f.machine_idx, 1);
+        assert_eq!(f.tool_idx, 0); // tool untouched
+    }
+
+    #[test]
+    fn dir_candidate_navigation_and_accept() {
+        let mut f = form();
+        f.field = FormField::Dir;
+        f.dir = "/home/u/".into();
+        f.dir_parent = "/home/u".into();
+        f.dir_raw = vec![entry("dev"), entry("docs"), entry("downloads")];
+        refilter_dirs(&mut f);
+        assert_eq!(f.dir_cands.len(), 3);
+        assert_eq!(f.dir_sel, None); // Enter would submit here
+        // ↓ enters the list; Enter then accepts instead of submitting.
+        newform_key(&mut f, 1, 0, key(KeyCode::Down));
+        assert_eq!(f.dir_sel, Some(0));
+        let acted = newform_key(&mut f, 1, 0, key(KeyCode::Enter));
+        assert!(matches!(acted, NewFormAction::FetchDirs(_)));
+        assert_eq!(f.dir, "/home/u/dev/"); // completed + trailing slash to drill in
+        assert_eq!(f.dir_sel, None);
+    }
+
+    #[test]
+    fn dir_filter_ranks_prefix_first_and_hides_dotfiles() {
+        let mut f = form();
+        f.dir = "/home/u/do".into();
+        f.dir_parent = "/home/u".into();
+        f.dir_raw = vec![entry("dev"), entry("docs"), entry("downloads"), entry(".cache")];
+        refilter_dirs(&mut f);
+        // "do" matches docs + downloads (prefix), not dev; .cache hidden.
+        let names: Vec<&str> = f.dir_cands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["docs", "downloads"]);
+    }
+
+    #[test]
+    fn dir_parent_and_partial_split() {
+        assert_eq!(dir_parent_of("/home/u/dev"), "/home/u");
+        assert_eq!(dir_partial_of("/home/u/dev"), "dev");
+        assert_eq!(dir_parent_of("/home/u/"), "/home/u");
+        assert_eq!(dir_partial_of("/home/u/"), "");
+        assert_eq!(dir_parent_of("/abc"), "/");
+        assert_eq!(dir_parent_of(""), "");
+    }
+
+    #[test]
+    fn fuzzy_scores_prefix_over_substring_over_subsequence() {
+        let prefix = fuzzy_score("development", "dev");
+        let substring = fuzzy_score("my-dev", "dev");
+        let subseq = fuzzy_score("daemon-vault", "dev");
+        assert!(prefix > substring);
+        assert!(substring > subseq);
+        assert!(subseq.is_some());
+        assert_eq!(fuzzy_score("docs", "xyz"), None);
+        assert!(fuzzy_score("anything", "").is_some());
     }
 }
