@@ -1,6 +1,7 @@
 // cc-screen-tui (`ccs`) — terminal client for the cc-screen-rust backend.
 // M1: session switcher (list + navigate). Attach/input/lifecycle land in M2–M4.
 
+mod anchored_backend;
 mod app;
 mod cli;
 mod client;

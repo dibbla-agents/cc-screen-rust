@@ -12,9 +12,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::Terminal;
 
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+use crate::anchored_backend::AnchoredBackend;
+
+pub type Tui = Terminal<AnchoredBackend<Stdout>>;
 
 /// Enter raw mode + the alternate screen and return a ratatui terminal. Installs
 /// a panic hook that restores the terminal first, so a panic's backtrace lands
@@ -27,7 +29,7 @@ pub fn enter() -> Result<Tui> {
     // common terminal (the bytes bypass mouse reporting).
     execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, cursor::Hide)?;
     install_panic_hook();
-    Ok(Terminal::new(CrosstermBackend::new(out))?)
+    Ok(Terminal::new(AnchoredBackend::new(out))?)
 }
 
 /// Undo `enter()`. Safe to call more than once.
