@@ -87,9 +87,16 @@ impl Rest {
         Ok((get("home"), get("machine")))
     }
 
-    /// GET /api/tools
-    pub async fn tools(&self) -> Result<Vec<ToolInfo>> {
-        let r = check(self.http.get(self.urls.rest("/api/tools")).send().await?)?;
+    /// GET /api/tools — `machine` picks the hub agent whose tool list to return
+    /// (empty = direct agent / single machine). A hub with more than one online
+    /// agent can't disambiguate a machine-less request and returns `[]`, so the
+    /// caller must pass the form's selected machine.
+    pub async fn tools(&self, machine: &str) -> Result<Vec<ToolInfo>> {
+        let mut get = self.http.get(self.urls.rest("/api/tools"));
+        if !machine.is_empty() {
+            get = get.query(&[("machine", machine)]);
+        }
+        let r = check(get.send().await?)?;
         Ok(r.json().await?)
     }
 

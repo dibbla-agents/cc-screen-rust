@@ -34,6 +34,9 @@ pub enum AppMsg {
     Created(Result<(String, String), String>),
     /// Subdirectories of `parent` for the new-session dir autocomplete.
     DirCands { parent: String, entries: Vec<DirEntry> },
+    /// The tool list for the form's selected machine (re-fetched on a hub when
+    /// the machine changes, since tools are per-agent).
+    ToolsLoaded(Vec<ToolInfo>),
 }
 
 pub enum PaneMsg {
@@ -127,6 +130,9 @@ enum NewFormAction {
     /// The dir field's parent changed — fetch its subdirectories (the result
     /// arrives as `AppMsg::DirCands` and refreshes the candidate list).
     FetchDirs(String),
+    /// The selected machine changed — re-fetch both its dir listing (`parent`)
+    /// and its tool list, since both are per-agent.
+    MachineChanged(String),
 }
 
 /// Apply one key to a `NewForm` — shared by the switcher form and the grid form.
@@ -226,14 +232,14 @@ fn accept_candidate(form: &mut NewForm) -> NewFormAction {
     NewFormAction::None
 }
 
-/// Force a dir re-fetch (e.g. after switching machines, when the cached listing
-/// belongs to the previous agent).
+/// After switching machines: drop the cached dir listing (it belongs to the
+/// previous agent) and signal that the tool list must be re-fetched too.
 fn invalidate_dirs(form: &mut NewForm) -> NewFormAction {
     form.dir_parent.clear();
     form.dir_raw.clear();
     form.dir_cands.clear();
     form.dir_sel = None;
-    NewFormAction::FetchDirs(dir_parent_of(&form.dir))
+    NewFormAction::MachineChanged(dir_parent_of(&form.dir))
 }
 
 /// After the dir text changes: if the parent directory is unchanged, just
@@ -434,7 +440,6 @@ impl App {
         self.spawn_term_events();
         self.spawn_ticker();
 
-        self.tools = self.rest.tools().await.unwrap_or_default();
         if let Ok((home, machine)) = self.rest.root_info().await {
             self.home = home;
             self.self_machine = machine;
@@ -446,6 +451,10 @@ impl App {
             self.hub_mode = true;
             self.machines = list;
         }
+        // Tools are per-agent; on a hub with >1 online machine a machine-less
+        // request is ambiguous (returns `[]`, which disables New Session), so
+        // fetch them for the machine the form will default to.
+        self.tools = self.rest.tools(&self.default_machine_name()).await.unwrap_or_default();
 
         self.sync_area(term);
         self.refresh().await;
@@ -513,6 +522,7 @@ impl App {
             AppMsg::Pane { id, msg } => self.handle_pane(id, msg),
             AppMsg::Created(res) => self.handle_created(res),
             AppMsg::DirCands { parent, entries } => self.handle_dir_cands(parent, entries),
+            AppMsg::ToolsLoaded(tools) => self.handle_tools_loaded(tools),
         }
         if self.pending_refresh {
             self.pending_refresh = false;
@@ -588,6 +598,21 @@ impl App {
                     f.error = Some(e);
                 } else if let GridOverlay::NewForm { form, .. } = &mut self.grid_overlay {
                     form.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Adopt a freshly fetched tool list (for the form's current machine) and
+    /// clamp the open form's tool selection so it can't point past the new list.
+    fn handle_tools_loaded(&mut self, tools: Vec<ToolInfo>) {
+        let max = tools.len().saturating_sub(1);
+        self.tools = tools;
+        match &mut self.overlay {
+            Overlay::NewSession(f) => f.tool_idx = f.tool_idx.min(max),
+            _ => {
+                if let GridOverlay::NewForm { form, .. } = &mut self.grid_overlay {
+                    form.tool_idx = form.tool_idx.min(max);
                 }
             }
         }
@@ -739,6 +764,10 @@ impl App {
             NewFormAction::Cancel => self.overlay = Overlay::None,
             NewFormAction::Submit => self.submit_newform(),
             NewFormAction::FetchDirs(parent) => self.spawn_dir_fetch(parent),
+            NewFormAction::MachineChanged(parent) => {
+                self.spawn_dir_fetch(parent);
+                self.spawn_tools_fetch();
+            }
         }
     }
 
@@ -754,6 +783,24 @@ impl App {
     /// The machine selected by default: the first online one, else the first.
     fn default_machine_idx(&self) -> usize {
         self.machines.iter().position(|m| m.online).unwrap_or(0)
+    }
+
+    /// The name of the default machine ("" in direct-agent mode / no machines).
+    fn default_machine_name(&self) -> String {
+        self.machines.get(self.default_machine_idx()).map(|m| m.machine.clone()).unwrap_or_default()
+    }
+
+    /// Re-fetch the tool list for whichever machine the open form now points at
+    /// (tools are per-agent), posting the result back as `AppMsg::ToolsLoaded`.
+    fn spawn_tools_fetch(&self) {
+        let machine = self.form_machine();
+        let rest = self.rest.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(tools) = rest.tools(&machine).await {
+                let _ = tx.send(AppMsg::ToolsLoaded(tools)).await;
+            }
+        });
     }
 
     /// The dir to seed a new form with: $HOME plus a trailing slash, so the very
@@ -1021,6 +1068,10 @@ impl App {
             NewFormAction::None => {}
             NewFormAction::Cancel => self.grid_overlay = GridOverlay::None,
             NewFormAction::FetchDirs(parent) => self.spawn_dir_fetch(parent),
+            NewFormAction::MachineChanged(parent) => {
+                self.spawn_dir_fetch(parent);
+                self.spawn_tools_fetch();
+            }
             NewFormAction::Submit => {
                 // Keep the form open until Created lands (handle_created routes
                 // success into the box and failure back into the form).
@@ -1462,9 +1513,12 @@ mod tests {
         assert_eq!(f.machine_idx, 0); // machine untouched
         newform_key(&mut f, 3, 2, key(KeyCode::Left));
         assert_eq!(f.tool_idx, 0);
-        // Machine field: ←/→ cycles the machine and re-fetches dirs for it.
+        // Machine field: ←/→ cycles the machine and re-fetches dirs + tools for it.
         f.field = FormField::Machine;
-        assert!(matches!(newform_key(&mut f, 3, 2, key(KeyCode::Right)), NewFormAction::FetchDirs(_)));
+        assert!(matches!(
+            newform_key(&mut f, 3, 2, key(KeyCode::Right)),
+            NewFormAction::MachineChanged(_)
+        ));
         assert_eq!(f.machine_idx, 1);
         assert_eq!(f.tool_idx, 0); // tool untouched
     }
