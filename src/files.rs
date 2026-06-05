@@ -99,7 +99,9 @@ fn read_dirs(dir: &Path) -> Result<Vec<DirEntry>, (StatusCode, String)> {
     let mut out = Vec::new();
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
-        if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        // follow symlinks: a symlinked dir should list as a folder (broken
+        // links fail metadata() and are skipped).
+        if std::fs::metadata(ent.path()).map(|m| m.is_dir()).unwrap_or(false) {
             out.push(DirEntry {
                 name,
                 path: ent.path().to_string_lossy().into_owned(),
@@ -132,7 +134,9 @@ pub async fn files(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
         let full = ent.path();
-        let Ok(meta) = ent.metadata() else { continue };
+        // follow symlinks so symlinked dirs/files resolve to their target
+        // type (broken links fail metadata() and are skipped).
+        let Ok(meta) = std::fs::metadata(&full) else { continue };
         if meta.is_dir() {
             dirs.push(DirEntry { name, path: full.to_string_lossy().into_owned() });
         } else if meta.is_file() {
