@@ -25,12 +25,22 @@ command -v gh >/dev/null || { echo "gh not found (needed to fetch CI artifacts)"
 VERSION="${1:-$(git -C .. describe --tags --abbrev=0)}"
 echo "→ hosting $VERSION on $SITE_URL/dl"
 
-# The most recent *successful* Release run for this tag (the build jobs succeed
-# even if the GitHub-Release publish step doesn't).
+# The most recent Release run for this tag. The build jobs succeed even when the
+# GitHub-Release publish ("host") step 403s on the org's read-only Actions token,
+# which fails the *run* — so don't filter on whole-run success (that's what made
+# this unable to find a run once the org token went read-only). Pick the latest
+# run and verify the build-* jobs (not host) succeeded, mirroring release.sh.
 RUN_ID="$(gh run list --repo "$REPO" --workflow Release --branch "$VERSION" \
-  --status success --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
-[ -n "$RUN_ID" ] || { echo "no successful Release run found for $VERSION" >&2; exit 1; }
-echo "  CI run $RUN_ID"
+  --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+[ -n "$RUN_ID" ] || { echo "no Release run found for $VERSION" >&2; exit 1; }
+if gh run view "$RUN_ID" --repo "$REPO" --json jobs \
+     --jq '[.jobs[]|select(.name|startswith("build-"))|.conclusion]|any(.!="success")' \
+     2>/dev/null | grep -q true; then
+  echo "Release run $RUN_ID has a failed/incomplete build job — aborting." >&2
+  echo "  inspect: gh run view $RUN_ID -R $REPO" >&2
+  exit 1
+fi
+echo "  CI run $RUN_ID (build jobs OK; host-publish failure tolerated)"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
