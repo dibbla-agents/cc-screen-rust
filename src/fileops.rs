@@ -84,9 +84,11 @@ fn dirs(app: &AppState, args: Value) -> CmdResult {
         Ok(rd) => rd,
         Err(e) => return err(400, e.to_string()),
     };
+    // follow symlinks via fs::metadata so a symlinked dir lists as a folder
+    // (broken links fail metadata() and are skipped).
     let mut entries: Vec<(String, PathBuf)> = rd
         .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| std::fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
         .collect();
     entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
@@ -127,7 +129,9 @@ fn files(app: &AppState, args: Value) -> CmdResult {
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
         let full = ent.path();
-        let Ok(meta) = ent.metadata() else { continue };
+        // follow symlinks so symlinked dirs/files resolve to their target type
+        // (broken links fail metadata() and are skipped).
+        let Ok(meta) = std::fs::metadata(&full) else { continue };
         if meta.is_dir() {
             dirs.push((name, full));
         } else if meta.is_file() {
@@ -426,6 +430,42 @@ mod tests {
         let r = run(&app, "delete", json!({ "path": bpath.to_string_lossy() }));
         assert!(matches!(r, CmdResult::Ok), "delete → 204: {r:?}");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dirs_follows_symlinked_directories() {
+        // An isolated-$HOME agent fills its home with symlinks back to the real
+        // home; a symlinked dir must still list as a folder (the file_type()
+        // path used to drop them because it never traverses the link).
+        let tmp = std::env::temp_dir().join(format!("ccr-fileops-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        let real = tmp.join("real_target");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        let app = app(&home);
+
+        std::os::unix::fs::symlink(&real, home.join("linked")).unwrap();
+        // a dangling link must be skipped, not error the listing
+        std::os::unix::fs::symlink(tmp.join("missing"), home.join("dangling")).unwrap();
+
+        for op in ["dirs", "files"] {
+            let r = run(&app, op, json!({ "path": home.to_string_lossy() }));
+            match r {
+                CmdResult::Json(v) => {
+                    let names: Vec<String> = v["dirs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|d| d["name"].as_str().unwrap().to_string())
+                        .collect();
+                    assert!(names.contains(&"linked".to_string()), "{op}: symlinked dir missing: {names:?}");
+                    assert!(!names.contains(&"dangling".to_string()), "{op}: dangling link should be skipped");
+                }
+                other => panic!("{op}: {other:?}"),
+            }
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
