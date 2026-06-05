@@ -18,10 +18,11 @@ on:
 
 jobs:
   build-push:
-    # Self-hosted on pine (x86_64) — native amd64 docker build with a warm local
-    # layer cache instead of a cold GitHub-hosted VM. pine only dials out; the
-    # image workflows trigger on tags / dispatch (never on PRs), so no fork risk.
-    runs-on: ccs-pine
+    # GitHub-hosted: the agent image is large (Ubuntu + Node + the coding CLIs)
+    # and its multi-GB build cache doesn't fit safely on pine's disk alongside the
+    # binary builds, so images stay on hosted runners (free on a public repo). The
+    # cargo-dist *binary* matrix is what runs self-hosted (see dist-workspace.toml).
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
