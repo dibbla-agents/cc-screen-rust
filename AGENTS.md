@@ -142,6 +142,11 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   hub's tailnet IP by default, and for off-tailnet use front it with a TLS
   reverse proxy (mTLS on the uplink). The agent's `confine.rs` ($HOME confinement)
   stays the authoritative guard — the hub can't widen it (file ops run on the agent).
+  See **HUB.md → "Off-tailnet via a Cloudflare Tunnel"** for a concrete loopback-bind
+  + tunnel recipe (and the 502 / open-uplink gotchas), and **HUB.md → "Running more
+  than one agent on a single host"** for the isolated-`$HOME` + hand-written-unit
+  pattern (the service name + `$HOME/.config/cc-screen-rust` state dir are fixed, so
+  `install` is one-agent-per-host).
 - **Auth is opt-in (`src/auth.rs`).** Off unless `CCWEB_PASSWORD`/`CCWEB_API_TOKEN`
   is set. The browser rides a signed 2-week session cookie (so individual
   fetches/WS need no token); headless clients (`ccs`, scripts) send

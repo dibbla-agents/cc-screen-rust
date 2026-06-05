@@ -149,6 +149,49 @@ The agent always **owns its PTYs locally**: a hub restart never kills your
 sessions (the agent just reconnects), and the resume-on-restart behavior is
 unchanged.
 
+### Running more than one agent on a single host
+
+`cc-screen-rust install` is **one agent per host**: the service name
+(`cc-screen-rust.service`) is fixed and the state dir is always
+`$HOME/.config/cc-screen-rust` (derived from `$HOME`; there's no separate
+override). Re-running `install` therefore *replaces* that one agent — fine for
+**repointing** a host at a different hub (just re-run with new `--hub` flags), but
+it can't give you two agents side by side.
+
+You'd want a second agent when a host already registers with one hub and you want
+it to *also* appear in another (e.g. a local hub **and** a shared one). Since an
+agent dials exactly one hub, that needs a second daemon, and the two must not share
+state. The clean way:
+
+1. **Isolated `$HOME`.** Make a dir (e.g. `~/.cc-agent-b`) that symlink-mirrors your
+   real home so the second agent reuses your real CLI logins and projects —
+   **except** `.config/cc-screen-rust`, which must be a *fresh real dir* so the two
+   agents don't fight over `sessions.json` / `session.key`.
+   File ops are confined to `$HOME` **lexically** (no symlink resolution), so a
+   symlinked `~/.cc-agent-b/project → ~/project` is allowed and resolves to the real
+   files — you just browse it under the mirrored path.
+2. **Hand-write a second unit** (don't use `install` — it would clobber the first).
+   Run the *same binary* with the isolated `$HOME` and `--hub-only` so it binds no
+   port (no clash with the first agent's `:8839`):
+
+   ```ini
+   # ~/.config/systemd/user/cc-screen-b.service
+   [Service]
+   Environment=HOME=%h/.cc-agent-b
+   Environment=PATH=%h/.local/bin:/usr/bin:/bin
+   Environment=CCWEB_HUB_URL=https://hub.example:8840
+   Environment=CCWEB_HUB_ONLY=1
+   Environment=CCWEB_MACHINE_ID=thishost
+   ExecStart=%h/.local/bin/cc-screen-rust --hub-only
+   Restart=on-failure
+   [Install]
+   WantedBy=default.target
+   ```
+   `systemctl --user daemon-reload && systemctl --user enable --now cc-screen-b`.
+
+The two agents own independent session sets and can both call themselves the same
+`--machine-id` since they live in different hubs.
+
 ---
 
 ## Clients
@@ -203,6 +246,29 @@ The hub challenges the "tailnet-only, never bind public" rule deliberately:
   owns no filesystem and runs no agent code itself, which bounds its own surface.
 - **Confinement stays on the agent.** File ops run on the owning agent and go
   through its `$HOME` confinement — the hub can't widen it.
+
+### Off-tailnet via a Cloudflare Tunnel
+
+A concrete take on "front it with a TLS reverse proxy" that needs no public inbound
+port (the host only dials out to Cloudflare):
+
+1. **Bind the hub to loopback:** `cc-screen-hub install --bind 127.0.0.1` (re-running
+   `install` preserves the password/token).
+2. **Point a tunnel at it.** Run `cloudflared` on the same host with the public
+   hostname's **Service** set to `http://127.0.0.1:8840`.
+3. Browse / `ccs` at `https://your-hostname` — Cloudflare terminates TLS and sets
+   `X-Forwarded-Proto: https`, so the hub's `Secure` login cookie works (plain http
+   to a non-loopback origin would drop it).
+
+Gotchas:
+- **502 Bad Gateway** almost always means the tunnel's origin can't reach the hub.
+  If the hub is bound to its *tailnet* IP (the install default) but the tunnel
+  origin is `localhost`, nothing listens there → 502. Either bind the hub to
+  `127.0.0.1` (above) or set the tunnel origin to the hub's actual bind address.
+- **A public hostname + open uplink means anyone can register an agent** — the
+  client password does **not** gate the uplink. Once the hub is internet-reachable,
+  set `--agents 'machine:token,…'`, and/or put Cloudflare Access in front of the
+  hostname.
 
 ---
 
