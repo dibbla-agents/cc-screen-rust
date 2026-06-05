@@ -2,7 +2,7 @@
 //! secrets, and the per-agent uplink tokens.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct HubConfig {
     pub addr: String,
@@ -33,6 +33,14 @@ fn arg_value(flag: &str) -> Option<String> {
     None
 }
 
+/// Where the hub keeps its state (`session.key`, favorites, push keys). Defaults
+/// to `~/.config/cc-screen-hub`, but `CCWEB_CONFIG_DIR` overrides it so several
+/// hubs (e.g. a dockerized prod on :8840 and a host-native test on :8841) can run
+/// on one host with FULLY ISOLATED state instead of fighting over one dir.
+fn resolve_config_dir(home: &Path, override_dir: Option<PathBuf>) -> PathBuf {
+    override_dir.unwrap_or_else(|| home.join(".config").join("cc-screen-hub"))
+}
+
 /// Parse `m1:tok1,m2:tok2` into a map. Tokens are base64url (no `:`/`,`), so
 /// splitting is unambiguous. Blank/!malformed entries are skipped.
 fn parse_agent_tokens(spec: Option<&str>) -> HashMap<String, String> {
@@ -55,7 +63,7 @@ fn parse_agent_tokens(spec: Option<&str>) -> HashMap<String, String> {
 
 pub fn load() -> HubConfig {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
-    let config_dir = home.join(".config").join("cc-screen-hub");
+    let config_dir = resolve_config_dir(&home, std::env::var_os("CCWEB_CONFIG_DIR").map(PathBuf::from));
     let _ = std::fs::create_dir_all(&config_dir);
     let addr = arg_value("--addr")
         .or_else(|| std::env::var("CCWEB_ADDR").ok())
@@ -78,5 +86,18 @@ mod tests {
         assert_eq!(m.len(), 2, "blank and colon-less entries are skipped");
         assert!(parse_agent_tokens(None).is_empty());
         assert!(parse_agent_tokens(Some("")).is_empty());
+    }
+
+    #[test]
+    fn config_dir_defaults_to_home_but_override_wins() {
+        let home = PathBuf::from("/home/x");
+        assert_eq!(
+            resolve_config_dir(&home, None),
+            PathBuf::from("/home/x/.config/cc-screen-hub"),
+        );
+        assert_eq!(
+            resolve_config_dir(&home, Some(PathBuf::from("/tmp/hub-test"))),
+            PathBuf::from("/tmp/hub-test"),
+        );
     }
 }

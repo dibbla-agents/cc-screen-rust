@@ -77,19 +77,44 @@ cc_tool tt  shell  "${SHELL:-/bin/bash} -l"
 Dockerfile's `npm install -g` line (or however it ships) if you use it, or omit it
 from `tools.conf`.
 
-## Publishing to GHCR
+## Pull the prebuilt image (run it on another machine)
 
-Same as the hub — image name `ghcr.io/erikknave/cc-screen-agent`, needs a Classic
-PAT with `write:packages`:
+CI publishes the agent image to GHCR on every release tag, so you can skip the
+build. **Canonical image:** `ghcr.io/dibbla-agents/cc-screen-agent` (tags: the
+semver version, e.g. `0.3.5`, and `latest`) — a **public** package, pullable with
+no login:
 
 ```sh
-echo "$GHCR_PAT" | docker login ghcr.io -u erikknave --password-stdin
-docker build -t ghcr.io/erikknave/cc-screen-agent:0.3.4 \
-             -t ghcr.io/erikknave/cc-screen-agent:latest \
-             -f docker/agent/Dockerfile .
-docker push ghcr.io/erikknave/cc-screen-agent:0.3.4
-docker push ghcr.io/erikknave/cc-screen-agent:latest
+docker pull ghcr.io/dibbla-agents/cc-screen-agent:latest        # or :0.3.5 to pin
 ```
 
-Heads up: this image is large (Ubuntu + Node + the CLIs + your toolchains) and the
-first build is slow. Subsequent builds reuse the cargo + layer caches.
+The shipped `docker-compose.yml` already points `image:` at that tag, so dropping
+its `build:` block (or `docker compose pull && up -d`) runs the registry image.
+Remember the agent owns the home volume + creds — set up `./home` (and the CLI
+logins / `.env`) exactly as in the compose steps above before starting it.
+
+## Publishing to GHCR (how the image gets there)
+
+**CI does this automatically.** `.github/workflows/agent-image.yml` builds and
+pushes to `ghcr.io/dibbla-agents/cc-screen-agent` on every `v*` tag (and on manual
+dispatch), tagging the semver version + `latest`. Owner is `github.repository_owner`
+(the org); set repo/org var `GHCR_OWNER` to target a personal namespace.
+
+**Token caveat:** the org's default Actions `GITHUB_TOKEN` is read-only; if the
+push 403s, add a Classic PAT with `write:packages` as repo/org secret `GHCR_PAT`.
+**Visibility:** make the package **public** once (package *Settings → Danger Zone*)
+so other machines pull without a login — the image carries no secrets.
+
+> Heads up: this image is large (Ubuntu + Node + the CLIs), so the CI build is
+> slower than the hub's; GHA caches keep repeat builds cheap.
+
+### Manual fallback (push by hand)
+
+```sh
+echo "$GHCR_PAT" | docker login ghcr.io -u <you> --password-stdin
+docker build -t ghcr.io/dibbla-agents/cc-screen-agent:0.3.5 \
+             -t ghcr.io/dibbla-agents/cc-screen-agent:latest \
+             -f docker/agent/Dockerfile .
+docker push ghcr.io/dibbla-agents/cc-screen-agent:0.3.5
+docker push ghcr.io/dibbla-agents/cc-screen-agent:latest
+```

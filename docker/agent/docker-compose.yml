@@ -16,7 +16,7 @@ services:
     build:
       context: ../..
       dockerfile: docker/agent/Dockerfile
-    image: ghcr.io/erikknave/cc-screen-agent:latest
+    image: ghcr.io/dibbla-agents/cc-screen-agent:latest
     container_name: cc-screen-agent
     restart: unless-stopped
     env_file:

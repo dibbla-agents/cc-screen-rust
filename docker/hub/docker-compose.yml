@@ -15,17 +15,20 @@ services:
     build:
       context: ../..
       dockerfile: docker/hub/Dockerfile
-    image: ghcr.io/erikknave/cc-screen-hub:latest
+    image: ghcr.io/dibbla-agents/cc-screen-hub:latest
     container_name: cc-screen-hub
     restart: unless-stopped
     # Tokens / password come from .env (see .env.example).
     env_file:
       - .env
     ports:
-      # host:container. The hub's security model says don't expose it publicly
-      # without a TLS proxy + agent tokens — for a private/tailnet box prefer
-      # binding a specific host IP, e.g.  "100.x.y.z:8840:8840".
-      - "8840:8840"
+      # host:container. Defaults to the conventional hub port 8840; override the
+      # HOST side with HUB_HOST_PORT (e.g. this repo's hubctl.sh sets it to 8841
+      # so a dockerized "prod" hub coexists with a native hub already on 8840).
+      # The container always listens on 8840 internally. For a tailnet box, bind a
+      # specific host IP — the hub's security model says don't expose it publicly
+      # without a TLS proxy + agent tokens, e.g. "100.x.y.z:8840:8840".
+      - "${HUB_HOST_PORT:-8840}:8840"
     volumes:
       # Persists session.key, favorites, VAPID keys, and push subscriptions.
       - hub-config:/home/app/.config/cc-screen-hub

@@ -32,6 +32,9 @@ CONFIG (env / ~/.config/cc-screen-hub/web.env)
   CCHUB_AGENT_TOKENS                 per-agent uplink tokens, "machine:token,m2:tok2".
                                      Empty = OPEN uplink (any agent may register) —
                                      tailnet/dev only. Set it to require known tokens.
+  CCWEB_CONFIG_DIR                   override the state dir (default ~/.config/cc-screen-hub)
+                                     so a second hub (e.g. a test instance on another
+                                     port) runs with fully isolated state.
 
 SETUP
   1. On the hub box:   cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'

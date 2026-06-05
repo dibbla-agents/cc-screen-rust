@@ -95,6 +95,28 @@ cc-screen-hub  update     # hub:   fetch the latest + restart the service
 ccs            update     # TUI:   fetch the latest ccs binary
 ```
 
+### Run from a prebuilt Docker image
+
+Instead of building, pull the CI-published images from GHCR (public — no login).
+Both track every release tag (`latest` + the semver version):
+
+```sh
+docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the aggregator / front door
+docker pull ghcr.io/dibbla-agents/cc-screen-agent:latest   # a machine host (PTYs + the YOLO CLIs)
+```
+
+The compose files in [`docker/hub/`](docker/hub/README.md) and
+[`docker/agent/`](docker/agent/README.md) already reference these tags — `docker
+compose pull && up -d` runs the registry image; keep their `build:` block to build
+locally instead. The **hub** is a stateless relay and containerizes cleanly; the
+**agent** runs YOLO agents, so containerizing it is a *feature* (the container +
+the home volume you mount become the sandbox) — never publish its port publicly.
+
+**Test/prod on one box:** the hub compose host-port defaults to **8840**; set
+`HUB_HOST_PORT=8841` to run a second (e.g. "prod") hub alongside one already on
+8840. `scripts/hubctl.sh` wires up exactly that split — see the `environments`
+guidance in `.claude/skills/`.
+
 ### Password protection (optional)
 
 Auth is **off by default** — it's tailnet-only, so the gate is just basic

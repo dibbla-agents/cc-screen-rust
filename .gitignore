@@ -3,3 +3,10 @@
 /frontend/dist
 /frontend/*.tsbuildinfo
 *.swp
+scripts/hubctl.env
+
+# local env files (tokens) — keep .env.example tracked, not .env
+docker/*/.env
+
+# transient scheduled-task lock (runtime pid/session state)
+.claude/scheduled_tasks.lock

@@ -31,6 +31,31 @@ docker run -d --name cc-screen-hub -p 8840:8840 --env-file docker/hub/.env \
   -v cc-screen-hub-config:/home/app/.config/cc-screen-hub cc-screen-hub
 ```
 
+## Pull the prebuilt image (run it on another machine)
+
+You don't have to build — CI publishes the hub image to GHCR on every release tag.
+**Canonical image:** `ghcr.io/dibbla-agents/cc-screen-hub` (tags: the semver
+version, e.g. `0.3.5`, and `latest`). It's a **public** package, so any machine
+can pull it with no login:
+
+```sh
+docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest          # or :0.3.5 to pin
+
+docker run -d --name cc-screen-hub -p 8840:8840 --env-file .env \
+  -v cc-screen-hub-config:/home/app/.config/cc-screen-hub \
+  ghcr.io/dibbla-agents/cc-screen-hub:latest
+```
+
+Or with compose: the shipped `docker-compose.yml` already has `image:` set to that
+tag, so dropping its `build:` block (or just `docker compose pull && up -d`) runs
+the registry image instead of building. The host port defaults to **8840**;
+override with `HUB_HOST_PORT=8841 docker compose up -d` to coexist with another
+hub already on 8840.
+
+> If the package is ever flipped back to private, pulling needs a one-time
+> `echo "$PAT" | docker login ghcr.io -u <you> --password-stdin` with a
+> `read:packages` token first.
+
 ## Configuration (env vars)
 
 All optional. With everything blank the hub runs with **no auth** and an **open
@@ -60,51 +85,37 @@ cc-screen-rust --hub http://HUB-HOST:8840 --token <uplink-token> --machine-id pi
 `CCHUB_AGENT_TOKENS` (or any value if you left it open). Add `--hub-only` on the
 agent to drop its own local bind so it's reachable *only* through the hub.
 
-## Publishing to GitHub Container Registry (GHCR)
+## Publishing to GHCR (how the image gets there)
 
-You can publish under your **personal** account (`ghcr.io/erikknave/cc-screen-hub`)
-or the **org** (`ghcr.io/dibbla-agents/cc-screen-hub`). Personal is simplest: you
-own the namespace outright, which sidesteps the org's read-only Actions token.
+**CI does this automatically.** `.github/workflows/hub-image.yml` builds and pushes
+to **`ghcr.io/dibbla-agents/cc-screen-hub`** on every `v*` tag (and on manual
+dispatch), tagging the semver version + `latest`. The owner is
+`github.repository_owner` (the org); set a repo/org variable **`GHCR_OWNER`** to
+target a personal namespace instead. So a normal release needs **no manual push** —
+just tag a version (see the `release` flow) and the image follows.
 
-Either way you need a **Classic PAT** with `write:packages` (and `read:packages`
-to pull). The `gh` CLI's default token does **not** carry `write:packages`, so
-mint a fresh PAT at <https://github.com/settings/tokens> — it is not `gh auth token`.
+**Token caveat:** the org's default Actions `GITHUB_TOKEN` is read-only (same
+reason the release workflow can't publish GitHub Releases itself). If the push
+step 403s, add a **Classic PAT** with `write:packages` as a repo/org secret named
+`GHCR_PAT` — the login step prefers it.
 
-### Option A — push manually from your machine (works today)
+**Visibility:** the package is **public** so anyone can `docker pull` it (the image
+carries no secrets — creds come from `.env`/the volume at runtime). New GHCR
+packages default to *private*; flip it once in the package's *Settings → Danger
+Zone → Change visibility*. The `org.opencontainers.image.source` label links the
+package back to this repo.
+
+### Manual fallback (push by hand)
+
+Only needed if CI is unavailable. Requires a Classic PAT with `write:packages`
+(the `gh` CLI's default token does **not** carry it — mint one at
+<https://github.com/settings/tokens>):
 
 ```sh
-echo "$GHCR_PAT" | docker login ghcr.io -u erikknave --password-stdin
-docker build -t ghcr.io/erikknave/cc-screen-hub:0.3.4 \
-             -t ghcr.io/erikknave/cc-screen-hub:latest \
+echo "$GHCR_PAT" | docker login ghcr.io -u <you> --password-stdin
+docker build -t ghcr.io/dibbla-agents/cc-screen-hub:0.3.5 \
+             -t ghcr.io/dibbla-agents/cc-screen-hub:latest \
              -f docker/hub/Dockerfile .
-docker push ghcr.io/erikknave/cc-screen-hub:0.3.4
-docker push ghcr.io/erikknave/cc-screen-hub:latest
-```
-
-(Swap `erikknave` → `dibbla-agents` to publish under the org instead; the PAT must
-be able to write that org's packages.)
-
-New GHCR packages default to **private** — to let others pull, make the package
-public in your account's *Packages* settings, or have pullers `docker login` with
-a `read:packages` PAT. The `org.opencontainers.image.source` label (added by the
-workflow's metadata step) links the package back to this repo.
-
-### Option B — GitHub Actions on tag
-
-`.github/workflows/hub-image.yml` builds and pushes on every `v*` tag (and on
-manual dispatch), tagging the image with the semver version and `latest`. It pushes
-to `github.repository_owner` by default; set a repo variable **`GHCR_OWNER`**
-(e.g. `erikknave`) to target a personal namespace.
-
-**Token caveat:** the org's default Actions `GITHUB_TOKEN` is read-only (the same
-reason the release workflow can't publish GitHub Releases itself), and it can't
-write a *personal* namespace from an org repo anyway. So add a **Classic PAT** with
-`write:packages` as a repo secret named `GHCR_PAT` — the login step prefers it.
-
-### Pull + run a published image
-
-```sh
-docker run -d --name cc-screen-hub -p 8840:8840 --env-file .env \
-  -v cc-screen-hub-config:/home/app/.config/cc-screen-hub \
-  ghcr.io/erikknave/cc-screen-hub:latest
+docker push ghcr.io/dibbla-agents/cc-screen-hub:0.3.5
+docker push ghcr.io/dibbla-agents/cc-screen-hub:latest
 ```
