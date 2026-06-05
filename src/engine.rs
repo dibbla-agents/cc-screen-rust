@@ -269,14 +269,15 @@ impl Session {
     /// state lock. The snapshot is a clean, size-agnostic repaint of the
     /// emulator's scrollback + screen (RIS-prefixed) — NOT the raw byte history,
     /// whose size-locked redraws duplicated/staircased at mismatched client sizes.
+    ///
+    /// Used for the FIRST attach AND for every resync/refit afterwards: an
+    /// already-attached client must call this (not a bare snapshot) and swap in
+    /// the returned receiver, dropping its old one — otherwise a burst already
+    /// folded into this snapshot but still queued in the old receiver gets
+    /// repainted a second time (the duplicated-banner bug). See `attach::attach_loop`.
     pub fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Bytes>) {
         let st = self.state.lock().unwrap();
         (st.emu.snapshot(), self.tx.subscribe())
-    }
-
-    /// Standalone repaint snapshot (used to resync a lagged client).
-    pub fn snapshot(&self) -> Vec<u8> {
-        self.state.lock().unwrap().emu.snapshot()
     }
 
     /// Clear scrollback but keep the visible screen (tmux clear-history
@@ -613,6 +614,69 @@ mod tests {
         assert!(snap.starts_with('\u{1b}')); // RIS reset prefix
         assert!(snap.contains("READY_MARK"));
         list[0].kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Regression for the duplicated-banner bug: a resync/refit (`attach_loop`'s
+    // Lagged + narrow-first-resize paths) MUST re-subscribe via `attach()`, not
+    // snapshot a stale receiver. A burst broadcast after the first attach but
+    // before the resync is folded into the resync snapshot — the fresh receiver
+    // must NOT also deliver it, or the client repaints it twice.
+    #[tokio::test]
+    async fn resync_attach_does_not_replay_snapshotted_bytes() {
+        let tmp = std::env::temp_dir().join(format!("ccr-resync-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Delay the burst so it is broadcast AFTER the first attach subscribes —
+        // that is the byte that used to get repainted twice.
+        let tool = shell_tool("sleep 1; printf BURST_MARK; sleep 5");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        // First attach (the live client) BEFORE the burst. Leave rx1 UNDRAINED —
+        // mimics a loop parked on a slow `out.send` while the pump broadcasts.
+        let (_snap1, mut rx1) = sess.attach();
+
+        // Wait until the burst is processed into the emulator (and thus broadcast).
+        for _ in 0..200 {
+            if sess.preview().contains("BURST_MARK") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(sess.preview().contains("BURST_MARK"), "burst reached the emulator");
+
+        // The stale receiver HAS the burst queued — the bytes that used to be
+        // repainted a second time.
+        let queued = rx1.try_recv().expect("burst was queued in the original receiver");
+        assert!(String::from_utf8_lossy(&queued).contains("BURST_MARK"));
+
+        // The resync/refit: snapshot + fresh subscription, atomically.
+        let (snap2, mut rx2) = sess.attach();
+        assert!(
+            String::from_utf8_lossy(&snap2).contains("BURST_MARK"),
+            "the resync snapshot already contains the burst"
+        );
+
+        // The fresh receiver subscribed AFTER the snapshot point, so it must be
+        // empty of the already-snapshotted burst.
+        match rx2.try_recv() {
+            Err(broadcast::error::TryRecvError::Empty) => {}
+            Ok(b) => panic!(
+                "fresh receiver replayed snapshotted bytes: {:?}",
+                String::from_utf8_lossy(&b)
+            ),
+            Err(e) => panic!("unexpected receiver state: {e:?}"),
+        }
+
+        sess.kill();
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

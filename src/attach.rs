@@ -84,7 +84,13 @@ pub async fn attach_loop(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // Slow client fell behind the ring → resync with a fresh repaint.
-                    if out.send(AttachOut::Snapshot(sess.snapshot())).await.is_err() {
+                    // Re-subscribe ATOMICALLY (see the refit below): snapshot the
+                    // emulator and re-subscribe under the pump's lock, then drop the
+                    // stale `rx`, so nothing already baked into this snapshot is also
+                    // replayed as live output afterwards.
+                    let (snap, fresh) = sess.attach();
+                    rx = fresh;
+                    if out.send(AttachOut::Snapshot(snap)).await.is_err() {
                         break;
                     }
                 }
@@ -101,8 +107,19 @@ pub async fn attach_loop(
                     // PTY to ≤ this client's width, so if the client is narrower
                     // than that snapshot, resend one that fits — otherwise its
                     // over-wide rows stay re-wrapped (ghosted) in the scrollback.
+                    //
+                    // Re-subscribe ATOMICALLY rather than calling the bare
+                    // `snapshot()`: a burst the pump broadcast since we attached
+                    // may still be queued in `rx`, and it is ALSO folded into this
+                    // fresh snapshot. Sending the snapshot and then draining that
+                    // queued burst would repaint it twice (the duplicated banner
+                    // bug). `attach()` snapshots + subscribes under the pump's lock,
+                    // so the new `rx` starts strictly after the snapshot point;
+                    // dropping the stale `rx` discards only already-snapshotted bytes.
                     if first && c < snap_cols {
-                        if out.send(AttachOut::Snapshot(sess.snapshot())).await.is_err() {
+                        let (snap, fresh) = sess.attach();
+                        rx = fresh;
+                        if out.send(AttachOut::Snapshot(snap)).await.is_err() {
                             break;
                         }
                     }
