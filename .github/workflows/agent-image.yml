@@ -1,10 +1,12 @@
 # Build the AGENT container image (the machine host that owns PTYs + runs the
-# YOLO coding CLIs) and push it to GitHub Container Registry (GHCR). Mirrors
-# hub-image.yml — fires on version tags (v*) and on manual dispatch — so the
-# agent image tracks every release instead of needing a hand-driven push.
+# YOLO coding CLIs) and push it to GitHub Container Registry (GHCR).
 #
-# Heads up: this image is large (Ubuntu + Node + the coding CLIs), so the build
-# is slower than the hub's. GHA layer + cargo caches keep repeat builds cheap.
+# Auto-build on tags is TEMPORARILY DISABLED: this image is large (Ubuntu + Node +
+# the coding CLIs, ~12 GB build cache) and agents usually run natively as a systemd
+# service, not in a container — so rebuilding it on every release is wasteful. It's
+# now **manual-only**: build on demand with `gh workflow run agent-image.yml`. To
+# resume per-release auto-builds, re-add the `push: { tags: ["v*"] }` trigger below
+# (mirroring hub-image.yml). The last-built `latest`/tagged image on GHCR is unaffected.
 #
 # Auth note: this org's default Actions GITHUB_TOKEN is read-only. If the push
 # step 403s, add a Classic PAT with `write:packages` as a repo/org secret named
@@ -12,8 +14,6 @@
 name: agent-image
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
