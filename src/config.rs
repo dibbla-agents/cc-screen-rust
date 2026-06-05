@@ -119,8 +119,18 @@ fn resolve_tools_path(home: &PathBuf, config_dir: &PathBuf) -> Option<PathBuf> {
 }
 
 pub fn load() -> Config {
-    let home = home_dir();
-    let config_dir = home.join(".config").join("cc-screen-rust");
+    let real_home = home_dir();
+    // Confinement / browse root. Defaults to $HOME. An isolated-state agent
+    // whose $HOME is a symlink farm (e.g. the studio agent) can point this at
+    // the real home with CCWEB_HOME so live session cwds — which /proc reports
+    // canonically, outside the symlinked $HOME — still resolve under the guard.
+    // The config/state dir stays under the *real* $HOME, so each agent keeps
+    // its own session store even when several share one CCWEB_HOME.
+    let home = std::env::var_os("CCWEB_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| real_home.clone());
+    let config_dir = real_home.join(".config").join("cc-screen-rust");
     let _ = std::fs::create_dir_all(&config_dir);
     let env_path = build_env_path(&home);
     let addr = arg_value("--addr")
