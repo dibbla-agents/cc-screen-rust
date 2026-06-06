@@ -26,15 +26,22 @@ pub async fn static_handler(uri: Uri) -> Response {
     let path = if raw.is_empty() { "index.html" } else { raw };
     if let Some(f) = Assets::get(path) {
         let ct = content_type(path);
-        return ([(header::CONTENT_TYPE, ct)], Bytes::from(f.data.into_owned())).into_response();
+        return app_response(ct, f.data.into_owned());
     }
     // SPA fallback so client routing works on a hard refresh.
     if let Some(f) = Assets::get("index.html") {
-        return (
-            [(header::CONTENT_TYPE, "text/html".to_string())],
-            Bytes::from(f.data.into_owned()),
-        )
-            .into_response();
+        return app_response("text/html".to_string(), f.data.into_owned());
     }
     (StatusCode::NOT_FOUND, "frontend not built").into_response()
+}
+
+/// Build an embedded-app response with the content type + browser security
+/// headers (CSP / nosniff / frame-ancestors / …). See `cc_screen_auth::headers`.
+fn app_response(content_type: String, body: Vec<u8>) -> Response {
+    let mut resp = ([(header::CONTENT_TYPE, content_type)], Bytes::from(body)).into_response();
+    let csp = cc_screen_auth::headers::resolve_csp();
+    for (name, value) in cc_screen_auth::headers::app_security_headers(csp.as_deref()) {
+        resp.headers_mut().insert(name, value);
+    }
+    resp
 }

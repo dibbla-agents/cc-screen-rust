@@ -24,6 +24,7 @@
 // query strings. The axum `require_auth` middleware lives in each binary (it's
 // coupled to that binary's app state).
 
+pub mod headers;
 pub mod netguard;
 pub mod origin;
 pub mod throttle;
