@@ -1,9 +1,12 @@
 // Clipboard image relay — the phone-screenshot-into-Claude path. The UI POSTs a
 // PNG to /api/clip?session=<name>; we stage it (per-session slot, TTL) and write
 // the paste key (Ctrl-V = 0x16) to that session's PTY. Claude Code then reads its
-// clipboard via the cc-screen clipboard shim, which (web-aware) fetches
-// /api/clip/image.png. We must NOT clear on first read — one paste triggers
-// several probes (list-types, then the image) — so expiry is purely time-based.
+// clipboard via the cc-screen clipboard shim (`scripts/clip-shim.sh`, shipped by
+// this agent's installer as xclip/wl-paste/pbpaste), which fetches
+// /api/clip/image.png from `$CCWEB_CLIP_URL` — this very agent's loopback,
+// exported per session in engine.rs (proposal 0007). We must NOT clear on first
+// read — one paste triggers several probes (list-types, then the image) — so
+// expiry is purely time-based.
 //
 // Slots are keyed by SESSION so a staged image is only served back to the session
 // it was staged for (not the last-stager to any session). The shim can scope its

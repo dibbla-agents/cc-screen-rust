@@ -127,6 +127,7 @@ impl Session {
         skip_permissions: bool,
         remote_control: bool,
         env_path: &str,
+        clip_url: &str,
     ) -> anyhow::Result<(Arc<Session>, Box<dyn portable_pty::Child + Send + Sync>)> {
         let full = format!("{}-{}", tool.prefix, short);
         let pty_system = native_pty_system();
@@ -148,6 +149,12 @@ impl Session {
         // `?session=` (see clip.rs) — a per-session slot prevents one session's
         // staged screenshot being served to another's paste.
         cmd.env("CCWEB_SESSION", &full);
+        // Where the shim fetches this session's staged clipboard image from — this
+        // very agent's loopback. Decouples paste from the legacy Go server's config
+        // dir, which the old shim was hardwired to (proposal 0007). Empty in tests.
+        if !clip_url.is_empty() {
+            cmd.env("CCWEB_CLIP_URL", clip_url);
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         // Drop the slave so the child is the sole holder of the slave side;
@@ -431,6 +438,10 @@ pub struct Inner {
     pub tools: Vec<Tool>,
     pub registry: Mutex<HashMap<String, Arc<Session>>>,
     pub env_path: String,
+    /// Loopback base URL exported to each session as `CCWEB_CLIP_URL` so the
+    /// clipboard shim fetches staged images from THIS agent (see clip.rs). Empty
+    /// in tests, in which case the env var is left unset.
+    pub clip_url: String,
     pub config_dir: PathBuf,
     pub home: PathBuf,
     /// This agent's machine identity (hostname / `--machine-id`). Surfaced on
@@ -458,6 +469,7 @@ impl AppState {
     pub fn new(
         tools: Vec<Tool>,
         env_path: String,
+        clip_url: String,
         config_dir: PathBuf,
         home: PathBuf,
         machine_id: String,
@@ -469,6 +481,7 @@ impl AppState {
                 tools,
                 registry: Mutex::new(HashMap::new()),
                 env_path,
+                clip_url,
                 push: crate::push::Push::new(&config_dir),
                 config_dir,
                 watcher: crate::watch::Watcher::new(home.clone()),
@@ -529,6 +542,7 @@ impl AppState {
             skip_permissions,
             remote_control,
             &self.inner.env_path,
+            &self.inner.clip_url,
         )?;
         self.inner.registry.lock().unwrap().insert(full.clone(), sess.clone());
 
@@ -689,6 +703,7 @@ mod tests {
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.clone(),
             tmp.clone(),
             "test-agent".into(),
@@ -720,6 +735,7 @@ mod tests {
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.clone(),
             tmp.clone(),
             "test-agent".into(),
@@ -745,6 +761,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // A spawned session must carry the clipboard contract env (proposal 0007):
+    // `CCWEB_CLIP_URL` (where the shim fetches a staged paste) and `CCWEB_SESSION`
+    // (so it scopes the fetch). We prove it end-to-end by having the child echo
+    // both and reading them back off the engine's preview.
+    #[tokio::test]
+    async fn session_exports_clip_url_and_name() {
+        let tmp = std::env::temp_dir().join(format!("ccr-clipenv-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = shell_tool("printf 'CLIP[%s]SES[%s]' \"$CCWEB_CLIP_URL\" \"$CCWEB_SESSION\"; sleep 3");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            "http://127.0.0.1:8839".into(), // non-empty → exported to the child
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let preview = state.list()[0].preview();
+        assert!(preview.contains("CLIP[http://127.0.0.1:8839]"), "preview was {preview:?}");
+        assert!(preview.contains(&format!("SES[{name}]")), "preview was {preview:?}");
+
+        state.get(&name).unwrap().kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // Regression for the duplicated-banner bug: a resync/refit (`attach_loop`'s
     // Lagged + narrow-first-resize paths) MUST re-subscribe via `attach()`, not
     // snapshot a stale receiver. A burst broadcast after the first attach but
@@ -760,6 +806,7 @@ mod tests {
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.clone(),
             tmp.clone(),
             "test-agent".into(),
@@ -820,6 +867,7 @@ mod tests {
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.clone(),
             tmp.clone(),
             "test-agent".into(),

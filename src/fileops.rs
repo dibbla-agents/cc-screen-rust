@@ -379,6 +379,7 @@ mod tests {
         AppState::new(
             vec![],
             String::new(),
+            String::new(),
             tmp.to_path_buf(),
             tmp.to_path_buf(),
             "test-agent".into(),

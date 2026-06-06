@@ -162,6 +162,23 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   key/paste/clear/delete) — the direct port is unaffected. Both persist in the
   manifest for restore; both clients surface the toggles + a "view only" badge.
   See `cc-screen-saas` proposal 0005 and HUB.md → "Per-session view-only control".
+- **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
+  staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
+  Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The
+  agent ships those as a **shim** (`scripts/clip-shim.sh`, embedded via
+  `include_str!` and written to `~/.local/bin` by `cc-screen-rust install` /
+  `install-shim`, idempotently — first on the session PATH). The shim resolves the
+  image from, in order: **this agent** (`$CCWEB_CLIP_URL` exported per session in
+  `engine.rs`, scoped by `$CCWEB_SESSION`) → the legacy **Go** `cc-screen-web`
+  (`~/.config/cc-screen/web.env`) → the **Mac** clip-server (`:9999`); any
+  non-image op (text copy/paste, `-o`/`-i`, text `--list-types`) **defers to the
+  real tool** (next PATH match via `type -aP`). `$CCWEB_CLIP_URL` is the agent's
+  *real* bind (NOT loopback — agents bind a tailnet IP), and is **unset under
+  `--hub-only`** (no local bind), so such agents use the Go/Mac chain directly.
+  Heads-up: clients reach sessions **through the hub**, and clipboard images are
+  not hub-relayed yet — so on a hub-fronted box the working paste path is the Mac
+  `:9999` source, not the agent. The single source of truth is the one script —
+  don't fork per-name copies. See `cc-screen-saas` proposal 0007.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

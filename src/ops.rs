@@ -127,6 +127,7 @@ mod tests {
         AppState::new(
             vec![shell_tool()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.to_path_buf(),
             tmp.to_path_buf(),
             "test-agent".into(),

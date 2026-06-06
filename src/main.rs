@@ -47,6 +47,7 @@ USAGE
   cc-screen-rust install [--help]    set it up as an auto-starting service (usual way)
   cc-screen-rust update              fetch the latest release + restart the service
   cc-screen-rust uninstall           remove that service
+  cc-screen-rust install-shim        (re)install the clipboard image-paste shim only
 
 RUN-DIRECTLY FLAGS (for one-off / foreground runs)
   --addr HOST:PORT    bind address (default 127.0.0.1:8839; env CCWEB_ADDR)
@@ -76,6 +77,16 @@ async fn main() {
         Some("install") => {
             if let Err(e) = service::install(&argv[2..]) {
                 eprintln!("install failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("install-shim") => {
+            // Just (re)install the clipboard image-paste shim into ~/.local/bin,
+            // without touching the service. Used by install.sh's --no-service path
+            // and handy for a manual refresh after an update.
+            if let Err(e) = service::install_shim() {
+                eprintln!("install-shim failed: {e}");
                 std::process::exit(1);
             }
             return;
@@ -135,6 +146,7 @@ async fn main() {
     let state = engine::AppState::new(
         tools,
         cfg.env_path.clone(),
+        cfg.clip_url.clone(),
         cfg.config_dir.clone(),
         cfg.home.clone(),
         cfg.machine_id.clone(),

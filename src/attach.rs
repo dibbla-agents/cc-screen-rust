@@ -167,6 +167,7 @@ mod tests {
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
+            String::new(),
             tmp.clone(),
             tmp.clone(),
             "test-agent".into(),

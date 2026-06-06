@@ -14,6 +14,16 @@ use std::process::Command;
 const SYSTEMD_UNIT: &str = "cc-screen-rust.service";
 const LAUNCHD_LABEL: &str = "com.dibbla.cc-screen-rust";
 
+/// The clipboard shim, embedded at build time. Written verbatim into
+/// ~/.local/bin as xclip / wl-paste / pbpaste so a Ctrl-V image paste from the
+/// web UI reaches the agent (proposal 0007). The script dispatches on its own
+/// basename, so the same bytes serve all three names. Single source of truth:
+/// `scripts/clip-shim.sh`.
+const CLIP_SHIM: &str = include_str!("../scripts/clip-shim.sh");
+/// The tool names the shim is installed as. Each is the next-on-PATH real tool's
+/// shadow for agent sessions only (~/.local/bin is first on the session PATH).
+const SHIM_NAMES: &[&str] = &["xclip", "wl-paste", "pbpaste"];
+
 // Wait for the bound (tailnet) IP to exist before starting, so a boot where
 // Tailscale comes up late doesn't crash-loop the bind. Loopback/wildcard skip
 // the wait. Kept verbatim from install.sh; uses CCWEB_ADDR from the env file.
@@ -312,6 +322,64 @@ fn launchd_plist(
     )
 }
 
+// ── clipboard shim (proposal 0007) ─────────────────────────────────────────
+
+/// Marker line every copy of our shim carries; lets a re-install tell its own
+/// shim apart from a user's real tool that happens to share the name.
+const SHIM_MARKER: &str = "cc-screen-rust clipboard shim";
+
+/// Install the clipboard shim into ~/.local/bin as xclip / wl-paste / pbpaste.
+///
+/// Idempotent: a re-install rewrites our shim and is a no-op when already
+/// current. We only ever write inside ~/.local/bin (first on the session PATH),
+/// so a real xclip in /usr/bin is *shadowed for agent sessions* but never
+/// overwritten — and the shim defers to it for non-image clipboard ops. If a
+/// *foreign* file already occupies the name inside ~/.local/bin, it's backed up
+/// to `<name>.pre-ccshim` once rather than silently lost.
+pub fn install_shim() -> Result<(), String> {
+    let dir = home().join(".local").join("bin");
+    let wrote = write_shims_into(&dir)?;
+    if wrote.is_empty() {
+        println!("→ clipboard image-paste shim already current (~/.local/bin/{})", SHIM_NAMES.join(", "));
+    } else {
+        println!("→ clipboard image-paste shim installed (~/.local/bin/{})", wrote.join(", "));
+    }
+    Ok(())
+}
+
+/// Write the shim into `dir` as each name in `SHIM_NAMES`; returns the names
+/// actually (re)written (empty = all already current). A foreign occupant is
+/// moved aside to `<name>.pre-ccshim` once. The dir-parameterised core of
+/// `install_shim`, so it's testable without touching the real ~/.local/bin.
+fn write_shims_into(dir: &Path) -> Result<Vec<String>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let mut wrote = Vec::new();
+    for name in SHIM_NAMES {
+        let path = dir.join(name);
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if existing == CLIP_SHIM {
+                continue; // already current — idempotent no-op
+            }
+            if !existing.contains(SHIM_MARKER) {
+                let bak = dir.join(format!("{name}.pre-ccshim"));
+                if !bak.exists() {
+                    let _ = std::fs::rename(&path, &bak);
+                    eprintln!("→ note: existing ~/.local/bin/{name} backed up to {name}.pre-ccshim");
+                }
+            }
+        }
+        std::fs::write(&path, CLIP_SHIM).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        }
+        wrote.push(name.to_string());
+    }
+    Ok(wrote)
+}
+
 // ── install / uninstall drivers ────────────────────────────────────────────
 
 pub fn install(args: &[String]) -> Result<(), String> {
@@ -373,6 +441,12 @@ pub fn install(args: &[String]) -> Result<(), String> {
         return Err(format!(
             "no service manager for this OS; run it yourself:\n  {bin} --addr {addr}"
         ));
+    }
+
+    // Wire the clipboard image-paste shim (best-effort: a failure here must not
+    // abort an otherwise-good service install).
+    if let Err(e) = install_shim() {
+        eprintln!("→ warning: clipboard shim not installed: {e}");
     }
 
     println!();
@@ -637,5 +711,46 @@ mod tests {
     #[test]
     fn xml_escape_escapes() {
         assert_eq!(xml_escape("a&b<c>\"'"), "a&amp;b&lt;c&gt;&quot;&apos;");
+    }
+
+    #[test]
+    fn shim_carries_its_marker() {
+        // install_shim relies on this marker to tell our shim from a real tool.
+        assert!(CLIP_SHIM.contains(SHIM_MARKER));
+    }
+
+    #[test]
+    fn install_shim_is_idempotent_and_preserves_foreign() {
+        let dir = std::env::temp_dir().join(format!("ccr-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A pre-existing FOREIGN xclip in the target dir must be backed up, not lost.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("xclip"), "#!/bin/sh\necho real\n").unwrap();
+
+        // First install: writes all three names.
+        let wrote = write_shims_into(&dir).unwrap();
+        assert_eq!(wrote.len(), SHIM_NAMES.len(), "all names written on first install");
+        for name in SHIM_NAMES {
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), CLIP_SHIM);
+        }
+        // The foreign xclip was moved aside, not clobbered.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("xclip.pre-ccshim")).unwrap(),
+            "#!/bin/sh\necho real\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("xclip")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "shim is executable");
+        }
+
+        // Re-install with no changes: a no-op (nothing rewritten), and the backup
+        // is not taken a second time.
+        let again = write_shims_into(&dir).unwrap();
+        assert!(again.is_empty(), "re-install is idempotent");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

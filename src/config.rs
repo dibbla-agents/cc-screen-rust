@@ -15,6 +15,12 @@ pub struct Config {
     /// die instantly — exactly the Go build's main.go PATH fix.
     pub env_path: String,
     pub addr: String,
+    /// Base URL a spawned session fetches its staged clipboard images from
+    /// (exported as `CCWEB_CLIP_URL`; see clip.rs / the clipboard shim). Derived
+    /// from the agent's *real* bind (the shim runs on the same host), NOT loopback.
+    /// **Empty under `--hub-only`**: that mode binds no local socket, so there's
+    /// nothing for the shim to hit — it then uses the standard Go/Mac clip chain.
+    pub clip_url: String,
     /// Resolved tools.conf path, or None to fall back to the built-in defaults.
     pub tools_path: Option<PathBuf>,
     /// Skip auto-resume of recorded sessions at startup (--no-restore).
@@ -103,6 +109,24 @@ fn build_env_path(home: &PathBuf) -> String {
     }
 }
 
+/// The clip base URL a session fetches its staged image from — derived from the
+/// agent's **actual bind address**, since the shim runs on the very same host and
+/// reaches the agent there. NOT hardcoded loopback: an agent commonly binds its
+/// tailnet IP (e.g. `100.x:8839`), and `127.0.0.1:8839` would then be a refused
+/// socket. A wildcard bind isn't itself connectable, so map it to loopback.
+fn clip_url_from_addr(addr: &str) -> String {
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => ("127.0.0.1", "8839"), // malformed (no port) → safe default
+    };
+    let port: u16 = port.parse().unwrap_or(8839);
+    let host = match host {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        h => h,
+    };
+    format!("http://{host}:{port}")
+}
+
 fn resolve_tools_path(home: &PathBuf, config_dir: &PathBuf) -> Option<PathBuf> {
     // Mirror cc-screen.sh / the Go toolsConfigPath, but also accept our own dir.
     if let Some(p) = std::env::var_os("CCSCREEN_CONFIG") {
@@ -157,6 +181,9 @@ pub fn load() -> Config {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(default_machine_id);
     let hub_only = has_flag("--hub-only") || env_truthy("CCWEB_HUB_ONLY");
+    // No local bind in hub-only mode → no clip endpoint to reach → leave it empty
+    // so the shim skips straight to the standard Go/Mac clipboard chain.
+    let clip_url = if hub_only { String::new() } else { clip_url_from_addr(&addr) };
     let allowed_origins = std::env::var("CCWEB_ALLOWED_ORIGINS").ok().filter(|s| !s.trim().is_empty());
     let allow_unauthenticated_remote = env_truthy("CCWEB_ALLOW_UNAUTHENTICATED_REMOTE");
     Config {
@@ -164,6 +191,7 @@ pub fn load() -> Config {
         config_dir,
         env_path,
         addr,
+        clip_url,
         tools_path,
         no_restore,
         password,
@@ -174,5 +202,24 @@ pub fn load() -> Config {
         hub_only,
         allowed_origins,
         allow_unauthenticated_remote,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_url_from_addr;
+
+    #[test]
+    fn clip_url_uses_the_real_bind_address() {
+        // A tailnet-IP bind must be kept verbatim — the shim runs on the same host
+        // and reaches the agent there; loopback would be a refused socket.
+        assert_eq!(clip_url_from_addr("100.106.14.17:8839"), "http://100.106.14.17:8839");
+        assert_eq!(clip_url_from_addr("127.0.0.1:8839"), "http://127.0.0.1:8839");
+        assert_eq!(clip_url_from_addr("[::1]:8842"), "http://[::1]:8842");
+        // A wildcard bind isn't itself connectable → loopback.
+        assert_eq!(clip_url_from_addr("0.0.0.0:9001"), "http://127.0.0.1:9001");
+        assert_eq!(clip_url_from_addr("[::]:8839"), "http://127.0.0.1:8839");
+        // Malformed (no port) → safe loopback default, never a panic.
+        assert_eq!(clip_url_from_addr("garbage"), "http://127.0.0.1:8839");
     }
 }

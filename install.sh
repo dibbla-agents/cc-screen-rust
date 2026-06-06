@@ -81,5 +81,9 @@ else
   CFG_DIR="$HOME/.config/cc-screen-rust"
   mkdir -p "$CFG_DIR"
   printf 'CCWEB_ADDR=%s\n' "$ADDR" > "$CFG_DIR/web.env"
+  # Image-paste shim still gets wired even when we don't start the service, so a
+  # foreground run has working Ctrl-V paste (the service path does this inside
+  # `cc-screen-rust install`).
+  "$BIN" install-shim || echo "→ warning: clipboard shim not installed" >&2
   echo "→ built $BIN (not started; --no-service). Run: $BIN --addr $ADDR"
 fi
