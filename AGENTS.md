@@ -168,17 +168,19 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   agent ships those as a **shim** (`scripts/clip-shim.sh`, embedded via
   `include_str!` and written to `~/.local/bin` by `cc-screen-rust install` /
   `install-shim`, idempotently — first on the session PATH). The shim resolves the
-  image from, in order: **this agent** (`$CCWEB_CLIP_URL` exported per session in
-  `engine.rs`, scoped by `$CCWEB_SESSION`) → the legacy **Go** `cc-screen-web`
-  (`~/.config/cc-screen/web.env`) → the **Mac** clip-server (`:9999`); any
-  non-image op (text copy/paste, `-o`/`-i`, text `--list-types`) **defers to the
-  real tool** (next PATH match via `type -aP`). `$CCWEB_CLIP_URL` is the agent's
-  *real* bind (NOT loopback — agents bind a tailnet IP), and is **unset under
-  `--hub-only`** (no local bind), so such agents use the Go/Mac chain directly.
-  Heads-up: clients reach sessions **through the hub**, and clipboard images are
-  not hub-relayed yet — so on a hub-fronted box the working paste path is the Mac
-  `:9999` source, not the agent. The single source of truth is the one script —
-  don't fork per-name copies. See `cc-screen-saas` proposal 0007.
+  image from, in order: (1) a **per-session local file** `$CCWEB_CLIP_FILE`
+  (`$XDG_RUNTIME_DIR/cc-screen/clip/<session>.png`, 0600, freshness-gated by mtime)
+  — the only path that works when the agent is **`--hub-only`** and binds no HTTP
+  port; (2) **this agent over HTTP** (`$CCWEB_CLIP_URL` = the agent's *real* bind,
+  NOT loopback, empty under `--hub-only`); (3) the legacy **Go** `cc-screen-web`;
+  (4) the **Mac** clip-server (`:9999`). `clip_put` writes both the file and the
+  in-memory slot on stage. Any non-image op (text copy/paste, `-o`/`-i`, text
+  `--list-types`) **defers to the real tool** (next PATH match via `type -aP`).
+  Why the file matters: clients reach sessions **through the hub**, the hub *does*
+  relay `/api/clip` (bulk proxy → the agent stages it over the uplink), but a
+  hub-only agent has no local HTTP for the shim to read back — the file closes
+  that hop. Single source of truth is the one script — don't fork per-name copies.
+  See `cc-screen-saas` proposal 0007.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

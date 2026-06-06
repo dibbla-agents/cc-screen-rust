@@ -150,10 +150,17 @@ impl Session {
         // staged screenshot being served to another's paste.
         cmd.env("CCWEB_SESSION", &full);
         // Where the shim fetches this session's staged clipboard image from — this
-        // very agent's loopback. Decouples paste from the legacy Go server's config
-        // dir, which the old shim was hardwired to (proposal 0007). Empty in tests.
+        // very agent's bind. Decouples paste from the legacy Go server's config
+        // dir, which the old shim was hardwired to (proposal 0007). Empty in tests
+        // and for hub-only agents (no bind — those rely on CCWEB_CLIP_FILE below).
         if !clip_url.is_empty() {
             cmd.env("CCWEB_CLIP_URL", clip_url);
+        }
+        // The local drop file the shim can read even with no HTTP bind (hub-only).
+        // Always set: it's the only source that works for a hub-only agent and a
+        // harmless duplicate for a bound one. See clip.rs.
+        if let Some(path) = crate::clip::session_clip_file(&full) {
+            cmd.env("CCWEB_CLIP_FILE", path);
         }
 
         let child = pair.slave.spawn_command(cmd)?;
@@ -769,7 +776,10 @@ mod tests {
     async fn session_exports_clip_url_and_name() {
         let tmp = std::env::temp_dir().join(format!("ccr-clipenv-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let tool = shell_tool("printf 'CLIP[%s]SES[%s]' \"$CCWEB_CLIP_URL\" \"$CCWEB_SESSION\"; sleep 3");
+        // One field per line (a single line would wrap past the 80-col preview).
+        let tool = shell_tool(
+            "printf 'CLIP[%s]\\nSES[%s]\\nFILE[%s]\\n' \"$CCWEB_CLIP_URL\" \"$CCWEB_SESSION\" \"$CCWEB_CLIP_FILE\"; sleep 3",
+        );
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
@@ -783,9 +793,17 @@ mod tests {
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let preview = state.list()[0].preview();
-        assert!(preview.contains("CLIP[http://127.0.0.1:8839]"), "preview was {preview:?}");
-        assert!(preview.contains(&format!("SES[{name}]")), "preview was {preview:?}");
+        // Read the full snapshot (not the one-line preview) so all three lines show.
+        let (snap, _rx) = state.list()[0].attach();
+        let snap = String::from_utf8_lossy(&snap);
+        assert!(snap.contains("CLIP[http://127.0.0.1:8839]"), "snap was {snap:?}");
+        assert!(snap.contains(&format!("SES[{name}]")), "snap was {snap:?}");
+        // The local drop-file path is always exported (the only source that works
+        // for a hub-only agent), scoped to this session.
+        assert!(
+            snap.contains(&format!("/cc-screen/clip/{name}.png]")),
+            "snap was {snap:?}"
+        );
 
         state.get(&name).unwrap().kill();
         let _ = std::fs::remove_dir_all(&tmp);

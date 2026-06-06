@@ -6,9 +6,11 @@
 # shells out to these tools to read a clipboard image when you press Ctrl-V; this
 # shim answers IMAGE queries from, in priority order (first hit wins):
 #
-#   1. THIS Rust agent's session  — $CCWEB_CLIP_URL, scoped by $CCWEB_SESSION
-#   2. the legacy Go cc-screen-web — ~/.config/cc-screen/web.env  (CCWEB_ADDR)
-#   3. the macOS clip-server       — http://127.0.0.1:9999 (SSH RemoteForward)
+#   1. THIS session's local drop file — $CCWEB_CLIP_FILE (works even when the
+#      agent is hub-only and binds no HTTP port; the agent writes it on stage)
+#   2. THIS Rust agent over HTTP       — $CCWEB_CLIP_URL, scoped by $CCWEB_SESSION
+#   3. the legacy Go cc-screen-web     — ~/.config/cc-screen/web.env (CCWEB_ADDR)
+#   4. the macOS clip-server           — http://127.0.0.1:9999 (SSH RemoteForward)
 #
 # so a phone-pasted screenshot lands whichever server staged it, and a Mac
 # clipboard image still pastes — none of the previously-working sources regress.
@@ -55,6 +57,20 @@ go_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/cc-screen/web.env"
 [ -f "$go_cfg" ] && GO_WEB="$(sed -n 's/^CCWEB_ADDR=//p' "$go_cfg" | head -1)"
 MAC_PORT=9999
 
+# Drop-file TTL (seconds) — mirrors the server-side ClipStore TTL so a previous
+# paste's file isn't served as the "current" image on a later, non-paste probe.
+FILE_TTL=20
+
+# True if $CCWEB_CLIP_FILE exists and was written within FILE_TTL seconds.
+file_fresh() {
+  [ -n "${CCWEB_CLIP_FILE:-}" ] && [ -f "$CCWEB_CLIP_FILE" ] || return 1
+  local now mt age
+  now="$(date +%s 2>/dev/null)" || return 1
+  mt="$(stat -c %Y "$CCWEB_CLIP_FILE" 2>/dev/null || stat -f %m "$CCWEB_CLIP_FILE" 2>/dev/null)" || return 1
+  age=$(( now - mt ))
+  [ "$age" -ge 0 ] && [ "$age" -le "$FILE_TTL" ]
+}
+
 # True if the URL's /targets probe reports an image is available.
 has_image() { curl -fsS --max-time 1 "$1" 2>/dev/null | grep -q image; }
 
@@ -81,12 +97,13 @@ image_url() {
 
 # Answer a "what targets are available?" probe.
 emit_targets() {
-  if image_url >/dev/null; then printf 'image/png\n'; else defer "$@"; fi
+  if file_fresh || image_url >/dev/null; then printf 'image/png\n'; else defer "$@"; fi
 }
 
 # Answer an "give me the image bytes" probe.
 emit_image() {
   local url
+  if file_fresh; then cat "$CCWEB_CLIP_FILE"; return; fi
   if url="$(image_url)"; then curl -fsS --max-time 5 "$url" 2>/dev/null; else defer "$@"; fi
 }
 
@@ -116,7 +133,7 @@ case "$self" in
   pbpaste)
     # pbpaste has no target flags: serve a staged image if one exists this
     # session, otherwise hand off to the real pbpaste for ordinary text.
-    if image_url >/dev/null; then emit_image "$@"; else defer "$@"; fi
+    if file_fresh || image_url >/dev/null; then emit_image "$@"; else defer "$@"; fi
     ;;
   *)
     defer "$@" ;;
