@@ -227,6 +227,13 @@ export default function App() {
     const apply = () => {
       setAppH(vv.height);
       window.scrollTo(0, 0); // keep the layout viewport pinned to the top
+      // ...and undo any focus-induced offset on the inner shell (#root); the
+      // window reset above can't touch a scrollTop that lives there. P0002.
+      const root = document.getElementById("root");
+      if (root) {
+        root.scrollTop = 0;
+        root.scrollLeft = 0;
+      }
     };
     apply();
     vv.addEventListener("resize", apply);
@@ -235,6 +242,24 @@ export default function App() {
       vv.removeEventListener("resize", apply);
       vv.removeEventListener("scroll", apply);
     };
+  }, []);
+
+  // Backstop for the scroll-jump (proposals/P0002). The shell is meant to be a
+  // fixed, non-scrolling frame, but a programmatic .focus() on an element below
+  // the fold makes the browser scroll the focused element into view — and an
+  // overflow:hidden ancestor (#root) is still programmatically scrollable, so it
+  // ends up with a non-zero scrollTop that shoves the header off-screen. Fix 1
+  // (preventScroll on every focus) removes the cause; this listener is the cheap
+  // belt-and-suspenders that catches any focus path Fix 1 misses, now or later.
+  useEffect(() => {
+    const root = document.getElementById("root");
+    if (!root) return;
+    const pin = () => {
+      if (root.scrollTop !== 0) root.scrollTop = 0;
+      if (root.scrollLeft !== 0) root.scrollLeft = 0;
+    };
+    root.addEventListener("scroll", pin, { passive: true });
+    return () => root.removeEventListener("scroll", pin);
   }, []);
 
   // Per-pane connection state for the header dot and pane-corner indicators.

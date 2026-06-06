@@ -38,7 +38,13 @@ const FavoritesSheet = forwardRef<FavoritesHandle, Props>(function FavoritesShee
   const draftRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  useImperativeHandle(ref, () => ({ focus: () => searchRef.current?.focus() }), []);
+  // preventScroll on every focus so raising the keyboard / opening the editor
+  // never scrolls the overflow:hidden app shell out of view. See proposals/P0002.
+  useImperativeHandle(
+    ref,
+    () => ({ focus: () => searchRef.current?.focus({ preventScroll: true }) }),
+    []
+  );
 
   // The sheet stays mounted (just hidden when closed) so the opener can focus the
   // search box synchronously inside the tap — the only way iOS Safari raises the
@@ -63,12 +69,12 @@ const FavoritesSheet = forwardRef<FavoritesHandle, Props>(function FavoritesShee
   const startAdd = () => {
     setEditing({ id: null });
     setDraft(query.trim()); // seed from the search box if you typed something
-    setTimeout(() => draftRef.current?.focus(), 0);
+    setTimeout(() => draftRef.current?.focus({ preventScroll: true }), 0);
   };
   const startEdit = (f: Favorite) => {
     setEditing({ id: f.id });
     setDraft(f.text);
-    setTimeout(() => draftRef.current?.focus(), 0);
+    setTimeout(() => draftRef.current?.focus({ preventScroll: true }), 0);
   };
   const saveEditor = () => {
     const t = draft.trim();

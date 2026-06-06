@@ -271,11 +271,51 @@ export default function AgentMirror({
       };
       ws.onerror = () => ws.close();
     };
+
+    // PWA resume. Standby can kill the socket without firing onclose — it may
+    // even keep reporting readyState OPEN (a zombie) — leaving the mirror frozen
+    // on pre-standby bytes. Re-attach on every hidden->visible transition; the
+    // fresh connection replays the server snapshot and recalibrates width. See
+    // TerminalView for the full rationale.
+    const reconnectNow = () => {
+      if (closedByUs) return;
+      if (retry) {
+        clearTimeout(retry);
+        retry = null;
+      }
+      backoff = 500;
+      const stale = wsRef.current;
+      if (stale) {
+        stale.onopen = stale.onmessage = stale.onclose = stale.onerror = null;
+        try {
+          stale.close();
+        } catch {
+          /* already closing */
+        }
+      }
+      connect();
+    };
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.CONNECTING) return; // connect in flight
+      const open = ws && ws.readyState === WebSocket.OPEN;
+      const coarse =
+        typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
+      if (!open || coarse) reconnectNow();
+    };
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("pageshow", onResume);
+    window.addEventListener("online", onResume);
+
     connect();
 
     return () => {
       closedByUs = true;
       if (retry) clearTimeout(retry);
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("pageshow", onResume);
+      window.removeEventListener("online", onResume);
       wsRef.current?.close();
       wsRef.current = null;
     };

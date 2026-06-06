@@ -110,6 +110,23 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize]);
 
+  // Focus the terminal WITHOUT letting the browser scroll it into view. xterm's
+  // term.focus() calls focus() on its hidden .xterm-helper-textarea, which it
+  // positions absolutely at the cursor cell — often far down a tall buffer. A
+  // plain focus there triggers the browser's "scroll focused element into view"
+  // pass, which sets scrollTop on an overflow:hidden ancestor (#root / the app
+  // shell) and shoves the header off-screen. Focusing the helper textarea
+  // directly with { preventScroll: true } removes that at the source; we fall
+  // back to term.focus() if the helper isn't found (selector is stable across
+  // xterm 5.x). See proposals/P0002.
+  function focusTerminal() {
+    const term = termRef.current;
+    if (!term) return;
+    const ta = hostRef.current?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+    if (ta) ta.focus({ preventScroll: true });
+    else term.focus();
+  }
+
   function sendResize() {
     const term = termRef.current;
     const ws = wsRef.current;
@@ -179,7 +196,7 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
         // terminal to type. On desktop, focus for immediate typing.
         const coarse =
           typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
-        if (!coarse) term.focus();
+        if (!coarse) focusTerminal();
       };
       ws.onmessage = (e) => {
         if (e.data instanceof ArrayBuffer) {
@@ -202,6 +219,49 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
       ws.onerror = () => ws.close();
     };
 
+    // PWA resume. When the phone wakes from standby the OS often kills the
+    // socket WITHOUT firing onclose — it can even keep reporting readyState
+    // OPEN (a zombie) — so the onclose-only reconnect above never runs and the
+    // terminal stays frozen on the bytes from before standby. On every
+    // hidden->visible transition we re-attach: a fresh connection replays the
+    // server snapshot (\x1bc RIS + raw ring) and repaints wherever the agent
+    // actually is now.
+    const reconnectNow = () => {
+      if (closedByUs) return;
+      if (retry) {
+        clearTimeout(retry);
+        retry = null;
+      }
+      backoff = 500;
+      const stale = wsRef.current;
+      if (stale) {
+        // Detach handlers first so this deliberate close doesn't schedule its
+        // own retry — reconnectNow opens the replacement itself.
+        stale.onopen = stale.onmessage = stale.onclose = stale.onerror = null;
+        try {
+          stale.close();
+        } catch {
+          /* already closing */
+        }
+      }
+      connect();
+    };
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.CONNECTING) return; // connect in flight
+      const open = ws && ws.readyState === WebSocket.OPEN;
+      const coarse =
+        typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
+      // Desktop sockets usually survive a tab switch and fire onclose cleanly,
+      // so only reconnect there if the socket is provably down. Touch devices —
+      // where standby silently zombifies the socket — always re-attach.
+      if (!open || coarse) reconnectNow();
+    };
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("pageshow", onResume);
+    window.addEventListener("online", onResume);
+
     // Direct typing in the terminal -> stdin over the WebSocket.
     const term = termRef.current!;
     const dataSub = term.onData((d) => {
@@ -216,6 +276,9 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
     return () => {
       closedByUs = true;
       if (retry) clearTimeout(retry);
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("pageshow", onResume);
+      window.removeEventListener("online", onResume);
       dataSub.dispose();
       wsRef.current?.close();
       wsRef.current = null;
@@ -236,7 +299,7 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
     const coarse =
       typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
     if (coarse) return;
-    termRef.current?.focus();
+    focusTerminal();
   }, [active]);
 
   // Suppress the browser's native context menu inside the terminal. xterm.js

@@ -30,7 +30,14 @@ const ComposeSheet = forwardRef<ComposeHandle, Props>(function ComposeSheet(
   const [recents, setRecents] = useState<string[]>(loadRecents);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  useImperativeHandle(ref, () => ({ focus: () => taRef.current?.focus() }), []);
+  // preventScroll: focusing the textarea (which slides up from the bottom edge,
+  // often below the fold of a shrunken soft-keyboard viewport) must not scroll
+  // the overflow:hidden app shell and displace the frame. See proposals/P0002.
+  useImperativeHandle(
+    ref,
+    () => ({ focus: () => taRef.current?.focus({ preventScroll: true }) }),
+    []
+  );
 
   // Autocomplete: as you type the prompt, surface matching favourites + recents
   // (favourites first), the 6 most relevant, updated on every keystroke. Tap one
