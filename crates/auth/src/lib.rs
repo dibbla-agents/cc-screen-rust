@@ -26,9 +26,11 @@
 
 pub mod netguard;
 pub mod origin;
+pub mod throttle;
 
 pub use netguard::{bind_scope, require_gated_uplink, require_safe_bind, BindScope};
 pub use origin::OriginPolicy;
+pub use throttle::{source_key, LoginThrottle};
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,6 +83,13 @@ impl Auth {
     /// false the middleware lets everything through.
     pub fn enabled(&self) -> bool {
         self.password.is_some() || self.token.is_some()
+    }
+
+    /// True when a *password* is set but short enough to be a weak online-guessing
+    /// surface (the binaries log a startup warning). The random API token isn't
+    /// guessable, so it doesn't count.
+    pub fn weak_password(&self) -> bool {
+        self.password.as_deref().is_some_and(|p| p.chars().count() < 12)
     }
 
     /// Is this request authenticated? Either it presents the API token (bearer

@@ -433,6 +433,8 @@ pub struct Inner {
     /// Origin/Host validation policy (anti cross-origin / DNS-rebinding). Enforced
     /// independent of the auth gate; see `auth::require_auth`.
     pub origin: cc_screen_auth::OriginPolicy,
+    /// Login attempt throttle (per-source backoff/lockout).
+    pub login_throttle: cc_screen_auth::LoginThrottle,
 }
 
 #[derive(Clone)]
@@ -463,6 +465,7 @@ impl AppState {
                 clip: ClipStore::default(),
                 auth,
                 origin,
+                login_throttle: cc_screen_auth::LoginThrottle::new(),
             }),
         }
     }

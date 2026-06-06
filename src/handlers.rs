@@ -58,11 +58,21 @@ pub async fn login(
     Json(req): Json<LoginReq>,
 ) -> Response {
     let auth = &app.inner.auth;
+    let throttle = &app.inner.login_throttle;
+    let source = cc_screen_auth::source_key(&headers);
+    let now = std::time::Instant::now();
+    // Locked out from recent failures → reject without checking (blunts parallel
+    // guessing, since the check is cheap and doesn't run verify).
+    if throttle.locked_for(&source, now).is_some() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "ok": false, "error": "too many attempts" }))).into_response();
+    }
     if auth.verify_login(&req.secret) {
+        throttle.record_success(&source);
         let cookie = auth.issue_cookie(crate::auth::is_https(&headers));
         return (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(json!({ "ok": true })))
             .into_response();
     }
+    throttle.record_failure(&source, now);
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false }))).into_response()
 }

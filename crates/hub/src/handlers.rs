@@ -49,11 +49,18 @@ pub async fn login(
     Json(req): Json<LoginReq>,
 ) -> Response {
     let auth = &hub.client_auth;
+    let source = cc_screen_auth::source_key(&headers);
+    let now = std::time::Instant::now();
+    if hub.login_throttle.locked_for(&source, now).is_some() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "ok": false, "error": "too many attempts" }))).into_response();
+    }
     if auth.verify_login(&req.secret) {
+        hub.login_throttle.record_success(&source);
         let cookie = auth.issue_cookie(cc_screen_auth::is_https(&headers));
         return (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(json!({ "ok": true })))
             .into_response();
     }
+    hub.login_throttle.record_failure(&source, now);
     // Fixed delay to blunt guessing, as on the agent.
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false }))).into_response()

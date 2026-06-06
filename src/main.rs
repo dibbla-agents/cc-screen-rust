@@ -123,6 +123,13 @@ async fn main() {
         "cc-screen-rust: auth {}",
         if auth_enabled { "ENABLED (password/token required)" } else { "disabled (tailnet-only, no gate)" }
     );
+    if auth.weak_password() {
+        tracing::warn!(
+            "cc-screen-rust: CCWEB_PASSWORD is short (<12 chars) — weak against online \
+             guessing if this is reachable off-tailnet; prefer a long passphrase or rely \
+             on the API token"
+        );
+    }
 
     let origin = auth::OriginPolicy::new(&cfg.addr, cfg.allowed_origins.as_deref());
     let state = engine::AppState::new(

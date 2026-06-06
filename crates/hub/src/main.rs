@@ -94,6 +94,12 @@ async fn main() {
         cfg.agent_tokens.len(),
         if cfg.agent_tokens.is_empty() { "open uplink — tailnet/dev only" } else { "uplink gated" },
     );
+    if auth.weak_password() {
+        tracing::warn!(
+            "cc-screen-hub: CCWEB_PASSWORD is short (<12 chars) — weak against online \
+             guessing if the hub is fronted to the internet; prefer a long passphrase"
+        );
+    }
 
     // Fail closed before binding: a routable bind with client auth disabled, or
     // with an OPEN uplink (no per-agent tokens), is refused unless the matching
@@ -123,6 +129,7 @@ async fn main() {
         agent_tokens: Arc::new(cfg.agent_tokens),
         client_auth: auth,
         origin: cc_screen_auth::OriginPolicy::new(&cfg.addr, cfg.allowed_origins.as_deref()),
+        login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),
         push: Arc::new(cc_screen_push::Push::new(&cfg.config_dir)),
         config_dir: cfg.config_dir,
         bulk: Default::default(),
