@@ -21,6 +21,7 @@ import {
   makeDir,
   removeDir,
   renamePath,
+  movePath,
   flattenDataTransfer,
   uploadFiles,
   FileNotEditable,
@@ -32,6 +33,7 @@ import ContextMenu, { type CtxTarget } from "./ContextMenu";
 import { errMsg, isMarkdownFile, isPdfFile, useDirTree, type DirTreeOpts, type TreeCtxInfo } from "./dirTree";
 import MarkdownEditor from "./MarkdownEditor";
 import EditorTree from "./EditorTree";
+import MoveDialog from "./MoveDialog";
 import AgentMirror, { type ConnState } from "./AgentMirror";
 
 // pdf.js is heavy and only needed for PDFs — keep it (and its worker) out of the
@@ -330,6 +332,9 @@ export default function EditorOverlay({
   // tree cache and `activePath`). Section roots (share/project/home) can't be
   // renamed/deleted — flag them so the menu hides those items.
   const [ctx, setCtx] = useState<{ x: number; y: number; target: CtxTarget } | null>(null);
+  // The "Move to…" folder picker (proposal 0012): opened from the context menu
+  // for touch (and as a non-drag alternative on desktop). Holds the node's path.
+  const [movePicker, setMovePicker] = useState<{ src: string } | null>(null);
   const onTreeContextMenu = useCallback(
     (e: { clientX: number; clientY: number; preventDefault: () => void }, info: TreeCtxInfo) => {
       e.preventDefault();
@@ -380,6 +385,36 @@ export default function EditorOverlay({
     },
     [tree, fileMachine]
   );
+  // Move a node into another directory (drag-drop or the "Move to…" picker).
+  // Refreshes the source parent (loses the node) and the destination (gains it,
+  // auto-expanded to reveal where it landed), then keeps the open file pointing
+  // at its new path if it (or an ancestor folder of it) moved. Throws on error
+  // so the picker can surface it inline; the drag path uses the caught wrapper.
+  const onMoveNode = useCallback(
+    async (src: string, destDir: string) => {
+      const srcParent = dirname(src);
+      if (srcParent === destDir) return; // no-op: already in that folder
+      const { path: np } = await movePath(src, destDir, fileMachine);
+      await tree.refresh(srcParent);
+      await tree.expand(destDir); // refresh + reveal the destination
+      setActivePath((cur) => {
+        if (cur === src) return np;
+        if (cur && cur.startsWith(src + "/")) return np + cur.slice(src.length);
+        return cur;
+      });
+    },
+    [tree, fileMachine]
+  );
+  // Drag-drop entry point: same move, but errors (e.g. a 409 name collision)
+  // surface in the editor's error banner instead of throwing into the DnD path.
+  const onMoveNodeDrag = useCallback(
+    (src: string, destDir: string) => {
+      setError("");
+      onMoveNode(src, destDir).catch((e) => setError(errMsg(e)));
+    },
+    [onMoveNode]
+  );
+
   const ctxDeleteFile = useCallback(
     async (p: string) => {
       await deleteFile(p, fileMachine);
@@ -685,6 +720,10 @@ export default function EditorOverlay({
         e.preventDefault();
         e.stopPropagation();
         // Peel transient surfaces off one at a time before closing the overlay.
+        if (movePicker) {
+          setMovePicker(null);
+          return;
+        }
         if (ctx) {
           setCtx(null);
           return;
@@ -714,7 +753,7 @@ export default function EditorOverlay({
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [open, newOpen, confirmDelete, menuOpen, treePanelOpen, ctx]);
+  }, [open, newOpen, confirmDelete, menuOpen, treePanelOpen, ctx, movePicker]);
 
   const reload = useCallback(() => {
     // Force a re-read by nudging activePath through null.
@@ -1198,6 +1237,7 @@ export default function EditorOverlay({
               downloadingPath={downloading}
               onContextMenu={onTreeContextMenu}
               onDropFiles={onTreeDropFiles}
+              onMoveNode={onMoveNodeDrag}
               activePath={activePath}
             />
             {/* Resize splitter — straddles the tree's right border. The hit area
@@ -1390,6 +1430,7 @@ export default function EditorOverlay({
                 downloadingPath={downloading}
                 onContextMenu={onTreeContextMenu}
                 onDropFiles={onTreeDropFiles}
+                onMoveNode={onMoveNodeDrag}
                 onOpenFile={(p) => {
                   setActivePath(p);
                   setTreePanelOpen(false);
@@ -1453,8 +1494,25 @@ export default function EditorOverlay({
           onNewFile={ctxNewFile}
           onNewFolder={ctxNewFolder}
           onRename={ctxRename}
+          onMove={(p) => {
+            setCtx(null);
+            setMovePicker({ src: p });
+          }}
           onDeleteFile={ctxDeleteFile}
           onDeleteFolder={ctxDeleteFolder}
+        />
+      )}
+
+      {/* "Move to…" folder picker — the touch path for relocating a node, and a
+          non-drag alternative on desktop. onMoveNode throws on error so the
+          dialog can show it inline and stay open. */}
+      {movePicker && (
+        <MoveDialog
+          src={movePicker.src}
+          startDir={dirname(movePicker.src)}
+          machine={fileMachine}
+          onConfirm={(destDir) => onMoveNode(movePicker.src, destDir)}
+          onClose={() => setMovePicker(null)}
         />
       )}
     </div>

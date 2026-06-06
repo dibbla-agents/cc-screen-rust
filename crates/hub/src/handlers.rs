@@ -382,6 +382,14 @@ pub async fn rename(
     file_route(&hub, &q.machine, None, "rename", body).await
 }
 
+pub async fn move_path(
+    State(hub): State<HubState>,
+    Query(q): Query<MachineQ>,
+    Json(body): Json<Value>,
+) -> Response {
+    file_route(&hub, &q.machine, None, "move", body).await
+}
+
 // ── Web Push (hub-local: one VAPID key + sub store for the whole fleet) ───────
 pub async fn push_key(State(hub): State<HubState>) -> Json<Value> {
     Json(json!({ "key": hub.push.application_server_key() }))

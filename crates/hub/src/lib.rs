@@ -68,6 +68,7 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/mkdir", post(handlers::mkdir))
         .route("/api/rmdir", post(handlers::rmdir))
         .route("/api/rename", post(handlers::rename))
+        .route("/api/move", post(handlers::move_path))
         // Hub-local: favorites + Web Push (one of each for the whole fleet).
         .route("/api/favorites", get(handlers::get_favorites).put(handlers::put_favorites))
         .route("/api/push/key", get(handlers::push_key))

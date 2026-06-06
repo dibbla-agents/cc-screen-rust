@@ -471,3 +471,46 @@ pub async fn rename(State(app): State<AppState>, Json(req): Json<RenameReq>) -> 
     std::fs::rename(&src, &dst).map_err(|err| e(StatusCode::BAD_REQUEST, err.to_string()))?;
     Ok(Json(json!({ "name": name, "path": dst.to_string_lossy() })).into_response())
 }
+
+// ── POST /api/move ───────────────────────────────────────────────────────────
+// Relocate a file or folder INTO another directory (unlike rename, which is
+// same-parent-only). Both the source node and the destination directory pass the
+// same symlink-safe $HOME confinement as every other file op, so move is exactly
+// as privileged as rename/delete/write — no new trust boundary (proposal 0012).
+#[derive(Deserialize)]
+pub struct MoveReq {
+    path: String, // absolute path of the node to move (file or dir)
+    dest: String, // absolute path of the destination directory
+}
+
+pub async fn move_path(State(app): State<AppState>, Json(req): Json<MoveReq>) -> R {
+    let home = home(&app);
+    let src = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dst_dir = resolve_existing_under(&home, &req.dest).ok_or_else(|| e(StatusCode::FORBIDDEN, "dest outside home"))?;
+    if src == home {
+        return Err(e(StatusCode::BAD_REQUEST, "refusing to move home"));
+    }
+    if !dst_dir.is_dir() {
+        return Err(e(StatusCode::BAD_REQUEST, "destination is not a directory"));
+    }
+    let name = src.file_name().ok_or_else(|| e(StatusCode::BAD_REQUEST, "no name"))?;
+    let dst = dst_dir.join(name);
+    if resolve_create_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
+        return Err(e(StatusCode::FORBIDDEN, "invalid destination"));
+    }
+    let name = name.to_string_lossy();
+    if dst == src {
+        // already in this folder — no-op success.
+        return Ok(Json(json!({ "name": name, "path": dst.to_string_lossy() })).into_response());
+    }
+    // Block moving a directory into itself or one of its own descendants —
+    // std::fs::rename would otherwise error or misbehave.
+    if dst.starts_with(&src) {
+        return Err(e(StatusCode::BAD_REQUEST, "cannot move a folder into itself"));
+    }
+    if dst.exists() {
+        return Err(e(StatusCode::CONFLICT, "a file or folder with that name already exists"));
+    }
+    std::fs::rename(&src, &dst).map_err(|err| e(StatusCode::BAD_REQUEST, err.to_string()))?;
+    Ok(Json(json!({ "name": name, "path": dst.to_string_lossy() })).into_response())
+}

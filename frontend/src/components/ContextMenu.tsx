@@ -12,6 +12,9 @@ export interface CtxHandlers {
   onNewFile: (dir: string, name: string) => Promise<void>;
   onNewFolder: (dir: string, name: string) => Promise<void>;
   onRename: (path: string, name: string) => Promise<void>;
+  // Open the "Move to…" folder picker for this node (proposal 0012). Synchronous:
+  // the parent swaps this menu for the picker, which owns the async move.
+  onMove: (path: string) => void;
   onDeleteFile: (path: string) => Promise<void>;
   onDeleteFolder: (path: string) => Promise<void>; // recursive
 }
@@ -45,6 +48,7 @@ export default function ContextMenu({
   onNewFile,
   onNewFolder,
   onRename,
+  onMove,
   onDeleteFile,
   onDeleteFolder,
 }: Props) {
@@ -147,6 +151,9 @@ export default function ContextMenu({
                 <button className={itemCls} onClick={() => startInput("rename")}>
                   Rename…
                 </button>
+                <button className={itemCls} onClick={() => { onMove(target.path); onClose(); }}>
+                  Move to…
+                </button>
                 <button className={`${itemCls} text-red-400 hover:bg-red-500/10`} onClick={() => { setErr(""); setMode({ t: "confirm" }); }}>
                   Delete
                 </button>
@@ -164,6 +171,9 @@ export default function ContextMenu({
                   <>
                     <button className={itemCls} onClick={() => startInput("rename")}>
                       Rename…
+                    </button>
+                    <button className={itemCls} onClick={() => { onMove(target.path); onClose(); }}>
+                      Move to…
                     </button>
                     <button className={`${itemCls} text-red-400 hover:bg-red-500/10`} onClick={() => { setErr(""); setMode({ t: "confirm" }); }}>
                       Delete folder

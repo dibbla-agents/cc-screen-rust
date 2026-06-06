@@ -482,6 +482,21 @@ export async function renamePath(path: string, name: string, machine?: string): 
   return r.json();
 }
 
+// movePath relocates a file or folder INTO the directory `dest` (both under
+// $HOME). Unlike renamePath (same-parent only), this is a cross-directory move.
+// $HOME-confined + symlink-safe server-side; rejects a name collision at the
+// destination (409) and moving a folder into itself/a descendant (400). Returns
+// the new {name, path}.
+export async function movePath(path: string, dest: string, machine?: string): Promise<DirEntry> {
+  const r = await fetch(withMachine("/api/move", machine), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, dest }),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || `move: ${r.status}`);
+  return r.json();
+}
+
 // createSession launches a new cc-screen session (tool = cmd or prefix) in dir,
 // named <prefix>-<name>. Returns the full session name, or throws with a
 // message ("already exists" on 409) the UI can show.

@@ -212,6 +212,7 @@ async fn main() {
         .route("/api/mkdir", post(files::mkdir))
         .route("/api/rmdir", post(files::rmdir))
         .route("/api/rename", post(files::rename))
+        .route("/api/move", post(files::move_path))
         // real-time filesystem watch (editor tree + open file)
         .route("/api/watch", get(watch::watch_ws))
         // upload (raised body limit)

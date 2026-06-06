@@ -62,6 +62,7 @@ pub fn run(app: &AppState, op: &str, args: Value) -> CmdResult {
         "mkdir" => mkdir(app, args),
         "rmdir" => rmdir(app, args),
         "rename" => rename(app, args),
+        "move" => move_path(app, args),
         _ => err(400, format!("unknown file op: {op}")),
     }
 }
@@ -371,6 +372,53 @@ fn rename(app: &AppState, args: Value) -> CmdResult {
     }
 }
 
+#[derive(Deserialize)]
+struct MoveArgs {
+    path: String,
+    dest: String,
+}
+
+// Mirror of files.rs::move_path for the hub relay (proposal 0012). Same
+// confinement + descendant guard so the `?machine=` path matches the direct one.
+fn move_path(app: &AppState, args: Value) -> CmdResult {
+    let a: MoveArgs = match serde_json::from_value(args) {
+        Ok(a) => a,
+        Err(e) => return err(400, e.to_string()),
+    };
+    let home = home(app);
+    let Some(src) = resolve_existing_under(&home, &a.path) else {
+        return err(403, "path outside home");
+    };
+    let Some(dst_dir) = resolve_existing_under(&home, &a.dest) else {
+        return err(403, "dest outside home");
+    };
+    if src == home {
+        return err(400, "refusing to move home");
+    }
+    if !dst_dir.is_dir() {
+        return err(400, "destination is not a directory");
+    }
+    let Some(name) = src.file_name() else { return err(400, "no name") };
+    let dst = dst_dir.join(name);
+    if resolve_create_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
+        return err(403, "invalid destination");
+    }
+    let name = name.to_string_lossy();
+    if dst == src {
+        return CmdResult::Json(json!({ "name": name, "path": dst.to_string_lossy() }));
+    }
+    if dst.starts_with(&src) {
+        return err(400, "cannot move a folder into itself");
+    }
+    if dst.exists() {
+        return err(409, "a file or folder with that name already exists");
+    }
+    match std::fs::rename(&src, &dst) {
+        Ok(()) => CmdResult::Json(json!({ "name": name, "path": dst.to_string_lossy() })),
+        Err(e) => err(400, e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +478,49 @@ mod tests {
         let bpath = tmp.join("proj").join("b.txt");
         let r = run(&app, "delete", json!({ "path": bpath.to_string_lossy() }));
         assert!(matches!(r, CmdResult::Ok), "delete → 204: {r:?}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn move_path_cases() {
+        // happy-path file move, happy-path dir move, collision (409),
+        // move-into-descendant (400), outside-$HOME (403). (proposal 0012)
+        let tmp = std::env::temp_dir().join(format!("ccr-fileops-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let a = tmp.join("a");
+        let b = tmp.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let app = app(&tmp);
+
+        // happy path: move a file from a/ into b/.
+        std::fs::write(a.join("f.txt"), b"hi").unwrap();
+        let r = run(&app, "move", json!({ "path": a.join("f.txt").to_string_lossy(), "dest": b.to_string_lossy() }));
+        assert!(matches!(r, CmdResult::Json(_)), "file move ok: {r:?}");
+        assert!(b.join("f.txt").exists() && !a.join("f.txt").exists());
+
+        // happy path: move a whole directory (with contents) into b/.
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::write(a.join("sub/inner.txt"), b"x").unwrap();
+        let r = run(&app, "move", json!({ "path": a.join("sub").to_string_lossy(), "dest": b.to_string_lossy() }));
+        assert!(matches!(r, CmdResult::Json(_)), "dir move ok: {r:?}");
+        assert!(b.join("sub/inner.txt").exists() && !a.join("sub").exists());
+
+        // collision: a file named f.txt already exists in b/ → 409.
+        std::fs::write(a.join("f.txt"), b"again").unwrap();
+        let r = run(&app, "move", json!({ "path": a.join("f.txt").to_string_lossy(), "dest": b.to_string_lossy() }));
+        assert!(matches!(r, CmdResult::Error { code: 409, .. }), "collision → 409: {r:?}");
+        assert!(a.join("f.txt").exists(), "source untouched on collision");
+
+        // move a folder into its own descendant → 400.
+        std::fs::create_dir_all(b.join("sub/deep")).unwrap();
+        let r = run(&app, "move", json!({ "path": b.join("sub").to_string_lossy(), "dest": b.join("sub/deep").to_string_lossy() }));
+        assert!(matches!(r, CmdResult::Error { code: 400, .. }), "into descendant → 400: {r:?}");
+
+        // destination outside $HOME → 403.
+        let r = run(&app, "move", json!({ "path": a.join("f.txt").to_string_lossy(), "dest": "/tmp" }));
+        assert!(matches!(r, CmdResult::Error { code: 403, .. }), "dest outside home → 403: {r:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

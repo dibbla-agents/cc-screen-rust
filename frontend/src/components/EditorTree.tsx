@@ -25,6 +25,8 @@ interface Props {
   // (via FolderChildren) and the section headers (project / home / share), so
   // you can drop straight onto a section root too.
   onDropFiles?: (dir: string, dt: DataTransfer) => void;
+  // Drag a node onto a folder / section root → move it there (proposal 0012).
+  onMoveNode?: (src: string, destDir: string) => void;
   activePath: string | null;
   // Phone-sized rows (larger type, taller targets). Off = the tight desktop
   // sidebar. See FolderChildren's `touch`.
@@ -38,7 +40,7 @@ interface Props {
 // overlay routes PDFs to its read-only pdf.js viewer); tapping anything else
 // downloads it, and every row carries a download button so even openable files
 // can be saved to the device. This is the single file view.
-export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPath, onContextMenu, onDropFiles, activePath, touch = false }: Props) {
+export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, activePath, touch = false }: Props) {
   const { cache, expanded, loading, errs, toggle, sections } = tree;
   // Section headers (Share / Project / Home) get the same right-click/long-press
   // menu as rows; FolderChildren runs its own copy for the nested rows.
@@ -90,6 +92,7 @@ export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPa
                   toggle(path, { sectionErrKey: sec.key, bySession: sec.bySession });
                 }}
                 onDropFiles={onDropFiles}
+                onMoveNode={onMoveNode}
               />
               {errs[sec.key] && (
                 <div className="px-2 py-1 text-xs text-red-400">{errs[sec.key]}</div>
@@ -107,6 +110,7 @@ export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPa
                   downloadingPath={downloadingPath}
                   onContextMenu={onContextMenu}
                   onDropFiles={onDropFiles}
+                  onMoveNode={onMoveNode}
                   activePath={activePath}
                   compact
                   touch={touch}
@@ -132,6 +136,7 @@ function SectionHeader({
   ctxProps,
   onClick,
   onDropFiles,
+  onMoveNode,
 }: {
   sec: TreeSection;
   isOpen: boolean;
@@ -140,8 +145,9 @@ function SectionHeader({
   ctxProps: ReturnType<ReturnType<typeof useTreeContextHandlers>["ctxHandlers"]>;
   onClick: () => void;
   onDropFiles?: (dir: string, dt: DataTransfer) => void;
+  onMoveNode?: (src: string, destDir: string) => void;
 }) {
-  const { over, dropHandlers } = useFolderDrop(sec.path || null, onDropFiles);
+  const { over, dropHandlers } = useFolderDrop(sec.path || null, onDropFiles, onMoveNode);
   return (
     <button
       onClick={onClick}

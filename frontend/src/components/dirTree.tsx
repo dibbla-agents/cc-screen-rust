@@ -395,6 +395,11 @@ export interface FolderChildrenProps {
   // to the consumer, which uploads into that folder. Desktop only in practice
   // (phones can't drag-and-drop), but harmless to wire on touch.
   onDropFiles?: (dir: string, dt: DataTransfer) => void;
+  // When set, tree nodes become draggable and folder rows / listings become
+  // move drop targets: dragging a node onto a folder calls onMoveNode(src,
+  // destDir) to relocate it there (proposal 0012). Desktop only in practice
+  // (HTML5 DnD doesn't fire on touch — phones use the context-menu "Move to…").
+  onMoveNode?: (src: string, destDir: string) => void;
   // Whether file rows are disabled (e.g. a download in flight).
   fileDisabled?: boolean;
   // Highlight the row for this file path (the open file in the editor).
@@ -513,19 +518,80 @@ export type DragHandlers = Partial<{
   onDrop: (e: ReactDragEvent) => void;
 }>;
 
+// ── Internal node move (drag a tree node onto a folder) — proposal 0012 ──────
+// A custom MIME tags in-app node drags so they stay distinct from OS-file drags
+// (which carry "Files" and still route to upload). `draggedNodePath` mirrors the
+// drag source's path at module scope because dataTransfer.getData() is write-only
+// until the drop fires — drop targets need the source path DURING dragover to
+// validate same-parent/descendant targets (dim / no-drop cursor).
+export const MOVE_MIME = "application/x-ccscreen-path";
+let draggedNodePath: string | null = null;
+
+function dirnameOf(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i <= 0 ? "/" : p.slice(0, i);
+}
+
+// A move of `src` into `destDir` is allowed unless it's a no-op (src already in
+// destDir) or illegal (destDir is src itself or a descendant of it — mirrors the
+// backend's `dst.starts_with(src)` guard).
+function moveAllowed(src: string | null, destDir: string): boolean {
+  if (!src) return false;
+  if (dirnameOf(src) === destDir) return false; // already there
+  if (destDir === src || destDir.startsWith(src + "/")) return false; // into self/descendant
+  return true;
+}
+
+// Drag-source handlers for a movable tree row. Wired only when the consumer
+// supplies an onMoveNode handler (so the download-only Files sheet stays inert).
+export function nodeDragProps(path: string): {
+  draggable: boolean;
+  onDragStart: (e: ReactDragEvent) => void;
+  onDragEnd: () => void;
+} {
+  return {
+    draggable: true,
+    onDragStart: (e) => {
+      e.stopPropagation();
+      draggedNodePath = path;
+      e.dataTransfer.setData(MOVE_MIME, path);
+      e.dataTransfer.effectAllowed = "move";
+    },
+    onDragEnd: () => {
+      draggedNodePath = null;
+    },
+  };
+}
+
+// useFolderDrop turns one folder element into a drop target for BOTH OS-file
+// uploads (onDropFiles, "Files" drags → copy) and in-app node moves (onMoveNode,
+// MOVE_MIME drags → move). For a move drag we always claim the innermost folder
+// (stopPropagation) so an invalid inner target can't bubble up to a valid
+// grandparent, but only highlight + accept the drop on a valid target.
 export function useFolderDrop(
   dir: string | null | undefined,
-  onDropFiles?: (dir: string, dt: DataTransfer) => void
+  onDropFiles?: (dir: string, dt: DataTransfer) => void,
+  onMoveNode?: (src: string, destDir: string) => void
 ): { over: boolean; dropHandlers: DragHandlers } {
   const [over, setOver] = useState(false);
   const depth = useRef(0);
-  if (!onDropFiles || !dir) return { over: false, dropHandlers: {} };
-  const isFileDrag = (e: ReactDragEvent) =>
-    Array.from(e.dataTransfer.types || []).includes("Files");
+  if ((!onDropFiles && !onMoveNode) || !dir) return { over: false, dropHandlers: {} };
+  const types = (e: ReactDragEvent) => Array.from(e.dataTransfer.types || []);
+  const isFileDrag = (e: ReactDragEvent) => !!onDropFiles && types(e).includes("Files");
+  const isMoveDrag = (e: ReactDragEvent) => !!onMoveNode && types(e).includes(MOVE_MIME);
+  const moveOk = () => moveAllowed(draggedNodePath, dir);
   return {
     over,
     dropHandlers: {
       onDragEnter: (e) => {
+        if (isMoveDrag(e)) {
+          e.stopPropagation(); // claim the innermost folder regardless of validity
+          if (!moveOk()) return; // invalid target: no highlight
+          e.preventDefault();
+          depth.current += 1;
+          setOver(true);
+          return;
+        }
         if (!isFileDrag(e)) return;
         e.preventDefault();
         e.stopPropagation();
@@ -533,24 +599,51 @@ export function useFolderDrop(
         setOver(true);
       },
       onDragOver: (e) => {
+        if (isMoveDrag(e)) {
+          e.stopPropagation();
+          if (!moveOk()) {
+            e.dataTransfer.dropEffect = "none"; // show the no-drop cursor
+            return;
+          }
+          e.preventDefault(); // make this a legal drop target
+          e.dataTransfer.dropEffect = "move";
+          return;
+        }
         if (!isFileDrag(e)) return;
-        e.preventDefault(); // make this a legal drop target
+        e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = "copy";
       },
       onDragLeave: (e) => {
+        if (isMoveDrag(e)) {
+          e.stopPropagation();
+          if (!moveOk()) return;
+          depth.current = Math.max(0, depth.current - 1);
+          if (depth.current === 0) setOver(false);
+          return;
+        }
         if (!isFileDrag(e)) return;
         e.stopPropagation();
         depth.current = Math.max(0, depth.current - 1);
         if (depth.current === 0) setOver(false);
       },
       onDrop: (e) => {
+        if (isMoveDrag(e)) {
+          e.stopPropagation();
+          if (!moveOk()) return;
+          e.preventDefault();
+          depth.current = 0;
+          setOver(false);
+          const src = e.dataTransfer.getData(MOVE_MIME) || draggedNodePath || "";
+          if (src) onMoveNode!(src, dir);
+          return;
+        }
         if (!isFileDrag(e)) return;
         e.preventDefault();
         e.stopPropagation();
         depth.current = 0;
         setOver(false);
-        onDropFiles(dir, e.dataTransfer);
+        onDropFiles!(dir, e.dataTransfer);
       },
     },
   };
@@ -570,6 +663,7 @@ function DirRow({
   swallowLongPress,
   ctxHandlers,
   onDropFiles,
+  onMoveNode,
 }: {
   d: DirEntry;
   isOpen: boolean;
@@ -581,8 +675,9 @@ function DirRow({
   swallowLongPress: () => boolean;
   ctxHandlers: ReturnType<typeof useTreeContextHandlers>["ctxHandlers"];
   onDropFiles?: (dir: string, dt: DataTransfer) => void;
+  onMoveNode?: (src: string, destDir: string) => void;
 }) {
-  const { over, dropHandlers } = useFolderDrop(d.path, onDropFiles);
+  const { over, dropHandlers } = useFolderDrop(d.path, onDropFiles, onMoveNode);
   return (
     <button
       onClick={() => {
@@ -591,6 +686,7 @@ function DirRow({
       }}
       className={`${rowCls} ${over ? "bg-accent/15 ring-1 ring-inset ring-accent/60" : ""}`}
       style={pad}
+      {...(onMoveNode ? nodeDragProps(d.path) : {})}
       {...ctxHandlers({ path: d.path, name: d.name, isDir: true })}
       {...dropHandlers}
     >
@@ -613,7 +709,7 @@ function DirRow({
 }
 
 export function FolderChildren(props: FolderChildrenProps) {
-  const { path, depth, cache, expanded, loading, onToggle, onFile, onDownload, downloadingPath, onContextMenu, onDropFiles, fileDisabled, activePath, compact, touch } = props;
+  const { path, depth, cache, expanded, loading, onToggle, onFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, fileDisabled, activePath, compact, touch } = props;
   const { ctxHandlers, swallowLongPress } = useTreeContextHandlers(onContextMenu);
   // This whole block (the folder's listed contents) is a drop target for the
   // folder itself, so a drop on a *file* row or the gaps between rows lands in
@@ -621,7 +717,7 @@ export function FolderChildren(props: FolderChildrenProps) {
   // rows (DirRow) and their expanded contents (the recursive FolderChildren
   // below) are inner drop zones that win via stopPropagation, so the innermost
   // folder under the cursor is always the target.
-  const { over, dropHandlers } = useFolderDrop(path, onDropFiles);
+  const { over, dropHandlers } = useFolderDrop(path, onDropFiles, onMoveNode);
 
   const data = cache.get(path);
   if (!data) return null;
@@ -659,6 +755,7 @@ export function FolderChildren(props: FolderChildrenProps) {
               swallowLongPress={swallowLongPress}
               ctxHandlers={ctxHandlers}
               onDropFiles={onDropFiles}
+              onMoveNode={onMoveNode}
             />
             {isOpen && <FolderChildren {...props} path={d.path} depth={depth + 1} />}
           </div>
@@ -687,6 +784,7 @@ export function FolderChildren(props: FolderChildrenProps) {
               disabled={fileDisabled}
               className={`${rowCls.replace("w-full", "min-w-0 flex-1")} disabled:opacity-60`}
               style={pad}
+              {...(onMoveNode ? nodeDragProps(f.path) : {})}
               {...ctxHandlers({ path: f.path, name: f.name, isDir: false })}
             >
               {/* Spacer aligns file labels under folder labels (past the caret). */}
