@@ -1,6 +1,6 @@
 [package]
 name = "cc-screen-tui"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2021"
 description = "Terminal client for cc-screen-rust"
 repository = "https://github.com/dibbla-agents/cc-screen-rust"
