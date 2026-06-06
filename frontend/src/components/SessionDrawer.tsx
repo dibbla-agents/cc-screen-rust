@@ -6,10 +6,15 @@ import NotificationsButton from "./NotificationsButton";
 
 interface Props {
   open: boolean;
-  // Desktop renders this scoped to the active terminal pane (frosted panel,
-  // no safe-area padding); phone renders it full-screen. The markup is the
-  // same — only the chrome/positioning differs. See App.tsx / TileGrid.
+  // Desktop renders this as a frosted panel (no safe-area padding); phone
+  // renders it full-screen. The markup is the same — only the chrome/positioning
+  // differs. See App.tsx / TileGrid.
   embedded?: boolean;
+  // Desktop variant: a left-pinned, fixed-width column that slides in/out over
+  // the terminal area (rather than covering a whole pane). When set, the node
+  // stays mounted while closed and animates the transform, so the slide-out
+  // plays; the phone path keeps the `!open` early return. See proposal 0006.
+  sidebar?: boolean;
   sessions: Session[];
   // Per-session WebSocket state, keyed `${machine}/${name}`, for sessions open
   // in a pane — lets a row's status dot go red when its connection drops. Rows
@@ -46,6 +51,7 @@ interface Props {
 export default function SessionDrawer({
   open,
   embedded = false,
+  sidebar = false,
   sessions,
   connByRef,
   machines,
@@ -153,7 +159,11 @@ export default function SessionDrawer({
       window.removeEventListener("keydown", handler, { capture: true });
   }, [open, ordered, cursor, onClose, onPick]);
 
-  if (!open) return null;
+  // Phone / pane-embedded variants unmount when closed. The sidebar variant
+  // stays mounted so its slide-out transition can play (see the transform-driven
+  // root below); the keyboard/cursor effects above are already gated on `open`,
+  // so a mounted-but-closed sidebar is inert.
+  if (!open && !sidebar) return null;
 
   // Shared icon-button chrome (refresh / close) — same understated look as the
   // editor's toolbar buttons.
@@ -188,12 +198,24 @@ export default function SessionDrawer({
     ? machines.filter((m) => !sessions.some((s) => (s.machine ?? "") === m.machine))
     : [];
 
-  return (
-    <div
-      className={`absolute inset-0 z-30 flex flex-col text-slate-200 ${
+  // The sidebar variant is a left-pinned, fixed-width column that translates
+  // in/out over the terminal area, leaving the active terminal visible to its
+  // right (proposal 0006). It overlays — never pushes — so the width-locked PTY
+  // is never resized when the switcher opens/closes. While closed it slides off
+  // to the left and drops pointer events so clicks fall through to the terminal.
+  const rootClass = sidebar
+    ? [
+        "absolute inset-y-0 left-0 z-30 flex w-[320px] max-w-[85%] flex-col text-slate-200",
+        "border-r border-edge/80 bg-bar/95 backdrop-blur-md shadow-xl",
+        "transition-transform duration-200 ease-out",
+        open ? "translate-x-0" : "-translate-x-full pointer-events-none",
+      ].join(" ")
+    : `absolute inset-0 z-30 flex flex-col text-slate-200 ${
         embedded ? "bg-bar/95 backdrop-blur-md" : "bg-bar pt-safe"
-      }`}
-    >
+      }`;
+
+  return (
+    <div className={rootClass} aria-hidden={sidebar && !open}>
       {/* Header: title + count, then the keyboard hint and icon chrome. */}
       <div className="flex items-center gap-2 border-b border-edge/80 px-3 py-2.5">
         <span className="text-[13px] font-semibold tracking-wide text-slate-100">

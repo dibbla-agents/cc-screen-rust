@@ -1443,13 +1443,14 @@ export default function App() {
 
   // The session switcher, built once and rendered in one of two places:
   //  - phone  → full-screen takeover at the app root (embedded=false)
-  //  - desktop → scoped to the active terminal pane via TileGrid's
-  //    paneOverlay (embedded=true), so Ctrl+B shows the picker inside the
-  //    box you're looking at, not over the whole screen.
-  const renderDrawer = (embedded: boolean) => (
+  //  - desktop → a left-pinned slide-in sidebar over the terminal area
+  //    (sidebar=true), so Ctrl+B reveals the picker without blanking the
+  //    terminal you were in (proposal 0006).
+  const renderDrawer = (embedded: boolean, sidebar = false) => (
     <SessionDrawer
       open={drawerOpen}
       embedded={embedded}
+      sidebar={sidebar}
       sessions={sessions}
       connByRef={connByRef}
       machines={machines}
@@ -1629,8 +1630,6 @@ export default function App() {
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
             onBlockedInput={() => showToast("View only — control disabled for this session", false)}
-            paneOverlay={renderDrawer(true)}
-            paneOverlayIdx={active}
           />
         ) : currentSession ? (
           // Phone path: one terminal, single pane — but it shows `panes[active]`
@@ -1659,6 +1658,24 @@ export default function App() {
 
         {/* No global download icon on desktop — each pane has its own that
             fades in on mouse activity. See PaneBox in TileGrid.tsx. */}
+
+        {/* Desktop session switcher: a left slide-in sidebar over the terminal
+            area (proposal 0006). It lives in <main> (anchored below the
+            collapsing header) and overlays the grid without resizing it, so the
+            width-locked PTY is never re-pinned. A faint scrim makes click-outside
+            -to-close obvious; it sits below the sidebar's z-30 and above the grid. */}
+        {isDesktop && (
+          <>
+            {drawerOpen && (
+              <div
+                className="absolute inset-0 z-20 bg-black/20"
+                onClick={() => setDrawerOpen(false)}
+                aria-hidden
+              />
+            )}
+            {renderDrawer(true, true)}
+          </>
+        )}
       </main>
 
       {/* Footer: phone only — control keys + compose + file transfer /
