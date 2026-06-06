@@ -179,7 +179,15 @@ export default function TerminalView({
     let cols = dims.cols;
     if (term.cols > 0 && Math.abs(cols - term.cols) < 2) cols = term.cols; // deadband
     if (cols === term.cols && dims.rows === term.rows) return;
+    // A grow (rows increasing) is the keyboard closing / more space appearing.
+    // The agent repaints on the resize using absolute cursor positioning, and on
+    // a grow that can leave the viewport scrolled up with the prompt below the
+    // fold (so the user must scroll back down). Re-anchor to the bottom on a grow
+    // so the prompt stays visible; the streamed repaint then sticks to the
+    // bottom. Don't do this on a shrink (keyboard opening) — that path is fine.
+    const grew = dims.rows > term.rows;
     term.resize(cols, dims.rows);
+    if (grew) term.scrollToBottom();
     sendResize();
   }
 
