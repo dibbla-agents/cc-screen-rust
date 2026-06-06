@@ -109,6 +109,8 @@ mod tests {
             short: name.into(),
             attached,
             activity: 0,
+            last_input_at: 0,
+            busy_since: 0,
             preview: preview.into(),
             waiting,
             cwd: String::new(),

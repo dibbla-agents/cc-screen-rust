@@ -13,7 +13,7 @@ pub use cc_screen_push::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::engine::AppState;
+use crate::engine::{now_secs, AppState};
 
 /// How often we sweep the session list for busy→waiting transitions.
 const TICK: Duration = Duration::from_secs(2);
@@ -30,9 +30,10 @@ pub async fn finish_watcher(state: AppState) {
         let mut seen = HashSet::new();
         for s in state.list() {
             seen.insert(s.name.clone());
-            let waiting = s.waiting();
+            let now = now_secs();
+            let waiting = s.waiting_at(now);
             let was = prev.insert(s.name.clone(), waiting);
-            if was == Some(false) && waiting {
+            if was == Some(false) && waiting && s.notification_eligible_at(now) {
                 let title = format!("{} is waiting", s.short);
                 let preview = s.preview();
                 let body = if preview.is_empty() { "finished — tap to open".to_string() } else { preview };

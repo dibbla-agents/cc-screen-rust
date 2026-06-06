@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::attach::{attach_loop, AttachOut, ClientEvent};
-use crate::engine::{AppState, Session};
+use crate::engine::{notification_eligible, now_secs, AppState, Session};
 
 /// How often the agent re-checks its session list and pushes a delta to the hub.
 const SESSIONS_POLL: Duration = Duration::from_secs(1);
@@ -132,13 +132,17 @@ async fn connect_and_serve(
         tokio::select! {
             _ = tick.tick() => {
                 let cur = crate::handlers::session_list(state);
+                let now = now_secs();
                 // Busy→waiting edges → WaitingEdge so the hub can buzz devices
                 // subscribed to it (centralized push). Best-effort: a missed buzz
                 // never breaks the session stream. First sight records state only
                 // (no edge), so startup doesn't fire for already-idle sessions.
                 for s in &cur {
                     let was = prev_waiting.insert(s.name.clone(), s.waiting);
-                    if was == Some(false) && s.waiting {
+                    if was == Some(false)
+                        && s.waiting
+                        && notification_eligible(s.busy_since, s.last_input_at, now)
+                    {
                         let edge = AgentMsg::WaitingEdge {
                             session: s.name.clone(),
                             short: s.short.clone(),

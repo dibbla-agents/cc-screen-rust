@@ -235,6 +235,8 @@ mod tests {
             short: "x".into(),
             attached: true,
             activity: 7,
+            last_input_at: 8,
+            busy_since: 9,
             preview: "hi".into(),
             waiting: false,
             cwd: "/home/u".into(),

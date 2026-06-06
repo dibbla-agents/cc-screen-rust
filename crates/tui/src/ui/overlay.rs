@@ -346,6 +346,8 @@ mod tests {
             short: name.into(),
             attached: false,
             activity: 0,
+            last_input_at: 0,
+            busy_since: 0,
             preview: "p".into(),
             waiting: false,
             cwd: String::new(),

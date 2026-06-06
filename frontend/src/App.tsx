@@ -432,6 +432,75 @@ export default function App() {
   }, [applySessionList]);
   refreshRef.current = refresh; // keep the on-close re-poll pointing at the latest
 
+  // Explicit navigation target used by notification taps and `?session=...`
+  // deep links. This is the one place that turns a session name into the pane
+  // identity the app stores, including the owning machine when known.
+  const openSessionByName = useCallback(
+    async (name: string): Promise<boolean> => {
+      const wanted = name.trim();
+      if (!wanted) return false;
+
+      let list = sessionsRef.current;
+      let found = list.find((s) => s.name === wanted);
+      if (!found) {
+        try {
+          list = await fetchSessions();
+          applySessionList(list);
+          found = list.find((s) => s.name === wanted);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return false;
+        }
+      }
+      if (!found) return false;
+
+      closeAllSheets();
+      mountAt(activeRef.current, { name: found.name, machine: found.machine ?? "" });
+      setDrawerOpen(false);
+      return true;
+    },
+    [applySessionList, closeAllSheets, mountAt]
+  );
+
+  // Cold-open deep link: a service-worker `openWindow("/?session=...")` lands
+  // here. Keep the query parameter until we successfully mount the session so a
+  // transient early fetch failure can be retried by a reload.
+  useEffect(() => {
+    if (authed !== true) return;
+    const params = new URLSearchParams(window.location.search);
+    const session = params.get("session");
+    if (!session) return;
+
+    let cancelled = false;
+    openSessionByName(session).then((opened) => {
+      if (cancelled || !opened) return;
+      params.delete("session");
+      const qs = params.toString();
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authed, openSessionByName]);
+
+  // Warm-open notification tap: the service worker focuses this window and asks
+  // it to mount the notified session instead of leaving the user on the prior
+  // pane.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const handler = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; session?: unknown } | null;
+      if (data?.type !== "open-session" || typeof data.session !== "string") return;
+      openSessionByName(data.session).catch(() => {});
+    };
+    navigator.serviceWorker.addEventListener("message", handler);
+    return () => navigator.serviceWorker.removeEventListener("message", handler);
+  }, [openSessionByName]);
+
   // Quiet background poll so the working/idle state (and the title + app-icon
   // badge below) stays current while the app is open — without the manual
   // refresh button's spinner or clobbering an error banner. Browsers throttle

@@ -28,12 +28,28 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const session = (event.notification.data && event.notification.data.session) || "";
-  const url = session ? "/?session=" + encodeURIComponent(session) : "/";
+  const url = new URL(session ? "/?session=" + encodeURIComponent(session) : "/", self.location.origin).href;
   event.waitUntil(
     (async () => {
-      // Focus an existing window if the PWA is already open; otherwise open one.
+      // Focus an existing window if the PWA is already open and ask it to switch
+      // sessions; otherwise open a deep-linked window.
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       for (const w of wins) {
+        if (session && "postMessage" in w) {
+          try {
+            w.postMessage({ type: "open-session", session });
+          } catch (e) {
+            /* ignore */
+          }
+        } else if (session && "navigate" in w) {
+          try {
+            const next = await w.navigate(url);
+            if (next && "focus" in next) await next.focus();
+            return;
+          } catch (e) {
+            /* ignore */
+          }
+        }
         if ("focus" in w) {
           try {
             await w.focus();

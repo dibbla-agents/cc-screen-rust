@@ -34,6 +34,12 @@ const INIT_ROWS: u16 = 24;
 /// Deliberately conservative: a false *busy* (we're a touch slow to flag a
 /// finish) is harmless; a false *waiting* mid-task would be a wrong signal.
 pub const IDLE_AFTER_SECS: u64 = 4;
+/// Minimum output-producing work time before a busy→waiting edge is worth a
+/// phone notification. Short answers should update the UI, not buzz a device.
+pub const NOTIFY_MIN_WORK_SECS: u64 = 60;
+/// Minimum time since the last client input before a busy→waiting edge can buzz.
+/// This filters out PTY echo from the user's own typing and mid-run steering.
+pub const NOTIFY_INPUT_QUIET_SECS: u64 = 60;
 
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -45,9 +51,20 @@ fn is_waiting(last_activity: u64, now: u64) -> bool {
     now.saturating_sub(last_activity) >= IDLE_AFTER_SECS
 }
 
+/// Shared gate for "agent finished" push notifications. `busy_since == 0`
+/// means we never observed a clean output-resumed-after-waiting transition, so
+/// first-sight / startup-busy sessions are suppressed conservatively.
+pub fn notification_eligible(busy_since: u64, last_input_at: u64, now: u64) -> bool {
+    busy_since != 0
+        && now.saturating_sub(busy_since) >= NOTIFY_MIN_WORK_SECS
+        && now.saturating_sub(last_input_at) >= NOTIFY_INPUT_QUIET_SECS
+}
+
 struct SessionState {
     emu: Emulator,
     last_activity: u64,
+    last_input_at: u64,
+    busy_since: u64,
     cols: u16,
     rows: u16,
     // Per-attached-client requested sizes, keyed by connection id. The PTY is
@@ -130,9 +147,12 @@ impl Session {
         let (tx, _rx) = broadcast::channel::<Bytes>(BROADCAST_CAP);
         let (closed, _) = watch::channel(false);
 
+        let now = now_secs();
         let state = SessionState {
             emu: Emulator::new(INIT_COLS, INIT_ROWS),
-            last_activity: now_secs(),
+            last_activity: now,
+            last_input_at: now,
+            busy_since: 0,
             cols: INIT_COLS,
             rows: INIT_ROWS,
             client_sizes: HashMap::new(),
@@ -145,7 +165,7 @@ impl Session {
             short: short.to_string(),
             launch_dir: dir.to_string(),
             extra_dirs,
-            created: now_secs(),
+            created: now,
             pid,
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
@@ -164,6 +184,11 @@ impl Session {
     }
 
     pub fn write_input(&self, data: &[u8]) {
+        if !data.is_empty() {
+            if let Ok(mut st) = self.state.lock() {
+                st.last_input_at = now_secs();
+            }
+        }
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(data);
             let _ = w.flush();
@@ -309,11 +334,32 @@ impl Session {
         self.state.lock().map(|s| s.last_activity).unwrap_or(0)
     }
 
+    pub fn last_input_at(&self) -> u64 {
+        self.state.lock().map(|s| s.last_input_at).unwrap_or(0)
+    }
+
+    pub fn busy_since(&self) -> u64 {
+        self.state.lock().map(|s| s.busy_since).unwrap_or(0)
+    }
+
     /// True when the agent has stopped streaming for `IDLE_AFTER_SECS` and is
     /// (almost always) waiting for input — the "your turn" signal the clients
     /// surface. A pure function of last-output time; see `is_waiting`.
     pub fn waiting(&self) -> bool {
-        is_waiting(self.last_activity(), now_secs())
+        self.waiting_at(now_secs())
+    }
+
+    pub fn waiting_at(&self, now: u64) -> bool {
+        is_waiting(self.last_activity(), now)
+    }
+
+    /// True when the current busy→waiting edge should produce a push
+    /// notification. Callers still own edge detection; this is only the gate.
+    pub fn notification_eligible_at(&self, now: u64) -> bool {
+        self.state
+            .lock()
+            .map(|s| notification_eligible(s.busy_since, s.last_input_at, now))
+            .unwrap_or(false)
     }
 
     pub fn preview(&self) -> String {
@@ -348,8 +394,12 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
             Ok(n) => {
                 let chunk = &buf[..n];
                 if let Ok(mut st) = sess.state.lock() {
+                    let now = now_secs();
+                    if is_waiting(st.last_activity, now) {
+                        st.busy_since = now;
+                    }
                     st.emu.process(chunk);
-                    st.last_activity = now_secs();
+                    st.last_activity = now;
                     let _ = sess.tx.send(Bytes::copy_from_slice(chunk));
                 }
             }
@@ -547,6 +597,35 @@ mod tests {
         assert!(is_waiting(now - 3600, now), "quiet for an hour → waiting");
         // A clock that went backwards must not underflow into "waiting".
         assert!(!is_waiting(now + 5, now), "future last-activity → working, not underflow");
+    }
+
+    #[test]
+    fn notification_gate_requires_work_and_input_quiet() {
+        let now = 1_000_000;
+        assert!(
+            notification_eligible(
+                now - NOTIFY_MIN_WORK_SECS,
+                now - NOTIFY_INPUT_QUIET_SECS,
+                now
+            ),
+            "long work with no recent input should notify"
+        );
+        assert!(
+            !notification_eligible(0, now - NOTIFY_INPUT_QUIET_SECS, now),
+            "unknown busy start suppresses first-sight sessions"
+        );
+        assert!(
+            !notification_eligible(now - 10, now - NOTIFY_INPUT_QUIET_SECS, now),
+            "quick replies should not notify"
+        );
+        assert!(
+            !notification_eligible(now - NOTIFY_MIN_WORK_SECS, now - 4, now),
+            "recent user input should suppress echoed typing and mid-run steering"
+        );
+        assert!(
+            !notification_eligible(now + 10, now + 10, now),
+            "clock skew should not underflow into a notification"
+        );
     }
 
     // End-to-end over a real PTY + real time: a session streaming output reads as

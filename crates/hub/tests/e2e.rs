@@ -55,6 +55,8 @@ fn sess(name: &str) -> SessionInfo {
         short: name.into(),
         attached: false,
         activity: 0,
+        last_input_at: 0,
+        busy_since: 0,
         preview: String::new(),
         waiting: false,
         cwd: String::new(),

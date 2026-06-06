@@ -29,6 +29,14 @@ pub struct SessionInfo {
     pub short: String,
     pub attached: bool,
     pub activity: i64,
+    /// Last client input timestamp (Unix seconds). Additive/defaulted so older
+    /// agents parse as 0; used by notification gating and future UI affordances.
+    #[serde(default)]
+    pub last_input_at: u64,
+    /// When the current output-producing turn began (Unix seconds), measured
+    /// from output resuming after a waiting gap. 0 means unknown.
+    #[serde(default)]
+    pub busy_since: u64,
     pub preview: String,
     /// True when the agent has produced no output for a few seconds — it has
     /// stopped streaming and is (almost always) waiting for input. `false` while
@@ -285,6 +293,8 @@ mod tests {
             short: "x".into(),
             attached: false,
             activity: 0,
+            last_input_at: 0,
+            busy_since: 0,
             preview: "p".into(),
             waiting: false,
             cwd: String::new(),
@@ -305,6 +315,8 @@ mod tests {
             short: "x".into(),
             attached: false,
             activity: 0,
+            last_input_at: 111,
+            busy_since: 222,
             preview: String::new(),
             waiting: false,
             cwd: String::new(),
@@ -319,11 +331,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.machine, "");
+        assert_eq!(old.last_input_at, 0);
+        assert_eq!(old.busy_since, 0);
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.
         let back: SessionInfo = serde_json::from_str(&v).unwrap();
         assert_eq!(back.machine, "laptop");
+        assert_eq!(back.last_input_at, 111);
+        assert_eq!(back.busy_since, 222);
     }
 
     #[test]

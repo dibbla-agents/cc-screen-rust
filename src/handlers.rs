@@ -103,6 +103,8 @@ pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
             short: s.short.clone(),
             attached: s.attached(),
             activity: s.last_activity() as i64,
+            last_input_at: s.last_input_at(),
+            busy_since: s.busy_since(),
             preview: s.preview(),
             waiting: s.waiting(),
             cwd: s.live_cwd(),

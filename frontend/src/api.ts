@@ -6,6 +6,8 @@ export interface Session {
   short: string;
   attached: boolean;
   activity: number;
+  last_input_at?: number;
+  busy_since?: number;
   preview: string;
   // True when the agent has gone quiet for a few seconds — it has stopped
   // streaming and is (almost always) waiting for input. False while it's
