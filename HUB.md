@@ -292,9 +292,18 @@ keys/paste. So whatever answers at `--hub` effectively drives the agent.
 
 Neither binary will bind a **routable** address with auth disabled — a YOLO
 control plane open to the network is RCE for any peer. The agent refuses unless
-`CCWEB_PASSWORD`/`CCWEB_API_TOKEN` is set (override: `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE=1`);
-the hub also refuses a routable bind with an empty `CCHUB_AGENT_TOKENS`
-(override: `CCHUB_ALLOW_OPEN_UPLINK=1`). Loopback dev is unaffected.
+`CCWEB_PASSWORD`/`CCWEB_API_TOKEN` is set (override: `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE=1`).
+
+The hub refuses an **open uplink** (empty `CCHUB_AGENT_TOKENS`) unless tokens are
+set or `CCHUB_ALLOW_OPEN_UPLINK=1`. Unlike the agent's bind guard, **there is no
+loopback exemption here**: a hub is the component that gets fronted by a reverse
+tunnel, so a `127.0.0.1` bind does *not* mean "only this host can reach it" — the
+documented off-tailnet recipe is exactly "bind loopback, publish via cloudflared."
+The bind address can't reveal the tunnel, so a no-token loopback hub now refuses to
+start too; set `CCHUB_ALLOW_OPEN_UPLINK=1` for a genuine loopback/dev run. As
+defense-in-depth, even with the override unset at startup, `/agent/ws` rejects an
+open-uplink registration that arrives **through a proxy** (forwarded headers
+present ⇒ not local).
 
 ### Browser trust boundary (Origin/Host)
 
@@ -336,10 +345,17 @@ Gotchas:
   If the hub is bound to its *tailnet* IP (the install default) but the tunnel
   origin is `localhost`, nothing listens there → 502. Either bind the hub to
   `127.0.0.1` (above) or set the tunnel origin to the hub's actual bind address.
-- **A public hostname + open uplink means anyone can register an agent** — the
-  client password does **not** gate the uplink. Once the hub is internet-reachable,
-  set `--agents 'machine:token,…'`, and/or put Cloudflare Access in front of the
-  hostname.
+- **A loopback bind is *not* private once a tunnel fronts it.** Tunnelling a hub to
+  the public internet requires uplink auth (`CCHUB_AGENT_TOKENS` / `--agents
+  'machine:token,…'`) **and/or** edge auth (a Cloudflare Access policy or service
+  token on `/agent/ws` *and* `/api`). The client password (`CCWEB_PASSWORD`) does
+  **not** gate the uplink — `/agent/ws` is client-auth-exempt by design — so client
+  auth alone leaves agent registration wide open. Without tokens the hub now refuses
+  to start (loopback or not). `CCHUB_ALLOW_OPEN_UPLINK=1` forces it open and is your
+  conscious "tailnet/dev only" opt-in; with tokens unset *and* the override unset, a
+  runtime check additionally rejects any registration that arrives through a proxy
+  (forwarded headers ⇒ not local). Off-tailnet the real fix is per-agent tokens (and
+  Cloudflare Access in front), not the override.
 
 ---
 
@@ -368,7 +384,7 @@ Hub (`~/.config/cc-screen-hub/web.env`):
 | `CCHUB_AGENT_TOKENS` | per-agent uplink tokens, `machine:token,…` (empty = open) |
 | `CCWEB_ALLOWED_ORIGINS` | extra allowed browser Origin/Host values (the proxy domain), comma-separated |
 | `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with client auth off (override) |
-| `CCHUB_ALLOW_OPEN_UPLINK` | `1` → allow a routable bind with an empty `CCHUB_AGENT_TOKENS` (override) |
+| `CCHUB_ALLOW_OPEN_UPLINK` | `1` → allow an empty `CCHUB_AGENT_TOKENS` (open uplink). Required for any no-token run, **including loopback** — there is no loopback exemption (a hub gets fronted by tunnels). Tailnet/dev only. |
 | `CCWEB_CSP` | override the embedded-app Content-Security-Policy (`off`/empty disables it) |
 
 ---
@@ -406,7 +422,9 @@ Run both binaries under a throwaway `$HOME` on loopback ports — never the live
 
 ```sh
 TMP=$(mktemp -d); export HOME=$TMP; mkdir -p "$TMP/work"
-./target/release/cc-screen-hub  --addr 127.0.0.1:18840 &
+# An open uplink (no per-agent tokens) is now opt-in even on loopback, so set the
+# override for this token-less dev run — otherwise the hub refuses to start.
+CCHUB_ALLOW_OPEN_UPLINK=1 ./target/release/cc-screen-hub  --addr 127.0.0.1:18840 &
 ./target/release/cc-screen-rust --addr 127.0.0.1:18839 \
     --hub http://127.0.0.1:18840 --machine-id smoke --no-restore &
 # create a shell session, then:

@@ -34,6 +34,7 @@ async fn start_hub(client_auth: Auth, agent_tokens: &[(&str, &str)]) -> String {
     let hub = HubState {
         registry: Registry::new(),
         agent_tokens: Arc::new(tokens),
+        allow_open_uplink: false,
         client_auth,
         origin: cc_screen_auth::OriginPolicy::default(),
         login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),

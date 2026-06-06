@@ -30,8 +30,10 @@ RUN-DIRECTLY FLAGS
 CONFIG (env / ~/.config/cc-screen-hub/web.env)
   CCWEB_PASSWORD / CCWEB_API_TOKEN   client auth gate (the browser/TUI login)
   CCHUB_AGENT_TOKENS                 per-agent uplink tokens, "machine:token,m2:tok2".
-                                     Empty = OPEN uplink (any agent may register) —
-                                     tailnet/dev only. Set it to require known tokens.
+                                     Empty = OPEN uplink (any agent may register); the
+                                     hub refuses to start in that case (even on loopback —
+                                     it may be tunnel-fronted) unless CCHUB_ALLOW_OPEN_UPLINK=1.
+                                     Set tokens to require known agents.
   CCWEB_CONFIG_DIR                   override the state dir (default ~/.config/cc-screen-hub)
                                      so a second hub (e.g. a test instance on another
                                      port) runs with fully isolated state.
@@ -127,6 +129,7 @@ async fn main() {
     let hub = HubState {
         registry: Registry::new(),
         agent_tokens: Arc::new(cfg.agent_tokens),
+        allow_open_uplink: cfg.allow_open_uplink,
         client_auth: auth,
         origin: cc_screen_auth::OriginPolicy::new(&cfg.addr, cfg.allowed_origins.as_deref()),
         login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),

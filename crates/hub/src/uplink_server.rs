@@ -21,6 +21,23 @@ use crate::state::HubState;
 /// `GET /agent/ws` — the agent uplink. Rejects an implausible token before the
 /// upgrade; the exact `(machine, token)` check happens after `Register`.
 pub async fn agent_ws(State(hub): State<HubState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    // Runtime backstop (proposal 0010, Part 3): in unguarded open-uplink mode (no
+    // per-agent tokens and no explicit CCHUB_ALLOW_OPEN_UPLINK opt-in), refuse a
+    // registration that arrived through a reverse proxy. Forwarded headers mean the
+    // connection did NOT originate on this host — exactly the loopback-behind-a-
+    // tunnel case the startup bind-scope check can't see. A genuine local dev peer
+    // carries no such headers; one that forges them is already local and gains
+    // nothing. This is defense-in-depth behind the startup guard, not the primary
+    // control (per-agent tokens are).
+    if hub.open_uplink_unguarded() && proxied(&headers) {
+        tracing::warn!("agent uplink: refused open-uplink registration arriving through a proxy");
+        return (
+            StatusCode::FORBIDDEN,
+            "open uplink is not allowed through a proxy: set CCHUB_AGENT_TOKENS to \
+             gate the uplink, or CCHUB_ALLOW_OPEN_UPLINK=1 to allow it anyway",
+        )
+            .into_response();
+    }
     let token = bearer(&headers);
     if !hub.handshake_token_plausible(token) {
         return (StatusCode::UNAUTHORIZED, "bad agent token").into_response();
@@ -36,6 +53,14 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .ok()?
         .strip_prefix("Bearer ")
         .map(str::trim)
+}
+
+/// True when the request carries reverse-proxy markers, i.e. it was forwarded
+/// rather than originating on this host. Behind cloudflared / a TLS proxy these
+/// are set and sanitized by the edge, so they're trustworthy there.
+fn proxied(headers: &HeaderMap) -> bool {
+    const MARKERS: [&str; 3] = ["x-forwarded-for", "cf-connecting-ip", "forwarded"];
+    MARKERS.iter().any(|h| headers.contains_key(*h))
 }
 
 async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
@@ -148,4 +173,33 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
     conn.go_offline();
     writer.abort();
     tracing::info!("agent {machine_id} offline");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn proxied_detects_forwarded_markers() {
+        // A direct (loopback/tailnet) connection carries no forwarded headers.
+        assert!(!proxied(&hdrs(&[("authorization", "Bearer x")])));
+        assert!(!proxied(&hdrs(&[])));
+        // Each reverse-proxy marker trips it.
+        assert!(proxied(&hdrs(&[("x-forwarded-for", "1.2.3.4")])));
+        assert!(proxied(&hdrs(&[("cf-connecting-ip", "1.2.3.4")])));
+        assert!(proxied(&hdrs(&[("forwarded", "for=1.2.3.4")])));
+        // Header name matching is case-insensitive (HeaderMap normalizes).
+        assert!(proxied(&hdrs(&[("X-Forwarded-For", "1.2.3.4")])));
+    }
 }

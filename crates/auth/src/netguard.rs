@@ -85,9 +85,16 @@ pub fn require_safe_bind(
     }
 }
 
-/// Hub-only policy: a routable bind with an OPEN uplink (no `CCHUB_AGENT_TOKENS`)
-/// is refused unless `allow_override` is set, so any peer can't register as any
-/// machine over a reachable uplink.
+/// Hub-only policy: an OPEN uplink (no `CCHUB_AGENT_TOKENS`) is refused unless
+/// `allow_override` is set, so any peer can't register as any machine over a
+/// reachable uplink.
+///
+/// Unlike [`require_safe_bind`], there is **no loopback exemption** (proposal
+/// 0010): a hub is the component that gets fronted by a reverse tunnel, so a
+/// loopback bind does *not* imply "only this host can reach it" — the documented
+/// off-tailnet recipe is "bind `127.0.0.1`, publish it via cloudflared." The bind
+/// address can't reveal the tunnel, so an open uplink must be a conscious,
+/// explicit choice regardless of bind scope.
 pub fn require_gated_uplink(
     addr: &str,
     tokens_configured: bool,
@@ -96,18 +103,15 @@ pub fn require_gated_uplink(
     if tokens_configured || allow_override {
         return Ok(());
     }
-    match bind_scope(addr) {
-        BindScope::Loopback => Ok(()),
-        BindScope::Routable => Err(format!(
-            "refusing to bind {addr} with an OPEN uplink (CCHUB_AGENT_TOKENS is \
-             empty): any peer that reaches this address could register as — and \
-             impersonate — any machine.\n\
-             Fix one of:\n  \
-             • set CCHUB_AGENT_TOKENS=machine:token,… to gate the uplink, or\n  \
-             • bind loopback instead, or\n  \
-             • set CCHUB_ALLOW_OPEN_UPLINK=1 to allow it anyway."
-        )),
-    }
+    Err(format!(
+        "refusing to run with an OPEN uplink (CCHUB_AGENT_TOKENS is empty) on \
+         {addr}: any peer that reaches this hub — including through a reverse \
+         tunnel fronting a loopback bind — could register as, and impersonate, \
+         any machine.\n\
+         Fix one of:\n  \
+         • set CCHUB_AGENT_TOKENS=machine:token,… to gate the uplink, or\n  \
+         • set CCHUB_ALLOW_OPEN_UPLINK=1 to allow it anyway (tailnet/dev only)."
+    ))
 }
 
 #[cfg(test)]
@@ -167,16 +171,19 @@ mod tests {
     }
 
     #[test]
-    fn gated_uplink_refuses_open_routable() {
-        // Loopback open uplink → fine (dev).
-        assert!(require_gated_uplink("127.0.0.1:8840", false, false).is_ok());
-        // Routable with tokens configured → fine.
-        assert!(require_gated_uplink("0.0.0.0:8840", true, false).is_ok());
-        // Routable open uplink, override → fine.
-        assert!(require_gated_uplink("0.0.0.0:8840", false, true).is_ok());
-        // Routable open uplink, no override → refused.
-        let err = require_gated_uplink("0.0.0.0:8840", false, false).unwrap_err();
+    fn gated_uplink_refuses_open_regardless_of_bind_scope() {
+        // No loopback exemption (proposal 0010): a loopback bind can be fronted by
+        // a tunnel, so an open uplink there is refused too.
+        let err = require_gated_uplink("127.0.0.1:8840", false, false).unwrap_err();
         assert!(err.contains("CCHUB_AGENT_TOKENS"));
         assert!(err.contains("CCHUB_ALLOW_OPEN_UPLINK"));
+        // Routable open uplink, no override → also refused.
+        assert!(require_gated_uplink("0.0.0.0:8840", false, false).is_err());
+        // Tokens configured → fine (loopback or routable).
+        assert!(require_gated_uplink("127.0.0.1:8840", true, false).is_ok());
+        assert!(require_gated_uplink("0.0.0.0:8840", true, false).is_ok());
+        // Explicit override → fine (loopback or routable).
+        assert!(require_gated_uplink("127.0.0.1:8840", false, true).is_ok());
+        assert!(require_gated_uplink("0.0.0.0:8840", false, true).is_ok());
     }
 }

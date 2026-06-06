@@ -15,6 +15,11 @@ pub struct HubState {
     /// `machine_id → uplink token`. Empty = open mode (tailnet/dev): any agent may
     /// register. Non-empty = each machine must present its configured token.
     pub agent_tokens: Arc<HashMap<String, String>>,
+    /// The explicit `CCHUB_ALLOW_OPEN_UPLINK` opt-in. Only meaningful in open mode
+    /// (empty `agent_tokens`): with it unset, the runtime backstop in
+    /// `uplink_server::agent_ws` refuses a registration arriving through a reverse
+    /// proxy (proposal 0010, Part 3).
+    pub allow_open_uplink: bool,
     /// The client-facing gate (browser cookie / `ccs` bearer). Independent of the
     /// per-agent uplink tokens above.
     pub client_auth: Auth,
@@ -55,6 +60,15 @@ impl HubState {
             Some(expected) => presented == Some(expected.as_str()),
         }
     }
+
+    /// True when the uplink is open (no per-agent tokens) and the operator has NOT
+    /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
+    /// who reaches `/agent/ws` could impersonate any machine, so the runtime
+    /// backstop (proposal 0010, Part 3) refuses a registration that arrived through
+    /// a reverse proxy (forwarded headers present ⇒ not local).
+    pub fn open_uplink_unguarded(&self) -> bool {
+        self.agent_tokens.is_empty() && !self.allow_open_uplink
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +81,7 @@ mod tests {
         HubState {
             registry: Registry::new(),
             agent_tokens: Arc::new(map),
+            allow_open_uplink: false,
             client_auth: Auth::new(None, None, [0u8; 32]),
             origin: cc_screen_auth::OriginPolicy::default(),
             login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),
