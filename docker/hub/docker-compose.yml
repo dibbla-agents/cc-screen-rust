@@ -22,13 +22,15 @@ services:
     env_file:
       - .env
     ports:
-      # host:container. Defaults to the conventional hub port 8840; override the
-      # HOST side with HUB_HOST_PORT (e.g. this repo's hubctl.sh sets it to 8841
-      # so a dockerized "prod" hub coexists with a native hub already on 8840).
-      # The container always listens on 8840 internally. For a tailnet box, bind a
-      # specific host IP — the hub's security model says don't expose it publicly
-      # without a TLS proxy + agent tokens, e.g. "100.x.y.z:8840:8840".
-      - "${HUB_HOST_PORT:-8840}:8840"
+      # hostIP:hostPort:container. Binds the host LOOPBACK by default — the hub
+      # concentrates access to every connected agent's PTYs/files, so don't expose
+      # it publicly without a TLS proxy + agent tokens. To reach it over a tailnet,
+      # set HUB_BIND to the tailnet IP (e.g. HUB_BIND=100.x.y.z) AND configure
+      # CCWEB_API_TOKEN + CCHUB_AGENT_TOKENS first — the hub's fail-closed startup
+      # guard refuses a routable bind without credentials. HUB_HOST_PORT overrides
+      # the host port (hubctl.sh uses 8841 so a dockerized "prod" hub coexists with
+      # a native hub on 8840); the container always listens on 8840 internally.
+      - "${HUB_BIND:-127.0.0.1}:${HUB_HOST_PORT:-8840}:8840"
     volumes:
       # Persists session.key, favorites, VAPID keys, and push subscriptions.
       - hub-config:/home/app/.config/cc-screen-hub

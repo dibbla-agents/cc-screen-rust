@@ -245,7 +245,55 @@ The hub challenges the "tailnet-only, never bind public" rule deliberately:
   the hub with a **TLS reverse proxy** (and prefer mTLS on the uplink). The hub
   owns no filesystem and runs no agent code itself, which bounds its own surface.
 - **Confinement stays on the agent.** File ops run on the owning agent and go
-  through its `$HOME` confinement — the hub can't widen it.
+  through its symlink-safe `$HOME` confinement — the hub can't widen it.
+
+### The agent fully trusts its `--hub` endpoint
+
+The uplink authenticates the *agent to the hub* (the per-agent token) but the
+agent does **not** separately authenticate the hub back. Once connected, the agent
+executes whatever the hub sends — create sessions, read/write files, inject
+keys/paste. So whatever answers at `--hub` effectively drives the agent.
+
+- **Off-tailnet, the agent MUST dial `wss://`** (a `https://` hub URL derives a
+  `wss://` uplink). TLS is what authenticates the hub and stops a MITM from
+  impersonating it. The uplink client validates certificates against the webpki
+  root store (the `tokio-tungstenite` rustls/webpki-roots stack), so `wss://` with
+  an untrusted or self-signed cert **fails closed** — it won't connect. Don't
+  disable verification.
+- **On a trusted tailnet**, plain `ws://` is acceptable because the tailnet itself
+  is the authenticated transport.
+- Treat the hub as part of the agent's trust base: only point `--hub` at a hub you
+  control, reached over TLS (or the tailnet).
+
+### Fail-closed binds (both binaries)
+
+Neither binary will bind a **routable** address with auth disabled — a YOLO
+control plane open to the network is RCE for any peer. The agent refuses unless
+`CCWEB_PASSWORD`/`CCWEB_API_TOKEN` is set (override: `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE=1`);
+the hub also refuses a routable bind with an empty `CCHUB_AGENT_TOKENS`
+(override: `CCHUB_ALLOW_OPEN_UPLINK=1`). Loopback dev is unaffected.
+
+### Browser trust boundary (Origin/Host)
+
+Both binaries reject cross-origin and DNS-rebinding `fetch`/WebSocket requests to
+`/api/*` — **independent of the auth gate** — so a web page the operator opens
+can't drive a default-unauthenticated instance. Same-origin requests, raw-IP
+hosts, `localhost`, and `*.ts.net` are accepted automatically; a reverse-proxy
+domain or other hostname must be added to `CCWEB_ALLOWED_ORIGINS`
+(comma-separated). If a proxied deployment suddenly 403s browser requests after
+upgrading, set `CCWEB_ALLOWED_ORIGINS` to its domain.
+
+### Trust the proxy's forwarded headers, not the client's
+
+Login throttling keys off `X-Forwarded-For` and the `Secure` cookie flag off
+`X-Forwarded-Proto`. These are only trustworthy when a reverse proxy **sets and
+overwrites** them — configure the documented TLS proxy to strip any
+client-supplied `X-Forwarded-*` so a caller can't spoof a source IP (to dodge the
+per-source lockout) or the scheme. On a direct tailnet bind there's no proxy, so
+the throttle falls back to a single global bucket. (A separate, accepted residual:
+the constant-time credential compare short-circuits on length, leaking only the
+credential *length* — acknowledged in `crates/auth` and acceptable for this threat
+model.)
 
 ### Off-tailnet via a Cloudflare Tunnel
 
@@ -284,6 +332,9 @@ Agent (`~/.config/cc-screen-rust/web.env`):
 | `CCWEB_HUB_TOKEN` | this machine's uplink token |
 | `CCWEB_MACHINE_ID` | name in the hub's list (default hostname) |
 | `CCWEB_HUB_ONLY` | `1`/`true` → bind no local port |
+| `CCWEB_ALLOWED_ORIGINS` | extra allowed browser Origin/Host values (reverse-proxy domain), comma-separated |
+| `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with auth off (override the fail-closed guard) |
+| `CCWEB_CSP` | override the embedded-app Content-Security-Policy (`off`/empty disables it) |
 
 Hub (`~/.config/cc-screen-hub/web.env`):
 
@@ -292,6 +343,10 @@ Hub (`~/.config/cc-screen-hub/web.env`):
 | `CCWEB_ADDR` | bind address (default `127.0.0.1:8840`) |
 | `CCWEB_PASSWORD` / `CCWEB_API_TOKEN` | client auth gate |
 | `CCHUB_AGENT_TOKENS` | per-agent uplink tokens, `machine:token,…` (empty = open) |
+| `CCWEB_ALLOWED_ORIGINS` | extra allowed browser Origin/Host values (the proxy domain), comma-separated |
+| `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with client auth off (override) |
+| `CCHUB_ALLOW_OPEN_UPLINK` | `1` → allow a routable bind with an empty `CCHUB_AGENT_TOKENS` (override) |
+| `CCWEB_CSP` | override the embedded-app Content-Security-Policy (`off`/empty disables it) |
 
 ---
 
