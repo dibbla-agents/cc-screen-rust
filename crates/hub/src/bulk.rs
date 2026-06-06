@@ -9,7 +9,6 @@
 //! multipart / confinement all behave exactly as a direct connection.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,14 +24,18 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::state::HubState;
 
-/// In-flight bulk transfers, keyed by a hub-allocated id the agent dials back with.
+/// In-flight bulk transfers, keyed by an unguessable random nonce the agent dials
+/// back with. Each slot remembers the `machine_id` it was opened for, so only the
+/// selected agent can claim it (a sequential id let any authorized — or, in open
+/// mode, any — peer race/guess it and hijack another machine's transfer).
 #[derive(Clone, Default)]
 pub struct BulkRegistry {
-    slots: Arc<Mutex<HashMap<u32, BulkSlot>>>,
-    next: Arc<AtomicU32>,
+    slots: Arc<Mutex<HashMap<String, BulkSlot>>>,
 }
 
 struct BulkSlot {
+    /// The machine this transfer was routed to; the dial-back must match it.
+    machine_id: String,
     /// Client request body → agent (drained by the `/agent/bulk` bridge).
     req_body: mpsc::Receiver<Vec<u8>>,
     /// Agent response head → the waiting client handler.
@@ -41,12 +44,34 @@ struct BulkSlot {
     body_tx: mpsc::Sender<Vec<u8>>,
 }
 
+/// Why a bulk dial-back couldn't claim a slot.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimErr {
+    /// No slot for that nonce (unknown / expired / already claimed).
+    Unknown,
+    /// The slot exists but was opened for a different machine — the dialer is not
+    /// the selected agent. The slot is left intact for the real agent.
+    WrongMachine,
+}
+
 impl BulkRegistry {
-    fn alloc(&self) -> u32 {
-        self.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    /// A fresh 256-bit URL-safe nonce.
+    fn alloc(&self) -> String {
+        cc_screen_auth::generate_token()
     }
-    fn take(&self, id: u32) -> Option<BulkSlot> {
-        self.slots.lock().unwrap().remove(&id)
+    /// Remove + return the slot only if `machine` matches the one it was opened
+    /// for. A wrong machine leaves the slot in place so the legitimate agent's
+    /// later dial-back still succeeds.
+    fn claim(&self, id: &str, machine: &str) -> Result<BulkSlot, ClaimErr> {
+        let mut g = self.slots.lock().unwrap();
+        match g.get(id) {
+            None => Err(ClaimErr::Unknown),
+            Some(slot) if slot.machine_id != machine => Err(ClaimErr::WrongMachine),
+            Some(_) => Ok(g.remove(id).expect("present under lock")),
+        }
+    }
+    fn take(&self, id: &str) -> Option<BulkSlot> {
+        self.slots.lock().unwrap().remove(id)
     }
 }
 
@@ -83,6 +108,7 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
     let Some(agent) = hub.registry.resolve(&machine, session.as_deref()) else {
         return (StatusCode::NOT_FOUND, "no online machine for that request").into_response();
     };
+    let target_machine = agent.machine_id.clone();
     let headers: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -91,16 +117,23 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
         .collect();
     let client_body = req.into_body();
 
-    // Register the transfer + tell the agent to dial back.
+    // Register the transfer (bound to the target machine) + tell the agent to dial
+    // back with the nonce.
     let id = hub.bulk.alloc();
     let (req_tx, req_rx) = mpsc::channel::<Vec<u8>>(16);
     let (head_tx, head_rx) = oneshot::channel::<BulkRespHead>();
     let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(16);
-    hub.bulk.slots.lock().unwrap().insert(id, BulkSlot { req_body: req_rx, head_tx, body_tx });
+    hub.bulk.slots.lock().unwrap().insert(
+        id.clone(),
+        BulkSlot { machine_id: target_machine, req_body: req_rx, head_tx, body_tx },
+    );
 
-    let frame = encode_frame(&HubMsg::OpenBulk { req: id, bulk: BulkSpec { method, uri, headers } }, b"");
+    let frame = encode_frame(
+        &HubMsg::OpenBulk { id: id.clone(), bulk: BulkSpec { method, uri, headers } },
+        b"",
+    );
     if agent.to_agent().send(frame).await.is_err() {
-        hub.bulk.take(id);
+        hub.bulk.take(&id);
         return (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response();
     }
 
@@ -123,7 +156,7 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
     let head = match tokio::time::timeout(Duration::from_secs(30), head_rx).await {
         Ok(Ok(h)) => h,
         _ => {
-            hub.bulk.take(id);
+            hub.bulk.take(&id);
             return (StatusCode::GATEWAY_TIMEOUT, "agent did not respond").into_response();
         }
     };
@@ -145,11 +178,17 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
 
 #[derive(Deserialize)]
 pub struct BulkIdQuery {
-    id: u32,
+    id: String,
+    /// The dialing agent's machine id — must match the slot's selected machine.
+    #[serde(default)]
+    machine: String,
 }
 
-/// `GET /agent/bulk?id=` — the agent dials this to run one transfer. Token-gated
-/// like `/agent/ws`; matched to the waiting client transfer by `id`.
+/// `GET /agent/bulk?id=&machine=` — the agent dials this to run one transfer.
+/// Token-gated like `/agent/ws`, AND bound to the selected machine: the dial-back
+/// must present the right `(machine, token)` pair and the nonce that was sent only
+/// to that machine. This stops another (lower-trust, or in open mode any) peer
+/// from racing/guessing the id to capture an upload body or forge a download.
 pub async fn agent_bulk(
     State(hub): State<HubState>,
     headers: HeaderMap,
@@ -164,15 +203,27 @@ pub async fn agent_bulk(
     if !hub.handshake_token_plausible(token) {
         return (StatusCode::UNAUTHORIZED, "bad agent token").into_response();
     }
-    let Some(slot) = hub.bulk.take(q.id) else {
-        return (StatusCode::NOT_FOUND, "unknown or expired bulk id").into_response();
+    // Bind the token to the claimed machine (configured mode); open mode accepts
+    // any token but the nonce+machine binding below still gates the claim.
+    if !hub.uplink_token_ok_for(&q.machine, token) {
+        return (StatusCode::UNAUTHORIZED, "agent token not valid for that machine").into_response();
+    }
+    let slot = match hub.bulk.claim(&q.id, &q.machine) {
+        Ok(slot) => slot,
+        Err(ClaimErr::WrongMachine) => {
+            tracing::warn!("bulk: dial-back from {} for a slot owned by another machine (rejected)", q.machine);
+            return (StatusCode::FORBIDDEN, "bulk slot belongs to another machine").into_response();
+        }
+        Err(ClaimErr::Unknown) => {
+            return (StatusCode::NOT_FOUND, "unknown or expired bulk id").into_response();
+        }
     };
     ws.on_upgrade(move |socket| bridge(socket, slot))
 }
 
 async fn bridge(socket: WebSocket, slot: BulkSlot) {
     let (mut tx, mut rx) = socket.split();
-    let BulkSlot { mut req_body, head_tx, body_tx } = slot;
+    let BulkSlot { machine_id: _, mut req_body, head_tx, body_tx } = slot;
 
     // Forward the client request body to the agent, then the end marker.
     tokio::spawn(async move {
@@ -217,6 +268,38 @@ mod tests {
         assert_eq!(qparam(q, "session").as_deref(), Some("claude-x"));
         assert_eq!(qparam(q, "path").as_deref(), Some("/home/u/f"));
         assert_eq!(qparam(q, "absent"), None);
+    }
+
+    fn slot(machine: &str) -> BulkSlot {
+        let (_req_tx, req_body) = mpsc::channel::<Vec<u8>>(1);
+        let (head_tx, _head_rx) = oneshot::channel::<BulkRespHead>();
+        let (body_tx, _body_rx) = mpsc::channel::<Vec<u8>>(1);
+        BulkSlot { machine_id: machine.into(), req_body, head_tx, body_tx }
+    }
+
+    #[test]
+    fn alloc_nonces_are_unguessable_and_unique() {
+        let reg = BulkRegistry::default();
+        let a = reg.alloc();
+        let b = reg.alloc();
+        assert_ne!(a, b);
+        assert!(a.len() >= 32, "nonce should be long: {a}");
+    }
+
+    #[test]
+    fn claim_binds_to_the_selected_machine() {
+        let reg = BulkRegistry::default();
+        let id = reg.alloc();
+        reg.slots.lock().unwrap().insert(id.clone(), slot("pine"));
+
+        // The wrong machine cannot claim it — and the slot survives for the real one.
+        assert!(matches!(reg.claim(&id, "laptop"), Err(ClaimErr::WrongMachine)));
+        assert!(reg.slots.lock().unwrap().contains_key(&id), "slot retained after a bad claim");
+        // The right machine claims it once.
+        assert!(reg.claim(&id, "pine").is_ok());
+        assert!(matches!(reg.claim(&id, "pine"), Err(ClaimErr::Unknown)), "consumed");
+        // An unknown nonce is rejected.
+        assert!(matches!(reg.claim("no-such-nonce", "pine"), Err(ClaimErr::Unknown)));
     }
 
     #[test]

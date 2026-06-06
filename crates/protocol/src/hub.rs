@@ -39,7 +39,7 @@ use crate::{CreateReq, DeleteReq, Favorite, RestorableSession, SessionInfo, Tool
 /// A logical stream inside one agent↔hub WebSocket. `0` is the control channel;
 /// `1..` are per-attached-client terminal/watch streams (hub-allocated).
 pub type ChannelId = u32;
-/// Correlates a [`HubMsg::Command`]/[`HubMsg::OpenBulk`] with its [`AgentMsg::Reply`].
+/// Correlates a [`HubMsg::Command`] with its [`AgentMsg::Reply`].
 pub type ReqId = u32;
 
 /// Bumped on any breaking envelope change; sent in [`AgentMsg::Register`] so the
@@ -64,7 +64,7 @@ pub enum AgentMsg {
     /// The agent's live session list (sent on register and whenever it changes).
     /// `SessionInfo` is the same type the client-facing `/api/sessions` returns.
     Sessions { sessions: Vec<SessionInfo> },
-    /// Result of a [`HubMsg::Command`] / [`HubMsg::OpenBulk`], correlated by `req`.
+    /// Result of a [`HubMsg::Command`], correlated by `req`.
     Reply { req: ReqId, result: CmdResult },
     /// Snapshot (RIS-prefixed repaint) for a freshly-attached client; **payload
     /// tail = the snapshot bytes**. Always the FIRST frame on a terminal channel.
@@ -98,8 +98,10 @@ pub enum HubMsg {
     WatchSub { ch: ChannelId, dirs: Vec<String>, unsub: bool },
     /// A small request/reply control op (lifecycle, small file ops).
     Command { req: ReqId, cmd: Cmd },
-    /// Ask the agent to dial the dedicated bulk WS for a large transfer.
-    OpenBulk { req: ReqId, bulk: BulkSpec },
+    /// Ask the agent to dial the dedicated bulk WS for a large transfer. `id` is
+    /// an unguessable random nonce the agent presents (with its `machine_id`) on
+    /// the dial-back, so only the selected agent can claim this transfer's slot.
+    OpenBulk { id: String, bulk: BulkSpec },
     /// Liveness probe (→ [`AgentMsg::Pong`]).
     Ping,
 }
@@ -278,7 +280,7 @@ mod tests {
             HubMsg::Command { req: 2, cmd: Cmd::Delete(DeleteReq { session: "claude-x".into(), mode: "kill".into() }) },
             HubMsg::Command { req: 3, cmd: Cmd::Key { session: "claude-x".into(), key: "enter".into() } },
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
-            HubMsg::OpenBulk { req: 5, bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
+            HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::Ping,
         ];
         for m in cases {

@@ -19,6 +19,12 @@ use axum::Router;
 
 use state::HubState;
 
+/// Upload body ceiling on the hub relay — the agent allows 500 MiB; add headroom
+/// for multipart framing so the hub never rejects a transfer the agent accepts.
+const UPLOAD_MAX: usize = 520 << 20; // 520 MiB
+/// Clipboard-image body ceiling (the agent allows 25 MiB).
+const CLIP_MAX: usize = 32 << 20; // 32 MiB
+
 /// Assemble the hub router. The agent uplink (`/agent/ws`) carries its own
 /// per-agent token check and is exempt from client auth (it isn't under `/api/`).
 /// Everything under `/api/` rides the client-auth middleware.
@@ -28,11 +34,13 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/agent/ws", get(uplink_server::agent_ws))
         .route("/agent/bulk", get(bulk::agent_bulk))
         // Bulk file transfers (download / upload / clipboard image), relayed to
-        // the owning agent's real handlers over the dedicated bulk WS.
+        // the owning agent's real handlers over the dedicated bulk WS. Cap the
+        // body at a sane ceiling (matching the agent's own limits, +headroom)
+        // rather than disabling the limit entirely — bound memory/disk abuse.
         .route("/api/download", get(bulk::proxy))
-        .route("/api/upload", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/api/upload", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::max(UPLOAD_MAX)))
         .route("/api/upload/check", post(bulk::proxy))
-        .route("/api/clip", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::disable()))
+        .route("/api/clip", post(bulk::proxy).layer(axum::extract::DefaultBodyLimit::max(CLIP_MAX)))
         .route("/api/clip/targets", get(bulk::proxy))
         .route("/api/clip/image.png", get(bulk::proxy))
         // Client-facing aggregation + auth.

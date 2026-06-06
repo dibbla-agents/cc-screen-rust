@@ -289,13 +289,15 @@ async fn handle_hub(
                 return false;
             }
         }
-        HubMsg::OpenBulk { req, bulk } => {
+        HubMsg::OpenBulk { id, bulk } => {
             // Big transfers run on a fresh, dedicated WS (off the control channel).
+            // We present our machine_id + the nonce on the dial-back so the hub can
+            // bind the slot to this machine.
             tokio::spawn(crate::bulk::serve(
                 state.clone(),
                 hub_base.to_string(),
                 token.map(str::to_string),
-                req,
+                id,
                 bulk,
             ));
         }

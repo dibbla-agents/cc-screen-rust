@@ -316,6 +316,73 @@ async fn explicit_machine_disambiguates_same_named_session() {
     assert!(blocked, "a machine-less attach to a colliding name gets no relay");
 }
 
+/// Fix 4: in open-uplink mode, a second peer registering as an already-online
+/// machine must be rejected (closed), not silently displace the live agent.
+#[tokio::test]
+async fn open_mode_rejects_duplicate_online_machine() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    spawn_fake_agent(&hub, "boxA", None, "shell-x").await;
+
+    // Wait until boxA is listed (online).
+    let mut listed = false;
+    for _ in 0..50 {
+        let body: Vec<SessionInfo> =
+            reqwest::get(format!("http://{hub}/api/sessions")).await.unwrap().json().await.unwrap();
+        if body.iter().any(|s| s.machine == "boxA") {
+            listed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(listed, "boxA online");
+
+    // An impostor dials in as boxA. The hub must close it.
+    let mut ws2 = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("connects");
+    send(
+        &mut ws2,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "boxA".into(),
+            hostname: "boxA".into(),
+            agent_version: "evil".into(),
+            tools: vec![],
+        },
+        b"",
+    )
+    .await;
+    let mut closed = false;
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(2), ws2.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Ok(_))) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(closed, "the impostor's duplicate registration is rejected");
+
+    // The original boxA is still online and serving.
+    let body: Vec<SessionInfo> =
+        reqwest::get(format!("http://{hub}/api/sessions")).await.unwrap().json().await.unwrap();
+    assert!(body.iter().any(|s| s.machine == "boxA"), "original boxA stays connected");
+}
+
+/// Fix 3: a bulk dial-back with an unknown / unmatched nonce is refused (no slot
+/// to claim), so a peer can't fabricate an id to capture a transfer.
+#[tokio::test]
+async fn bulk_dialback_with_unknown_nonce_is_rejected() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    // No transfer is in flight, so any nonce is unknown → the upgrade is refused.
+    let res = connect(
+        &format!("ws://{hub}/agent/bulk?id=made-up-nonce&machine=boxA"),
+        None,
+    )
+    .await;
+    assert!(res.is_err(), "an unknown bulk nonce must not upgrade");
+}
+
 /// New Session needs the chosen agent's tool list. Agents register their tools at
 /// uplink time; the hub serves them from the registry (no agent round-trip).
 /// Without this route New Session's Create button stays disabled (no tool to

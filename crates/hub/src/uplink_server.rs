@@ -55,6 +55,18 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     let _ = ws_write.send(Message::Close(None)).await;
                     return;
                 }
+                // Fix 4: in OPEN uplink mode (no per-agent tokens) any peer could
+                // register as an existing machine_id and silently displace the live
+                // agent — a stealthy MITM of all its terminal/file traffic. Refuse a
+                // duplicate while the original is still online. (Configured mode is
+                // already gated: only the real agent holds the matching token, so a
+                // genuine reconnect is allowed to replace.) A dropped agent is marked
+                // offline, so a real reconnect after the drop still succeeds.
+                if hub.agent_tokens.is_empty() && hub.registry.is_online(&machine_id) {
+                    tracing::warn!("agent {machine_id}: rejected — already online (open-uplink takeover blocked)");
+                    let _ = ws_write.send(Message::Close(None)).await;
+                    return;
+                }
                 (machine_id, hostname, tools)
             }
             _ => {
