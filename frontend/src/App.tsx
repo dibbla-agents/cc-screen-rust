@@ -1348,6 +1348,18 @@ export default function App() {
   const onKey = (key: string) => {
     if (!currentSession || blockViewOnly()) return;
     sendKey(currentSession.name, key, currentSession.machine).catch(() => {});
+    // Keep the soft keyboard up and the cursor focused after a ControlBar tap.
+    // Tapping a button blurs xterm's hidden helper textarea; on iOS that
+    // dismisses the keyboard, which fires the visualViewport→appH refit and
+    // jumps the agent's prompt out of view. ControlBar's mousedown-preventDefault
+    // suppresses the blur on desktop, but iOS Safari doesn't honor it — so we
+    // refocus the helper textarea in-gesture here (this runs inside the button's
+    // click) with preventScroll (per 0004) so iOS keeps the keyboard up and the
+    // view stays put. No-op on desktop where focus never left. See 0009.
+    const term = termsRef.current[active];
+    const ta = term?.element?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+    if (ta) ta.focus({ preventScroll: true });
+    else term?.focus();
   };
   // Wipe the polluted scrollback that builds up when Claude Code re-renders on
   // every SIGWINCH (it writes to the normal buffer, so each redraw appends).
