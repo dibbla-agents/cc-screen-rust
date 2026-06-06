@@ -152,6 +152,16 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   fetches/WS need no token); headless clients (`ccs`, scripts) send
   `Authorization: Bearer <token>`. The middleware exempts static assets +
   `/api/{login,auth,logout}`; everything else under `/api/` is gated.
+- **Per-session launch policy (0005).** Each session has two switches, chosen at
+  create (`CreateReq.skip_permissions` / `.remote_control`, defaulted so an older
+  client reproduces today's behavior — YOLO on, hub control off). **Skip
+  permissions** gates the tool's `yolo_flag` (split out of the launch template in
+  `src/tools.rs`; declare a custom one with `cc_tool_yolo <cmd|prefix> <flag>`).
+  **Remote control** is the per-session *view-only-through-the-hub* gate, enforced
+  authoritatively on the agent (`src/uplink.rs` drops input, `src/ops.rs` 403s
+  key/paste/clear/delete) — the direct port is unaffected. Both persist in the
+  manifest for restore; both clients surface the toggles + a "view only" badge.
+  See `cc-screen-saas` proposal 0005 and HUB.md → "Per-session view-only control".
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

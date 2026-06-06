@@ -70,6 +70,9 @@ pub struct NewSessionView<'a> {
     pub candidates: &'a [DirEntry],
     pub cand_sel: Option<usize>,
     pub error: Option<&'a str>,
+    /// Per-session launch policy toggles (0005). Defaults: YOLO on, hub off.
+    pub skip_permissions: bool,
+    pub remote_control: bool,
 }
 
 /// How many dir candidates to show at once.
@@ -105,6 +108,23 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         }
         Line::from(spans)
     };
+
+    // A policy-toggle row: `label  [value]  description`, the bracketed value
+    // colored when "on" (the more-exposed state) and dimmed when "off".
+    let toggle_line =
+        |label: &str, on: bool, focused: bool, on_txt: &str, off_txt: &str, on_color: Color, desc: &str| {
+            let marker = if focused { "▸" } else { " " };
+            let (txt, col) = if on { (on_txt, on_color) } else { (off_txt, Color::DarkGray) };
+            Line::from(vec![
+                Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{label:<6}"), dim),
+                Span::styled(
+                    format!("[{txt}]"),
+                    Style::default().fg(col).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {desc}"), dim),
+            ])
+        };
 
     // A read-only label row: `label  value` (no marker, no selector arrows).
     let label_line = |label: &str, value: &str, suffix: Vec<Span<'static>>| {
@@ -159,12 +179,37 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         }
     }
 
+    // Per-session launch policy (0005). Pre-filled to the right defaults; the
+    // "on" state of each is the more-exposed choice, so it carries the color.
+    lines.push(toggle_line(
+        "perms",
+        v.skip_permissions,
+        v.focus == FormField::SkipPermissions,
+        "YOLO",
+        "ask",
+        Color::Yellow,
+        "skip permission prompts",
+    ));
+    lines.push(toggle_line(
+        "hub",
+        v.remote_control,
+        v.focus == FormField::RemoteControl,
+        "control",
+        "view-only",
+        Color::Cyan,
+        "allow control from the hub",
+    ));
+
     lines.push(Line::from(""));
     if let Some(e) = v.error {
         lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
     }
+    let toggle_focused =
+        matches!(v.focus, FormField::SkipPermissions | FormField::RemoteControl);
     let hint = if dir_focused {
         " ↑↓ pick · tab/→ open · enter create · esc cancel"
+    } else if toggle_focused {
+        " space/←→ toggle · tab field · enter create · esc cancel"
     } else {
         " ←/→ change · tab field · enter create · esc cancel"
     };
@@ -350,6 +395,8 @@ mod tests {
             busy_since: 0,
             preview: "p".into(),
             waiting: false,
+            remote_control: None,
+            skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
         }
@@ -404,6 +451,8 @@ mod tests {
             candidates: &[],
             cand_sel: None,
             error: Some("already exists"),
+            skip_permissions: true,
+            remote_control: false,
         };
         let s = render_to(70, 14, |f| new_session(f, &v));
         assert!(s.contains("new session"), "{s}");
@@ -413,6 +462,9 @@ mod tests {
         assert!(s.contains("already exists"), "{s}");
         // No machine → the machine row is absent.
         assert!(!s.contains("machine"), "{s}");
+        // Policy toggles render with their defaults (0005): YOLO on, hub off.
+        assert!(s.contains("YOLO"), "skip-permissions toggle: {s}");
+        assert!(s.contains("view-only"), "remote-control toggle: {s}");
     }
 
     #[test]
@@ -428,6 +480,8 @@ mod tests {
             candidates: &[],
             cand_sel: None,
             error: None,
+            skip_permissions: true,
+            remote_control: false,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -449,6 +503,8 @@ mod tests {
             candidates: &[],
             cand_sel: None,
             error: None,
+            skip_permissions: true,
+            remote_control: false,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -474,6 +530,8 @@ mod tests {
             candidates: &cands,
             cand_sel: Some(1),
             error: None,
+            skip_permissions: true,
+            remote_control: false,
         };
         let s = render_to(70, 18, |f| new_session(f, &v));
         assert!(s.contains("dev"), "{s}");

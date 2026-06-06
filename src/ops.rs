@@ -14,6 +14,13 @@ fn unknown_session() -> CmdResult {
     CmdResult::Error { code: 404, msg: "unknown session".into() }
 }
 
+/// 403-style result for a control op aimed at a **view-only** session (0005).
+/// The agent is the authoritative enforcer: even if the hub forwards the op, we
+/// refuse it here so a buggy/compromised hub can't drive a view-only session.
+fn view_only() -> CmdResult {
+    CmdResult::Error { code: 403, msg: "session is view-only".into() }
+}
+
 pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
     match cmd {
         Cmd::Create(req) => match crate::handlers::create_core(app, &req) {
@@ -21,6 +28,7 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             Err((code, msg)) => CmdResult::Error { code: code.as_u16(), msg },
         },
         Cmd::Delete(req) => match app.get(&req.session) {
+            Some(sess) if !sess.remote_control => view_only(),
             Some(sess) => {
                 // The user is ending it on purpose — forget it so a later restore
                 // doesn't resurrect it (mirrors the REST delete handler).
@@ -34,6 +42,7 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             None => unknown_session(),
         },
         Cmd::Key { session, key } => match app.get(&session) {
+            Some(sess) if !sess.remote_control => view_only(),
             Some(sess) => match key_bytes(&key) {
                 Some(b) => {
                     sess.write_input(b);
@@ -44,6 +53,7 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             None => unknown_session(),
         },
         Cmd::Paste { session, text, enter } => match app.get(&session) {
+            Some(sess) if !sess.remote_control => view_only(),
             Some(sess) => {
                 sess.write_input(&wrap_bracketed_paste(&text, enter));
                 CmdResult::Ok
@@ -51,6 +61,7 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             None => unknown_session(),
         },
         Cmd::ClearHistory { session } => match app.get(&session) {
+            Some(sess) if !sess.remote_control => view_only(),
             Some(sess) => {
                 sess.clear_history();
                 CmdResult::Ok
@@ -88,5 +99,88 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             CmdResult::Error { code: 400, msg: "favorites are hub-local".into() }
         }
         Cmd::File { op, args } => crate::fileops::run(app, &op, args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::AppState;
+    use crate::tools::Tool;
+    use cc_screen_protocol::DeleteReq;
+
+    fn shell_tool() -> Tool {
+        Tool {
+            cmd: "tt".into(),
+            prefix: "shell".into(),
+            // Block on stdin so the session stays live for the duration of the test.
+            tmpl: "cat".into(),
+            extra_flag: None,
+            extra_max: 0,
+            resume_suffix: None,
+            resume_keep_extra: false,
+            yolo_flag: None,
+        }
+    }
+
+    fn app(tmp: &std::path::Path) -> AppState {
+        AppState::new(
+            vec![shell_tool()],
+            std::env::var("PATH").unwrap_or_default(),
+            tmp.to_path_buf(),
+            tmp.to_path_buf(),
+            "test-agent".into(),
+            crate::auth::Auth::load(tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        )
+    }
+
+    fn is_403(r: &CmdResult) -> bool {
+        matches!(r, CmdResult::Error { code: 403, .. })
+    }
+
+    // A hub-routed control op against a view-only session is refused at the agent
+    // (0005 acceptance #2), regardless of what the hub forwards. A controllable
+    // session runs the same ops fine.
+    #[test]
+    fn control_ops_refused_for_view_only_session() {
+        let tmp = std::env::temp_dir().join(format!("ccr-ops-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let app = app(&tmp);
+        let tool = shell_tool();
+
+        // remote_control = false → view-only through the hub.
+        let vo = app.create(&tool, "vo", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+        // remote_control = true → full hub control.
+        let ok = app.create(&tool, "ok", &tmp.to_string_lossy(), vec![], false, true, true).unwrap();
+
+        // Every control-bearing op is refused 403 on the view-only session…
+        assert!(is_403(&run_cmd(&app, Cmd::Key { session: vo.clone(), key: "enter".into() })));
+        assert!(is_403(&run_cmd(
+            &app,
+            Cmd::Paste { session: vo.clone(), text: "hi".into(), enter: false }
+        )));
+        assert!(is_403(&run_cmd(&app, Cmd::ClearHistory { session: vo.clone() })));
+        assert!(is_403(&run_cmd(
+            &app,
+            Cmd::Delete(DeleteReq { session: vo.clone(), mode: "kill".into() })
+        )));
+
+        // …and accepted on the controllable one.
+        assert!(matches!(
+            run_cmd(&app, Cmd::Key { session: ok.clone(), key: "enter".into() }),
+            CmdResult::Ok
+        ));
+        assert!(matches!(
+            run_cmd(&app, Cmd::ClearHistory { session: ok.clone() }),
+            CmdResult::Ok
+        ));
+
+        // The view-only session is still alive (its delete was refused, not run).
+        assert!(app.get(&vo).is_some(), "view-only delete must not have killed it");
+
+        app.get(&vo).unwrap().kill();
+        app.get(&ok).map(|s| s.kill());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

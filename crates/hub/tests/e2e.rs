@@ -61,6 +61,8 @@ fn sess(name: &str) -> SessionInfo {
         busy_since: 0,
         preview: String::new(),
         waiting: false,
+        remote_control: None,
+        skip_permissions: None,
         cwd: String::new(),
         machine: String::new(),
     }

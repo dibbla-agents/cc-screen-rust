@@ -204,10 +204,21 @@ struct WatchChan {
     forwarder: tokio::task::JoinHandle<()>,
 }
 
+/// One relayed terminal channel: its client-event sender plus the owning
+/// session's view-only policy (0005), captured at attach so `Input` can be
+/// dropped at the PTY boundary without re-looking-up the session each frame.
+struct TermChan {
+    tx: mpsc::Sender<ClientEvent>,
+    /// `false` ⇒ view-only: hub-relayed input is dropped here (output still
+    /// flows, so the client keeps watching). The agent is the authoritative
+    /// enforcer — see `src/ops.rs::view_only`.
+    remote_control: bool,
+}
+
 /// Everything a `HubMsg` handler may touch on this connection.
 struct ChannelMaps {
-    /// ch → terminal client-event sender (one `attach_loop` each).
-    term: HashMap<ChannelId, mpsc::Sender<ClientEvent>>,
+    /// ch → relayed terminal channel (one `attach_loop` each).
+    term: HashMap<ChannelId, TermChan>,
     /// ch → relayed fs-watch channel.
     watch: HashMap<ChannelId, WatchChan>,
 }
@@ -225,7 +236,9 @@ async fn handle_hub(
     match msg {
         HubMsg::Attach { ch, session, cols, rows } => match state.get(&session) {
             Some(sess) => {
-                chans.term.insert(ch, spawn_channel(sess, ch, cols, rows, out_tx.clone()));
+                let remote_control = sess.remote_control;
+                let tx = spawn_channel(sess, ch, cols, rows, out_tx.clone());
+                chans.term.insert(ch, TermChan { tx, remote_control });
             }
             None => {
                 // Unknown session → tell the hub this channel is already closed.
@@ -233,13 +246,20 @@ async fn handle_hub(
             }
         },
         HubMsg::Input { ch } => {
-            if let Some(tx) = chans.term.get(&ch) {
-                let _ = tx.send(ClientEvent::Input(payload.to_vec())).await;
+            if let Some(tc) = chans.term.get(&ch) {
+                // View-only (0005): drop hub-relayed input at the PTY boundary.
+                // The snapshot/output stream keeps flowing, so the client still
+                // *watches* — it just can't type. Authoritative even if the hub
+                // (buggy or compromised) forwards the bytes anyway.
+                if tc.remote_control {
+                    let _ = tc.tx.send(ClientEvent::Input(payload.to_vec())).await;
+                }
             }
         }
         HubMsg::Resize { ch, cols, rows } => {
-            if let Some(tx) = chans.term.get(&ch) {
-                let _ = tx.send(ClientEvent::Resize(cols, rows)).await;
+            // Resize only pins terminal geometry — never gated by remote_control.
+            if let Some(tc) = chans.term.get(&ch) {
+                let _ = tc.tx.send(ClientEvent::Resize(cols, rows)).await;
             }
         }
         HubMsg::WatchSub { ch, dirs, unsub } => {

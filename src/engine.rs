@@ -93,6 +93,13 @@ pub struct Session {
     pub extra_dirs: Vec<String>,
     #[allow(dead_code)]
     pub created: u64,
+    /// Whether the hub may relay control to this session (0005). `false` ⇒
+    /// view-only through the hub: the agent drops hub-originated input and
+    /// refuses hub control ops. The direct port is always fully controllable.
+    /// Enforced in `src/uplink.rs` (input) and `src/ops.rs` (key/paste/clear/delete).
+    pub remote_control: bool,
+    /// Whether this session launched YOLO — reported to clients as a badge.
+    pub skip_permissions: bool,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -110,12 +117,15 @@ pub struct Session {
 impl Session {
     /// Spawn a tool under a fresh PTY. Returns the session handle plus the child
     /// process (the caller owns the wait/reap so it can update the registry).
+    #[allow(clippy::too_many_arguments)]
     fn spawn(
         tool: &Tool,
         short: &str,
         dir: &str,
         extra_dirs: Vec<String>,
         resume: bool,
+        skip_permissions: bool,
+        remote_control: bool,
         env_path: &str,
     ) -> anyhow::Result<(Arc<Session>, Box<dyn portable_pty::Child + Send + Sync>)> {
         let full = format!("{}-{}", tool.prefix, short);
@@ -127,7 +137,7 @@ impl Session {
             pixel_height: 0,
         })?;
 
-        let launch = tools::build_launch(tool, short, &extra_dirs, resume);
+        let launch = tools::build_launch(tool, short, &extra_dirs, resume, skip_permissions);
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
         cmd.arg(&launch);
@@ -170,6 +180,8 @@ impl Session {
             launch_dir: dir.to_string(),
             extra_dirs,
             created: now,
+            remote_control,
+            skip_permissions,
             pid,
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
@@ -486,6 +498,7 @@ impl AppState {
 
     /// Create + register a session, spawning a reaper thread that drops it from
     /// the registry when the child exits.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         tool: &Tool,
@@ -493,6 +506,8 @@ impl AppState {
         dir: &str,
         extra_dirs: Vec<String>,
         resume: bool,
+        skip_permissions: bool,
+        remote_control: bool,
     ) -> anyhow::Result<String> {
         let short = tools::sanitize_name(name);
         if short.is_empty() {
@@ -505,11 +520,20 @@ impl AppState {
                 anyhow::bail!("session already exists: {full}");
             }
         }
-        let (sess, mut child) =
-            Session::spawn(tool, &short, dir, extra_dirs.clone(), resume, &self.inner.env_path)?;
+        let (sess, mut child) = Session::spawn(
+            tool,
+            &short,
+            dir,
+            extra_dirs.clone(),
+            resume,
+            skip_permissions,
+            remote_control,
+            &self.inner.env_path,
+        )?;
         self.inner.registry.lock().unwrap().insert(full.clone(), sess.clone());
 
-        // Record for resume-after-restart (best-effort).
+        // Record for resume-after-restart (best-effort). The launch policy is
+        // persisted so a redeploy relaunches the session under the same policy.
         manifest::record(
             &self.inner.config_dir,
             manifest::Entry {
@@ -520,6 +544,8 @@ impl AppState {
                 dir: dir.to_string(),
                 extra_dirs,
                 created_at: now_secs() as i64,
+                skip_permissions,
+                remote_control,
             },
         );
 
@@ -559,7 +585,15 @@ impl AppState {
             if !std::path::Path::new(&e.dir).is_dir() {
                 continue;
             }
-            match self.create(&tool, &e.short, &e.dir, e.extra_dirs.clone(), true) {
+            match self.create(
+                &tool,
+                &e.short,
+                &e.dir,
+                e.extra_dirs.clone(),
+                true,
+                e.skip_permissions,
+                e.remote_control,
+            ) {
                 Ok(name) => restored.push(name),
                 Err(err) => {
                     failed.insert(e.session.clone(), err.to_string());
@@ -595,6 +629,7 @@ mod tests {
             extra_max: 0,
             resume_suffix: None,
             resume_keep_extra: false,
+            yolo_flag: None,
         }
     }
 
@@ -660,7 +695,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // ~1s in: mid-stream, output landed well under IDLE_AFTER_SECS ago.
@@ -691,7 +726,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         assert_eq!(name, "shell-t");
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -731,7 +766,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // First attach (the live client) BEFORE the burst. Leave rx1 UNDRAINED —
@@ -791,7 +826,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // No client has reported a size yet → PTY stays at its init size.

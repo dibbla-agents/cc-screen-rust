@@ -32,6 +32,19 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_dirs: Vec<String>,
     pub created_at: i64,
+    /// Per-session launch policy (proposal 0005), persisted so a redeploy
+    /// relaunches each session under the same policy. Old `sessions.json` files
+    /// lacking these default to skip-on / remote-off — today's behavior.
+    #[serde(default = "default_true")]
+    pub skip_permissions: bool,
+    #[serde(default)]
+    pub remote_control: bool,
+}
+
+/// Default for `Entry::skip_permissions` — a pre-0005 manifest entry was always
+/// launched YOLO, so a missing field restores as YOLO.
+pub fn default_true() -> bool {
+    true
 }
 
 fn file(config_dir: &Path) -> PathBuf {
@@ -104,6 +117,8 @@ mod tests {
             dir: "/tmp".into(),
             extra_dirs: vec![],
             created_at: 1,
+            skip_permissions: true,
+            remote_control: false,
         }
     }
 
@@ -120,5 +135,18 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].session, "claude-b");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_entry_defaults_skip_on_remote_off() {
+        // A pre-0005 sessions.json omits the policy fields → skip on, remote off.
+        let json = r#"[{"session":"claude-a","cmd":"cc","prefix":"claude","short":"a","dir":"/tmp","createdAt":1}]"#;
+        let e: Vec<Entry> = serde_json::from_str(json).unwrap();
+        assert!(e[0].skip_permissions);
+        assert!(!e[0].remote_control);
+        // Round-trips as camelCase.
+        let v = serde_json::to_string(&e[0]).unwrap();
+        assert!(v.contains(r#""skipPermissions":true"#), "{v}");
+        assert!(v.contains(r#""remoteControl":false"#), "{v}");
     }
 }

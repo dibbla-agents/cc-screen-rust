@@ -102,15 +102,19 @@ pub enum FormField {
     Machine,
     Name,
     Dir,
+    /// Per-session launch policy toggles (0005). Both take Space / ←→ to flip.
+    SkipPermissions,
+    RemoteControl,
 }
 
-/// The fields in Tab order. `Machine` is skipped unless the server is a hub.
+/// The fields in Tab order. `Machine` is skipped unless the server is a hub; the
+/// two policy toggles are always present (0005).
 fn form_fields(has_machine: bool) -> &'static [FormField] {
     use FormField::*;
     if has_machine {
-        &[Tool, Machine, Name, Dir]
+        &[Tool, Machine, Name, Dir, SkipPermissions, RemoteControl]
     } else {
-        &[Tool, Name, Dir]
+        &[Tool, Name, Dir, SkipPermissions, RemoteControl]
     }
 }
 
@@ -159,6 +163,8 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
                 form.machine_idx = (form.machine_idx + machines_len - 1) % machines_len;
                 return invalidate_dirs(form);
             }
+            FormField::SkipPermissions => form.skip_permissions = !form.skip_permissions,
+            FormField::RemoteControl => form.remote_control = !form.remote_control,
             _ => {}
         },
         (KeyCode::Right, _) => match form.field {
@@ -169,10 +175,20 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
                 form.machine_idx = (form.machine_idx + 1) % machines_len;
                 return invalidate_dirs(form);
             }
+            FormField::SkipPermissions => form.skip_permissions = !form.skip_permissions,
+            FormField::RemoteControl => form.remote_control = !form.remote_control,
             // → also accepts a highlighted dir candidate (a quick "drill in").
             FormField::Dir if form.dir_sel.is_some() => return accept_candidate(form),
             _ => {}
         },
+        // Space toggles the focused policy switch (the text fields take it as a
+        // literal char in the Char arm below).
+        (KeyCode::Char(' '), _) if form.field == FormField::SkipPermissions => {
+            form.skip_permissions = !form.skip_permissions;
+        }
+        (KeyCode::Char(' '), _) if form.field == FormField::RemoteControl => {
+            form.remote_control = !form.remote_control;
+        }
         (KeyCode::Down, _) if form.field == FormField::Dir => move_cand(form, 1),
         (KeyCode::Up, _) if form.field == FormField::Dir => move_cand(form, -1),
         (KeyCode::Backspace, _) => match form.field {
@@ -342,6 +358,10 @@ struct NewForm {
     dir_raw: Vec<DirEntry>,
     dir_cands: Vec<DirEntry>,
     dir_sel: Option<usize>,
+    /// Per-session launch policy (0005). Defaults match the agent's serde
+    /// defaults: YOLO on, hub control off (view-only through the aggregator).
+    skip_permissions: bool,
+    remote_control: bool,
 }
 
 impl NewForm {
@@ -359,6 +379,8 @@ impl NewForm {
             dir_raw: Vec::new(),
             dir_cands: Vec::new(),
             dir_sel: None,
+            skip_permissions: true,
+            remote_control: false,
         }
     }
 }
@@ -649,7 +671,10 @@ impl App {
                 Mode::Grid => self.key_grid(k),
             },
             Event::Paste(s) if matches!(self.mode, Mode::Grid) => {
-                if let Some(p) = self.panes.get(self.active).and_then(|x| x.as_ref()) {
+                if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some_and(|p| p.view_only())
+                {
+                    self.status = "view only — control disabled for this session".into();
+                } else if let Some(p) = self.panes.get(self.active).and_then(|x| x.as_ref()) {
                     p.send_input(cc_screen_protocol::wrap_bracketed_paste(&s, false));
                 }
             }
@@ -862,6 +887,8 @@ impl App {
             name: form.name.clone(),
             dir: form.dir.clone(),
             extra_dirs: Vec::new(),
+            skip_permissions: form.skip_permissions,
+            remote_control: form.remote_control,
         };
         let rest = self.rest.clone();
         let tx = self.tx.clone();
@@ -1141,6 +1168,12 @@ impl App {
     }
 
     fn send_key_to_active(&mut self, k: KeyEvent) {
+        // View-only (0005): drop the key and surface a hint rather than typing
+        // into a session the agent would refuse input for — never a silent drop.
+        if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some_and(|p| p.view_only()) {
+            self.status = "view only — control disabled for this session".into();
+            return;
+        }
         if let Some(p) = self.panes.get_mut(self.active).and_then(|x| x.as_mut()) {
             if let Some(bytes) = input::encode(k, p.application_cursor()) {
                 p.scroll_to_live(); // typing returns you to the live bottom
@@ -1182,7 +1215,16 @@ impl App {
         let task = tokio::spawn(ws::run(url, token, id, cols, rows, out_rx, self.tx.clone()));
 
         self.remember(&session);
-        self.panes[idx] = Some(Pane::new(id, session, machine, cols, rows, out_tx, task));
+        // Adopt the session's hub control policy (0005) so the box can mark
+        // itself view-only and refuse input. None for a pre-0005 agent that
+        // doesn't report it → controllable.
+        let remote_control = self
+            .sessions
+            .iter()
+            .find(|s| s.name == session && s.machine == machine)
+            .and_then(|s| s.remote_control);
+        self.panes[idx] =
+            Some(Pane::new(id, session, machine, cols, rows, out_tx, task, remote_control));
         self.active = idx;
         self.mode = Mode::Grid;
         self.prefix_armed = false;
@@ -1221,6 +1263,13 @@ impl App {
     }
 
     fn kill_focused(&mut self) {
+        // View-only (0005): killing is a control op too — refuse it (the agent
+        // would 403 a hub-routed delete anyway). Detach (Ctrl-A d) still works:
+        // it only closes your local view, not the session.
+        if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some_and(|p| p.view_only()) {
+            self.status = "view only — control disabled for this session".into();
+            return;
+        }
         if let Some(p) = self.panes.get(self.active).and_then(|x| x.as_ref()) {
             let rest = self.rest.clone();
             let target = p.session.clone();
@@ -1310,6 +1359,8 @@ impl App {
             candidates: &form.dir_cands,
             cand_sel: form.dir_sel,
             error: form.error.as_deref(),
+            skip_permissions: form.skip_permissions,
+            remote_control: form.remote_control,
         }
     }
 
@@ -1419,6 +1470,8 @@ mod tests {
             busy_since: 0,
             preview: String::new(),
             waiting: false,
+            remote_control: None,
+            skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
         }
@@ -1491,11 +1544,15 @@ mod tests {
     fn newform_tab_cycles_fields_with_and_without_machine() {
         let mut f = form();
         f.field = FormField::Tool;
-        // No machines: Tool → Name → Dir → Tool.
+        // No machines: Tool → Name → Dir → SkipPermissions → RemoteControl → Tool.
         newform_key(&mut f, 3, 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Name);
         newform_key(&mut f, 3, 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Dir);
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::SkipPermissions);
+        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::RemoteControl);
         newform_key(&mut f, 3, 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Tool);
         // With machines: Tool → Machine → Name.
@@ -1503,6 +1560,24 @@ mod tests {
         assert_eq!(f.field, FormField::Machine);
         newform_key(&mut f, 3, 2, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Name);
+    }
+
+    #[test]
+    fn newform_policy_toggles() {
+        let mut f = form();
+        // Defaults: skip-permissions on, remote-control off (0005 asymmetry).
+        assert!(f.skip_permissions && !f.remote_control);
+        // Space flips the focused toggle; ←/→ do too.
+        f.field = FormField::SkipPermissions;
+        newform_key(&mut f, 3, 0, key(KeyCode::Char(' ')));
+        assert!(!f.skip_permissions, "space toggles skip off");
+        newform_key(&mut f, 3, 0, key(KeyCode::Right));
+        assert!(f.skip_permissions, "→ toggles skip back on");
+        f.field = FormField::RemoteControl;
+        newform_key(&mut f, 3, 0, key(KeyCode::Left));
+        assert!(f.remote_control, "← toggles remote on");
+        // Enter still submits from a toggle field.
+        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Enter)), NewFormAction::Submit));
     }
 
     #[test]

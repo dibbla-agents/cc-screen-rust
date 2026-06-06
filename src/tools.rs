@@ -18,6 +18,12 @@ pub struct Tool {
     pub extra_max: u32,             // 0 = unlimited
     pub resume_suffix: Option<String>, // e.g. "--continue", "resume --last"
     pub resume_keep_extra: bool,
+    /// The approval-bypass flag, kept *separate* from `tmpl` so a session can
+    /// launch without it (proposal 0005's per-session "skip permissions"
+    /// switch). `None` = the tool has no such flag (the bare shell) **or** a
+    /// pre-0005 user template that still inlines it — either way nothing is
+    /// appended, and a `false` skip can't strip an inlined flag.
+    pub yolo_flag: Option<String>,
 }
 
 impl Tool {
@@ -30,6 +36,7 @@ impl Tool {
             extra_max: 0,
             resume_suffix: None,
             resume_keep_extra: false,
+            yolo_flag: None,
         }
     }
 }
@@ -93,11 +100,15 @@ pub fn load_tools(path: Option<PathBuf>) -> Vec<Tool> {
 }
 
 fn defaults() -> Vec<Tool> {
+    // The approval-bypass flag is *not* baked into these templates — it lives in
+    // `yolo_flag` (filled by `with_defaults`) so a session can opt out of YOLO
+    // per 0005. Gemini's `--skip-trust` stays: it's a trust-store convenience,
+    // not the dangerous approval bypass.
     vec![
-        Tool::new("cc", "claude", "claude --rc 'claude-{name}' --dangerously-skip-permissions"),
-        Tool::new("kc", "kimi", "kimi -y"),
-        Tool::new("gc", "gemini", "gemini -y --skip-trust"),
-        Tool::new("coc", "codex", "codex --dangerously-bypass-approvals-and-sandbox"),
+        Tool::new("cc", "claude", "claude --rc 'claude-{name}'"),
+        Tool::new("kc", "kimi", "kimi"),
+        Tool::new("gc", "gemini", "gemini --skip-trust"),
+        Tool::new("coc", "codex", "codex"),
         Tool::new("tt", "shell", "${SHELL:-/bin/bash} -l"),
     ]
 }
@@ -107,6 +118,7 @@ fn parse(text: &str) -> Vec<Tool> {
     let mut seen: Vec<String> = Vec::new();
     let mut extra: Vec<(String, String, u32)> = Vec::new();
     let mut resumes: Vec<(String, String)> = Vec::new();
+    let mut yolos: Vec<(String, String)> = Vec::new();
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -118,6 +130,16 @@ fn parse(text: &str) -> Vec<Tool> {
             if toks.len() >= 3 {
                 let max = toks.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
                 extra.push((toks[1].clone(), toks[2].clone(), max));
+            }
+            continue;
+        }
+        // cc_tool_yolo <cmd|prefix> <flag> — declare a tool's approval-bypass
+        // flag separately so a session can launch without it (0005). The rest of
+        // the line (after the key) is the flag, so a multi-token flag works.
+        if line.starts_with("cc_tool_yolo") {
+            let (toks, rest) = split_head(line, 2);
+            if toks.len() >= 2 && !rest.is_empty() {
+                yolos.push((toks[1].clone(), unquote(&rest)));
             }
             continue;
         }
@@ -159,6 +181,13 @@ fn parse(text: &str) -> Vec<Tool> {
             }
         }
     }
+    for (key, flag) in yolos {
+        for t in out.iter_mut() {
+            if t.cmd == key || t.prefix == key {
+                t.yolo_flag = Some(flag.clone());
+            }
+        }
+    }
     out
 }
 
@@ -193,6 +222,24 @@ fn with_defaults(mut tools: Vec<Tool>) -> Vec<Tool> {
                     t.resume_keep_extra = false; // codex resume rejects --add-dir
                 }
                 _ => {}
+            }
+        }
+        if t.yolo_flag.is_none() {
+            let cand: Option<&str> = match (t.prefix.as_str(), t.cmd.as_str()) {
+                ("claude", _) | (_, "cc") => Some("--dangerously-skip-permissions"),
+                ("kimi", _) | (_, "kc") => Some("-y"),
+                ("gemini", _) | (_, "gc") => Some("-y"),
+                ("codex", _) | (_, "coc") => Some("--dangerously-bypass-approvals-and-sandbox"),
+                _ => None,
+            };
+            // Adopt the built-in flag only if the template doesn't already inline
+            // it. A pre-0005 user template that bakes the flag in keeps
+            // yolo_flag = None, so skip_permissions=false leaves it YOLO (we don't
+            // strip inlined flags) and skip=true won't double it. (0005 §tools.conf.)
+            if let Some(flag) = cand {
+                if !t.tmpl.split_whitespace().any(|tok| tok == flag) {
+                    t.yolo_flag = Some(flag.into());
+                }
             }
         }
     }
@@ -237,10 +284,29 @@ fn resume_command(t: &Tool, name: &str, extra_dirs: &[String]) -> Option<String>
 /// "; tmux kill-session" tail — we observe the child's exit directly. When
 /// `resume` is set we run "(resume) || (launch)" so a tool with nothing to
 /// continue (or a rejected resume flag) still falls back to a fresh session.
-pub fn build_launch(t: &Tool, name: &str, extra_dirs: &[String], resume: bool) -> String {
-    let launch = launch_command(t, name, extra_dirs);
+///
+/// `skip_permissions` (0005) gates the tool's `yolo_flag`: when true (the
+/// default) and the tool has a flag, it's appended to *both* the fresh and
+/// resume forms (so resuming stays YOLO too); when false the flag is omitted and
+/// the CLI launches with its normal approval prompts.
+pub fn build_launch(
+    t: &Tool,
+    name: &str,
+    extra_dirs: &[String],
+    resume: bool,
+    skip_permissions: bool,
+) -> String {
+    let yolo = if skip_permissions { t.yolo_flag.as_deref() } else { None };
+    let with_yolo = |mut cmd: String| {
+        if let Some(flag) = yolo {
+            cmd.push(' ');
+            cmd.push_str(flag);
+        }
+        cmd
+    };
+    let launch = with_yolo(launch_command(t, name, extra_dirs));
     if resume {
-        if let Some(rc) = resume_command(t, name, extra_dirs) {
+        if let Some(rc) = resume_command(t, name, extra_dirs).map(with_yolo) {
             if rc != launch {
                 return format!("({rc}) || ({launch})");
             }
@@ -283,6 +349,70 @@ mod tests {
     }
 
     #[test]
+    fn yolo_flag_split_out_of_templates() {
+        // The dangerous flag lives in yolo_flag, never inline in the template.
+        let t = load_tools(None);
+        let want = [
+            ("claude", "--dangerously-skip-permissions"),
+            ("kimi", "-y"),
+            ("gemini", "-y"),
+            ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        ];
+        for (prefix, flag) in want {
+            let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
+            assert_eq!(tool.yolo_flag.as_deref(), Some(flag), "{prefix} yolo_flag");
+            assert!(!tool.tmpl.contains(flag), "{prefix} tmpl must not inline the flag");
+        }
+        // Gemini keeps --skip-trust (a trust-store convenience, not the bypass).
+        let gem = t.iter().find(|x| x.prefix == "gemini").unwrap();
+        assert!(gem.tmpl.contains("--skip-trust"));
+        // The bare shell has no approval flag.
+        let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
+        assert!(sh.yolo_flag.is_none());
+    }
+
+    #[test]
+    fn build_launch_gates_yolo_flag() {
+        let t = load_tools(None);
+        let claude = t.iter().find(|x| x.prefix == "claude").unwrap();
+        // skip on (today's default): the flag is present.
+        let yolo = build_launch(claude, "proj", &[], false, true);
+        assert!(yolo.contains("--dangerously-skip-permissions"), "{yolo}");
+        // skip off: launches with normal approval prompts — no flag.
+        let safe = build_launch(claude, "proj", &[], false, false);
+        assert!(!safe.contains("--dangerously-skip-permissions"), "{safe}");
+        // Resume keeps the YOLO flag on both the resume and fallback forms.
+        let resumed = build_launch(claude, "proj", &[], true, true);
+        assert_eq!(resumed.matches("--dangerously-skip-permissions").count(), 2, "{resumed}");
+        // …and drops it from both when skip is off.
+        let resumed_safe = build_launch(claude, "proj", &[], true, false);
+        assert!(!resumed_safe.contains("--dangerously-skip-permissions"), "{resumed_safe}");
+    }
+
+    #[test]
+    fn cc_tool_yolo_declared_and_inline_guard() {
+        // Explicit cc_tool_yolo wins.
+        let cfg = "cc_tool xx myc 'myc run'\ncc_tool_yolo myc --go-fast";
+        let t = parse(cfg);
+        let t = with_defaults(t);
+        let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
+        assert_eq!(tool.yolo_flag.as_deref(), Some("--go-fast"));
+        let line = build_launch(tool, "p", &[], false, true);
+        assert!(line.ends_with("--go-fast"), "{line}");
+        // A pre-0005 template that inlines the known flag keeps yolo_flag = None,
+        // so skip=false can't strip it (stays YOLO) and skip=true won't double it.
+        let inlined = with_defaults(parse(
+            "cc_tool cc claude \"claude --dangerously-skip-permissions\"",
+        ));
+        let c = inlined.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(c.yolo_flag.is_none(), "inlined flag must not adopt a default yolo_flag");
+        let on = build_launch(c, "p", &[], false, true);
+        assert_eq!(on.matches("--dangerously-skip-permissions").count(), 1, "{on}");
+        let off = build_launch(c, "p", &[], false, false);
+        assert!(off.contains("--dangerously-skip-permissions"), "can't strip inlined: {off}");
+    }
+
+    #[test]
     fn sanitize() {
         assert_eq!(sanitize_name(" my proj!! "), "my-proj");
         assert_eq!(sanitize_name("a/b"), "a-b");
@@ -294,12 +424,14 @@ mod tests {
         let t = with_defaults(vec![Tool::new("cc", "claude", "claude --rc 'claude-{name}'")])
             .pop()
             .unwrap();
-        let fresh = build_launch(&t, "proj", &[], false);
+        // skip_permissions=false here keeps these assertions focused on the
+        // launch/resume shape (yolo gating is covered by build_launch_gates_yolo_flag).
+        let fresh = build_launch(&t, "proj", &[], false, false);
         assert_eq!(fresh, "claude --rc 'claude-proj'");
-        let resumed = build_launch(&t, "proj", &[], true);
+        let resumed = build_launch(&t, "proj", &[], true, false);
         assert!(resumed.contains("--continue"));
         assert!(resumed.contains("||")); // (resume) || (fresh) fallback
-        let with_extra = build_launch(&t, "proj", &["/home/u/lib".to_string()], false);
+        let with_extra = build_launch(&t, "proj", &["/home/u/lib".to_string()], false, false);
         assert!(with_extra.contains("--add-dir") && with_extra.contains("/home/u/lib"));
     }
 }

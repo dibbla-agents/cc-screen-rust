@@ -247,6 +247,29 @@ The hub challenges the "tailnet-only, never bind public" rule deliberately:
 - **Confinement stays on the agent.** File ops run on the owning agent and go
   through its symlink-safe `$HOME` confinement — the hub can't widen it.
 
+### Per-session view-only control (`remote_control`)
+
+Each session carries a per-session **remote-control** switch (proposal 0005,
+`cc-screen-saas`), chosen at create time in both clients' new-session form:
+
+- **Default off ⇒ view-only through the hub.** A view-only session can be
+  *watched* through the hub (output + snapshot still stream) but **not driven**:
+  the agent drops hub-relayed input and refuses hub-routed key/paste/clear/delete
+  with `403 session is view-only`. The session's **own direct port stays fully
+  controllable** — "remote control" is scoped to the hub uplink, the surface that
+  exposes a box to other machines. Turn it **on** to let the hub relay control as
+  before.
+- **The agent is the authoritative enforcer.** Enforcement lives at the PTY
+  boundary in the agent (`src/uplink.rs` for input, `src/ops.rs` for the control
+  ops), *not* in the hub. A buggy or compromised hub that forwards input to a
+  view-only session has it dropped at the agent. The hub stays a pure relay — it
+  passes `SessionInfo.remote_control` through untouched so clients render an
+  accurate "view only" badge and disable their input affordances.
+- **Independent of YOLO.** The same form has a separate **skip-permissions**
+  switch (default on) that decides whether the CLI launches with its
+  approval-bypass flag. Both flags persist across a redeploy (the manifest), so a
+  view-only / non-YOLO session comes back the same.
+
 ### The agent fully trusts its `--hub` endpoint
 
 The uplink authenticates the *agent to the hub* (the per-agent token) but the

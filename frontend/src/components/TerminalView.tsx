@@ -26,17 +26,40 @@ interface Props {
   // current selection. Called with the live instance on mount and `null`
   // on unmount — the parent stores it by pane index.
   onTerm?: (term: Terminal | null) => void;
+  // View-only through the hub (0005): output still streams (you keep watching),
+  // but locally-typed input is dropped here rather than sent — the agent would
+  // refuse it anyway. `onBlockedInput` fires when a keystroke is swallowed so the
+  // parent can surface a non-modal hint (never a silent drop).
+  viewOnly?: boolean;
+  onBlockedInput?: () => void;
 }
 
 // One TerminalView per session (parent remounts via key={session}). It owns the
 // xterm instance and the WebSocket, reconnecting on drop — because all state
 // lives in tmux, a reconnect re-attaches exactly where the agent left off.
-export default function TerminalView({ session, machine, fontSize, onState, active = true, onTerm }: Props) {
+export default function TerminalView({
+  session,
+  machine,
+  fontSize,
+  onState,
+  active = true,
+  onTerm,
+  viewOnly = false,
+  onBlockedInput,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const fitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Read live inside the once-registered onData handler (the policy can resolve
+  // from undefined→known after the first session-list load).
+  const viewOnlyRef = useRef(viewOnly);
+  const onBlockedInputRef = useRef(onBlockedInput);
+  useEffect(() => {
+    viewOnlyRef.current = viewOnly;
+    onBlockedInputRef.current = onBlockedInput;
+  }, [viewOnly, onBlockedInput]);
 
   // Build the terminal once.
   useEffect(() => {
@@ -265,6 +288,12 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
     // Direct typing in the terminal -> stdin over the WebSocket.
     const term = termRef.current!;
     const dataSub = term.onData((d) => {
+      // View-only (0005): drop locally-typed input and surface a hint, rather
+      // than sending bytes the agent would refuse — never a silent dead key.
+      if (viewOnlyRef.current) {
+        onBlockedInputRef.current?.();
+        return;
+      }
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ t: "i", d }));

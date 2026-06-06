@@ -30,6 +30,66 @@ function basename(p: string): string {
   return parts[parts.length - 1] || "/";
 }
 
+// A labeled switch row for the per-session launch policy (0005). The "on" state
+// is the more-exposed choice for both switches, so it carries the colored track
+// (amber = YOLO power, accent = hub control) while the safe/off state stays
+// muted. role="switch" + aria-checked keeps it accessible; the hint text swaps
+// with state so the consequence is always spelled out in plain language.
+function PolicyToggle({
+  on,
+  onChange,
+  tone,
+  label,
+  tag,
+  hintOn,
+  hintOff,
+}: {
+  on: boolean;
+  onChange: (v: boolean) => void;
+  tone: "danger" | "accent";
+  label: string;
+  tag?: string;
+  hintOn: string;
+  hintOff: string;
+}) {
+  const track = on ? (tone === "danger" ? "bg-amber" : "bg-accent") : "bg-edge";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={() => onChange(!on)}
+      className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-panel/60"
+    >
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <span className="text-[13px] font-semibold text-slate-100">{label}</span>
+          {tag && (
+            <span
+              className={`rounded px-1 py-px text-[9px] font-bold uppercase tracking-wide ${
+                on ? "bg-amber text-bar" : "bg-edge/70 text-slate-400"
+              }`}
+            >
+              {tag}
+            </span>
+          )}
+        </span>
+        <span className="mt-0.5 block text-[11px] leading-snug text-slate-500">
+          {on ? hintOn : hintOff}
+        </span>
+      </span>
+      <span className={`relative h-6 w-10 shrink-0 rounded-full transition-colors ${track}`}>
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-slate-100 shadow transition-all ${
+            on ? "left-[1.125rem]" : "left-0.5"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
+
 // Full-screen, thumb-friendly flow to start a new session: browse the home
 // directory tree (tap a folder to descend, ⬆︎ to go up), pick a tool, name it,
 // Create. The session launches in the browsed folder, exactly like `cc` would.
@@ -62,6 +122,11 @@ export default function NewSessionPanel({
   const [extraPickerOpen, setExtraPickerOpen] = useState(false);
   const [extraPickerDirs, setExtraPickerDirs] = useState<DirsResp | null>(null);
   const [extraPickerErr, setExtraPickerErr] = useState<string | null>(null);
+  // Per-session launch policy (proposal 0005). Defaults are deliberately
+  // asymmetric and chosen so a user who never touches them gets today's
+  // behavior: YOLO on, hub control off (view-only through the aggregator).
+  const [skipPermissions, setSkipPermissions] = useState(true);
+  const [remoteControl, setRemoteControl] = useState(false);
 
   const go = async (path?: string) => {
     setErr(null);
@@ -126,6 +191,8 @@ export default function NewSessionPanel({
     setExtraPickerOpen(false);
     setExtraPickerDirs(null);
     setExtraPickerErr(null);
+    setSkipPermissions(true);
+    setRemoteControl(false);
     fetchTools(selectedMachine)
       .then((ts) => {
         setTools(ts);
@@ -199,7 +266,9 @@ export default function NewSessionPanel({
         name,
         dirs.path,
         extraSupport ? extraDirs : [],
-        selectedMachine
+        selectedMachine,
+        skipPermissions,
+        remoteControl
       );
       onCreated(ref);
     } catch (e) {
@@ -401,6 +470,30 @@ export default function NewSessionPanel({
             )}
           </div>
         )}
+        {/* Per-session launch policy (proposal 0005). Deliberately small and
+            pre-filled: a user who ignores it gets the right thing (YOLO on, hub
+            control off). Plain-language labels, not raw flag names; the exposed
+            state of each switch reads as the riskier one. */}
+        <div className="mb-2 overflow-hidden rounded-lg border border-edge/70 bg-bar/70">
+          <PolicyToggle
+            on={skipPermissions}
+            onChange={setSkipPermissions}
+            tone="danger"
+            label="Skip permission prompts"
+            tag="YOLO"
+            hintOn="Runs tools without asking — fast, but it can do anything."
+            hintOff="Pauses for your approval on risky actions."
+          />
+          <div className="h-px bg-edge/60" />
+          <PolicyToggle
+            on={remoteControl}
+            onChange={setRemoteControl}
+            tone="accent"
+            label="Allow control from the hub"
+            hintOn="Anyone on the hub can type into this session."
+            hintOff="View-only on the hub — others watch, can't type. This machine always controls it."
+          />
+        </div>
         {err && <div className="mb-2 text-sm text-red-400">{err}</div>}
         <div className="flex gap-2">
           <input

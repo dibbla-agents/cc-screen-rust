@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { MachineInfo, PaneRef, RestorableSession, Session } from "../api";
+import { isViewOnly, type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
@@ -334,6 +334,25 @@ export default function SessionDrawer({
                       className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                       title={statusTitle(status)}
                     />
+                    {/* Badge only the non-default states (0005), so a glance down
+                        the list flags the exceptions: view-only sessions, and the
+                        rare session deliberately launched with permission prompts. */}
+                    {isViewOnly(s) && (
+                      <span
+                        className="shrink-0 rounded bg-edge/70 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-400"
+                        title="View only — typing is disabled for this session on the hub"
+                      >
+                        view
+                      </span>
+                    )}
+                    {s.skip_permissions === false && (
+                      <span
+                        className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-300"
+                        title="Launched with normal permission prompts (not YOLO)"
+                      >
+                        safe
+                      </span>
+                    )}
                     <span className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-slate-500">
                       {ago(s.activity)}
                     </span>

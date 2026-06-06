@@ -65,7 +65,7 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             // glance then shows which agents are working vs done — mirrors the
             // web PWA's "running" badge. (See the server's IDLE_AFTER_SECS.)
             let work = if s.waiting { "  " } else { "● " };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                 Span::styled(
                     format!("{:<26}", truncate(&s.name, 26)),
@@ -74,9 +74,23 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Span::styled(format!("{:<8}", truncate(&s.tool, 8)), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:>5}  ", ago(s.activity)), Style::default().fg(Color::DarkGray)),
                 Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(truncate(&s.preview, 62), Style::default().fg(Color::Gray)),
-            ]);
-            ListItem::new(line)
+            ];
+            // Badge only the non-default policy states (0005): view-only sessions,
+            // and the rare session launched with normal permission prompts.
+            if s.remote_control == Some(false) {
+                spans.push(Span::styled(
+                    "view ",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if s.skip_permissions == Some(false) {
+                spans.push(Span::styled(
+                    "safe ",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ));
+            }
+            spans.push(Span::styled(truncate(&s.preview, 62), Style::default().fg(Color::Gray)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -113,6 +127,8 @@ mod tests {
             busy_since: 0,
             preview: preview.into(),
             waiting,
+            remote_control: None,
+            skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
         }

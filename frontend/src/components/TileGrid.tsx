@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
-import type { PaneRef, Session } from "../api";
+import { isViewOnly, type PaneRef, type Session } from "../api";
 import { toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
@@ -83,6 +83,9 @@ interface Props {
   // DataTransfer is handed up; the parent flattens it (folders included)
   // and opens the UploadSheet targeting `panes[idx]`.
   onDropFiles?: (idx: number, dt: DataTransfer) => void;
+  // Fired when a keystroke is swallowed because the pane's session is view-only
+  // through the hub (0005). The parent surfaces a non-modal hint.
+  onBlockedInput?: () => void;
   // Pane-scoped overlay (the session switcher on desktop): rendered as an
   // `absolute inset-0` child of pane `paneOverlayIdx`, so it covers exactly
   // that terminal box rather than the whole screen. Null = nothing to show.
@@ -109,6 +112,7 @@ export default function TileGrid({
   onOpenEditor,
   onTermFor,
   onDropFiles,
+  onBlockedInput,
   paneOverlay,
   paneOverlayIdx,
 }: Props) {
@@ -140,6 +144,7 @@ export default function TileGrid({
           onOpenEditor={onOpenEditor}
           onTerm={(t) => onTermFor?.(idx, t)}
           onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
+          onBlockedInput={onBlockedInput}
           overlay={paneOverlayIdx === idx ? paneOverlay : null}
         />
       ))}
@@ -162,6 +167,7 @@ interface PaneProps {
   onOpenEditor: () => void;
   onTerm?: (term: Terminal | null) => void;
   onDropFiles?: (dt: DataTransfer) => void;
+  onBlockedInput?: () => void;
   overlay?: ReactNode;
 }
 
@@ -180,11 +186,15 @@ function PaneBox({
   onOpenEditor,
   onTerm,
   onDropFiles,
+  onBlockedInput,
   overlay,
 }: PaneProps) {
   const meta = sessions.find(
     (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
   );
+  // View-only through the hub (0005): block typing into this pane and mark it
+  // persistently so it reads as deliberately view-only, never broken.
+  const viewOnly = isViewOnly(meta);
 
   // Drag-and-drop overlay state. We track a counter (incremented on
   // dragenter, decremented on dragleave) because dragenter/leave also fire
@@ -326,6 +336,18 @@ function PaneBox({
         )}
       </div>
 
+      {/* Persistent view-only marker (0005), top-left so it never hides with the
+          auto-fading chrome cluster (top-right). It must always be legible — a
+          view-only pane should feel deliberately view-only, not broken. */}
+      {session && viewOnly && (
+        <div
+          className="pointer-events-none absolute left-1.5 top-1 z-10 rounded bg-bar/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-300 backdrop-blur-sm"
+          title="View only — typing is disabled for this session on the hub"
+        >
+          View only
+        </div>
+      )}
+
       {session ? (
         <TerminalView
           key={`${session.machine}/${session.name}`}
@@ -335,6 +357,8 @@ function PaneBox({
           onState={onConn}
           active={active}
           onTerm={onTerm}
+          viewOnly={viewOnly}
+          onBlockedInput={onBlockedInput}
         />
       ) : (
         <EmptyPanePicker

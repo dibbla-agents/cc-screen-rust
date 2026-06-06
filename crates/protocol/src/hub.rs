@@ -241,6 +241,8 @@ mod tests {
             busy_since: 9,
             preview: "hi".into(),
             waiting: false,
+            remote_control: Some(false),
+            skip_permissions: Some(true),
             cwd: "/home/u".into(),
             machine: "box1".into(),
         };

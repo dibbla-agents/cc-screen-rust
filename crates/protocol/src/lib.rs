@@ -45,6 +45,19 @@ pub struct SessionInfo {
     /// `#[serde(default)]` so a TUI talking to an older server still parses.
     #[serde(default)]
     pub waiting: bool,
+    /// Whether the hub may relay control (input/keys/paste/lifecycle) to this
+    /// session. `None` = a pre-0005 agent that doesn't report the policy → the
+    /// client must treat it as **controllable** (never a false view-only
+    /// lockout). `Some(false)` = view-only through the hub; `Some(true)` = full
+    /// hub control. Omitted on the wire when unknown so older clients still parse.
+    /// See proposal 0005 (cc-screen-saas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_control: Option<bool>,
+    /// Whether the session launched in YOLO mode (its approval-bypass flag).
+    /// Informational — drives a "YOLO"/"safe" badge. `None` = unknown (pre-0005
+    /// agent). Omitted on the wire when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
     /// The session's live cwd; omitted when empty (the server can't read it).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
@@ -110,7 +123,7 @@ pub struct AuthStatus {
 }
 
 // ── POST /api/session ────────────────────────────────────────────────────────
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateReq {
     pub tool: String,
@@ -118,6 +131,35 @@ pub struct CreateReq {
     pub dir: String,
     #[serde(default)]
     pub extra_dirs: Vec<String>,
+    /// Launch the CLI in YOLO mode (`--dangerously-skip-permissions` / `-y` /
+    /// `--dangerously-bypass-approvals-and-sandbox`). Defaults to **true** so an
+    /// older client (which omits it) reproduces today's behavior. See 0005.
+    #[serde(default = "default_true")]
+    pub skip_permissions: bool,
+    /// Allow the hub to relay input + lifecycle to this session. Defaults to
+    /// **false** — a session is view-only *through the hub* unless opted in. The
+    /// agent's own direct port is always fully controllable regardless. See 0005.
+    #[serde(default)]
+    pub remote_control: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// Hand-written so `CreateReq::default()` matches the documented + serde defaults
+// (skip-permissions on, remote-control off) rather than `bool::default()` (false).
+impl Default for CreateReq {
+    fn default() -> Self {
+        Self {
+            tool: String::new(),
+            name: String::new(),
+            dir: String::new(),
+            extra_dirs: Vec::new(),
+            skip_permissions: true,
+            remote_control: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,12 +339,18 @@ mod tests {
             busy_since: 0,
             preview: "p".into(),
             waiting: false,
+            remote_control: None,
+            skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
         assert!(!v.contains("machine"), "empty machine should be omitted: {v}");
+        assert!(
+            !v.contains("remote_control") && !v.contains("skip_permissions"),
+            "unknown policy should be omitted: {v}"
+        );
         assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
     }
 
@@ -319,11 +367,15 @@ mod tests {
             busy_since: 222,
             preview: String::new(),
             waiting: false,
+            remote_control: Some(false),
+            skip_permissions: Some(true),
             cwd: String::new(),
             machine: "laptop".into(),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
+        assert!(v.contains(r#""remote_control":false"#), "policy should serialize when set: {v}");
+        assert!(v.contains(r#""skip_permissions":true"#), "yolo should serialize when set: {v}");
 
         // A NEW client parsing an OLD payload (no `machine`) reads it as "".
         let old: SessionInfo = serde_json::from_str(
@@ -333,6 +385,10 @@ mod tests {
         assert_eq!(old.machine, "");
         assert_eq!(old.last_input_at, 0);
         assert_eq!(old.busy_since, 0);
+        // A pre-0005 payload carries no policy → None, so the client treats the
+        // session as controllable (never a false view-only lockout).
+        assert_eq!(old.remote_control, None);
+        assert_eq!(old.skip_permissions, None);
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.
@@ -353,6 +409,32 @@ mod tests {
             serde_json::to_string(&s).unwrap(),
             r#"{"authRequired":true,"authed":false}"#
         );
+    }
+
+    #[test]
+    fn create_req_asymmetric_defaults() {
+        // An older client omits both flags → today's behavior: YOLO on, hub
+        // control off (view-only). This asymmetry is the whole point of 0005.
+        let r: CreateReq =
+            serde_json::from_str(r#"{"tool":"cc","name":"x","dir":"/tmp"}"#).unwrap();
+        assert!(r.skip_permissions, "missing skipPermissions must default to true");
+        assert!(!r.remote_control, "missing remoteControl must default to false");
+        assert!(r.extra_dirs.is_empty());
+        // The hand-written Default matches the serde defaults (not bool::default()).
+        let d = CreateReq::default();
+        assert!(d.skip_permissions && !d.remote_control);
+        // camelCase on the wire, matching the React PWA.
+        let s = serde_json::to_string(&CreateReq {
+            tool: "cc".into(),
+            name: "x".into(),
+            dir: "/tmp".into(),
+            extra_dirs: vec![],
+            skip_permissions: false,
+            remote_control: true,
+        })
+        .unwrap();
+        assert!(s.contains(r#""skipPermissions":false"#), "{s}");
+        assert!(s.contains(r#""remoteControl":true"#), "{s}");
     }
 
     #[test]

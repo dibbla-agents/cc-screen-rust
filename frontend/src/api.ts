@@ -17,6 +17,24 @@ export interface Session {
   // The machine (agent) this session lives on, set by the hub when it aggregates
   // several agents. Absent/empty when talking to a single agent directly.
   machine?: string;
+  // Whether the hub may relay control (typing/keys/paste/lifecycle) to this
+  // session (proposal 0005). `undefined` = a pre-0005 agent that doesn't report
+  // the policy → treat as CONTROLLABLE (never a false view-only lockout).
+  // `false` = view-only through the hub; `true` = full hub control.
+  remote_control?: boolean;
+  // Whether the session launched in YOLO mode (approval prompts skipped).
+  // Informational — drives a "YOLO" badge. `undefined` = unknown (pre-0005).
+  skip_permissions?: boolean;
+}
+
+// isViewOnly answers the single question every input affordance asks: should the
+// hub client refuse to drive this session? Only an explicit `remote_control ===
+// false` counts — `undefined` (pre-0005 agent, can't enforce) and `true` are
+// both controllable, so we never lock a user out of a session the agent would
+// actually accept input for. Centralised so the list, panes, and input guards
+// share one definition.
+export function isViewOnly(s?: Pick<Session, "remote_control"> | null): boolean {
+  return s?.remote_control === false;
 }
 
 // PaneRef is the identity the app stores for an open session: the session name
@@ -472,12 +490,16 @@ export async function createSession(
   name: string,
   dir: string,
   extraDirs: string[] = [],
-  machine?: string
+  machine?: string,
+  // Per-session launch policy (0005). Defaults match the agent's serde defaults
+  // so omitting them reproduces today's behavior: YOLO on, hub control off.
+  skipPermissions = true,
+  remoteControl = false
 ): Promise<PaneRef> {
   const r = await fetch(withMachine("/api/session", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tool, name, dir, extraDirs }),
+    body: JSON.stringify({ tool, name, dir, extraDirs, skipPermissions, remoteControl }),
   });
   if (!r.ok) {
     const msg = (await r.text()).trim();
