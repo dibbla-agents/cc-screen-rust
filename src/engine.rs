@@ -134,6 +134,10 @@ impl Session {
         cmd.cwd(dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("PATH", env_path);
+        // The session name, so the clipboard shim can scope its image fetch with
+        // `?session=` (see clip.rs) — a per-session slot prevents one session's
+        // staged screenshot being served to another's paste.
+        cmd.env("CCWEB_SESSION", &full);
 
         let child = pair.slave.spawn_command(cmd)?;
         // Drop the slave so the child is the sole holder of the slave side;

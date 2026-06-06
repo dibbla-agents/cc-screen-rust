@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
-use crate::confine::{resolve_under, safe_rel};
+use crate::confine::{resolve_create_under, resolve_existing_under, safe_rel};
 use crate::engine::AppState;
 
 type R = Result<Response, (StatusCode, String)>;
@@ -33,7 +33,7 @@ fn upload_root(app: &AppState, session: &str) -> Result<PathBuf, (StatusCode, St
         return Ok(app.inner.home.clone());
     }
     let sess = app.get(session).ok_or_else(|| e(StatusCode::NOT_FOUND, "unknown session"))?;
-    resolve_under(&app.inner.home, &sess.live_cwd())
+    resolve_existing_under(&app.inner.home, &sess.live_cwd())
         .ok_or_else(|| e(StatusCode::FORBIDDEN, "session cwd outside home"))
 }
 
@@ -49,13 +49,15 @@ pub struct CheckReq {
 }
 
 pub async fn upload_check(State(app): State<AppState>, Json(req): Json<CheckReq>) -> R {
+    let home = app.inner.home.clone();
     let root = upload_root(&app, &req.session)?;
-    let dir = resolve_under(&root, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
+    let dir = resolve_existing_under(&root, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
     let mut exists: Vec<String> = Vec::new();
     for n in &req.names {
         let Some(rel) = safe_rel(n) else { continue };
         let target = dir.join(&rel);
-        if resolve_under(&dir, &target.to_string_lossy()).as_deref() != Some(target.as_path()) {
+        // Symlink-safe: the target's real parent must stay under $HOME.
+        if resolve_create_under(&home, &target.to_string_lossy()).as_deref() != Some(target.as_path()) {
             continue;
         }
         if target.exists() {
@@ -98,8 +100,9 @@ pub async fn upload(
     Query(q): Query<UploadQuery>,
     mut mp: Multipart,
 ) -> R {
+    let home = app.inner.home.clone();
     let root = upload_root(&app, &q.session)?;
-    let dir = resolve_under(&root, &q.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
+    let dir = resolve_existing_under(&root, &q.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
     if !dir.is_dir() {
         return Err(e(StatusCode::BAD_REQUEST, "dir does not exist"));
     }
@@ -144,8 +147,11 @@ pub async fn upload(
         };
         let rel_str = rel.to_string_lossy().into_owned();
         let target = dir.join(&rel);
-        if resolve_under(&dir, &target.to_string_lossy()).as_deref() != Some(target.as_path()) {
-            resp.errors.insert(rel_str, "path escapes target dir".into());
+        // Symlink-safe: the target's nearest existing ancestor must stay under
+        // $HOME — rejecting an upload routed through a symlinked dir pointing out,
+        // BEFORE we create any intermediate directories.
+        if resolve_create_under(&home, &target.to_string_lossy()).as_deref() != Some(target.as_path()) {
+            resp.errors.insert(rel_str, "path escapes home".into());
             continue;
         }
         if let Some(parent) = target.parent() {

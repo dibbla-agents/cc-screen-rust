@@ -38,7 +38,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::confine::resolve_under;
+use crate::confine::{resolve_existing_under, resolve_under};
 use crate::engine::AppState;
 
 // Don't let one client pin an unbounded number of inotify watches.
@@ -131,7 +131,9 @@ impl Watcher {
     /// subscriber; ignores paths outside $HOME, non-directories, and any beyond
     /// the per-client cap.
     pub(crate) fn subscribe(&self, id: u64, raw: &str) {
-        let dir = match resolve_under(&self.home, raw) {
+        // Symlink-safe: a dir whose real path escapes $HOME must not be watched
+        // (otherwise a symlink under home pointing out would leak fs events).
+        let dir = match resolve_existing_under(&self.home, raw) {
             Some(d) => d,
             None => return,
         };

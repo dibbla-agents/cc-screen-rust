@@ -12,7 +12,7 @@ use cc_screen_protocol::hub::CmdResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::confine::resolve_under;
+use crate::confine::{atomic_write, resolve_create_under, resolve_existing_under};
 use crate::engine::AppState;
 
 const MAX_EDIT_BYTES: u64 = 5 << 20;
@@ -77,7 +77,7 @@ struct PathArgs {
 fn dirs(app: &AppState, args: Value) -> CmdResult {
     let a: PathArgs = serde_json::from_value(args).unwrap_or_default();
     let home = home(app);
-    let Some(dir) = resolve_under(&home, &a.path) else {
+    let Some(dir) = resolve_existing_under(&home, &a.path) else {
         return err(403, "path outside home");
     };
     let rd = match std::fs::read_dir(&dir) {
@@ -117,7 +117,7 @@ fn files(app: &AppState, args: Value) -> CmdResult {
     if q_path.is_empty() {
         q_path = share.to_string_lossy().into_owned();
     }
-    let Some(dir) = resolve_under(&home, &q_path) else {
+    let Some(dir) = resolve_existing_under(&home, &q_path) else {
         return err(403, "path outside home");
     };
     let rd = match std::fs::read_dir(&dir) {
@@ -161,7 +161,7 @@ fn files(app: &AppState, args: Value) -> CmdResult {
 /// delete target a file, never the home dir).
 fn resolve_file(app: &AppState, raw: &str) -> Result<PathBuf, CmdResult> {
     let home = home(app);
-    resolve_under(&home, raw)
+    resolve_existing_under(&home, raw)
         .filter(|p| *p != home)
         .ok_or_else(|| err(403, "path outside home"))
 }
@@ -212,9 +212,12 @@ fn write(app: &AppState, args: Value) -> CmdResult {
         Ok(a) => a,
         Err(e) => return err(400, e.to_string()),
     };
-    let path = match resolve_file(app, &a.path) {
-        Ok(p) => p,
-        Err(c) => return c,
+    // A write may create a new leaf, so confine by the (canonical) parent — but
+    // still forbid targeting $HOME itself.
+    let home = home(app);
+    let path = match resolve_create_under(&home, &a.path).filter(|p| *p != home) {
+        Some(p) => p,
+        None => return err(403, "path outside home"),
     };
     if a.content.len() as u64 > MAX_EDIT_BYTES {
         return err(413, "content too large");
@@ -235,11 +238,7 @@ fn write(app: &AppState, args: Value) -> CmdResult {
     if !parent.is_dir() {
         return err(400, "parent folder does not exist");
     }
-    let tmp = path.with_extension("ccwtmp");
-    if let Err(e) = std::fs::write(&tmp, a.content.as_bytes()) {
-        return err(500, e.to_string());
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
+    if let Err(e) = atomic_write(&path, a.content.as_bytes()) {
         return err(500, e.to_string());
     }
     let meta = match std::fs::metadata(&path) {
@@ -285,7 +284,7 @@ fn mkdir(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(dir) = resolve_under(&home, &a.dir) else {
+    let Some(dir) = resolve_existing_under(&home, &a.dir) else {
         return err(403, "dir outside home");
     };
     let name = a.name.trim();
@@ -313,7 +312,7 @@ fn rmdir(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(dir) = resolve_under(&home, &a.path) else {
+    let Some(dir) = resolve_existing_under(&home, &a.path) else {
         return err(403, "path outside home");
     };
     if dir == home {
@@ -342,7 +341,7 @@ fn rename(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(src) = resolve_under(&home, &a.path) else {
+    let Some(src) = resolve_existing_under(&home, &a.path) else {
         return err(403, "path outside home");
     };
     if src == home {
@@ -357,7 +356,7 @@ fn rename(app: &AppState, args: Value) -> CmdResult {
     }
     let Some(parent) = src.parent() else { return err(400, "no parent") };
     let dst = parent.join(name);
-    if resolve_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
+    if resolve_create_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
         return err(403, "invalid destination");
     }
     if dst == src {
@@ -481,6 +480,41 @@ mod tests {
             assert!(matches!(r, CmdResult::Error { code: 403, .. }), "{bad} should be 403: {r:?}");
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_home_is_rejected() {
+        // A symlink under home pointing OUTSIDE must not be a read/write/list/delete
+        // bypass, while one pointing back inside still works.
+        let base = std::env::temp_dir().join(format!("ccr-fileops-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top secret").unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("escape")).unwrap();
+        let app = app(&home);
+
+        let escaped = home.join("escape/secret.txt").to_string_lossy().into_owned();
+        // read / delete through the outward symlink → 403.
+        assert!(matches!(run(&app, "read", json!({ "path": escaped })), CmdResult::Error { code: 403, .. }));
+        assert!(matches!(run(&app, "delete", json!({ "path": escaped })), CmdResult::Error { code: 403, .. }));
+        // listing the outward-symlinked dir → 403.
+        assert!(matches!(
+            run(&app, "dirs", json!({ "path": home.join("escape").to_string_lossy() })),
+            CmdResult::Error { code: 403, .. }
+        ));
+        // writing a NEW file through the outward symlink → 403; the outside dir is untouched.
+        let new_escaped = home.join("escape/planted.txt").to_string_lossy().into_owned();
+        assert!(matches!(
+            run(&app, "write", json!({ "path": new_escaped, "content": "x" })),
+            CmdResult::Error { code: 403, .. }
+        ));
+        assert!(!outside.join("planted.txt").exists(), "nothing written outside home");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

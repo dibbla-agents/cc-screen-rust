@@ -1,6 +1,8 @@
 // Filesystem endpoints — the $HOME-confined browse / editor / download block,
 // a faithful port of the Go build's browse.go + files.go + editor.go. Every path
-// goes through confine::resolve_under(home, …) so traversal can't escape $HOME.
+// goes through confine's symlink-safe resolvers (resolve_existing_under for reads/
+// listing/deletes, resolve_create_under for writes) so neither traversal nor a
+// symlink whose target sits outside $HOME can escape the root.
 
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
@@ -18,7 +20,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
-use crate::confine::resolve_under;
+use crate::confine::{resolve_create_under, resolve_existing_under};
 use crate::engine::AppState;
 
 const MAX_EDIT_BYTES: u64 = 5 << 20;
@@ -81,7 +83,7 @@ pub struct PathQuery {
 
 pub async fn dirs(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R {
     let home = home(&app);
-    let dir = resolve_under(&home, &q.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_existing_under(&home, &q.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     let mut entries = read_dirs(&dir)?;
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(Json(json!({
@@ -126,7 +128,7 @@ pub async fn files(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R
     if q_path.is_empty() {
         q_path = share.to_string_lossy().into_owned();
     }
-    let dir = resolve_under(&home, &q_path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_existing_under(&home, &q_path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
 
     let rd = std::fs::read_dir(&dir).map_err(|err| e(StatusCode::BAD_REQUEST, err.to_string()))?;
     let mut dirs: Vec<DirEntry> = Vec::new();
@@ -179,7 +181,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> R {
     let home = home(&app);
-    let path = resolve_under(&home, &q.path).filter(|p| *p != home)
+    let path = resolve_existing_under(&home, &q.path).filter(|p| *p != home)
         .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if !meta.is_file() {
@@ -278,7 +280,7 @@ fn rfc5987(s: &str) -> String {
 // ── GET /api/file/read ───────────────────────────────────────────────────────
 pub async fn file_read(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R {
     let home = home(&app);
-    let path = resolve_under(&home, &q.path).filter(|p| *p != home)
+    let path = resolve_existing_under(&home, &q.path).filter(|p| *p != home)
         .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if !meta.is_file() {
@@ -320,7 +322,7 @@ pub struct WriteReq {
 
 pub async fn file_write(State(app): State<AppState>, Json(req): Json<WriteReq>) -> R {
     let home = home(&app);
-    let path = resolve_under(&home, &req.path).filter(|p| *p != home)
+    let path = resolve_create_under(&home, &req.path).filter(|p| *p != home)
         .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     if req.content.len() as u64 > MAX_EDIT_BYTES {
         return Err(e(StatusCode::PAYLOAD_TOO_LARGE, "content too large"));
@@ -344,12 +346,7 @@ pub async fn file_write(State(app): State<AppState>, Json(req): Json<WriteReq>) 
     if !parent.is_dir() {
         return Err(e(StatusCode::BAD_REQUEST, "parent folder does not exist"));
     }
-    let tmp = path.with_extension("ccwtmp");
-    tokio::fs::write(&tmp, req.content.as_bytes())
-        .await
-        .map_err(|err| e(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    tokio::fs::rename(&tmp, &path)
-        .await
+    crate::confine::atomic_write(&path, req.content.as_bytes())
         .map_err(|err| e(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let meta = std::fs::metadata(&path).map_err(|err| e(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -370,7 +367,7 @@ pub struct PathReq {
 
 pub async fn file_delete(State(app): State<AppState>, Json(req): Json<PathReq>) -> R {
     let home = home(&app);
-    let path = resolve_under(&home, &req.path).filter(|p| *p != home)
+    let path = resolve_existing_under(&home, &req.path).filter(|p| *p != home)
         .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if meta.is_dir() {
@@ -389,7 +386,7 @@ pub struct MkdirReq {
 
 pub async fn mkdir(State(app): State<AppState>, Json(req): Json<MkdirReq>) -> R {
     let home = home(&app);
-    let dir = resolve_under(&home, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside home"))?;
+    let dir = resolve_existing_under(&home, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside home"))?;
     let name = req.name.trim();
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
         return Err(e(StatusCode::BAD_REQUEST, "invalid folder name"));
@@ -414,7 +411,7 @@ pub struct RmdirReq {
 
 pub async fn rmdir(State(app): State<AppState>, Json(req): Json<RmdirReq>) -> R {
     let home = home(&app);
-    let dir = resolve_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     if dir == home {
         return Err(e(StatusCode::BAD_REQUEST, "refusing to delete home"));
     }
@@ -448,7 +445,7 @@ pub struct RenameReq {
 
 pub async fn rename(State(app): State<AppState>, Json(req): Json<RenameReq>) -> R {
     let home = home(&app);
-    let src = resolve_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let src = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     if src == home {
         return Err(e(StatusCode::BAD_REQUEST, "refusing to rename home"));
     }
@@ -462,7 +459,7 @@ pub async fn rename(State(app): State<AppState>, Json(req): Json<RenameReq>) -> 
     let parent = src.parent().ok_or_else(|| e(StatusCode::BAD_REQUEST, "no parent"))?;
     let dst = parent.join(name);
     // dst must stay under home and in the same parent (Join already cleaned it).
-    if resolve_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
+    if resolve_create_under(&home, &dst.to_string_lossy()).as_deref() != Some(dst.as_path()) {
         return Err(e(StatusCode::FORBIDDEN, "invalid destination"));
     }
     if dst == src {
