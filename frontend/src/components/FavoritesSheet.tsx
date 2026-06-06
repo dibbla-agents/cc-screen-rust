@@ -39,7 +39,8 @@ const FavoritesSheet = forwardRef<FavoritesHandle, Props>(function FavoritesShee
   const searchRef = useRef<HTMLInputElement>(null);
 
   // preventScroll on every focus so raising the keyboard / opening the editor
-  // never scrolls the overflow:hidden app shell out of view. See proposals/P0002.
+  // never scrolls the overflow:hidden app shell out of view.
+  // See cc-screen-saas docs/proposals/archived/0004-scroll-jump-fix.md.
   useImperativeHandle(
     ref,
     () => ({ focus: () => searchRef.current?.focus({ preventScroll: true }) }),

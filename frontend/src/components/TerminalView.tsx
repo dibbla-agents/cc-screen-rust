@@ -118,7 +118,7 @@ export default function TerminalView({ session, machine, fontSize, onState, acti
   // shell) and shoves the header off-screen. Focusing the helper textarea
   // directly with { preventScroll: true } removes that at the source; we fall
   // back to term.focus() if the helper isn't found (selector is stable across
-  // xterm 5.x). See proposals/P0002.
+  // xterm 5.x). See cc-screen-saas docs/proposals/archived/0004-scroll-jump-fix.md.
   function focusTerminal() {
     const term = termRef.current;
     if (!term) return;

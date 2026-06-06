@@ -32,7 +32,8 @@ const ComposeSheet = forwardRef<ComposeHandle, Props>(function ComposeSheet(
 
   // preventScroll: focusing the textarea (which slides up from the bottom edge,
   // often below the fold of a shrunken soft-keyboard viewport) must not scroll
-  // the overflow:hidden app shell and displace the frame. See proposals/P0002.
+  // the overflow:hidden app shell and displace the frame.
+  // See cc-screen-saas docs/proposals/archived/0004-scroll-jump-fix.md.
   useImperativeHandle(
     ref,
     () => ({ focus: () => taRef.current?.focus({ preventScroll: true }) }),

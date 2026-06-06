@@ -228,7 +228,8 @@ export default function App() {
       setAppH(vv.height);
       window.scrollTo(0, 0); // keep the layout viewport pinned to the top
       // ...and undo any focus-induced offset on the inner shell (#root); the
-      // window reset above can't touch a scrollTop that lives there. P0002.
+      // window reset above can't touch a scrollTop that lives there.
+      // See cc-screen-saas docs/proposals/archived/0004-scroll-jump-fix.md.
       const root = document.getElementById("root");
       if (root) {
         root.scrollTop = 0;
@@ -244,7 +245,8 @@ export default function App() {
     };
   }, []);
 
-  // Backstop for the scroll-jump (proposals/P0002). The shell is meant to be a
+  // Backstop for the scroll-jump (cc-screen-saas
+  // docs/proposals/archived/0004-scroll-jump-fix.md). The shell is meant to be a
   // fixed, non-scrolling frame, but a programmatic .focus() on an element below
   // the fold makes the browser scroll the focused element into view — and an
   // overflow:hidden ancestor (#root) is still programmatically scrollable, so it
