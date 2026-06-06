@@ -1,0 +1,40 @@
+# Dependency vulnerability audit (cargo-audit). Runs on pushes/PRs that touch the
+# Cargo manifests/lockfile and on a weekly schedule, so a newly-disclosed advisory
+# surfaces even without a code change.
+#
+# Documented ignore — RUSTSEC-2023-0071 (`rsa` 0.9, Marvin timing sidechannel):
+# pulled in transitively (web-push-native → jwt-simple → superboring → rsa) with NO
+# fixed upgrade available upstream. Our Web Push path signs VAPID with ECDSA P-256
+# (ES256) and never performs RSA private-key decryption of attacker-controlled
+# ciphertext, so the RSA timing oracle is not on a reachable code path here. Revisit
+# when web-push-native ships a fix or drops the rsa dependency.
+name: audit
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        # `-D warnings` would also fail on the informational unmaintained/unsound
+        # advisories (paste/serial/lru, all transitive via ratatui/portable-pty with
+        # no fix); we gate only on actual vulnerabilities and ignore the documented
+        # unfixable RSA advisory above.
+        run: cargo audit --ignore RUSTSEC-2023-0071
