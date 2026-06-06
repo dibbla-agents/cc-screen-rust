@@ -1701,6 +1701,12 @@ export default function App() {
           {/* View-only (0005) disables PTY control (keys/paste/image/compose);
               the file plane (upload/download/browse) is NOT gated by it. */}
           <ControlBar onKey={onKey} disabled={!currentSession || activeViewOnly} />
+          {/* Transient build tell-tale (mobile): confirms which bundle the device
+              actually loaded, so PWA service-worker caching can't masquerade as a
+              broken fix. Fed by VITE_BUILD_ID at build time. Remove once done. */}
+          <div className="pointer-events-none fixed left-1 top-1 z-[100] rounded bg-black/40 px-1 text-[9px] leading-tight text-slate-400">
+            {(import.meta.env as { VITE_BUILD_ID?: string }).VITE_BUILD_ID ?? "dev"}
+          </div>
           {/* Hidden picker the Upload button triggers; multiple + no accept so
               iOS offers Photos / Camera / Files. */}
           <input
