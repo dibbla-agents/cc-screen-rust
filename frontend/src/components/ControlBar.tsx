@@ -10,7 +10,12 @@ const KEY = "flex h-11 min-w-[2.75rem] items-center justify-center rounded-lg bg
 // send-keys (HTTP), so they work without the terminal having focus.
 export default function ControlBar({ onKey, disabled }: Props) {
   const Btn = ({ k, label, cls = "" }: { k: string; label: string; cls?: string }) => (
-    <button disabled={disabled} onClick={() => onKey(k)} className={`${KEY} ${cls}`}>
+    <button
+      disabled={disabled}
+      onMouseDown={(e) => e.preventDefault()} // keep focus on the terminal textarea; don't dismiss the soft keyboard
+      onClick={() => onKey(k)}
+      className={`${KEY} ${cls}`}
+    >
       {label}
     </button>
   );
