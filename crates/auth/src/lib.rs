@@ -24,6 +24,12 @@
 // query strings. The axum `require_auth` middleware lives in each binary (it's
 // coupled to that binary's app state).
 
+pub mod netguard;
+pub mod origin;
+
+pub use netguard::{bind_scope, require_gated_uplink, require_safe_bind, BindScope};
+pub use origin::OriginPolicy;
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,10 +84,16 @@ impl Auth {
     }
 
     /// Is this request authenticated? Either it presents the API token (bearer
-    /// header / `X-Api-Token` / `?token=`) or a valid, unexpired session cookie.
-    /// Shared by the middleware and `GET /api/auth`.
-    pub fn is_authed(&self, headers: &HeaderMap, query: Option<&str>) -> bool {
-        // 1) API token via header or query param.
+    /// header / `X-Api-Token`) or a valid, unexpired session cookie. Shared by the
+    /// middleware and `GET /api/auth`.
+    ///
+    /// NB: long-lived tokens are deliberately **not** accepted via `?token=` — a
+    /// credential in a URL leaks through browser history, proxy logs, referrers,
+    /// and screenshots. Headless clients send `Authorization: Bearer <token>`; the
+    /// browser rides the cookie. `query` is retained in the signature only because
+    /// `GET /api/auth` reports status from it; it is no longer a credential source.
+    pub fn is_authed(&self, headers: &HeaderMap, _query: Option<&str>) -> bool {
+        // 1) API token via header.
         if let Some(bearer) = bearer_token(headers) {
             if self.token_matches(bearer) {
                 return true;
@@ -89,11 +101,6 @@ impl Auth {
         }
         if let Some(x) = headers.get("x-api-token").and_then(|v| v.to_str().ok()) {
             if self.token_matches(x.trim()) {
-                return true;
-            }
-        }
-        if let Some(t) = query_param(query, "token") {
-            if self.token_matches(&t) {
                 return true;
             }
         }
@@ -215,16 +222,6 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-/// Pull one key from a raw query string (`session=x&token=y`). Tokens are
-/// base64url (no chars needing percent-decoding), so we split rather than decode.
-fn query_param(query: Option<&str>, key: &str) -> Option<String> {
-    query?
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v.to_string())
-}
-
 fn load_or_create_secret(config_dir: &Path) -> [u8; 32] {
     let path = config_dir.join("session.key");
     if let Ok(bytes) = std::fs::read(&path) {
@@ -260,6 +257,46 @@ fn write_secret(path: &Path, s: &[u8; 32]) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn write_secret(path: &Path, s: &[u8; 32]) -> std::io::Result<()> {
     std::fs::write(path, s)
+}
+
+/// Atomically write secret-bearing content to `path` with private (`0600`)
+/// permissions on Unix — the bar `session.key` already meets, extended here to
+/// installer files (`web.env`, launchd plists that inline secrets). Creates
+/// parent dirs, writes a `0600` temp file, atomically renames over any existing
+/// file, then re-asserts the mode (fixing a pre-existing world-readable file on
+/// migration). Non-Unix falls back to a plain write (no mode control —
+/// documented weaker).
+#[cfg(unix)]
+pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp-private");
+    let tmp = std::path::PathBuf::from(tmp);
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(contents)?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)
 }
 
 #[cfg(test)]
@@ -344,8 +381,9 @@ mod tests {
         let mut h2 = HeaderMap::new();
         h2.insert("x-api-token", "tok".parse().unwrap());
         assert!(a.is_authed(&h2, None));
-        // Query param.
-        assert!(a.is_authed(&HeaderMap::new(), Some("session=foo&token=tok")));
+        // Query-string tokens are NOT accepted (they leak via logs/history) —
+        // even the correct token in `?token=` must be rejected now.
+        assert!(!a.is_authed(&HeaderMap::new(), Some("session=foo&token=tok")));
         assert!(!a.is_authed(&HeaderMap::new(), Some("session=foo&token=bad")));
     }
 
@@ -380,5 +418,26 @@ mod tests {
     #[test]
     fn generated_tokens_differ() {
         assert_ne!(generate_token(), generate_token());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_is_0600_and_fixes_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ccauth-priv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("web.env");
+        // Pre-create a world-readable file to confirm migration fixes the mode.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_file(&path, b"CCWEB_PASSWORD=secret\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode should be private");
+        assert_eq!(std::fs::read(&path).unwrap(), b"CCWEB_PASSWORD=secret\n");
+        // No leftover temp file.
+        assert!(!dir.join("web.env.tmp-private").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

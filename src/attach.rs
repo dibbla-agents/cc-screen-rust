@@ -170,6 +170,7 @@ mod tests {
             tmp.clone(),
             "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         );
         (state, tmp)
     }

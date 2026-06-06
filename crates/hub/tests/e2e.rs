@@ -35,6 +35,7 @@ async fn start_hub(client_auth: Auth, agent_tokens: &[(&str, &str)]) -> String {
         registry: Registry::new(),
         agent_tokens: Arc::new(tokens),
         client_auth,
+        origin: cc_screen_auth::OriginPolicy::default(),
         config_dir: tmp.clone(),
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
         bulk: Default::default(),

@@ -425,11 +425,17 @@ pub async fn push_test(State(hub): State<HubState>) -> Response {
 /// (notably `/agent/ws`, which has its own per-agent token check) are exempt. A
 /// no-op when no client credential is configured.
 pub async fn require_client_auth(State(hub): State<HubState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    // Browser trust boundary — runs regardless of the auth gate. The `/agent/*`
+    // uplink + bulk dial-backs are not browser-facing (non-`/api/`), so skip them.
+    if path.starts_with("/api/") && !hub.origin.check(req.headers()) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
+
     let auth = &hub.client_auth;
     if !auth.enabled() {
         return next.run(req).await;
     }
-    let path = req.uri().path();
     let exempt = !path.starts_with("/api/")
         || matches!(path, "/api/login" | "/api/auth" | "/api/logout");
     if exempt || auth.is_authed(req.headers(), req.uri().query()) {

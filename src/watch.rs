@@ -25,7 +25,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::Response,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use notify_debouncer_mini::{
@@ -233,7 +234,10 @@ struct WatchFrame {
 }
 
 // ── GET /api/watch (WebSocket) ───────────────────────────────────────────────
-pub async fn watch_ws(State(app): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn watch_ws(State(app): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    if !app.inner.origin.check(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
     ws.on_upgrade(move |socket| handle(socket, app))
 }
 

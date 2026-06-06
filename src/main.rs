@@ -118,11 +118,13 @@ async fn main() {
     );
 
     let auth = auth::Auth::load(&cfg.config_dir, cfg.password.clone(), cfg.api_token.clone());
+    let auth_enabled = auth.enabled();
     tracing::info!(
         "cc-screen-rust: auth {}",
-        if auth.enabled() { "ENABLED (password/token required)" } else { "disabled (tailnet-only, no gate)" }
+        if auth_enabled { "ENABLED (password/token required)" } else { "disabled (tailnet-only, no gate)" }
     );
 
+    let origin = auth::OriginPolicy::new(&cfg.addr, cfg.allowed_origins.as_deref());
     let state = engine::AppState::new(
         tools,
         cfg.env_path.clone(),
@@ -130,6 +132,7 @@ async fn main() {
         cfg.home.clone(),
         cfg.machine_id.clone(),
         auth,
+        origin,
     );
 
     // Auto-restore recorded sessions at startup (resume-only model: a redeploy /
@@ -223,6 +226,20 @@ async fn main() {
         let _ = app; // built but unused in this mode
         std::future::pending::<()>().await;
         return;
+    }
+
+    // Fail closed: refuse a routable bind with auth disabled — a YOLO control
+    // plane open to the tailnet/LAN is RCE for any peer. Loopback dev is fine;
+    // CCWEB_ALLOW_UNAUTHENTICATED_REMOTE=1 is the loud override.
+    if let Err(msg) = auth::require_safe_bind(
+        &cfg.addr,
+        auth_enabled,
+        cfg.allow_unauthenticated_remote,
+        "CCWEB_PASSWORD and/or CCWEB_API_TOKEN",
+        "CCWEB_ALLOW_UNAUTHENTICATED_REMOTE",
+    ) {
+        eprintln!("cc-screen-rust: {msg}");
+        std::process::exit(1);
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr)

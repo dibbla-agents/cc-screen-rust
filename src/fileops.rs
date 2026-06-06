@@ -384,6 +384,7 @@ mod tests {
             tmp.to_path_buf(),
             "test-agent".into(),
             crate::auth::Auth::load(tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         )
     }
 

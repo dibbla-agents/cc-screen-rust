@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cc_screen_protocol::hub::{encode_frame, HubMsg};
 use cc_screen_protocol::WsClientFrame;
@@ -32,7 +32,15 @@ pub struct WsQuery {
     session: String,
 }
 
-pub async fn ws(State(hub): State<HubState>, Query(q): Query<WsQuery>, ws: WebSocketUpgrade) -> Response {
+pub async fn ws(
+    State(hub): State<HubState>,
+    Query(q): Query<WsQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !hub.origin.check(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
     let Some(agent) = hub.registry.resolve(&q.machine, Some(&q.session)) else {
         return (StatusCode::NOT_FOUND, "no online machine for that session").into_response();
     };

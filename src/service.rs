@@ -230,7 +230,10 @@ fn read_env_file(path: &Path) -> BTreeMap<String, String> {
 
 fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> Result<(), String> {
     let body: String = env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    std::fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))
+    // web.env carries the password / API token — write it private (0600), fixing
+    // the mode on any pre-existing world-readable file.
+    cc_screen_auth::write_private_file(path, body.as_bytes())
+        .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 // ── pure builders (testable) ───────────────────────────────────────────────
@@ -437,7 +440,8 @@ fn install_launchd(
     );
     let plist_path = agents.join(format!("{LAUNCHD_LABEL}.plist"));
     let plist_str = plist_path.to_string_lossy().to_string();
-    std::fs::write(&plist_path, plist)
+    // The plist inlines CCWEB_* secrets, so write it private (0600).
+    cc_screen_auth::write_private_file(&plist_path, plist.as_bytes())
         .map_err(|e| format!("writing {}: {e}", plist_path.display()))?;
 
     // load -w is deprecated but the most broadly compatible across macOS

@@ -419,8 +419,14 @@ pub struct WsQuery {
 pub async fn ws(
     State(app): State<AppState>,
     Query(q): Query<WsQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Defense-in-depth: the auth middleware already ran the Origin/Host check, but
+    // the terminal WS is the RCE path — re-check before upgrading.
+    if !app.inner.origin.check(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
     match app.get(&q.session) {
         Some(sess) => ws.on_upgrade(move |socket| handle_socket(socket, sess)),
         None => (StatusCode::NOT_FOUND, "unknown session").into_response(),

@@ -148,7 +148,10 @@ fn read_env_file(path: &Path) -> BTreeMap<String, String> {
 
 fn write_env_file(path: &Path, env: &BTreeMap<String, String>) -> Result<(), String> {
     let body: String = env.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
-    std::fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))
+    // web.env carries the client password / token + per-agent uplink tokens —
+    // write it private (0600), fixing the mode on any pre-existing file.
+    cc_screen_auth::write_private_file(path, body.as_bytes())
+        .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 // ── pure builders (testable) ───────────────────────────────────────────────
@@ -306,7 +309,9 @@ fn install_launchd(bin: &str, config_dir: &Path, env: &BTreeMap<String, String>)
     );
     let plist_path = agents.join(format!("{LAUNCHD_LABEL}.plist"));
     let plist_str = plist_path.to_string_lossy().to_string();
-    std::fs::write(&plist_path, plist).map_err(|e| format!("writing {}: {e}", plist_path.display()))?;
+    // The plist inlines secret env, so write it private (0600).
+    cc_screen_auth::write_private_file(&plist_path, plist.as_bytes())
+        .map_err(|e| format!("writing {}: {e}", plist_path.display()))?;
     let _ = run("launchctl", &["unload", "-w", &plist_str], true);
     run("launchctl", &["load", "-w", &plist_str], false)?;
     println!("→ launchd LaunchAgent '{LAUNCHD_LABEL}' loaded");

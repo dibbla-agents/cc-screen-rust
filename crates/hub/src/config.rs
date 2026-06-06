@@ -14,6 +14,15 @@ pub struct HubConfig {
     /// `machine_id → uplink token`, parsed from CCHUB_AGENT_TOKENS. Empty = open
     /// mode (any agent may register — tailnet/dev only).
     pub agent_tokens: HashMap<String, String>,
+    /// Comma-separated extra allowed Origin/Host values (CCWEB_ALLOWED_ORIGINS) for
+    /// the browser trust boundary — the reverse-proxy domain fronting the hub.
+    pub allowed_origins: Option<String>,
+    /// Loud override (CCWEB_ALLOW_UNAUTHENTICATED_REMOTE): permit a routable bind
+    /// with client auth disabled.
+    pub allow_unauthenticated_remote: bool,
+    /// Loud override (CCHUB_ALLOW_OPEN_UPLINK): permit a routable bind with an
+    /// empty CCHUB_AGENT_TOKENS (open uplink).
+    pub allow_open_uplink: bool,
 }
 
 /// Read a `--flag value` or `--flag=value` CLI argument.
@@ -71,7 +80,24 @@ pub fn load() -> HubConfig {
     let password = std::env::var("CCWEB_PASSWORD").ok();
     let api_token = std::env::var("CCWEB_API_TOKEN").ok();
     let agent_tokens = parse_agent_tokens(std::env::var("CCHUB_AGENT_TOKENS").ok().as_deref());
-    HubConfig { addr, config_dir, password, api_token, agent_tokens }
+    let allowed_origins = std::env::var("CCWEB_ALLOWED_ORIGINS").ok().filter(|s| !s.trim().is_empty());
+    let truthy = |k: &str| {
+        std::env::var(k)
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    };
+    let allow_unauthenticated_remote = truthy("CCWEB_ALLOW_UNAUTHENTICATED_REMOTE");
+    let allow_open_uplink = truthy("CCHUB_ALLOW_OPEN_UPLINK");
+    HubConfig {
+        addr,
+        config_dir,
+        password,
+        api_token,
+        agent_tokens,
+        allowed_origins,
+        allow_unauthenticated_remote,
+        allow_open_uplink,
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cc_screen_protocol::hub::{encode_frame, HubMsg};
 use futures_util::{SinkExt, StreamExt};
@@ -32,7 +32,15 @@ struct WatchFrame {
     dirs: Vec<String>,
 }
 
-pub async fn ws(State(hub): State<HubState>, Query(q): Query<WatchQuery>, ws: WebSocketUpgrade) -> Response {
+pub async fn ws(
+    State(hub): State<HubState>,
+    Query(q): Query<WatchQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !hub.origin.check(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
     // Watch has no session to disambiguate by; resolve to the single online
     // machine when the client (the PWA) omits `machine`.
     let Some(agent) = hub.registry.resolve(&q.machine, None) else {

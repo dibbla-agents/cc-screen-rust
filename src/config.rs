@@ -37,6 +37,13 @@ pub struct Config {
     /// With `--hub` set, bind NO inbound socket — reachable only through the hub
     /// (the YOLO box stops listening). `--hub-only`.
     pub hub_only: bool,
+    /// Comma-separated extra allowed Origin/Host values (CCWEB_ALLOWED_ORIGINS) for
+    /// the browser trust boundary — a reverse-proxy domain or non-tailnet hostname.
+    /// Loopback, raw IPs, and `*.ts.net` are always accepted; see auth::origin.
+    pub allowed_origins: Option<String>,
+    /// Loud override (CCWEB_ALLOW_UNAUTHENTICATED_REMOTE): permit a routable bind
+    /// with auth disabled. Off by default — the fail-closed guard refuses it.
+    pub allow_unauthenticated_remote: bool,
 }
 
 fn home_dir() -> PathBuf {
@@ -150,6 +157,8 @@ pub fn load() -> Config {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(default_machine_id);
     let hub_only = has_flag("--hub-only") || env_truthy("CCWEB_HUB_ONLY");
+    let allowed_origins = std::env::var("CCWEB_ALLOWED_ORIGINS").ok().filter(|s| !s.trim().is_empty());
+    let allow_unauthenticated_remote = env_truthy("CCWEB_ALLOW_UNAUTHENTICATED_REMOTE");
     Config {
         home,
         config_dir,
@@ -163,5 +172,7 @@ pub fn load() -> Config {
         hub_token,
         machine_id,
         hub_only,
+        allowed_origins,
+        allow_unauthenticated_remote,
     }
 }

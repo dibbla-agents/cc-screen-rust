@@ -18,6 +18,9 @@ pub struct HubState {
     /// The client-facing gate (browser cookie / `ccs` bearer). Independent of the
     /// per-agent uplink tokens above.
     pub client_auth: Auth,
+    /// Origin/Host validation policy (anti cross-origin / DNS-rebinding), enforced
+    /// independent of the client-auth gate. See `handlers::require_client_auth`.
+    pub origin: cc_screen_auth::OriginPolicy,
     /// The hub's own config dir, for hub-local state (favorites, push subs).
     pub config_dir: PathBuf,
     /// Centralized Web Push: one VAPID keypair + subscription store for the whole
@@ -63,6 +66,7 @@ mod tests {
             registry: Registry::new(),
             agent_tokens: Arc::new(map),
             client_auth: Auth::new(None, None, [0u8; 32]),
+            origin: cc_screen_auth::OriginPolicy::default(),
             config_dir: std::env::temp_dir(),
             push: Arc::new(cc_screen_push::Push::new(&std::env::temp_dir())),
             bulk: crate::bulk::BulkRegistry::default(),

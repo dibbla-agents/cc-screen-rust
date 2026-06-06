@@ -95,10 +95,34 @@ async fn main() {
         if cfg.agent_tokens.is_empty() { "open uplink — tailnet/dev only" } else { "uplink gated" },
     );
 
+    // Fail closed before binding: a routable bind with client auth disabled, or
+    // with an OPEN uplink (no per-agent tokens), is refused unless the matching
+    // loud override is set. The hub concentrates access to every agent's PTYs and
+    // files, so an open default here is fleet-wide RCE.
+    if let Err(msg) = cc_screen_auth::require_safe_bind(
+        &cfg.addr,
+        auth.enabled(),
+        cfg.allow_unauthenticated_remote,
+        "CCWEB_PASSWORD and/or CCWEB_API_TOKEN",
+        "CCWEB_ALLOW_UNAUTHENTICATED_REMOTE",
+    ) {
+        eprintln!("cc-screen-hub: {msg}");
+        std::process::exit(1);
+    }
+    if let Err(msg) = cc_screen_auth::require_gated_uplink(
+        &cfg.addr,
+        !cfg.agent_tokens.is_empty(),
+        cfg.allow_open_uplink,
+    ) {
+        eprintln!("cc-screen-hub: {msg}");
+        std::process::exit(1);
+    }
+
     let hub = HubState {
         registry: Registry::new(),
         agent_tokens: Arc::new(cfg.agent_tokens),
         client_auth: auth,
+        origin: cc_screen_auth::OriginPolicy::new(&cfg.addr, cfg.allowed_origins.as_deref()),
         push: Arc::new(cc_screen_push::Push::new(&cfg.config_dir)),
         config_dir: cfg.config_dir,
         bulk: Default::default(),

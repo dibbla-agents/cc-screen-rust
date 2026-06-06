@@ -426,6 +426,9 @@ pub struct Inner {
     pub push: crate::push::Push,
     /// Opt-in auth gate (password / API token). No-op when unconfigured.
     pub auth: crate::auth::Auth,
+    /// Origin/Host validation policy (anti cross-origin / DNS-rebinding). Enforced
+    /// independent of the auth gate; see `auth::require_auth`.
+    pub origin: cc_screen_auth::OriginPolicy,
 }
 
 #[derive(Clone)]
@@ -441,6 +444,7 @@ impl AppState {
         home: PathBuf,
         machine_id: String,
         auth: crate::auth::Auth,
+        origin: cc_screen_auth::OriginPolicy,
     ) -> AppState {
         AppState {
             inner: Arc::new(Inner {
@@ -454,6 +458,7 @@ impl AppState {
                 machine_id,
                 clip: ClipStore::default(),
                 auth,
+                origin,
             }),
         }
     }
@@ -646,6 +651,7 @@ mod tests {
             tmp.clone(),
             "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         let sess = state.get(&name).unwrap();
@@ -676,6 +682,7 @@ mod tests {
             tmp.clone(),
             "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         assert_eq!(name, "shell-t");
@@ -715,6 +722,7 @@ mod tests {
             tmp.clone(),
             "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         let sess = state.get(&name).unwrap();
@@ -774,6 +782,7 @@ mod tests {
             tmp.clone(),
             "test-agent".into(),
             crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
         );
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false).unwrap();
         let sess = state.get(&name).unwrap();
