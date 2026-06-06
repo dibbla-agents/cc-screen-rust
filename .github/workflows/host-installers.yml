@@ -1,0 +1,61 @@
+name: host-installers
+
+# Re-host the cargo-dist installers + binaries on the Dibbla /dl site after a
+# release builds, so the `curl … | sh` one-liners serve the new version. This
+# just runs site/release-host.sh (the same script used by hand) in CI.
+#
+# Trigger note: this keys off the *Release workflow completing* via workflow_run,
+# NOT `on: release`. The cargo-dist `host` job publishes the GitHub Release using
+# the default GITHUB_TOKEN, and releases created by GITHUB_TOKEN do not emit a
+# `release` event (GitHub's recursion guard) — so `on: release` would never fire.
+# workflow_run also still hosts if the publish step regresses (release-host.sh
+# tolerates a failed host-publish as long as the build-* jobs succeeded).
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to host (e.g. v0.3.7)"
+        required: true
+
+permissions:
+  contents: read   # read the tag/release
+  actions: read    # gh run download the Release run's build artifacts
+
+jobs:
+  host:
+    runs-on: ubuntu-22.04
+    # Only host real version-tag builds. PR builds of the Release workflow
+    # (on: pull_request) have event=pull_request and are skipped here;
+    # release-host.sh re-verifies the build-* jobs and aborts if any failed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    env:
+      DIBBLA_API_TOKEN: ${{ secrets.DIBBLA_API_TOKEN }}
+      DIBBLA_API_URL: ${{ secrets.DIBBLA_API_URL }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - name: Checkout the released tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+          fetch-depth: 0          # release-host.sh / deploy.sh use `git describe`
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install the Dibbla CLI
+        run: |
+          curl -fsSL https://install.dibbla.com/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Host installers + binaries on the Dibbla /dl site
+        run: site/release-host.sh "$TAG"
