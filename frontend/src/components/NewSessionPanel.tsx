@@ -122,11 +122,9 @@ export default function NewSessionPanel({
   const [extraPickerOpen, setExtraPickerOpen] = useState(false);
   const [extraPickerDirs, setExtraPickerDirs] = useState<DirsResp | null>(null);
   const [extraPickerErr, setExtraPickerErr] = useState<string | null>(null);
-  // Per-session launch policy (proposal 0005). Defaults are deliberately
-  // asymmetric and chosen so a user who never touches them gets today's
-  // behavior: YOLO on, hub control off (view-only through the aggregator).
+  // Per-session launch policy (proposal 0005). Defaults to today's behavior:
+  // YOLO on. (0014 retired the hub-control toggle — every session is editable.)
   const [skipPermissions, setSkipPermissions] = useState(true);
-  const [remoteControl, setRemoteControl] = useState(false);
 
   const go = async (path?: string) => {
     setErr(null);
@@ -192,7 +190,6 @@ export default function NewSessionPanel({
     setExtraPickerDirs(null);
     setExtraPickerErr(null);
     setSkipPermissions(true);
-    setRemoteControl(false);
     fetchTools(selectedMachine)
       .then((ts) => {
         setTools(ts);
@@ -267,8 +264,7 @@ export default function NewSessionPanel({
         dirs.path,
         extraSupport ? extraDirs : [],
         selectedMachine,
-        skipPermissions,
-        remoteControl
+        skipPermissions
       );
       onCreated(ref);
     } catch (e) {
@@ -471,9 +467,9 @@ export default function NewSessionPanel({
           </div>
         )}
         {/* Per-session launch policy (proposal 0005). Deliberately small and
-            pre-filled: a user who ignores it gets the right thing (YOLO on, hub
-            control off). Plain-language labels, not raw flag names; the exposed
-            state of each switch reads as the riskier one. */}
+            pre-filled: a user who ignores it gets the right thing (YOLO on).
+            Plain-language label, not the raw flag name; the exposed state reads
+            as the riskier one. (0014 retired the hub-control toggle.) */}
         <div className="mb-2 overflow-hidden rounded-lg border border-edge/70 bg-bar/70">
           <PolicyToggle
             on={skipPermissions}
@@ -483,15 +479,6 @@ export default function NewSessionPanel({
             tag="YOLO"
             hintOn="Runs tools without asking — fast, but it can do anything."
             hintOff="Pauses for your approval on risky actions."
-          />
-          <div className="h-px bg-edge/60" />
-          <PolicyToggle
-            on={remoteControl}
-            onChange={setRemoteControl}
-            tone="accent"
-            label="Allow control from the hub"
-            hintOn="Anyone on the hub can type into this session."
-            hintOff="View-only on the hub — others watch, can't type. This machine always controls it."
           />
         </div>
         {err && <div className="mb-2 text-sm text-red-400">{err}</div>}

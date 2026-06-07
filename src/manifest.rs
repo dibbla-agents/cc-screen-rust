@@ -34,11 +34,11 @@ pub struct Entry {
     pub created_at: i64,
     /// Per-session launch policy (proposal 0005), persisted so a redeploy
     /// relaunches each session under the same policy. Old `sessions.json` files
-    /// lacking these default to skip-on / remote-off — today's behavior.
+    /// lacking it default to skip-on — today's behavior. (The `remoteControl`
+    /// field once stored here is retired by 0014: a stray one in an old file is
+    /// ignored, and the session restores editable.)
     #[serde(default = "default_true")]
     pub skip_permissions: bool,
-    #[serde(default)]
-    pub remote_control: bool,
 }
 
 /// Default for `Entry::skip_permissions` — a pre-0005 manifest entry was always
@@ -118,7 +118,6 @@ mod tests {
             extra_dirs: vec![],
             created_at: 1,
             skip_permissions: true,
-            remote_control: false,
         }
     }
 
@@ -138,15 +137,21 @@ mod tests {
     }
 
     #[test]
-    fn legacy_entry_defaults_skip_on_remote_off() {
-        // A pre-0005 sessions.json omits the policy fields → skip on, remote off.
+    fn legacy_entry_defaults_skip_on_and_ignores_remote_control() {
+        // A pre-0005 sessions.json omits skipPermissions → defaults to skip on.
         let json = r#"[{"session":"claude-a","cmd":"cc","prefix":"claude","short":"a","dir":"/tmp","createdAt":1}]"#;
         let e: Vec<Entry> = serde_json::from_str(json).unwrap();
         assert!(e[0].skip_permissions);
-        assert!(!e[0].remote_control);
-        // Round-trips as camelCase.
+        // A 0005-era entry persisted as view-only (`remoteControl: false`) still
+        // deserializes — the retired field is ignored (0014) — and there is no
+        // longer any policy to restore it under, so the session comes back editable.
+        let legacy = r#"[{"session":"claude-b","prefix":"claude","short":"b","dir":"/tmp","createdAt":2,"skipPermissions":true,"remoteControl":false}]"#;
+        let e2: Vec<Entry> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(e2[0].session, "claude-b");
+        assert!(e2[0].skip_permissions);
+        // Round-trips as camelCase, with no remoteControl field written back.
         let v = serde_json::to_string(&e[0]).unwrap();
         assert!(v.contains(r#""skipPermissions":true"#), "{v}");
-        assert!(v.contains(r#""remoteControl":false"#), "{v}");
+        assert!(!v.contains("remoteControl"), "retired field must not serialize: {v}");
     }
 }

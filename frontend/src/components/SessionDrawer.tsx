@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { isViewOnly, type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
+import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
@@ -356,17 +356,9 @@ export default function SessionDrawer({
                       className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                       title={statusTitle(status)}
                     />
-                    {/* Badge only the non-default states (0005), so a glance down
-                        the list flags the exceptions: view-only sessions, and the
-                        rare session deliberately launched with permission prompts. */}
-                    {isViewOnly(s) && (
-                      <span
-                        className="shrink-0 rounded bg-edge/70 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-slate-400"
-                        title="View only — typing is disabled for this session on the hub"
-                      >
-                        view
-                      </span>
-                    )}
+                    {/* Badge the one remaining non-default state (0005): the rare
+                        session deliberately launched with permission prompts.
+                        (0014 removed the view-only badge.) */}
                     {s.skip_permissions === false && (
                       <span
                         className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-300"

@@ -69,10 +69,6 @@ pub struct Pane {
     conn: ConnState,
     out_tx: mpsc::Sender<WsOut>,
     task: JoinHandle<()>,
-    /// The owning session's hub control policy (0005). `Some(false)` ⇒ view-only
-    /// through the hub: input is dropped here and the box wears a marker. `None`
-    /// (pre-0005 agent) or `Some(true)` ⇒ controllable.
-    remote_control: Option<bool>,
 }
 
 impl Pane {
@@ -85,7 +81,6 @@ impl Pane {
         rows: u16,
         out_tx: mpsc::Sender<WsOut>,
         task: JoinHandle<()>,
-        remote_control: Option<bool>,
     ) -> Self {
         let (cols, rows) = (cols.max(1), rows.max(1));
         Self {
@@ -99,15 +94,7 @@ impl Pane {
             conn: ConnState::Connecting,
             out_tx,
             task,
-            remote_control,
         }
-    }
-
-    /// View-only through the hub (0005): control is disabled for this box. Only
-    /// an explicit `Some(false)` counts — a pre-0005 agent (`None`) is treated as
-    /// controllable, so we never lock anyone out of a session the agent accepts.
-    pub fn view_only(&self) -> bool {
-        self.remote_control == Some(false)
     }
 
     /// The box title: `machine/session` when aggregated through a hub, else just
@@ -303,7 +290,7 @@ mod tests {
     fn pane(cols: u16, rows: u16) -> Pane {
         let (tx, _rx) = mpsc::channel(4);
         let task = tokio::spawn(async {});
-        Pane::new(1, "s".into(), String::new(), cols, rows, tx, task, None)
+        Pane::new(1, "s".into(), String::new(), cols, rows, tx, task)
     }
 
     fn render(p: &Pane, w: u16, h: u16) -> String {

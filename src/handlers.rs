@@ -118,8 +118,7 @@ pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
             preview: s.preview(),
             waiting: s.waiting(),
             // This agent knows the policy → report it concretely (Some), so a
-            // 0005-aware client renders an accurate view-only / YOLO affordance.
-            remote_control: Some(s.remote_control),
+            // 0005-aware client renders an accurate YOLO affordance.
             skip_permissions: Some(s.skip_permissions),
             cwd: s.live_cwd(),
             machine: String::new(),
@@ -158,7 +157,7 @@ pub fn create_core(app: &AppState, req: &CreateReq) -> Result<String, (StatusCod
     if name.is_empty() {
         name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     }
-    app.create(&tool, &name, &dir.to_string_lossy(), extra, false, req.skip_permissions, req.remote_control)
+    app.create(&tool, &name, &dir.to_string_lossy(), extra, false, req.skip_permissions)
         .map_err(|e| {
             let msg = e.to_string();
             let code = if msg.contains("already exists") {

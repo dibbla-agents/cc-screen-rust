@@ -42,14 +42,6 @@ pub fn render(
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
             left.push(Span::styled(format!("  {state_txt}"), Style::default().fg(state_col)));
-            // Persistent view-only marker (0005) so a view-only box reads as
-            // deliberately view-only, not unresponsive.
-            if p.view_only() {
-                left.push(Span::styled(
-                    "  ◌ view only",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ));
-            }
             left.push(Span::styled(format!("  {cols}×{rows}"), Style::default().fg(Color::DarkGray)));
             if p.scroll_offset() > 0 {
                 left.push(Span::styled(

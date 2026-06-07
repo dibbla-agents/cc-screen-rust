@@ -75,14 +75,8 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Span::styled(format!("{:>5}  ", ago(s.activity)), Style::default().fg(Color::DarkGray)),
                 Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ];
-            // Badge only the non-default policy states (0005): view-only sessions,
-            // and the rare session launched with normal permission prompts.
-            if s.remote_control == Some(false) {
-                spans.push(Span::styled(
-                    "view ",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ));
-            }
+            // Badge the one remaining non-default policy state: the rare session
+            // launched with normal permission prompts (0014 removed view-only).
             if s.skip_permissions == Some(false) {
                 spans.push(Span::styled(
                     "safe ",
@@ -127,7 +121,6 @@ mod tests {
             busy_since: 0,
             preview: preview.into(),
             waiting,
-            remote_control: None,
             skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),

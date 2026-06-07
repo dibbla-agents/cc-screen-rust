@@ -152,16 +152,26 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   fetches/WS need no token); headless clients (`ccs`, scripts) send
   `Authorization: Bearer <token>`. The middleware exempts static assets +
   `/api/{login,auth,logout}`; everything else under `/api/` is gated.
-- **Per-session launch policy (0005).** Each session has two switches, chosen at
-  create (`CreateReq.skip_permissions` / `.remote_control`, defaulted so an older
-  client reproduces today's behavior — YOLO on, hub control off). **Skip
-  permissions** gates the tool's `yolo_flag` (split out of the launch template in
-  `src/tools.rs`; declare a custom one with `cc_tool_yolo <cmd|prefix> <flag>`).
-  **Remote control** is the per-session *view-only-through-the-hub* gate, enforced
-  authoritatively on the agent (`src/uplink.rs` drops input, `src/ops.rs` 403s
-  key/paste/clear/delete) — the direct port is unaffected. Both persist in the
-  manifest for restore; both clients surface the toggles + a "view only" badge.
-  See `cc-screen-saas` proposal 0005 and HUB.md → "Per-session view-only control".
+- **Per-session launch policy (0005, trimmed by 0014).** Each session has **one**
+  create-time switch, `CreateReq.skip_permissions` (defaulted on so an older
+  client reproduces today's behavior — YOLO). **Skip permissions** gates the
+  tool's `yolo_flag` (split out of the launch template in `src/tools.rs`; declare
+  a custom one with `cc_tool_yolo <cmd|prefix> <flag>`); it persists in the
+  manifest for restore and both clients surface the toggle + a "safe" badge.
+  **0014 removed the second switch** (`remote_control` / hub view-only): every
+  hub session is now editable — there is no view-only gate, no agent-side `403`,
+  no client badge, and "remote control" in the product refers *only* to Claude
+  Code's own `claude --rc` desktop registration. See `cc-screen-saas` proposals
+  0005 and 0014.
+- **Default claude launch is plain `claude` (0015).** The built-in `cc` template
+  in `src/tools.rs` no longer bakes in `--rc`/`--remote-control`, so a session no
+  longer auto-registers with the Claude *desktop app* ("Remote control active") —
+  cc-screen drives sessions over its own agent/hub/PTY path and resume uses
+  `--continue`, not the registered name. Desktop registration is **opt-in** via a
+  `tools.conf` override that keeps `{name}` substitution:
+  `cc_tool cc claude "claude --rc 'claude-{name}'"`. Restore rebuilds from the
+  current template, so the change applies uniformly with no migration. See
+  proposal 0015.
 - **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
   staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
   Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The

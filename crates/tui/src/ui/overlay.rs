@@ -70,9 +70,9 @@ pub struct NewSessionView<'a> {
     pub candidates: &'a [DirEntry],
     pub cand_sel: Option<usize>,
     pub error: Option<&'a str>,
-    /// Per-session launch policy toggles (0005). Defaults: YOLO on, hub off.
+    /// Per-session launch policy toggle (0005). Default: YOLO on. (0014 retired
+    /// the hub-control toggle that sat beside it.)
     pub skip_permissions: bool,
-    pub remote_control: bool,
 }
 
 /// How many dir candidates to show at once.
@@ -179,8 +179,8 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         }
     }
 
-    // Per-session launch policy (0005). Pre-filled to the right defaults; the
-    // "on" state of each is the more-exposed choice, so it carries the color.
+    // Per-session launch policy (0005). Pre-filled to the right default; the
+    // "on" state is the more-exposed choice, so it carries the color.
     lines.push(toggle_line(
         "perms",
         v.skip_permissions,
@@ -190,22 +190,12 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         Color::Yellow,
         "skip permission prompts",
     ));
-    lines.push(toggle_line(
-        "hub",
-        v.remote_control,
-        v.focus == FormField::RemoteControl,
-        "control",
-        "view-only",
-        Color::Cyan,
-        "allow control from the hub",
-    ));
 
     lines.push(Line::from(""));
     if let Some(e) = v.error {
         lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
     }
-    let toggle_focused =
-        matches!(v.focus, FormField::SkipPermissions | FormField::RemoteControl);
+    let toggle_focused = matches!(v.focus, FormField::SkipPermissions);
     let hint = if dir_focused {
         " ↑↓ pick · tab/→ open · enter create · esc cancel"
     } else if toggle_focused {
@@ -395,7 +385,6 @@ mod tests {
             busy_since: 0,
             preview: "p".into(),
             waiting: false,
-            remote_control: None,
             skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
@@ -452,7 +441,6 @@ mod tests {
             cand_sel: None,
             error: Some("already exists"),
             skip_permissions: true,
-            remote_control: false,
         };
         let s = render_to(70, 14, |f| new_session(f, &v));
         assert!(s.contains("new session"), "{s}");
@@ -462,9 +450,10 @@ mod tests {
         assert!(s.contains("already exists"), "{s}");
         // No machine → the machine row is absent.
         assert!(!s.contains("machine"), "{s}");
-        // Policy toggles render with their defaults (0005): YOLO on, hub off.
+        // The skip-permissions toggle renders with its default (YOLO on). The
+        // hub-control toggle was retired by 0014 — no "view-only" affordance.
         assert!(s.contains("YOLO"), "skip-permissions toggle: {s}");
-        assert!(s.contains("view-only"), "remote-control toggle: {s}");
+        assert!(!s.contains("view-only"), "no retired hub-control toggle: {s}");
     }
 
     #[test]
@@ -481,7 +470,6 @@ mod tests {
             cand_sel: None,
             error: None,
             skip_permissions: true,
-            remote_control: false,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -504,7 +492,6 @@ mod tests {
             cand_sel: None,
             error: None,
             skip_permissions: true,
-            remote_control: false,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -531,7 +518,6 @@ mod tests {
             cand_sel: Some(1),
             error: None,
             skip_permissions: true,
-            remote_control: false,
         };
         let s = render_to(70, 18, |f| new_session(f, &v));
         assert!(s.contains("dev"), "{s}");

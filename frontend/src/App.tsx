@@ -8,7 +8,6 @@ import {
   fetchSessions,
   flattenDataTransfer,
   getAuthStatus,
-  isViewOnly,
   pasteText,
   restoreSessions,
   saveFavorites,
@@ -1019,23 +1018,6 @@ export default function App() {
 
       const target = panesRef.current[activeRef.current] ?? null;
 
-      // View-only (0005): a hub session with control disabled can be watched but
-      // not pasted into. Swallow the paste with a hint rather than firing a
-      // request the agent would refuse. (Pre-0005 agents report no policy →
-      // isViewOnly is false → unchanged.)
-      const targetMeta = target
-        ? sessionsRef.current.find(
-            (s) => s.name === target.name && (s.machine ?? "") === target.machine
-          )
-        : undefined;
-      if (target && isViewOnly(targetMeta)) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        showToast("View only — control disabled for this session", false);
-        return;
-      }
-
       // Image branch — first File-kind item with an image/* type.
       let blob: File | null = null;
       for (let i = 0; i < data.items.length; i++) {
@@ -1308,37 +1290,16 @@ export default function App() {
     (id: string) => persistFavorites(favorites.filter((f) => f.id !== id)),
     [favorites, persistFavorites]
   );
-  // The active session's metadata + its hub view-only policy (0005). A view-only
-  // session can be watched but not driven from this (hub) client; every input
-  // affordance below short-circuits with a non-modal hint instead of firing a
-  // request the agent would refuse. `isViewOnly` is false for pre-0005 agents
-  // (undefined policy), so this never locks anyone out of a controllable session.
+  // The active session's metadata (drives the header tool/name + status dot).
   const cur = sessions.find(
     (s) => s.name === currentSession?.name && (s.machine ?? "") === currentSession?.machine
   );
-  const activeViewOnly = isViewOnly(cur);
-  // Guard at the top of every input handler. Returns true (and shows the hint)
-  // when control is blocked, so the caller bails. One message everywhere.
-  const blockViewOnly = (): boolean => {
-    if (activeViewOnly) {
-      showToast("View only — control disabled for this session", false);
-      return true;
-    }
-    return false;
-  };
 
   // Inject = paste the prompt into the active pane's agent AND submit it
   // (Enter), then close the sheet. One tap fires a favourite straight in.
   const injectFavorite = useCallback(
     (text: string) => {
       if (!currentSession) return;
-      if (isViewOnly(sessionsRef.current.find(
-        (s) => s.name === currentSession.name && (s.machine ?? "") === currentSession.machine
-      ))) {
-        showToast("View only — control disabled for this session", false);
-        setFavOpen(false);
-        return;
-      }
       pasteText(currentSession.name, text, true, currentSession.machine).catch(() => {});
       setFavOpen(false);
     },
@@ -1346,7 +1307,7 @@ export default function App() {
   );
 
   const onKey = (key: string) => {
-    if (!currentSession || blockViewOnly()) return;
+    if (!currentSession) return;
     sendKey(currentSession.name, key, currentSession.machine).catch(() => {});
     // Keep the soft keyboard up and the cursor focused after a ControlBar tap.
     // Tapping a button blurs xterm's hidden helper textarea; on iOS that
@@ -1364,15 +1325,15 @@ export default function App() {
   // Wipe the polluted scrollback that builds up when Claude Code re-renders on
   // every SIGWINCH (it writes to the normal buffer, so each redraw appends).
   const onClearHistory = () => {
-    if (!currentSession || blockViewOnly()) return;
+    if (!currentSession) return;
     clearHistory(currentSession.name, currentSession.machine).catch(() => {});
   };
   const onSend = (text: string, enter: boolean) => {
-    if (!currentSession || blockViewOnly()) return;
+    if (!currentSession) return;
     pasteText(currentSession.name, text, enter, currentSession.machine).catch(() => {});
   };
   const onImage = (png: Blob) => {
-    if (!currentSession || blockViewOnly()) return;
+    if (!currentSession) return;
     sendImage(currentSession.name, png, currentSession.machine).catch(() => {});
   };
   const conn = conns[active] ?? "closed";
@@ -1535,14 +1496,6 @@ export default function App() {
                 {cur.tool}
               </span>
               <span className="truncate font-medium text-slate-100">{cur.short}</span>
-              {activeViewOnly && (
-                <span
-                  className="shrink-0 rounded bg-edge/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-300"
-                  title="View only — typing, keys and paste are disabled for this session on the hub"
-                >
-                  View only
-                </span>
-              )}
             </>
           ) : (
             <span className="text-slate-400">Pick a session</span>
@@ -1612,9 +1565,9 @@ export default function App() {
 
         <button
           onClick={onClearHistory}
-          disabled={!currentSession || activeViewOnly}
+          disabled={!currentSession}
           aria-label="Clear scrollback for this session"
-          title={activeViewOnly ? "View only — control disabled" : "Clear scrollback"}
+          title="Clear scrollback"
           className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 active:bg-edge disabled:opacity-40"
         >
           <EraserIcon className="h-5 w-5" />
@@ -1641,7 +1594,6 @@ export default function App() {
             onOpenEditor={() => openEditor(null)}
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
-            onBlockedInput={() => showToast("View only — control disabled for this session", false)}
           />
         ) : currentSession ? (
           // Phone path: one terminal, single pane — but it shows `panes[active]`
@@ -1659,8 +1611,6 @@ export default function App() {
             fontSize={fontSize}
             onState={(c) => setPaneConn(active, c)}
             onTerm={(t) => { termsRef.current[active] = t; }}
-            viewOnly={activeViewOnly}
-            onBlockedInput={() => showToast("View only — control disabled for this session", false)}
           />
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-slate-500">
@@ -1698,9 +1648,7 @@ export default function App() {
           is a different action from uploading a file to the project. */}
       {!isDesktop && (
         <>
-          {/* View-only (0005) disables PTY control (keys/paste/image/compose);
-              the file plane (upload/download/browse) is NOT gated by it. */}
-          <ControlBar onKey={onKey} disabled={!currentSession || activeViewOnly} />
+          <ControlBar onKey={onKey} disabled={!currentSession} />
           {/* Hidden picker the Upload button triggers; multiple + no accept so
               iOS offers Photos / Camera / Files. */}
           <input
@@ -1728,7 +1676,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setImageOpen(true)}
-              disabled={!currentSession || activeViewOnly}
+              disabled={!currentSession}
               className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge disabled:opacity-40"
               aria-label="Paste an image into the terminal"
             >
@@ -1750,11 +1698,11 @@ export default function App() {
                 setComposeOpen(true);
                 composeRef.current?.focus(); // focus in-gesture so iOS shows the keyboard
               }}
-              disabled={!currentSession || activeViewOnly}
+              disabled={!currentSession}
               className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-panel px-4 py-3 text-left text-sm text-slate-400 active:bg-edge disabled:opacity-40"
             >
               <PencilIcon className="h-4 w-4 shrink-0" />
-              <span className="truncate">{activeViewOnly ? "View only — control disabled" : "Write a prompt…"}</span>
+              <span className="truncate">Write a prompt…</span>
             </button>
           </div>
         </>

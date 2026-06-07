@@ -204,15 +204,11 @@ struct WatchChan {
     forwarder: tokio::task::JoinHandle<()>,
 }
 
-/// One relayed terminal channel: its client-event sender plus the owning
-/// session's view-only policy (0005), captured at attach so `Input` can be
-/// dropped at the PTY boundary without re-looking-up the session each frame.
+/// One relayed terminal channel: its client-event sender. Hub-relayed input
+/// always reaches the PTY writer, exactly as a direct client's does — view-only
+/// no longer exists (0014).
 struct TermChan {
     tx: mpsc::Sender<ClientEvent>,
-    /// `false` ⇒ view-only: hub-relayed input is dropped here (output still
-    /// flows, so the client keeps watching). The agent is the authoritative
-    /// enforcer — see `src/ops.rs::view_only`.
-    remote_control: bool,
 }
 
 /// Everything a `HubMsg` handler may touch on this connection.
@@ -236,9 +232,8 @@ async fn handle_hub(
     match msg {
         HubMsg::Attach { ch, session, cols, rows } => match state.get(&session) {
             Some(sess) => {
-                let remote_control = sess.remote_control;
                 let tx = spawn_channel(sess, ch, cols, rows, out_tx.clone());
-                chans.term.insert(ch, TermChan { tx, remote_control });
+                chans.term.insert(ch, TermChan { tx });
             }
             None => {
                 // Unknown session → tell the hub this channel is already closed.
@@ -247,17 +242,12 @@ async fn handle_hub(
         },
         HubMsg::Input { ch } => {
             if let Some(tc) = chans.term.get(&ch) {
-                // View-only (0005): drop hub-relayed input at the PTY boundary.
-                // The snapshot/output stream keeps flowing, so the client still
-                // *watches* — it just can't type. Authoritative even if the hub
-                // (buggy or compromised) forwards the bytes anyway.
-                if tc.remote_control {
-                    let _ = tc.tx.send(ClientEvent::Input(payload.to_vec())).await;
-                }
+                // Hub-relayed input always reaches the PTY, exactly as a direct
+                // client's does (0014 removed the view-only drop).
+                let _ = tc.tx.send(ClientEvent::Input(payload.to_vec())).await;
             }
         }
         HubMsg::Resize { ch, cols, rows } => {
-            // Resize only pins terminal geometry — never gated by remote_control.
             if let Some(tc) = chans.term.get(&ch) {
                 let _ = tc.tx.send(ClientEvent::Resize(cols, rows)).await;
             }

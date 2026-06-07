@@ -247,28 +247,29 @@ The hub challenges the "tailnet-only, never bind public" rule deliberately:
 - **Confinement stays on the agent.** File ops run on the owning agent and go
   through its symlink-safe `$HOME` confinement — the hub can't widen it.
 
-### Per-session view-only control (`remote_control`)
+### Every hub session is editable (the view-only gate was removed in 0014)
 
-Each session carries a per-session **remote-control** switch (proposal 0005,
-`cc-screen-saas`), chosen at create time in both clients' new-session form:
+Proposal 0005 once gave each session a per-session **remote-control** switch:
+off ⇒ *view-only through the hub*. **Proposal 0014 removed it entirely** — there
+is no longer any such thing as a view-only session. If you can see a session on
+the hub, you can drive it: hub-relayed input always reaches the PTY, and the
+control ops (key/paste/clear/delete) are never refused on policy grounds.
 
-- **Default off ⇒ view-only through the hub.** A view-only session can be
-  *watched* through the hub (output + snapshot still stream) but **not driven**:
-  the agent drops hub-relayed input and refuses hub-routed key/paste/clear/delete
-  with `403 session is view-only`. The session's **own direct port stays fully
-  controllable** — "remote control" is scoped to the hub uplink, the surface that
-  exposes a box to other machines. Turn it **on** to let the hub relay control as
-  before.
-- **The agent is the authoritative enforcer.** Enforcement lives at the PTY
-  boundary in the agent (`src/uplink.rs` for input, `src/ops.rs` for the control
-  ops), *not* in the hub. A buggy or compromised hub that forwards input to a
-  view-only session has it dropped at the agent. The hub stays a pure relay — it
-  passes `SessionInfo.remote_control` through untouched so clients render an
-  accurate "view only" badge and disable their input affordances.
-- **Independent of YOLO.** The same form has a separate **skip-permissions**
-  switch (default on) that decides whether the CLI launches with its
-  approval-bypass flag. Both flags persist across a redeploy (the manifest), so a
-  view-only / non-YOLO session comes back the same.
+- **Why it's safe.** The view-only default existed because "reachable on the hub"
+  didn't imply "authenticated." After [0010](#off-tailnet-via-a-cloudflare-tunnel)
+  (per-agent token-gated uplink; an unauthenticated `/agent/ws` handshake is
+  refused `401`) it does — so a second, per-session view-only gate on top of an
+  already-authenticated control plane bought little and cost a real footgun (a
+  session you could see, didn't mean to make view-only, and couldn't even kill).
+- **No naming collision.** "Remote control" in the product now refers *only* to
+  Claude Code's own `claude --rc` desktop-app registration (the source of the
+  "Remote control active" banner), never to hub editability.
+- **Skip-permissions is untouched.** The new-session form still carries the
+  **skip-permissions** switch (default on) deciding whether the CLI launches with
+  its approval-bypass flag; it persists across a redeploy (the manifest). If a
+  deliberate "observe but don't touch" mode is ever wanted back, it would be
+  reintroduced under a non-colliding name and never as the default (0014 → open
+  questions).
 
 ### The agent fully trusts its `--hub` endpoint
 

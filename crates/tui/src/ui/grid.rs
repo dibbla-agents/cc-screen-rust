@@ -53,9 +53,6 @@ fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, sin
         (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray))
     };
     let title = match pane {
-        // Mark a view-only box (0005) in its title so every box — not just the
-        // focused one (the status bar covers that) — reads as view-only.
-        Some(p) if p.view_only() => format!("{} ◌ view only", p.title()),
         Some(p) => p.title(),
         None => "empty".to_string(),
     };
@@ -86,23 +83,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn dummy(id: u64, name: &str) -> Pane {
-        dummy_rc(id, name, None)
-    }
-
-    fn dummy_rc(id: u64, name: &str, rc: Option<bool>) -> Pane {
         let (tx, _rx) = mpsc::channel(4);
-        Pane::new(id, name.into(), String::new(), 40, 10, tx, tokio::spawn(async {}), rc)
-    }
-
-    #[tokio::test]
-    async fn view_only_box_titled_in_grid() {
-        // A view-only pane (remote_control = Some(false)) wears a marker in its
-        // box title; a controllable one does not (0005).
-        let panes = vec![Some(dummy_rc(1, "shell-vo", Some(false))), Some(dummy(2, "shell-ok")), None, None];
-        let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        t.draw(|f| render(f, Layout::Quad, &panes, 1, "^A", false)).unwrap();
-        let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-        assert!(s.contains("view only"), "view-only box should be marked: {s:?}");
+        Pane::new(id, name.into(), String::new(), 40, 10, tx, tokio::spawn(async {}))
     }
 
     #[tokio::test]

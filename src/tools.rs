@@ -105,7 +105,13 @@ fn defaults() -> Vec<Tool> {
     // per 0005. Gemini's `--skip-trust` stays: it's a trust-store convenience,
     // not the dangerous approval bypass.
     vec![
-        Tool::new("cc", "claude", "claude --rc 'claude-{name}'"),
+        // Plain `claude` by default (0015): the `--rc`/`--remote-control` flag
+        // registered every session with the Claude *desktop app* ("Remote control
+        // active"), a surprising outward-facing side effect cc-screen never needs
+        // (it drives sessions over its own agent/hub/PTY path; resume uses
+        // `--continue`, not the registered name). Opt back in via tools.conf:
+        //   cc_tool cc claude "claude --rc 'claude-{name}'"
+        Tool::new("cc", "claude", "claude"),
         Tool::new("kc", "kimi", "kimi"),
         Tool::new("gc", "gemini", "gemini --skip-trust"),
         Tool::new("coc", "codex", "codex"),
@@ -421,17 +427,33 @@ mod tests {
 
     #[test]
     fn launch_and_resume_fallback() {
-        let t = with_defaults(vec![Tool::new("cc", "claude", "claude --rc 'claude-{name}'")])
-            .pop()
-            .unwrap();
+        // The built-in claude template is a plain `claude` (0015) — no `--rc`.
+        let t = with_defaults(defaults()).into_iter().find(|t| t.prefix == "claude").unwrap();
         // skip_permissions=false here keeps these assertions focused on the
         // launch/resume shape (yolo gating is covered by build_launch_gates_yolo_flag).
         let fresh = build_launch(&t, "proj", &[], false, false);
-        assert_eq!(fresh, "claude --rc 'claude-proj'");
+        assert_eq!(fresh, "claude");
         let resumed = build_launch(&t, "proj", &[], true, false);
         assert!(resumed.contains("--continue"));
         assert!(resumed.contains("||")); // (resume) || (fresh) fallback
+        assert!(!resumed.contains("--rc"), "default no longer registers with the desktop app: {resumed}");
         let with_extra = build_launch(&t, "proj", &["/home/u/lib".to_string()], false, false);
         assert!(with_extra.contains("--add-dir") && with_extra.contains("/home/u/lib"));
+    }
+
+    #[test]
+    fn rc_optin_substitutes_name() {
+        // Opting back into desktop registration via a tools.conf override
+        // (`cc_tool cc claude "claude --rc 'claude-{name}'"`) still substitutes
+        // {name} → the session name, so the `{name}` launch logic stays covered.
+        let t = with_defaults(parse("cc_tool cc claude \"claude --rc 'claude-{name}'\""))
+            .into_iter()
+            .find(|t| t.prefix == "claude")
+            .unwrap();
+        let fresh = build_launch(&t, "proj", &[], false, false);
+        assert_eq!(fresh, "claude --rc 'claude-proj'");
+        // Resume still appends --continue ahead of the registered launch.
+        let resumed = build_launch(&t, "proj", &[], true, false);
+        assert!(resumed.contains("--continue") && resumed.contains("--rc"), "{resumed}");
     }
 }
