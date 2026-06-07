@@ -5,6 +5,7 @@
 //! `$HOME`. Bulk transfers (download/upload/clipboard) are NOT here; they use the
 //! dedicated bulk stream.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -55,6 +56,7 @@ fn dir_entry(name: String, path: &Path) -> Value {
 pub fn run(app: &AppState, op: &str, args: Value) -> CmdResult {
     match op {
         "dirs" => dirs(app, args),
+        "dirs_search" => dirs_search(app, args),
         "files" => files(app, args),
         "read" => read(app, args),
         "write" => write(app, args),
@@ -101,6 +103,27 @@ fn dirs(app: &AppState, args: Value) -> CmdResult {
         "parent": dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         "dirs": dirs,
     }))
+}
+
+#[derive(Deserialize, Default)]
+struct DirSearchArgs {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    root: String,
+}
+
+/// Recursive fuzzy dir search (proposal 0016), hub-relayed mirror of
+/// files.rs::dirs_search. Same confinement + ranking via the shared core.
+fn dirs_search(app: &AppState, args: Value) -> CmdResult {
+    let a: DirSearchArgs = serde_json::from_value(args).unwrap_or_default();
+    let home = home(app);
+    let Some(root) = resolve_existing_under(&home, &a.root) else {
+        return err(403, "path outside home");
+    };
+    let recent: HashSet<PathBuf> = app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect();
+    let hits = crate::dirsearch::search(&home, &root, &a.q, &recent);
+    CmdResult::Json(crate::dirsearch::results_json(&home, &root, &hits))
 }
 
 fn files(app: &AppState, args: Value) -> CmdResult {

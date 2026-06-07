@@ -36,7 +36,6 @@ import ControlBar from "./components/ControlBar";
 import ComposeSheet, { type ComposeHandle } from "./components/ComposeSheet";
 import ImageSheet from "./components/ImageSheet";
 import FavoritesSheet, { type FavoritesHandle } from "./components/FavoritesSheet";
-import NewSessionPanel from "./components/NewSessionPanel";
 import TileGrid, { type Layout, paneCount } from "./components/TileGrid";
 import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
@@ -196,10 +195,13 @@ export default function App() {
     setPaletteOpen(false);
   }, []);
   const [favorites, setFavorites] = useState<Favorite[]>([]);
-  // When the New-Session panel opens we remember which pane to mount the
+  // When the create flow starts we remember which pane to mount the
   // newly-created session into. -1 means "phone path / default — pane 0".
-  const [newOpen, setNewOpen] = useState(false);
+  // The create flow now lives in-drawer (proposal 0016); `createReq` is a token
+  // bumped to ask the (already-open) drawer to jump straight into create mode —
+  // used by the per-pane "new session" affordances in TileGrid.
   const [newForPane, setNewForPane] = useState<number>(-1);
+  const [createReq, setCreateReq] = useState(0);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   // Small ephemeral toast for paste-event feedback (and any other one-shot
   // confirmation we add later). Auto-dismissed by the show() helper below.
@@ -378,7 +380,6 @@ export default function App() {
     setComposeOpen(false);
     setImageOpen(false);
     setFavOpen(false);
-    setNewOpen(false);
     setUploadOpen(false);
     closePalette();
   }, [closePalette]);
@@ -1406,13 +1407,34 @@ export default function App() {
     else scheduleHide(1200);
   }, [isDesktop, paletteOpen, showHeader, scheduleHide]);
 
-  // openNewFor opens the create-session panel and remembers which pane to
-  // mount the new session into when it returns.
+  // openNewFor opens the drawer straight into the in-sidebar create flow
+  // (proposal 0016) and remembers which pane to mount the new session into. Used
+  // by the per-pane "new session" affordances in TileGrid. The `createReq` bump
+  // tells the (now-open) drawer to jump to create mode.
   const openNewFor = (idx: number) => {
     setNewForPane(idx);
-    setDrawerOpen(false);
-    setNewOpen(true);
+    setActive(idx);
+    setDrawerOpen(true);
+    setCreateReq((n) => n + 1);
   };
+
+  // Mount + refresh once a session is created from the in-drawer flow. Mirrors
+  // the old NewSessionPanel onCreated: mount in the remembered pane (−1 = active
+  // fallback), mark a propagation grace window so the immediate refresh (and the
+  // background poll) don't null the pane before the hub's session list catches
+  // up, then close the drawer.
+  const onSessionCreated = useCallback(
+    (session: PaneRef) => {
+      setDrawerOpen(false);
+      recentMounts.current.set(refKey(session), Date.now() + 15000);
+      const target = newForPane >= 0 ? newForPane : active;
+      mountAt(target, session);
+      setActive(target);
+      setNewForPane(-1);
+      refresh();
+    },
+    [newForPane, active, mountAt, setActive, refresh]
+  );
 
   // The session switcher, built once and rendered in one of two places:
   //  - phone  → full-screen takeover at the app root (embedded=false)
@@ -1434,7 +1456,16 @@ export default function App() {
       onPick={pick}
       onClose={() => setDrawerOpen(false)}
       onRefresh={refresh}
-      onNew={() => openNewFor(active)}
+      onNew={() => setNewForPane(active)}
+      createInitialMachine={currentSession?.machine || firstOnlineMachine}
+      recentDirs={restorable.map((r) => r.dir)}
+      onCreated={onSessionCreated}
+      createReq={createReq}
+      showLayout={isDesktop}
+      onLayout={() => {
+        setDrawerOpen(false);
+        openPalette();
+      }}
       deleting={deleting}
       onDelete={removeSession}
       restorable={restorable}
@@ -1711,27 +1742,6 @@ export default function App() {
       {/* Phone: full-screen switcher. Desktop renders it pane-scoped inside
           TileGrid (see paneOverlay above), so it only covers the active box. */}
       {!isDesktop && renderDrawer(false)}
-      <NewSessionPanel
-        open={newOpen}
-        machines={machines}
-        multiMachine={multiMachine}
-        initialMachine={currentSession?.machine || firstOnlineMachine}
-        onClose={() => setNewOpen(false)}
-        onCreated={(session) => {
-          setNewOpen(false);
-          setDrawerOpen(false);
-          // Mount in the pane the user came from (-1 = active fallback). Mark a
-          // propagation grace window so the immediate refresh() (and the
-          // background poll) don't null this pane before the hub's session list
-          // catches up — otherwise we'd bounce straight back to the switcher.
-          recentMounts.current.set(refKey(session), Date.now() + 15000);
-          const target = newForPane >= 0 ? newForPane : active;
-          mountAt(target, session);
-          setActive(target);
-          setNewForPane(-1);
-          refresh();
-        }}
-      />
       <ComposeSheet
         ref={composeRef}
         open={composeOpen}

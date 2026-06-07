@@ -336,6 +336,25 @@ pub async fn files(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Re
     file_route(&hub, &q.machine, opt(&q.session), "files", json!({ "path": q.path, "session": q.session })).await
 }
 
+// Recursive fuzzy dir search (proposal 0016), per-agent like `dirs`: the chosen
+// machine searches its own $HOME. `?session=` disambiguates the owner when the
+// PWA omits `?machine=` (falls back to the single online box).
+#[derive(Deserialize)]
+pub struct DirSearchQ {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    machine: String,
+}
+
+pub async fn dirs_search(State(hub): State<HubState>, Query(qy): Query<DirSearchQ>) -> Response {
+    file_route(&hub, &qy.machine, opt(&qy.session), "dirs_search", json!({ "q": qy.q, "root": qy.root })).await
+}
+
 pub async fn file_read(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
     file_route(&hub, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
 }

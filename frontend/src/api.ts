@@ -269,6 +269,41 @@ export async function fetchDirs(path?: string, machine?: string): Promise<DirsRe
   return r.json();
 }
 
+// One ranked hit from the recursive folder search (GET /api/dirs/search,
+// proposal 0016). `rel` is the home-relative display path (~/development/foo);
+// `depth` is how far below the search root it sits.
+export interface DirSearchResult {
+  path: string;
+  name: string;
+  rel: string;
+  depth: number;
+  score: number;
+  mtime: number;
+}
+
+export interface DirsSearchResp {
+  root: string;
+  home: string;
+  results: DirSearchResult[];
+}
+
+// searchDirs fuzzy-matches directories anywhere below `root` (default $HOME) on
+// the chosen agent. Empty `q` returns no results — the caller falls back to
+// fetchDirs + a recents shortcut. Per-agent like fetchDirs (the hub routes by
+// ?machine=), so on a hub each agent searches its own $HOME.
+export async function searchDirs(
+  q: string,
+  root?: string,
+  machine?: string
+): Promise<DirsSearchResp> {
+  const params = new URLSearchParams();
+  params.set("q", q);
+  if (root) params.set("root", root);
+  const r = await fetch(withMachine(`/api/dirs/search?${params.toString()}`, machine));
+  if (!r.ok) throw new Error((await r.text()).trim() || `dirs search: ${r.status}`);
+  return r.json();
+}
+
 export interface FileEntry {
   name: string;
   path: string;

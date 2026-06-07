@@ -4,6 +4,7 @@
 // listing/deletes, resolve_create_under for writes) so neither traversal nor a
 // symlink whose target sits outside $HOME can escape the root.
 
+use std::collections::HashSet;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -94,6 +95,34 @@ pub async fn dirs(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R 
         "dirs": entries,
     }))
     .into_response())
+}
+
+// ── GET /api/dirs/search ───────────────────────────────────────────────────
+// Recursive, $HOME-confined fuzzy directory search for the create-session flow
+// (proposal 0016). `root` defaults to $HOME; results are ranked + capped by the
+// shared core in `dirsearch`. Empty `q` returns no results (the client uses
+// /api/dirs + a recents shortcut instead).
+#[derive(Deserialize)]
+pub struct DirSearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    root: String,
+}
+
+pub async fn dirs_search(State(app): State<AppState>, Query(q): Query<DirSearchQuery>) -> R {
+    let home = home(&app);
+    let root =
+        resolve_existing_under(&home, &q.root).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let recent = recent_cwds(&app);
+    let hits = crate::dirsearch::search(&home, &root, &q.q, &recent);
+    Ok(Json(crate::dirsearch::results_json(&home, &root, &hits)).into_response())
+}
+
+/// The cwds of live sessions — fed to the search ranker so a folder you already
+/// have a session in floats to the top.
+fn recent_cwds(app: &AppState) -> HashSet<PathBuf> {
+    app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect()
 }
 
 fn read_dirs(dir: &Path) -> Result<Vec<DirEntry>, (StatusCode, String)> {

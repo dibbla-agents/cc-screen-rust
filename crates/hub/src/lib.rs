@@ -61,6 +61,7 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/clear-history", post(handlers::clear_history))
         // File browser / editor (small ops), routed to the owning agent.
         .route("/api/dirs", get(handlers::dirs))
+        .route("/api/dirs/search", get(handlers::dirs_search))
         .route("/api/files", get(handlers::files))
         .route("/api/file/read", get(handlers::file_read))
         .route("/api/file/write", post(handlers::file_write))

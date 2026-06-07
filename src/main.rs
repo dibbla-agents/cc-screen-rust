@@ -11,6 +11,7 @@ mod bulk;
 mod clip;
 mod config;
 mod confine;
+mod dirsearch;
 mod engine;
 mod fileops;
 mod files;
@@ -204,6 +205,7 @@ async fn main() {
         .route("/api/push/test", post(handlers::push_test))
         // files / editor
         .route("/api/dirs", get(files::dirs))
+        .route("/api/dirs/search", get(files::dirs_search))
         .route("/api/files", get(files::files))
         .route("/api/download", get(files::download))
         .route("/api/file/read", get(files::file_read))

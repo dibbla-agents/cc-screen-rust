@@ -114,6 +114,45 @@ export function statusTitle(status: AgentStatus): string {
     : "ready for input";
 }
 
+// fuzzyScore — case-insensitive subsequence match of `query` against `text`,
+// returning a higher number for a better match (contiguous runs, word-start
+// hits, and a head-of-string match all add) or `null` when `query` is not a
+// subsequence at all. Mirrors the agent-side scorer in `dirsearch.rs` so the
+// in-sidebar list filter (proposal 0016, Part A) ranks like the folder search.
+// An empty query scores 0 (everything matches), so the caller keeps today's
+// resting order when nothing is typed.
+export function fuzzyScore(query: string, text: string): number | null {
+  const q = query.toLowerCase();
+  if (q.length === 0) return 0;
+  const h = text.toLowerCase();
+  let hi = 0;
+  let score = 0;
+  let last = -2;
+  let run = 0;
+  for (const nc of q) {
+    let pos = -1;
+    for (let j = hi; j < h.length; j++) {
+      if (h[j] === nc) {
+        pos = j;
+        break;
+      }
+    }
+    if (pos < 0) return null;
+    score += 2;
+    if (pos === 0) score += 6;
+    if (pos === 0 || "/-_. ".includes(h[pos - 1]!)) score += 12;
+    if (pos === last + 1) {
+      run += 1;
+      score += 4 * run;
+    } else {
+      run = 0;
+    }
+    last = pos;
+    hi = pos + 1;
+  }
+  return score;
+}
+
 // Compact "time since last activity" for the switcher rows.
 export function ago(unixSeconds: number): string {
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));
