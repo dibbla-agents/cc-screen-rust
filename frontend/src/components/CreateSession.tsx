@@ -47,6 +47,20 @@ function basename(p: string): string {
   return parts[parts.length - 1] || "/";
 }
 
+// The folder's display name (the search-result top row). At $HOME the name is
+// blank → show "~".
+function folderName(row: { name: string; path: string }): string {
+  return row.name || basename(row.path) || "~";
+}
+
+// The parent portion of a home-relative path (the bottom row), or "" when the
+// path has no parent to show (it IS ~). e.g. ("~/a/b/c","c") → "~/a/b".
+function parentOf(rel: string, name: string): string {
+  if (rel === "~" || !rel) return "";
+  if (name && rel.endsWith("/" + name)) return rel.slice(0, rel.length - name.length - 1) || "~";
+  return "";
+}
+
 // A row the cursor can land on: a folder (⏎ creates a session in it, → descends
 // into it) or the "create folder" affordance (⏎ makes it, then creates there).
 type Row =
@@ -451,11 +465,29 @@ export default function CreateSession({
             >
               <span className="text-slate-500">{row.here ? "◉" : "📁"}</span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] text-slate-100">
-                  {row.here ? `Create here · ${row.rel}` : row.rel}
+                {/* Two rows: folder name on top, its parent path below. The
+                    parent is left-cropped (direction:rtl + a leading LRM so the
+                    path still reads LTR) so the immediate parent folder is always
+                    visible even when the path is deep. */}
+                <span className="flex items-center gap-1.5">
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-100">
+                    {folderName(row)}
+                  </span>
+                  {row.here && (
+                    <span className="shrink-0 text-[9px] uppercase tracking-wide text-accent">here</span>
+                  )}
+                  {row.recent && (
+                    <span className="shrink-0 text-[9px] uppercase tracking-wide text-slate-500">recent</span>
+                  )}
                 </span>
-                {row.recent && (
-                  <span className="block text-[10px] uppercase tracking-wide text-slate-600">recent</span>
+                {parentOf(row.rel, folderName(row)) && (
+                  <span
+                    className="block overflow-hidden whitespace-nowrap text-[11px] text-slate-500"
+                    style={{ direction: "rtl", textAlign: "left", textOverflow: "ellipsis" }}
+                    title={row.rel}
+                  >
+                    {"\u200e" + parentOf(row.rel, folderName(row))}
+                  </span>
                 )}
               </span>
               {!row.here && (
