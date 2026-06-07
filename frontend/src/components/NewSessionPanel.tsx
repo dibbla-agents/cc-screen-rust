@@ -111,6 +111,9 @@ export default function NewSessionPanel({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const nameEdited = useRef(false);
+  // Focused on open so the keyboard path (proposal 0011) can name-and-create
+  // without reaching for the mouse.
+  const nameRef = useRef<HTMLInputElement>(null);
   // Folder management within the browser.
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -204,6 +207,41 @@ export default function NewSessionPanel({
     if (!dirs) return;
     setExtraDirs((prev) => prev.filter((p) => p !== dirs.path));
   }, [dirs?.path]);
+
+  // Esc backs out (proposal 0011): close an open sub-picker first — the
+  // extra-folders browser, then the inline new-folder input — and only the panel
+  // itself once nothing is layered on top. Capture phase mirrors SessionDrawer:
+  // the terminal/xterm helper textarea may still hold focus underneath and would
+  // otherwise swallow the key via stopPropagation.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (extraPickerOpen) {
+        setExtraPickerOpen(false);
+        return;
+      }
+      if (creating) {
+        setCreating(false);
+        setNewName("");
+        return;
+      }
+      onClose();
+    };
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
+  }, [open, extraPickerOpen, creating, onClose]);
+
+  // Land the cursor in the name field on open so a keyboard user can type a name
+  // and Enter to create immediately (or Tab into the tool pills / folder list).
+  // Deferred a frame so the input is mounted before we focus it.
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => nameRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [open]);
 
   if (!open) return null;
 
@@ -484,11 +522,13 @@ export default function NewSessionPanel({
         {err && <div className="mb-2 text-sm text-red-400">{err}</div>}
         <div className="flex gap-2">
           <input
+            ref={nameRef}
             value={name}
             onChange={(e) => {
               nameEdited.current = true;
               setName(e.target.value);
             }}
+            onKeyDown={(e) => e.key === "Enter" && create()}
             placeholder={here === "~" ? "session name" : here}
             className="min-w-0 flex-1 rounded-lg border border-edge bg-bar px-3 py-3 font-mono text-[15px] text-slate-100 outline-none focus:border-accent"
           />

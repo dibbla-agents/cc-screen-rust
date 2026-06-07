@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
@@ -85,15 +85,37 @@ export default function SessionDrawer({
       return b.activity - a.activity;
     });
   }, [sessions]);
-  // Keyboard-cursor index into `sessions`. Separate from the "active"
-  // (currently-attached) row so ↑/↓ can park on a different session before
-  // committing with Enter. -1 means "no row focused" (e.g. empty list).
+  // A single ordered list of navigable items (proposal 0011): the header actions
+  // — "New session" always, "Restore" when there's something to restore — come
+  // first, followed by the session rows. The keyboard cursor indexes *this* list
+  // (not `ordered`), so ↑/↓ walks off the top session row onto the header
+  // actions and Enter has a typed action to dispatch.
+  type NavItem =
+    | { kind: "new" }
+    | { kind: "restore" }
+    | { kind: "session"; session: Session };
+  const items = useMemo<NavItem[]>(
+    () => [
+      { kind: "new" },
+      ...(restorable.length > 0 ? [{ kind: "restore" as const }] : []),
+      ...ordered.map((session) => ({ kind: "session" as const, session })),
+    ],
+    [ordered, restorable.length]
+  );
+  // Offset of the first session row within `items` (1, or 2 when Restore shows).
+  const sessionBase = items.length - ordered.length;
+
+  // Keyboard-cursor index into `items`. Separate from the "active"
+  // (currently-attached) row so ↑/↓ can park on a different item before
+  // committing with Enter. -1 means "nothing focused" (drawer closed). `items`
+  // always has at least the "New session" entry, so the cursor is valid even on
+  // an empty session list.
   const [cursor, setCursor] = useState<number>(-1);
-  const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const itemRefs = useRef<(HTMLElement | null)[]>([]);
 
   // Whenever the drawer opens (or the session list changes while it's open),
   // park the cursor on the currently-attached session — that's the natural
-  // starting point for "show me what else is around".
+  // starting point for "show me what else is around" — else on "New session".
   useEffect(() => {
     if (!open) {
       setCursor(-1);
@@ -103,14 +125,26 @@ export default function SessionDrawer({
     const cur = ordered.findIndex(
       (s) => s.name === current?.name && (s.machine ?? "") === current?.machine
     );
-    setCursor(cur >= 0 ? cur : ordered.length > 0 ? 0 : -1);
-  }, [open, ordered, current]);
+    setCursor(cur >= 0 ? sessionBase + cur : 0);
+  }, [open, ordered, current, sessionBase]);
 
-  // Keep the cursor row in view when it moves off-screen (long lists).
+  // Keep the cursor item in view when it moves off-screen (long lists).
   useEffect(() => {
     if (cursor < 0) return;
-    rowRefs.current[cursor]?.scrollIntoView({ block: "nearest" });
+    itemRefs.current[cursor]?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
+
+  // Shared by the Restore button's click and the Enter-on-Restore keyboard path
+  // (proposal 0011). Guards re-entry while a restore is already in flight.
+  const runRestore = useCallback(async () => {
+    if (restoring) return;
+    setRestoring(true);
+    try {
+      await onRestore();
+    } finally {
+      setRestoring(false);
+    }
+  }, [restoring, onRestore]);
 
   // ↑/↓ to move the cursor, Enter to pick, Esc to dismiss. Bound only while
   // the drawer is open so the terminal still owns these keys when it's not.
@@ -133,11 +167,10 @@ export default function SessionDrawer({
         onClose();
         return;
       }
-      if (ordered.length === 0) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
-        setCursor((i) => (i < 0 ? 0 : Math.min(ordered.length - 1, i + 1)));
+        setCursor((i) => (i < 0 ? 0 : Math.min(items.length - 1, i + 1)));
         return;
       }
       if (e.key === "ArrowUp") {
@@ -147,17 +180,19 @@ export default function SessionDrawer({
         return;
       }
       if (e.key === "Enter") {
-        if (cursor >= 0 && cursor < ordered.length) {
-          e.preventDefault();
-          e.stopPropagation();
-          onPick(ordered[cursor]);
-        }
+        const it = items[cursor];
+        if (!it) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (it.kind === "session") onPick(it.session);
+        else if (it.kind === "new") onNew();
+        else if (it.kind === "restore") void runRestore();
       }
     };
     window.addEventListener("keydown", handler, { capture: true });
     return () =>
       window.removeEventListener("keydown", handler, { capture: true });
-  }, [open, ordered, cursor, onClose, onPick]);
+  }, [open, items, cursor, onClose, onPick, onNew, runRestore]);
 
   // Phone / pane-embedded variants unmount when closed. The sidebar variant
   // stays mounted so its slide-out transition can play (see the transform-driven
@@ -239,10 +274,15 @@ export default function SessionDrawer({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
-        {/* New session */}
+        {/* New session — item 0, always present and keyboard-reachable. */}
         <button
+          ref={(el) => {
+            itemRefs.current[0] = el;
+          }}
           onClick={onNew}
-          className="flex w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left transition-colors hover:bg-edge/50"
+          className={`flex w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left transition-colors hover:bg-edge/50 ${
+            cursor === 0 ? "bg-edge/70 ring-1 ring-inset ring-accent/40" : ""
+          }`}
         >
           <span className="flex h-5 w-5 shrink-0 items-center justify-center">
             <PlusIcon className="h-4 w-4 text-accent" />
@@ -250,20 +290,18 @@ export default function SessionDrawer({
           <span className="text-[13px] font-medium text-slate-200">New session…</span>
         </button>
 
-        {/* Restore (only after a reboot/tmux restart took sessions down) */}
+        {/* Restore (only after a reboot/tmux restart took sessions down) —
+            item 1 when shown. */}
         {restorable.length > 0 && (
           <button
-            onClick={async () => {
-              if (restoring) return;
-              setRestoring(true);
-              try {
-                await onRestore();
-              } finally {
-                setRestoring(false);
-              }
+            ref={(el) => {
+              itemRefs.current[1] = el;
             }}
+            onClick={runRestore}
             disabled={restoring}
-            className="flex w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left transition-colors hover:bg-edge/50 disabled:opacity-60"
+            className={`flex w-full items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left transition-colors hover:bg-edge/50 disabled:opacity-60 ${
+              cursor === 1 ? "bg-edge/70 ring-1 ring-inset ring-accent/40" : ""
+            }`}
             title={restorable.map((r) => `${r.tool}-${r.short} · ${r.dir}`).join("\n")}
           >
             <span className="flex h-5 w-5 shrink-0 items-center justify-center">
@@ -302,7 +340,7 @@ export default function SessionDrawer({
         {ordered.map((s, idx) => {
           const active =
             s.name === current?.name && (s.machine ?? "") === current?.machine;
-          const focused = idx === cursor;
+          const focused = sessionBase + idx === cursor;
           const isDeleting = deleting.has(s.name);
           // One status dot: red (connection down) / amber (working) / green
           // (ready for input). `waiting` is server-computed and independent of
@@ -318,8 +356,9 @@ export default function SessionDrawer({
           );
           // First row of a new machine run gets a group header. Sessions arrive
           // pre-sorted by (machine, name) from the hub, so a simple
-          // change-detect against the previous row groups them; cursor/rowRefs
-          // stay indexed over the flat `sessions` array (headers aren't rows).
+          // change-detect against the previous row groups them; cursor/itemRefs
+          // index the flat `items` list via `sessionBase + idx` (headers and
+          // empty-machine headers aren't items).
           const showHeader =
             multiMachine &&
             (idx === 0 || (ordered[idx - 1].machine ?? "") !== (s.machine ?? ""));
@@ -333,7 +372,7 @@ export default function SessionDrawer({
               {showHeader && renderMachineHeader(s.machine ?? "")}
               <div
                 ref={(el) => {
-                  rowRefs.current[idx] = el;
+                  itemRefs.current[sessionBase + idx] = el;
                 }}
                 className={`group flex items-center rounded-md transition-colors ${rowState}`}
               >
