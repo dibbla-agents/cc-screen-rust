@@ -5,7 +5,7 @@
 # stays in the binaries, not here.
 [package]
 name = "cc-screen-auth"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 description = "Opt-in password/API-token auth with signed session cookies for cc-screen-rust"
 
