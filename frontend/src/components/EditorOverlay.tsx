@@ -88,6 +88,16 @@ interface Props {
   agentRows?: number;
   // Terminal font size — the upper bound for the mirror's auto-fitted font.
   termFontSize?: number;
+  // Desktop only (proposal 0019): open the session switcher *over* the viewer so
+  // the file viewer can follow a session change without closing. When provided,
+  // the toolbar shows a session-switcher button. Undefined on phone (the flow
+  // there is still close → switch → open).
+  onOpenSwitcher?: () => void;
+  // Reports the editor's unsaved-buffer state up so the parent can guard a
+  // session switch (which would otherwise silently discard the buffer). The
+  // guard lives at the switch source (App.tsx) because an effect reacting to an
+  // already-changed prop can't cleanly cancel the switch.
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -174,6 +184,8 @@ export default function EditorOverlay({
   agentCols = 0,
   agentRows = 0,
   termFontSize = 14,
+  onOpenSwitcher,
+  onDirtyChange,
 }: Props) {
   // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
   // on open; switchable via the header dropdown (multi-machine only).
@@ -435,6 +447,14 @@ export default function EditorOverlay({
   const dirty = status === "ready" && content !== loaded;
   const isMd = isMarkdownFile(name);
 
+  // Surface the unsaved-buffer state up so the parent can guard a session switch
+  // at its source (proposal 0019). Report `false` when the overlay is closed so a
+  // stale-dirty flag never blocks a switch after the editor is gone.
+  useEffect(() => {
+    onDirtyChange?.(open && dirty);
+    return () => onDirtyChange?.(false);
+  }, [open, dirty, onDirtyChange]);
+
   // Refs so the filesystem-watch listener (registered once) reads fresh values.
   const activePathRef = useRef(activePath);
   activePathRef.current = activePath;
@@ -541,6 +561,29 @@ export default function EditorOverlay({
   useEffect(() => {
     if (open) setActivePath(initialPath);
   }, [open, initialPath]);
+
+  // Proposal 0019 — follow a session switch under the open viewer. When the
+  // underlying session changes (the user cycled sessions / picked one from the
+  // switcher while the viewer stayed open), the previously-open file belongs to
+  // the *old* session's machine/cwd, so drop back to the new session's tree
+  // instead of trying to re-read a stale path on the new machine. The tree,
+  // mirror, and fileMachine already retarget off the new props (see the
+  // initialMachine/useDirTree/AgentMirror-key effects); the only missing piece
+  // is clearing the stale activePath. Skip the very first run (the open
+  // transition) so this never fights the initialPath effect above.
+  const sessionKey = `${agentMachine}/${session ?? ""}`;
+  const prevSessionKey = useRef(sessionKey);
+  useEffect(() => {
+    if (!open) {
+      prevSessionKey.current = sessionKey;
+      return;
+    }
+    if (prevSessionKey.current !== sessionKey) {
+      prevSessionKey.current = sessionKey;
+      setActivePath(null); // → tree for the new session
+      setTreePanelOpen(true); // phone: surface the tree (no-op on desktop)
+    }
+  }, [open, sessionKey]);
 
   // Opened with no file (the ⬇ Files entry / Ctrl+B e) on a phone? Land directly
   // on the file browser rather than the empty state — this overlay IS the file
@@ -879,6 +922,24 @@ export default function EditorOverlay({
             {name || "Editor"}
           </span>
         </div>
+
+        {/* Session switcher (proposal 0019) — desktop only. The file viewer is a
+            singleton bound to the active pane's session; this opens the same
+            SessionDrawer used everywhere else *over* the viewer, so switching
+            sessions re-targets the tree + mirror without leaving the viewer.
+            Shows the current session so it doubles as a "which session am I
+            looking at" label. Mirrors the ⌃B s chord (also live over the viewer). */}
+        {isDesktop && onOpenSwitcher && (
+          <button
+            onClick={onOpenSwitcher}
+            title="Switch session (⌃B s)"
+            aria-label="Switch session"
+            className="flex h-9 max-w-[12rem] shrink-0 items-center gap-1.5 rounded-lg bg-panel px-2.5 text-xs text-slate-200 transition-colors hover:bg-edge hover:text-slate-100"
+          >
+            <span className="text-slate-400">☰</span>
+            <span className="truncate">{session || "Session"}</span>
+          </button>
+        )}
 
         {/* Machine switcher — which agent's $HOME the tree/file ops browse. Only
             with a hub fronting >1 agent. Switching re-roots the tree (the

@@ -166,6 +166,14 @@ export default function App() {
   });
   const editorOpenRef = useRef(false);
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
+  // The editor reports its unsaved-buffer state up here so a session switch under
+  // the open viewer (Ctrl+B ↑/↓ or a drawer pick) can prompt before discarding
+  // it — the source-side dirty guard from proposal 0019. A ref shadows it so the
+  // keyboard handler + pick read the fresh value without re-binding.
+  const editorDirtyRef = useRef(false);
+  const onEditorDirtyChange = useCallback((d: boolean) => {
+    editorDirtyRef.current = d;
+  }, []);
   // File-upload state. The list is captured at trigger time — flattened from
   // a desktop drop (folders walked via webkitGetAsEntry in api.ts) or from the
   // phone's file picker — and uploadPane is the pane's session+machine captured
@@ -713,15 +721,88 @@ export default function App() {
       if (next !== null) mountAt(cur, paneRefFor(next));
     };
 
+    // Proposal 0019 — session cycle while the file viewer owns the screen. Only
+    // up/down (session cycle) makes sense over the singleton editor; left/right
+    // (pane focus) does not, so it's ignored. The dirty guard lives here at the
+    // switch source: an effect reacting to an already-moved pane couldn't cancel
+    // it. Cancelling the confirm leaves the viewer on the current session.
+    const handleViewerArrow = (k: string) => {
+      if (k !== "ArrowUp" && k !== "ArrowDown") return;
+      const cur = activeRef.current;
+      const dir: 1 | -1 = k === "ArrowDown" ? 1 : -1;
+      const names = sessionsRef.current.map((x) => x.name);
+      const next = cycleSessionInPane(panesRef.current, cur, names, dir);
+      if (next === null) return;
+      if (editorDirtyRef.current && !window.confirm("Discard unsaved changes?")) return;
+      mountAt(cur, paneRefFor(next));
+    };
+
     const isArrow = (k: string) =>
       k === "ArrowLeft" || k === "ArrowRight" || k === "ArrowUp" || k === "ArrowDown";
 
     const handler = (e: KeyboardEvent) => {
       if (shouldSkipShortcut(e)) return;
-      // The editor overlay owns the whole screen and handles its own keys
-      // (Esc/Cmd+S in its own capture-phase listener); the tmux-style prefix is
-      // inert while it's open so Ctrl+B doesn't cycle panes underneath.
-      if (editorOpenRef.current) return;
+
+      const stop = () => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      };
+
+      // Proposal 0019 — the editor overlay owns the whole screen and handles its
+      // own keys (Esc/Cmd+S in its own capture-phase listener), so most of the
+      // tmux prefix stays inert: pane numbers, the layout palette (l/Space),
+      // unmount (x) and open-editor (e) have no meaning over a full-screen file
+      // viewer. The exception is the *session-switch* chords, kept live so the
+      // viewer can follow a session change without closing: Ctrl+B ↑/↓ cycles
+      // the active session and Ctrl+B s opens the switcher over the viewer.
+      if (editorOpenRef.current) {
+        if (isCtrlB(e)) {
+          stop();
+          clearArm();
+          clearRepeat();
+          armed = true;
+          armTimer = window.setTimeout(() => {
+            armed = false;
+            armTimer = null;
+            openDrawer();
+          }, PREFIX_TIMEOUT_MS);
+          return;
+        }
+        if (armed) {
+          const k = e.key;
+          if (k === "ArrowUp" || k === "ArrowDown") {
+            stop();
+            clearArm();
+            handleViewerArrow(k);
+            extendRepeat();
+            return;
+          }
+          if (k === "s" || k === "S") {
+            stop();
+            clearArm();
+            openDrawer();
+            return;
+          }
+          // Esc and every other chord key is inert over the viewer: drop the
+          // prefix. (Esc-to-close is the editor's own capture-phase handler.)
+          clearArm();
+          return;
+        }
+        if (repeating) {
+          const k = e.key;
+          if (k === "ArrowUp" || k === "ArrowDown") {
+            stop();
+            handleViewerArrow(k);
+            extendRepeat();
+            return;
+          }
+          clearRepeat();
+          return;
+        }
+        return;
+      }
+
       // While the layout palette is open it owns the keyboard. The palette's
       // onKeyDown runs in bubble phase; without this gate the window-level
       // capture handler would also chew on arrows/Enter/Esc and re-arm
@@ -742,12 +823,6 @@ export default function App() {
         }, PREFIX_TIMEOUT_MS);
         return;
       }
-
-      const stop = () => {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-      };
 
       if (armed) {
         const k = e.key;
@@ -1208,8 +1283,16 @@ export default function App() {
   };
 
   // Picking from the drawer mounts the chosen session (with its owning machine)
-  // in the active pane.
+  // in the active pane. When the file viewer is open over the grid (proposal
+  // 0019) the pick retargets the viewer instead of the terminal, so guard an
+  // unsaved buffer first — cancelling leaves the viewer on the current session.
   const pick = (s: Session) => {
+    if (
+      editorOpenRef.current &&
+      editorDirtyRef.current &&
+      !window.confirm("Discard unsaved changes?")
+    )
+      return;
     mountAt(active, { name: s.name, machine: s.machine ?? "" });
     setDrawerOpen(false);
   };
@@ -1441,11 +1524,12 @@ export default function App() {
   //  - desktop → a left-pinned slide-in sidebar over the terminal area
   //    (sidebar=true), so Ctrl+B reveals the picker without blanking the
   //    terminal you were in (proposal 0006).
-  const renderDrawer = (embedded: boolean, sidebar = false) => (
+  const renderDrawer = (embedded: boolean, sidebar = false, elevated = false) => (
     <SessionDrawer
       open={drawerOpen}
       embedded={embedded}
       sidebar={sidebar}
+      elevated={elevated}
       sessions={sessions}
       connByRef={connByRef}
       machines={machines}
@@ -1661,12 +1745,17 @@ export default function App() {
           <>
             {drawerOpen && (
               <div
-                className="absolute inset-0 z-20 bg-black/20"
+                className={`absolute inset-0 bg-black/20 ${
+                  editor.open ? "z-[64]" : "z-20"
+                }`}
                 onClick={() => setDrawerOpen(false)}
                 aria-hidden
               />
             )}
-            {renderDrawer(true, true)}
+            {/* When the file viewer (z-[60]) is up, the switcher must render
+                above it (proposal 0019) so Ctrl+B s / the toolbar button reveal
+                a usable switcher rather than one hidden behind the viewer. */}
+            {renderDrawer(true, true, editor.open)}
           </>
         )}
       </main>
@@ -1780,6 +1869,11 @@ export default function App() {
             agentCols={termsRef.current[active]?.cols}
             agentRows={termsRef.current[active]?.rows}
             termFontSize={fontSize}
+            // Proposal 0019: let the viewer follow a session switch. Desktop
+            // only — the toolbar button + Ctrl+B s open the same SessionDrawer
+            // over the viewer; onDirtyChange feeds the source-side switch guard.
+            onOpenSwitcher={isDesktop ? () => setDrawerOpen(true) : undefined}
+            onDirtyChange={onEditorDirtyChange}
           />
         </Suspense>
       )}

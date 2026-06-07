@@ -16,6 +16,10 @@ interface Props {
   // stays mounted while closed and animates the transform, so the slide-out
   // plays; the phone path keeps the `!open` early return. See proposal 0006.
   sidebar?: boolean;
+  // Lift the sidebar (and its scrim, handled by the caller) above the file
+  // viewer's z-[60] overlay so the switcher renders on top of it instead of
+  // behind it (proposal 0019). Only meaningful with `sidebar`.
+  elevated?: boolean;
   sessions: Session[];
   // Per-session WebSocket state, keyed `${machine}/${name}`, for sessions open
   // in a pane — lets a row's status dot go red when its connection drops. Rows
@@ -84,6 +88,7 @@ export default function SessionDrawer({
   open,
   embedded = false,
   sidebar = false,
+  elevated = false,
   sessions,
   connByRef,
   machines,
@@ -321,7 +326,7 @@ export default function SessionDrawer({
   // and drops pointer events so clicks fall through to the terminal.
   const rootClass = sidebar
     ? [
-        "absolute inset-y-0 left-0 z-30 flex w-[320px] max-w-[85%] flex-col text-slate-200",
+        `absolute inset-y-0 left-0 ${elevated ? "z-[70]" : "z-30"} flex w-[320px] max-w-[85%] flex-col text-slate-200`,
         "border-r border-edge/80 bg-bar/95 backdrop-blur-md shadow-xl",
         "transition-transform duration-200 ease-out",
         open ? "translate-x-0" : "-translate-x-full pointer-events-none",
