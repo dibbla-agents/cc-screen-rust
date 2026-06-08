@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
-import { machineAccent, toolColor } from "../util";
+import { machineAccent, toolColor, toolQuietBadge } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -376,15 +376,18 @@ function PaneBox({
               </span>
             </>
           )}
+          {/* Quiet tool label — brand hue as text on a faint wash, normal
+              weight. De-emphasised vs the loud solid chip so the session name
+              (below) reads as the primary identity. */}
           <span
-            className={`shrink-0 rounded px-1 py-px text-[9px] font-bold uppercase text-bar ${toolColor(
+            className={`shrink-0 rounded px-1 py-px text-[9px] font-medium uppercase tracking-wide ${toolQuietBadge(
               meta.tool
             )}`}
           >
             {meta.tool}
           </span>
           <span
-            className={`min-w-0 flex-1 truncate ${
+            className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
               active ? "text-slate-100" : "text-slate-300"
             }`}
           >
