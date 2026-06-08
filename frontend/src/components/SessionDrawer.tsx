@@ -3,6 +3,7 @@ import { type MachineInfo, type PaneRef, type RestorableSession, type Session } 
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
+import ToastsButton from "./ToastsButton";
 import CreateSession from "./CreateSession";
 
 interface Props {
@@ -59,6 +60,11 @@ interface Props {
   // appears only when non-empty. onRestore brings them all back.
   restorable: RestorableSession[];
   onRestore: () => void | Promise<void>;
+  // In-app session-ready toasts (proposal 0017): the persisted on/off flag and
+  // its toggle. Sits beside the Web Push bell; enabling fires a test toast (App
+  // owns that, since it holds the toast host). Defaults on.
+  toastsOn: boolean;
+  onToggleToasts: () => void;
 }
 
 // A navigable item the keyboard cursor can land on (proposal 0011, generalized
@@ -110,6 +116,8 @@ export default function SessionDrawer({
   onDelete,
   restorable,
   onRestore,
+  toastsOn,
+  onToggleToasts,
 }: Props) {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -576,7 +584,8 @@ export default function SessionDrawer({
           </span>
         )}
         <span className="ml-auto hidden text-[10px] text-slate-600 sm:inline">↑↓ ⏎ · Esc · ⌃B</span>
-        <NotificationsButton className={`${iconBtn} ml-auto sm:ml-0`} />
+        <ToastsButton on={toastsOn} onToggle={onToggleToasts} className={`${iconBtn} ml-auto sm:ml-0`} />
+        <NotificationsButton className={iconBtn} />
         <button onClick={onRefresh} aria-label="Refresh sessions" className={iconBtn}>
           <RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
         </button>

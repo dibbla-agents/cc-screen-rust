@@ -51,6 +51,17 @@ import { agentStatus, statusDot, statusTitle, toolColor, toPng, writeClipboard }
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
+// In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
+// (the proposal ships always-on; the gated, foreground-only edge keeps it
+// quiet) — only an explicit "0" disables it.
+const TOASTS_KEY = "ccweb.toasts.v1";
+const loadToastsEnabled = (): boolean => {
+  try {
+    return localStorage.getItem(TOASTS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+};
 // One-shot "how to select" hint. `.v2` because the v1 wording said
 // "Shift+drag" universally — wrong on Mac, where the modifier is Option.
 // Bumping the key re-shows the corrected hint to users who already
@@ -264,6 +275,34 @@ export default function App() {
   // Previous session snapshot for the ready-edge diff. null until the first poll
   // establishes a baseline (that snapshot toasts nothing).
   const prevSnapshotRef = useRef<Session[] | null>(null);
+  // Persisted on/off for the toasts (drawer toggle). A ref shadows it so the
+  // detector effect can read the live value without re-subscribing.
+  const [toastsEnabled, setToastsEnabled] = useState<boolean>(loadToastsEnabled);
+  const toastsEnabledRef = useRef(toastsEnabled);
+  useEffect(() => { toastsEnabledRef.current = toastsEnabled; }, [toastsEnabled]);
+  // Toggle the setting; on enable, fire a one-off **test toast** so the user
+  // immediately sees what a real ready-notification looks like (mirrors the Web
+  // Push bell's test buzz). The test entry has an empty name so a click just
+  // dismisses (openSessionByName("") is a no-op) rather than hunting a session.
+  const toggleToasts = useCallback(() => {
+    setToastsEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(TOASTS_KEY, next ? "1" : "0");
+      } catch { /* quota — ignore */ }
+      if (next) {
+        toastHostRef.current?.push([
+          {
+            name: "",
+            machine: "",
+            tool: currentSession ? sessionsRef.current.find((s) => s.name === currentSession.name)?.tool ?? "claude" : "claude",
+            short: "Test toast — this is how a ready session appears",
+          },
+        ]);
+      }
+      return next;
+    });
+  }, [currentSession]);
 
   // Track the visible area (shrinks when the soft keyboard opens) so the app —
   // terminal, footer, and the compose/image sheets — stays above the keyboard
@@ -618,6 +657,9 @@ export default function App() {
     const prev = prevSnapshotRef.current;
     prevSnapshotRef.current = sessions;
     if (prev === null) return; // first snapshot: baseline only
+    // Still advance the baseline above when toasts are off, so re-enabling
+    // doesn't replay a stale edge; just don't emit while disabled.
+    if (!toastsEnabledRef.current) return;
     if (document.visibilityState !== "visible") return; // hidden: OS push owns it
     const mounted = new Set(
       panesRef.current.filter((p): p is PaneRef => p != null).map(sessionKey)
@@ -1615,6 +1657,8 @@ export default function App() {
       onDelete={removeSession}
       restorable={restorable}
       onRestore={onRestore}
+      toastsOn={toastsEnabled}
+      onToggleToasts={toggleToasts}
     />
   );
 
