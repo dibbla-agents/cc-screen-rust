@@ -25,6 +25,30 @@ export function ImageIcon({ className }: IconProps) {
   );
 }
 
+// A checklist — the session-status overview (proposal 0022): rows with a leading
+// tick, i.e. "what each session needs at a glance".
+export function StatusListIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m3 5 1.5 1.5L7 4" />
+      <path d="m3 12 1.5 1.5L7 11" />
+      <path d="m3 19 1.5 1.5L7 18" />
+      <path d="M11 5h10" />
+      <path d="M11 12h10" />
+      <path d="M11 19h10" />
+    </svg>
+  );
+}
+
 // A bell — notifications. `filled` paints it solid (subscribed); `off` adds a
 // slash (push unavailable / muted).
 export function BellIcon({

@@ -58,13 +58,27 @@ fn agent_ws_url(base: &str) -> String {
     format!("{ws}/agent/ws")
 }
 
+/// Agent-side summary knobs (proposal 0022): how big a terminal tail to extract,
+/// and how often to evaluate candidacy. The hub owns the actual spend gate.
+#[derive(Clone, Copy)]
+pub struct SummaryParams {
+    pub tail_lines: usize,
+    pub interval_secs: u64,
+}
+
 /// Connect to `hub_url` and serve forever, reconnecting with backoff.
-pub async fn run(state: AppState, hub_url: String, token: Option<String>, machine_id: String) {
+pub async fn run(
+    state: AppState,
+    hub_url: String,
+    token: Option<String>,
+    machine_id: String,
+    summary: SummaryParams,
+) {
     let url = agent_ws_url(&hub_url);
     tracing::info!("uplink: hub={url} machine_id={machine_id}");
     let mut attempt = 0u32;
     loop {
-        match connect_and_serve(&state, &url, &hub_url, token.as_deref(), &machine_id).await {
+        match connect_and_serve(&state, &url, &hub_url, token.as_deref(), &machine_id, summary).await {
             Err(e) => {
                 tracing::warn!("uplink: connect failed: {e}");
                 attempt = attempt.saturating_add(1);
@@ -86,6 +100,7 @@ async fn connect_and_serve(
     hub_base: &str,
     token: Option<&str>,
     machine_id: &str,
+    summary: SummaryParams,
 ) -> anyhow::Result<()> {
     let mut req = url.into_client_request()?;
     if let Some(t) = token {
@@ -127,6 +142,9 @@ async fn connect_and_serve(
     // Per-session `waiting` state, for emitting busy→waiting edges to the hub.
     let mut prev_waiting: HashMap<String, bool> = HashMap::new();
     let mut tick = interval(SESSIONS_POLL);
+    // Periodic summary candidacy (proposal 0022). Floor at 5s so a misconfigured
+    // tiny value can't hot-loop the LLM.
+    let mut summary_tick = interval(Duration::from_secs(summary.interval_secs.max(5)));
 
     loop {
         tokio::select! {
@@ -143,12 +161,19 @@ async fn connect_and_serve(
                         && s.waiting
                         && notification_eligible(s.busy_since, s.last_input_at, now)
                     {
+                        // The push carries the agent's last cached summary detail
+                        // (proposal 0022) so the buzz says what's needed; the hub
+                        // falls back to preview when it's absent.
                         let edge = AgentMsg::WaitingEdge {
                             session: s.name.clone(),
                             short: s.short.clone(),
                             preview: s.preview.clone(),
+                            detail: s.detail.clone(),
                         };
                         let _ = out_tx.send(WsOut::Bin(encode_frame(&edge, b""))).await;
+                        // The session just finished a turn — ask for a fresh summary
+                        // now so the next poll / next push reflects this state.
+                        request_summary(state, &out_tx, machine_id, &s.name, summary.tail_lines).await;
                     }
                 }
                 prev_waiting.retain(|name, _| cur.iter().any(|s| &s.name == name));
@@ -158,6 +183,14 @@ async fn connect_and_serve(
                     if out_tx.send(WsOut::Bin(frame)).await.is_err() {
                         break;
                     }
+                }
+            }
+            _ = summary_tick.tick() => {
+                // Steady-state candidacy sweep: a changed (hash differs) session
+                // that isn't already in flight gets one SummaryRequest. Idle
+                // sessions send nothing (the hash gate is local + cheap).
+                for sess in state.list() {
+                    request_summary(state, &out_tx, machine_id, &sess.name, summary.tail_lines).await;
                 }
             }
             incoming = ws_read.next() => match incoming {
@@ -294,6 +327,18 @@ async fn handle_hub(
             let result = crate::ops::run_cmd(state, cmd);
             let _ = out_tx.send(WsOut::Bin(encode_frame(&AgentMsg::Reply { req, result }, b""))).await;
         }
+        HubMsg::SummaryResult { session, content_hash, headline, detail } => {
+            // The hub answered (or declined). Cache only a non-declined result that
+            // still matches the latest requested hash (else it's stale). A declined
+            // result (both None) leaves the cache untouched — clients keep showing
+            // preview. (0022 §5.)
+            if let (Some(h), Some(d)) = (headline, detail) {
+                if let Some(sess) = state.get(&session) {
+                    let stored = sess.store_summary(content_hash, h, d);
+                    tracing::debug!("summary result for {session}: stored={stored}");
+                }
+            }
+        }
         HubMsg::Ping => {
             if out_tx.send(WsOut::Bin(encode_frame(&AgentMsg::Pong, b""))).await.is_err() {
                 return false;
@@ -313,6 +358,33 @@ async fn handle_hub(
         }
     }
     true
+}
+
+/// If `session` is a summary candidate (its content changed since the last
+/// summary and no request is in flight), redact + extract its inputs/tail and send
+/// a `SummaryRequest` to the hub, marking the hash in-flight. A no-op for an
+/// unchanged or already-requested session — so an idle fleet sends nothing.
+async fn request_summary(
+    state: &AppState,
+    out_tx: &mpsc::Sender<WsOut>,
+    machine_id: &str,
+    session: &str,
+    tail_lines: usize,
+) {
+    let Some(sess) = state.get(session) else { return };
+    let (hash, inputs, tail) = sess.summary_extract(tail_lines);
+    if !sess.summary_candidate(hash) {
+        return;
+    }
+    sess.mark_summary_requested(hash);
+    let req = AgentMsg::SummaryRequest {
+        machine: machine_id.to_string(),
+        session: session.to_string(),
+        content_hash: hash,
+        inputs,
+        tail,
+    };
+    let _ = out_tx.send(WsOut::Bin(encode_frame(&req, b""))).await;
 }
 
 /// Spin up one client channel: an `attach_loop` against `sess` plus a forwarder

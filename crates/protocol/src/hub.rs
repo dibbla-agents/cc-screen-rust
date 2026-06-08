@@ -76,8 +76,28 @@ pub enum AgentMsg {
     /// The channel's session ended (child exited) — the hub closes the client WS.
     Closed { ch: ChannelId },
     /// The agent observed a busy→waiting edge; the hub turns it into a push
-    /// notification (centralized push). No payload.
-    WaitingEdge { session: String, short: String, preview: String },
+    /// notification (centralized push). No payload. `detail` carries the agent's
+    /// last cached LLM summary for this session (proposal 0022) so the push body
+    /// can be the summary rather than the bare preview; `None` falls back to
+    /// `preview`. Additive — an older hub ignores the field.
+    WaitingEdge {
+        session: String,
+        short: String,
+        preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// The agent asks the hub to summarize one session (proposal 0022). The agent
+    /// has redacted `inputs` + `tail` before sending. `content_hash` identifies the
+    /// exact (inputs, tail) snapshot so the hub echoes it back and the agent can
+    /// drop a stale result. The hub gates on feature/key/budget before spending.
+    SummaryRequest {
+        machine: String,
+        session: String,
+        content_hash: u64,
+        inputs: Vec<String>,
+        tail: String,
+    },
     /// Reply to [`HubMsg::Ping`].
     Pong,
 }
@@ -102,6 +122,16 @@ pub enum HubMsg {
     /// an unguessable random nonce the agent presents (with its `machine_id`) on
     /// the dial-back, so only the selected agent can claim this transfer's slot.
     OpenBulk { id: String, bulk: BulkSpec },
+    /// The hub's answer to a [`AgentMsg::SummaryRequest`] (proposal 0022). Echoes
+    /// `content_hash` so the agent ignores it if the session changed again
+    /// meanwhile. `headline`/`detail` are `None` when the hub declined (feature
+    /// off, no key, or over budget) — the agent then keeps showing `preview`.
+    SummaryResult {
+        session: String,
+        content_hash: u64,
+        headline: Option<String>,
+        detail: Option<String>,
+    },
     /// Liveness probe (→ [`AgentMsg::Pong`]).
     Ping,
 }
@@ -244,6 +274,8 @@ mod tests {
             skip_permissions: Some(true),
             cwd: "/home/u".into(),
             machine: "box1".into(),
+            headline: None,
+            detail: None,
         };
         let cases = vec![
             AgentMsg::Register {
@@ -259,7 +291,14 @@ mod tests {
             AgentMsg::Output { ch: 2 },
             AgentMsg::WatchEvt { ch: 5 },
             AgentMsg::Closed { ch: 2 },
-            AgentMsg::WaitingEdge { session: "claude-x".into(), short: "x".into(), preview: "done".into() },
+            AgentMsg::WaitingEdge { session: "claude-x".into(), short: "x".into(), preview: "done".into(), detail: Some("Paused for tests.".into()) },
+            AgentMsg::SummaryRequest {
+                machine: "box1".into(),
+                session: "claude-x".into(),
+                content_hash: 0xdead_beef,
+                inputs: vec!["fix the auth bug".into(), "y".into()],
+                tail: "login() rewritten\nrun tests? (y/n)".into(),
+            },
             AgentMsg::Pong,
         ];
         for m in cases {
@@ -282,6 +321,12 @@ mod tests {
             HubMsg::Command { req: 3, cmd: Cmd::Key { session: "claude-x".into(), key: "enter".into() } },
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
             HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
+            HubMsg::SummaryResult {
+                session: "claude-x".into(),
+                content_hash: 0xdead_beef,
+                headline: Some("Waiting to run tests".into()),
+                detail: Some("It refactored auth and is paused.".into()),
+            },
             HubMsg::Ping,
         ];
         for m in cases {

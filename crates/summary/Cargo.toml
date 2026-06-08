@@ -1,0 +1,20 @@
+# The session summarizer: the one place that calls Anthropic's Messages API to
+# turn a session's recent inputs + terminal tail into a short {headline, detail}
+# status. Shared by the hub (the canonical keyholder) and the agent (the optional
+# standalone-only local-key fallback), so the request shape + parsing live once.
+# See cc-screen-saas proposal 0022.
+[package]
+name = "cc-screen-summary"
+version = "0.3.30"
+edition = "2021"
+description = "Haiku-backed session-status summarizer for cc-screen-rust"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# Pure-Rust rustls stack (no system OpenSSL) to match the rest of the workspace.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

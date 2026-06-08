@@ -102,6 +102,34 @@ impl Emulator {
         String::new()
     }
 
+    /// Plain-text render of the last `max_lines` non-blank rows of the buffer
+    /// (scrollback + screen), one row per line, no ANSI/SGR. This is the LLM
+    /// context window for the session summary (proposal 0022): `snapshot()` is
+    /// wrong for that (it carries SGR codes), `preview()` is only one line.
+    /// Leading/trailing blank rows are dropped so a short session returns just its
+    /// content; the output is stable for an unchanged grid (drives the hash gate).
+    pub fn tail_text(&self, max_lines: usize) -> String {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let mut lines: Vec<String> = Vec::new();
+        for li in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = &grid[Line(li)];
+            let s: String = (0..cols).map(|c| row[Column(c)].c).collect();
+            lines.push(s.trim_end().to_string());
+        }
+        // Trim blank rows at both ends (no padding for short sessions).
+        while lines.first().is_some_and(|s| s.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|s| s.is_empty()) {
+            lines.pop();
+        }
+        if lines.len() > max_lines {
+            lines = lines.split_off(lines.len() - max_lines);
+        }
+        lines.join("\n")
+    }
+
     /// A clean, size-agnostic repaint of scrollback + screen, prefixed with RIS.
     pub fn snapshot(&self) -> Vec<u8> {
         let grid = self.term.grid();
@@ -399,6 +427,29 @@ mod tests {
         }
         let n = full.matches("UNIQUE_FOOTER_MARK").count();
         assert_eq!(n, 1, "footer must appear exactly once, found {n}:\n{full}");
+    }
+
+    #[test]
+    fn tail_text_is_plain_bounded_and_stable() {
+        let mut e = Emulator::new(80, 24);
+        // Styled output: tail_text must drop the SGR bytes.
+        e.process(b"\x1b[1;31mERROR\x1b[0m: build failed\r\n");
+        e.process(b"line two\r\nline three\r\n");
+        let t = e.tail_text(200);
+        assert!(!t.contains('\u{1b}'), "no ANSI escapes in tail_text: {t:?}");
+        assert!(t.contains("ERROR: build failed"));
+        assert!(t.contains("line three"));
+        // Stable for an unchanged grid (the hash gate relies on this).
+        assert_eq!(t, e.tail_text(200));
+        // Bounded to the last N rows.
+        let mut tall = Emulator::new(40, 10);
+        for i in 0..50 {
+            tall.process(format!("row{i}\r\n").as_bytes());
+        }
+        let bounded = tall.tail_text(5);
+        assert_eq!(bounded.lines().count(), 5, "bounded to 5 rows: {bounded:?}");
+        assert!(bounded.contains("row49"), "keeps the most recent rows");
+        assert!(!bounded.contains("row10"), "drops older rows");
     }
 
     #[test]

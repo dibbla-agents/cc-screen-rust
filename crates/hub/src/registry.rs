@@ -294,6 +294,8 @@ mod tests {
             skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
+            headline: None,
+            detail: None,
         }
     }
 

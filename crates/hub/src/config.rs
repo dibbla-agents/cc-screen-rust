@@ -23,6 +23,17 @@ pub struct HubConfig {
     /// Loud override (CCHUB_ALLOW_OPEN_UPLINK): permit a routable bind with an
     /// empty CCHUB_AGENT_TOKENS (open uplink).
     pub allow_open_uplink: bool,
+    /// Session-summary key (CCHUB_ANTHROPIC_API_KEY) — the single keyholder
+    /// (proposal 0022). `None` disables summaries fleet-wide.
+    pub anthropic_api_key: Option<String>,
+    /// Fleet master switch (CCHUB_SUMMARY=on|off). Defaults to **on iff a key is
+    /// set** — flipping it off disables summaries without touching any agent.
+    pub summary_enabled: bool,
+    /// Model for summaries (CCHUB_SUMMARY_MODEL, default `claude-haiku-4-5`).
+    pub summary_model: String,
+    /// Optional spend cap in USD (CCHUB_SUMMARY_BUDGET) since process start; the
+    /// gate of §4. `None` = uncapped.
+    pub summary_budget_usd: Option<f64>,
 }
 
 /// Read a `--flag value` or `--flag=value` CLI argument.
@@ -88,6 +99,21 @@ pub fn load() -> HubConfig {
     };
     let allow_unauthenticated_remote = truthy("CCWEB_ALLOW_UNAUTHENTICATED_REMOTE");
     let allow_open_uplink = truthy("CCHUB_ALLOW_OPEN_UPLINK");
+    let anthropic_api_key = std::env::var("CCHUB_ANTHROPIC_API_KEY").ok().filter(|s| !s.trim().is_empty());
+    // Default on iff a key is present; CCHUB_SUMMARY=off forces it off.
+    let summary_enabled = match std::env::var("CCHUB_SUMMARY").ok().map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "0" | "off" | "false" | "no") => false,
+        Some(v) if matches!(v.as_str(), "1" | "on" | "true" | "yes") => true,
+        _ => anthropic_api_key.is_some(),
+    };
+    let summary_model = std::env::var("CCHUB_SUMMARY_MODEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| cc_screen_summary::DEFAULT_MODEL.to_string());
+    let summary_budget_usd = std::env::var("CCHUB_SUMMARY_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&b| b > 0.0);
     HubConfig {
         addr,
         config_dir,
@@ -97,6 +123,10 @@ pub fn load() -> HubConfig {
         allowed_origins,
         allow_unauthenticated_remote,
         allow_open_uplink,
+        anthropic_api_key,
+        summary_enabled,
+        summary_model,
+        summary_budget_usd,
     }
 }
 

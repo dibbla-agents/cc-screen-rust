@@ -167,7 +167,7 @@ export default function SessionDrawer({
     (it: NavItem): number | null => {
       if (it.kind === "session") {
         const s = it.session;
-        const fields = [s.short, s.preview, s.tool, s.machine ?? ""];
+        const fields = [s.short, s.headline ?? "", s.detail ?? "", s.preview, s.tool, s.machine ?? ""];
         let best: number | null = null;
         for (const f of fields) {
           const sc = fuzzyScore(q, f);
@@ -512,8 +512,16 @@ export default function SessionDrawer({
                   {ago(s.activity)}
                 </span>
               </span>
-              <span className="mt-0.5 block truncate font-mono text-[11px] leading-tight text-slate-600">
-                {s.preview || "—"}
+              {/* Proposal 0022: the LLM headline replaces the bare preview when
+                  present (and titles the row with the fuller detail), falling
+                  back to the preview line otherwise. */}
+              <span
+                className={`mt-0.5 block truncate text-[11px] leading-tight ${
+                  s.headline ? "text-slate-400" : "font-mono text-slate-600"
+                }`}
+                title={s.detail || undefined}
+              >
+                {s.headline || s.preview || "—"}
               </span>
             </span>
           </button>

@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use cc_screen_auth::Auth;
-use cc_screen_hub::{build_router, config, registry::Registry, service, state::HubState};
+use cc_screen_hub::{
+    build_router, config, registry::Registry, service, state::HubState, summarizer::Summarizer,
+};
 
 /// Runtime usage. Service setup is `cc-screen-hub install --help`.
 fn print_usage() {
@@ -126,6 +128,19 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let summarizer = Summarizer::new(
+        cfg.summary_enabled,
+        cfg.anthropic_api_key,
+        cfg.summary_model.clone(),
+        cfg.summary_budget_usd,
+    );
+    tracing::info!(
+        "cc-screen-hub: session summaries {} (model={}, budget={})",
+        if summarizer.active() { "ENABLED" } else { "disabled (no key or CCHUB_SUMMARY=off)" },
+        cfg.summary_model,
+        cfg.summary_budget_usd.map(|b| format!("${b:.2}")).unwrap_or_else(|| "uncapped".into()),
+    );
+
     let hub = HubState {
         registry: Registry::new(),
         agent_tokens: Arc::new(cfg.agent_tokens),
@@ -136,6 +151,7 @@ async fn main() {
         push: Arc::new(cc_screen_push::Push::new(&cfg.config_dir)),
         config_dir: cfg.config_dir,
         bulk: Default::default(),
+        summary: Arc::new(summarizer),
     };
 
     let app = build_router(hub);

@@ -78,7 +78,26 @@ struct SessionState {
     // space — also correct. Last-writer-wins instead let two clients (e.g. the
     // web PWA + the `ccs` TUI) of different widths fight and garble each other.
     client_sizes: HashMap<u64, (u16, u16)>,
+    /// Bounded ring of recent raw operator input (drop-oldest), the single source
+    /// for reconstructing "the last things the user asked" for the session summary
+    /// (proposal 0022). Appended in `write_input()`; never sent raw — the
+    /// candidacy path normalizes + redacts it first.
+    input_ring: Vec<u8>,
+    /// The cached LLM summary (headline/detail), produced by the hub (or the
+    /// standalone fallback) and surfaced to every client via `SessionInfo`.
+    summary: Option<crate::summary::Summary>,
+    /// Content hash the cached `summary` describes (0 = none). A session is a
+    /// summary *candidate* when its current content hash differs from this.
+    summary_hash: u64,
+    /// Content hash of the most recent in-flight `SummaryRequest` (0 = none).
+    /// Stops a slow round-trip from re-firing each tick, and lets a stale result
+    /// (hash no longer the latest requested) be dropped.
+    requested_hash: u64,
 }
+
+/// Max bytes retained in the per-session input ring (drop-oldest). Generous
+/// enough for a few recent submissions; bounded so long sessions don't grow.
+const INPUT_RING_CAP: usize = 4096;
 
 pub struct Session {
     pub name: String,   // full, e.g. claude-myproj
@@ -178,6 +197,10 @@ impl Session {
             cols: INIT_COLS,
             rows: INIT_ROWS,
             client_sizes: HashMap::new(),
+            input_ring: Vec::new(),
+            summary: None,
+            summary_hash: 0,
+            requested_hash: 0,
         };
 
         let sess = Arc::new(Session {
@@ -210,11 +233,95 @@ impl Session {
         if !data.is_empty() {
             if let Ok(mut st) = self.state.lock() {
                 st.last_input_at = now_secs();
+                // Capture into the bounded input ring (drop-oldest). This is the
+                // single choke point every input path funnels through, so one
+                // append covers typed keys, named keys, paste, and Ctrl-combos.
+                st.input_ring.extend_from_slice(data);
+                if st.input_ring.len() > INPUT_RING_CAP {
+                    let drop = st.input_ring.len() - INPUT_RING_CAP;
+                    st.input_ring.drain(0..drop);
+                }
             }
         }
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(data);
             let _ = w.flush();
+        }
+    }
+
+    /// Reconstruct the operator's recent typed submissions from the input ring
+    /// (segmented + cleaned; see `summary::normalize_input`). Convenience accessor
+    /// exercised by tests; `summary_extract` does the same under one lock.
+    #[allow(dead_code)]
+    pub fn recent_input(&self) -> Vec<String> {
+        match self.state.lock() {
+            Ok(st) => crate::summary::normalize_input(&st.input_ring),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// A plain-text window of the last `max_lines` rows of the buffer (no ANSI),
+    /// for the session-summary LLM context. Convenience accessor; `summary_extract`
+    /// reads the same under one lock.
+    #[allow(dead_code)]
+    pub fn tail_text(&self, max_lines: usize) -> String {
+        match self.state.lock() {
+            Ok(st) => st.emu.tail_text(max_lines),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// The current cached LLM summary, if any.
+    pub fn summary(&self) -> Option<crate::summary::Summary> {
+        self.state.lock().ok().and_then(|st| st.summary.clone())
+    }
+
+    /// Build the redacted summary extract for a candidacy check: the recent
+    /// submissions, the terminal tail, and the content hash over both. Redaction
+    /// happens here so nothing secret-shaped leaves the agent. Returns the hash
+    /// plus the (redacted) inputs/tail ready for a `SummaryRequest`.
+    pub fn summary_extract(&self, tail_lines: usize) -> (u64, Vec<String>, String) {
+        let (inputs_raw, tail_raw) = match self.state.lock() {
+            Ok(st) => (crate::summary::normalize_input(&st.input_ring), st.emu.tail_text(tail_lines)),
+            Err(_) => (Vec::new(), String::new()),
+        };
+        let inputs: Vec<String> = inputs_raw.iter().map(|s| crate::summary::redact(s)).collect();
+        let tail = crate::summary::redact(&tail_raw);
+        let hash = crate::summary::content_hash(&inputs, &tail);
+        (hash, inputs, tail)
+    }
+
+    /// Whether this session is a summary *candidate*: its current content differs
+    /// from the cached summary's content AND isn't already the in-flight request.
+    /// `hash` is the current content hash (from `summary_extract`).
+    pub fn summary_candidate(&self, hash: u64) -> bool {
+        match self.state.lock() {
+            Ok(st) => hash != st.summary_hash && hash != st.requested_hash,
+            Err(_) => false,
+        }
+    }
+
+    /// Record that a `SummaryRequest` for `hash` is now in flight.
+    pub fn mark_summary_requested(&self, hash: u64) {
+        if let Ok(mut st) = self.state.lock() {
+            st.requested_hash = hash;
+        }
+    }
+
+    /// Store a returned summary. Drops it as stale (returns `false`) if `hash` is
+    /// not the latest requested hash — the session changed again meanwhile, so a
+    /// newer request is (or will be) in flight and this result would be a stale
+    /// overwrite. On accept, the cache + `summary_hash` advance to `hash`.
+    pub fn store_summary(&self, hash: u64, headline: String, detail: String) -> bool {
+        if let Ok(mut st) = self.state.lock() {
+            if hash != st.requested_hash {
+                return false;
+            }
+            st.summary = Some(crate::summary::Summary { headline, detail });
+            st.summary_hash = hash;
+            true
+        } else {
+            false
         }
     }
 
@@ -858,6 +965,55 @@ mod tests {
             ),
             Err(e) => panic!("unexpected receiver state: {e:?}"),
         }
+
+        sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The input ring captures every keystroke through write_input, and the
+    // candidacy/store gate behaves: an unchanged hash is not a candidate, and a
+    // result whose hash isn't the latest requested is dropped as stale.
+    #[tokio::test]
+    async fn summary_capture_candidacy_and_stale_drop() {
+        let tmp = std::env::temp_dir().join(format!("ccr-sum-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = shell_tool("sleep 5");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        // Typed input is captured + reconstructed.
+        sess.write_input(b"fix the auth bug\r");
+        sess.write_input(b"y\r");
+        assert_eq!(sess.recent_input(), vec!["fix the auth bug", "y"]);
+
+        // First extract → a candidate (no cached summary yet).
+        let (hash, inputs, _tail) = sess.summary_extract(200);
+        assert!(sess.summary_candidate(hash), "changed content with no summary is a candidate");
+        assert!(inputs.iter().any(|s| s == "fix the auth bug"));
+
+        // Mark it in flight; the same hash is no longer a candidate.
+        sess.mark_summary_requested(hash);
+        assert!(!sess.summary_candidate(hash), "in-flight hash isn't re-fired");
+
+        // A stale result (some other hash) is dropped.
+        assert!(!sess.store_summary(hash.wrapping_add(1), "h".into(), "d".into()));
+        assert!(sess.summary().is_none(), "stale result didn't overwrite");
+
+        // The matching result is stored and clears candidacy.
+        assert!(sess.store_summary(hash, "Waiting".into(), "It is paused.".into()));
+        let s = sess.summary().expect("summary cached");
+        assert_eq!(s.headline, "Waiting");
+        assert!(!sess.summary_candidate(hash), "after storing, same content isn't a candidate");
 
         sess.kill();
         let _ = std::fs::remove_dir_all(&tmp);

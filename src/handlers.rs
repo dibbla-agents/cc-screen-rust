@@ -107,21 +107,28 @@ pub async fn logout(State(app): State<AppState>) -> Response {
 pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
     app.list()
         .into_iter()
-        .map(|s| SessionInfo {
-            name: s.name.clone(),
-            tool: s.tool.clone(),
-            short: s.short.clone(),
-            attached: s.attached(),
-            activity: s.last_activity() as i64,
-            last_input_at: s.last_input_at(),
-            busy_since: s.busy_since(),
-            preview: s.preview(),
-            waiting: s.waiting(),
-            // This agent knows the policy → report it concretely (Some), so a
-            // 0005-aware client renders an accurate YOLO affordance.
-            skip_permissions: Some(s.skip_permissions),
-            cwd: s.live_cwd(),
-            machine: String::new(),
+        .map(|s| {
+            let summary = s.summary();
+            SessionInfo {
+                name: s.name.clone(),
+                tool: s.tool.clone(),
+                short: s.short.clone(),
+                attached: s.attached(),
+                activity: s.last_activity() as i64,
+                last_input_at: s.last_input_at(),
+                busy_since: s.busy_since(),
+                preview: s.preview(),
+                waiting: s.waiting(),
+                // This agent knows the policy → report it concretely (Some), so a
+                // 0005-aware client renders an accurate YOLO affordance.
+                skip_permissions: Some(s.skip_permissions),
+                cwd: s.live_cwd(),
+                machine: String::new(),
+                // The cached LLM summary (proposal 0022), if any. Reaches every
+                // client — direct or hub-relayed — through this one list.
+                headline: summary.as_ref().map(|x| x.headline.clone()),
+                detail: summary.map(|x| x.detail),
+            }
         })
         .collect()
 }

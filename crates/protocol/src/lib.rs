@@ -60,6 +60,17 @@ pub struct SessionInfo {
     /// talking to a hub-less server reads it as "".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine: String,
+    /// LLM-summarized headline (≤ 6 words): what this session is doing / needs,
+    /// at a glance. Produced by the hub's Haiku call (proposal 0022) and cached on
+    /// the agent; `None` until computed / when the feature is off, in which case
+    /// clients fall back to `preview`. Additive + omitted-when-absent, so older
+    /// clients and feature-off agents are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<String>,
+    /// LLM-summarized detail (2–3 sentences) — the tooltip / status-view / push
+    /// body. Same lifecycle + back-compat as `headline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
@@ -329,9 +340,13 @@ mod tests {
             skip_permissions: None,
             cwd: String::new(),
             machine: String::new(),
+            headline: None,
+            detail: None,
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
+        assert!(!v.contains("headline"), "absent headline should be omitted: {v}");
+        assert!(!v.contains("detail"), "absent detail should be omitted: {v}");
         assert!(!v.contains("machine"), "empty machine should be omitted: {v}");
         assert!(!v.contains("remote_control"), "retired policy must never serialize: {v}");
         assert!(!v.contains("skip_permissions"), "unknown policy should be omitted: {v}");
@@ -354,9 +369,12 @@ mod tests {
             skip_permissions: Some(true),
             cwd: String::new(),
             machine: "laptop".into(),
+            headline: Some("Waiting to run tests".into()),
+            detail: Some("It refactored auth and is paused.".into()),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
+        assert!(v.contains(r#""headline":"Waiting to run tests""#), "headline serializes when set: {v}");
         assert!(v.contains(r#""skip_permissions":true"#), "yolo should serialize when set: {v}");
 
         // A NEW client parsing an OLD payload (no `machine`, and a now-retired
@@ -369,6 +387,8 @@ mod tests {
         assert_eq!(old.last_input_at, 0);
         assert_eq!(old.busy_since, 0);
         assert_eq!(old.skip_permissions, None);
+        assert_eq!(old.headline, None, "old payload → no summary");
+        assert_eq!(old.detail, None);
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.

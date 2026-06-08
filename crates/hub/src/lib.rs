@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod registry;
 pub mod service;
 pub mod state;
+pub mod summarizer;
 pub mod uplink_server;
 pub mod watch_ws;
 

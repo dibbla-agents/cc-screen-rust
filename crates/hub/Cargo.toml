@@ -38,6 +38,10 @@ mime_guess = "2"
 # The hub serves the same embedded React PWA as the agent, so the phone opens the
 # hub URL and gets the UI. Same frontend/dist the agent embeds (built first).
 rust-embed = { version = "8", features = ["mime-guess"] }
+# Session summaries (proposal 0022): the hub is the canonical keyholder + spend
+# gate and makes the Haiku call via the shared summarizer (raw POST /v1/messages).
+cc-screen-summary = { path = "../summary" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 # In-process e2e: a fake agent + a fake client over loopback WebSockets, and HTTP

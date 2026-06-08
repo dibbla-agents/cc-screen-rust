@@ -199,6 +199,17 @@ export default ToastHost;
 // whole row a button that mounts the session; a separate close affordance.
 // motion-safe slide-in; reduced motion gets a plain fade (motion-reduce variant
 // drops the translate).
+// The toast's status line: the LLM summary detail (or headline) when present —
+// the whole point of proposal 0022 is that the buzz says what's needed — else
+// the generic "ready for input". A longer detail is clamped to two lines.
+function ToastStatus({ entry }: { entry: ToastEntry }) {
+  const summary = entry.detail || entry.headline;
+  if (summary) {
+    return <span className="line-clamp-2 text-xs text-slate-300">{summary}</span>;
+  }
+  return <span className="text-xs text-emerald-400">ready for input</span>;
+}
+
 function DesktopToast({
   entry,
   onClick,
@@ -218,7 +229,7 @@ function DesktopToast({
         <span className={`h-2.5 w-2.5 flex-none rounded-full ${toolColor(entry.tool)}`} />
         <span className="flex min-w-0 flex-col">
           <span className="truncate text-sm font-medium text-slate-100">{entry.short}</span>
-          <span className="text-xs text-emerald-400">ready for input</span>
+          <ToastStatus entry={entry} />
         </span>
       </button>
       <button
@@ -276,7 +287,7 @@ function MobileBanner({
         <span className={`h-2.5 w-2.5 flex-none rounded-full ${toolColor(entry.tool)}`} />
         <span className="flex min-w-0 flex-col">
           <span className="truncate text-sm font-medium text-slate-100">{entry.short}</span>
-          <span className="text-xs text-emerald-400">ready for input</span>
+          <ToastStatus entry={entry} />
         </span>
       </button>
       <button

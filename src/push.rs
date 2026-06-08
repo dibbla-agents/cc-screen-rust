@@ -35,8 +35,14 @@ pub async fn finish_watcher(state: AppState) {
             let was = prev.insert(s.name.clone(), waiting);
             if was == Some(false) && waiting && s.notification_eligible_at(now) {
                 let title = format!("{} is waiting", s.short);
-                let preview = s.preview();
-                let body = if preview.is_empty() { "finished — tap to open".to_string() } else { preview };
+                // Prefer the LLM summary detail (proposal 0022) over the bare
+                // preview line; fall back to preview, then a generic nudge.
+                let body = s
+                    .summary()
+                    .map(|sum| sum.detail)
+                    .filter(|d| !d.is_empty())
+                    .or_else(|| Some(s.preview()).filter(|p| !p.is_empty()))
+                    .unwrap_or_else(|| "finished — tap to open".to_string());
                 state.inner.push.notify(&title, &body, &s.name).await;
             }
         }

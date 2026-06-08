@@ -20,6 +20,12 @@ export interface Session {
   // Whether the session launched in YOLO mode (approval prompts skipped).
   // Informational — drives a "YOLO" badge. `undefined` = unknown (pre-0005).
   skip_permissions?: boolean;
+  // LLM-summarized status (proposal 0022). `headline` (≤6 words) replaces the
+  // bare preview in dense surfaces; `detail` (2-3 sentences) is the tooltip /
+  // status-view / push body. Absent until computed or when the feature is off —
+  // every surface falls back to `preview`.
+  headline?: string;
+  detail?: string;
 }
 
 // PaneRef is the identity the app stores for an open session: the session name

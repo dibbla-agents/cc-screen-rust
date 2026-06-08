@@ -34,6 +34,10 @@ export interface ReadyEdge {
   machine: string;
   tool: string;
   short: string;
+  // The session's LLM summary (proposal 0022), when available — the toast shows
+  // `detail` (or `headline`) instead of the generic "ready for input".
+  headline?: string;
+  detail?: string;
 }
 
 // detectReadyEdges diffs the previous snapshot against the current one and
@@ -81,6 +85,8 @@ export function detectReadyEdges(
       machine: c.machine ?? "",
       tool: c.tool,
       short: c.short,
+      headline: c.headline,
+      detail: c.detail,
     });
   }
   return edges;

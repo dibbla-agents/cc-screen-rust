@@ -143,15 +143,35 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     Ok((AgentMsg::Reply { req, result }, _)) => conn.resolve_reply(req, result),
                     // Busy→waiting edge → centralized push, machine-stamped. Spawn
                     // so the (blocking) send doesn't stall this agent's read loop.
-                    Ok((AgentMsg::WaitingEdge { session, short, preview }, _)) => {
+                    // The push body prefers the agent's cached LLM summary detail
+                    // (proposal 0022), falling back to preview, then a nudge.
+                    Ok((AgentMsg::WaitingEdge { session, short, preview, detail }, _)) => {
                         let push = hub.push.clone();
                         let title = format!("{machine_id} · {short} is waiting");
-                        let body = if preview.is_empty() {
-                            "finished — tap to open".to_string()
-                        } else {
-                            preview
-                        };
+                        let body = detail
+                            .filter(|d| !d.is_empty())
+                            .or_else(|| Some(preview).filter(|p| !p.is_empty()))
+                            .unwrap_or_else(|| "finished — tap to open".to_string());
                         tokio::spawn(async move { push.notify(&title, &body, &session).await });
+                    }
+                    // Agent asks for a session summary (proposal 0022). Gate + call
+                    // Haiku off the read loop, then send the result back over the
+                    // uplink (echoing content_hash). A declined/failed call returns
+                    // None/None so the agent keeps showing preview.
+                    Ok((AgentMsg::SummaryRequest { session, content_hash, inputs, tail, .. }, _)) => {
+                        let summary = hub.summary.clone();
+                        let to_agent = conn.to_agent().clone();
+                        tokio::spawn(async move {
+                            let (headline, detail) = match summary.summarize(&inputs, &tail).await {
+                                crate::summarizer::Outcome::Ok(s) => (Some(s.headline), Some(s.detail)),
+                                _ => (None, None),
+                            };
+                            let frame = encode_frame(
+                                &HubMsg::SummaryResult { session, content_hash, headline, detail },
+                                b"",
+                            );
+                            let _ = to_agent.send(frame).await;
+                        });
                     }
                     Ok((AgentMsg::Pong, _)) => {}
                     Ok((other, _)) => tracing::debug!("agent {machine_id}: unhandled {other:?}"),

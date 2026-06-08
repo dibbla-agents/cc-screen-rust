@@ -21,6 +21,7 @@ mod ops;
 mod push;
 mod render;
 mod service;
+mod summary;
 mod tools;
 mod uplink;
 mod upload;
@@ -170,15 +171,48 @@ async fn main() {
     // phones via Web Push. Cheap idle poll; no-op until a device subscribes.
     tokio::spawn(push::finish_watcher(state.clone()));
 
+    let summary_params = uplink::SummaryParams {
+        tail_lines: cfg.summary_tail_lines,
+        interval_secs: cfg.summary_interval_secs,
+    };
+
     // If pointed at a hub, also dial out and register. Dual-mode: the local bind
-    // below still serves direct clients unless --hub-only.
+    // below still serves direct clients unless --hub-only. The hub is the
+    // canonical summary keyholder (proposal 0022); the uplink ships redacted
+    // SummaryRequests and caches the hub's SummaryResults.
     if let Some(hub) = cfg.hub_url.clone() {
+        tracing::info!(
+            "cc-screen-rust: session summaries via hub (tail={} lines, every {}s)",
+            cfg.summary_tail_lines,
+            cfg.summary_interval_secs
+        );
         tokio::spawn(uplink::run(
             state.clone(),
             hub,
             cfg.hub_token.clone(),
             cfg.machine_id.clone(),
+            summary_params,
         ));
+    } else if let Some(key) = cfg.anthropic_api_key.clone() {
+        // Standalone (no hub) + a local key → self-summarize. Off otherwise.
+        let model = std::env::var("CCWEB_SUMMARY_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cc_screen_summary::DEFAULT_MODEL.to_string());
+        tracing::info!(
+            "cc-screen-rust: standalone session summaries ENABLED (model={model}, tail={} lines, every {}s)",
+            cfg.summary_tail_lines,
+            cfg.summary_interval_secs
+        );
+        tokio::spawn(summary::standalone_summarizer(
+            state.clone(),
+            key,
+            model,
+            cfg.summary_tail_lines,
+            cfg.summary_interval_secs,
+        ));
+    } else {
+        tracing::info!("cc-screen-rust: session summaries off (no hub, no CCWEB_ANTHROPIC_API_KEY)");
     }
 
     let app = Router::new()

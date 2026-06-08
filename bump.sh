@@ -18,7 +18,8 @@ case "$NEW" in
 esac
 
 FILES="Cargo.toml crates/tui/Cargo.toml crates/protocol/Cargo.toml \
-crates/auth/Cargo.toml crates/push/Cargo.toml crates/hub/Cargo.toml"
+crates/auth/Cargo.toml crates/push/Cargo.toml crates/hub/Cargo.toml \
+crates/summary/Cargo.toml"
 OLD="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 [ -n "$OLD" ] || { echo "could not read current version from Cargo.toml" >&2; exit 1; }
 if [ "$OLD" = "$NEW" ]; then echo "already at $NEW" >&2; exit 1; fi

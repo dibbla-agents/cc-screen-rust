@@ -388,6 +388,7 @@ dependencies = [
  "cc-screen-auth",
  "cc-screen-protocol",
  "cc-screen-push",
+ "cc-screen-summary",
  "futures-util",
  "mime_guess",
  "reqwest",
@@ -435,11 +436,13 @@ dependencies = [
  "cc-screen-auth",
  "cc-screen-protocol",
  "cc-screen-push",
+ "cc-screen-summary",
  "futures-util",
  "http",
  "mime_guess",
  "notify-debouncer-mini",
  "portable-pty",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
@@ -449,6 +452,17 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cc-screen-summary"
+version = "0.3.30"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

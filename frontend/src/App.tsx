@@ -36,6 +36,7 @@ import ControlBar from "./components/ControlBar";
 import ComposeSheet, { type ComposeHandle } from "./components/ComposeSheet";
 import ImageSheet from "./components/ImageSheet";
 import FavoritesSheet, { type FavoritesHandle } from "./components/FavoritesSheet";
+import StatusView from "./components/StatusView";
 import TileGrid, { type Layout, paneCount } from "./components/TileGrid";
 import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
@@ -48,7 +49,7 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
 import { agentStatus, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
-import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, UploadIcon } from "./icons";
+import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
@@ -189,6 +190,8 @@ export default function App() {
   const [composeOpen, setComposeOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
   const [favOpen, setFavOpen] = useState(false);
+  // The searchable session-status overview (proposal 0022).
+  const [statusOpen, setStatusOpen] = useState(false);
   // The file editor is a SINGLETON, app-wide overlay — not per-pane (desktop can
   // show up to 4 terminals, but only ever one editor, covering the whole
   // screen). `path` is the file to open; null means "let the user pick from the
@@ -1724,6 +1727,17 @@ export default function App() {
 
         <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={statusTitle(headerStatus)} />
 
+        {/* Session-status overview (proposal 0022): what every session needs, at a
+            glance. Always available (phone + desktop). */}
+        <button
+          onClick={() => setStatusOpen(true)}
+          aria-label="Session status overview"
+          title="Status — what each session needs"
+          className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 active:bg-edge"
+        >
+          <StatusListIcon className="h-5 w-5" />
+        </button>
+
         {isDesktop && (
           <div className="relative">
             {/* Wire the trigger to whichever side of the toggle is next.
@@ -1992,6 +2006,20 @@ export default function App() {
         onAdd={addFavorite}
         onUpdate={updateFavorite}
         onDelete={deleteFavorite}
+      />
+
+      {/* Searchable Session × Status overview (proposal 0022). Reads off the same
+          /api/sessions poll; picking a row mounts that session. */}
+      <StatusView
+        open={statusOpen}
+        sessions={sessions}
+        machines={machines}
+        multiMachine={multiMachine}
+        onClose={() => setStatusOpen(false)}
+        onPick={(s) => {
+          pick(s);
+          setStatusOpen(false);
+        }}
       />
 
       {/* In-app session-ready toasts (proposal 0017). Fed gated busy→waiting

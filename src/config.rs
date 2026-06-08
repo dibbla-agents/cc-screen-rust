@@ -50,6 +50,16 @@ pub struct Config {
     /// Loud override (CCWEB_ALLOW_UNAUTHENTICATED_REMOTE): permit a routable bind
     /// with auth disabled. Off by default — the fail-closed guard refuses it.
     pub allow_unauthenticated_remote: bool,
+    /// Session-summary extract size in terminal lines (CCWEB_SUMMARY_TAIL_LINES,
+    /// default 200). The main cost dial — more lines = more input tokens.
+    pub summary_tail_lines: usize,
+    /// Session-summary candidacy tick in seconds (CCWEB_SUMMARY_INTERVAL_SECS,
+    /// default 300). How often a changed session is re-summarized.
+    pub summary_interval_secs: u64,
+    /// Optional standalone-only Anthropic key (CCWEB_ANTHROPIC_API_KEY). The hub
+    /// is the canonical keyholder; this only enables self-summarizing on a pure
+    /// no-hub agent. Off unless set. See proposal 0022 §0.
+    pub anthropic_api_key: Option<String>,
 }
 
 fn home_dir() -> PathBuf {
@@ -186,6 +196,17 @@ pub fn load() -> Config {
     let clip_url = if hub_only { String::new() } else { clip_url_from_addr(&addr) };
     let allowed_origins = std::env::var("CCWEB_ALLOWED_ORIGINS").ok().filter(|s| !s.trim().is_empty());
     let allow_unauthenticated_remote = env_truthy("CCWEB_ALLOW_UNAUTHENTICATED_REMOTE");
+    let summary_tail_lines = std::env::var("CCWEB_SUMMARY_TAIL_LINES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(200);
+    let summary_interval_secs = std::env::var("CCWEB_SUMMARY_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(300);
+    let anthropic_api_key = std::env::var("CCWEB_ANTHROPIC_API_KEY").ok().filter(|s| !s.trim().is_empty());
     Config {
         home,
         config_dir,
@@ -202,6 +223,9 @@ pub fn load() -> Config {
         hub_only,
         allowed_origins,
         allow_unauthenticated_remote,
+        summary_tail_lines,
+        summary_interval_secs,
+        anthropic_api_key,
     }
 }
 

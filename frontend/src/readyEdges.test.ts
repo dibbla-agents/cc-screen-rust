@@ -37,6 +37,24 @@ describe("detectReadyEdges", () => {
     expect(edges).toEqual([{ name: "a", machine: "", tool: "claude", short: "a" }]);
   });
 
+  it("carries the LLM summary (proposal 0022) onto the edge when present", () => {
+    const prev = [mk({ name: "a", waiting: false })];
+    const cur = [
+      mk({
+        name: "a",
+        waiting: true,
+        busy_since: longAgo(),
+        last_input_at: longAgo(),
+        headline: "Waiting to run tests",
+        detail: "It refactored auth and is paused for approval.",
+      }),
+    ];
+    const edges = detectReadyEdges(prev, cur, NONE, NOW_MS);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].headline).toBe("Waiting to run tests");
+    expect(edges[0].detail).toBe("It refactored auth and is paused for approval.");
+  });
+
   it("rejects gate 1: a trivial <1min turn produces no toast", () => {
     const prev = [mk({ name: "a", waiting: false })];
     const cur = [

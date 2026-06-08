@@ -35,6 +35,10 @@ pub struct HubState {
     pub push: Arc<cc_screen_push::Push>,
     /// In-flight bulk transfers (download/upload/clip) over the dedicated WS.
     pub bulk: crate::bulk::BulkRegistry,
+    /// Session summarizer (proposal 0022): the single keyholder + spend gate that
+    /// answers agents' `SummaryRequest`s by calling Haiku. Shared so the running
+    /// budget tally is one place.
+    pub summary: Arc<crate::summarizer::Summarizer>,
 }
 
 impl HubState {
@@ -88,6 +92,7 @@ mod tests {
             config_dir: std::env::temp_dir(),
             push: Arc::new(cc_screen_push::Push::new(&std::env::temp_dir())),
             bulk: crate::bulk::BulkRegistry::default(),
+            summary: Arc::new(crate::summarizer::Summarizer::disabled()),
         }
     }
 

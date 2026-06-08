@@ -2,7 +2,7 @@
 # rust-embed path, build.sh/install.sh, and the systemd unit don't move. The
 # shared wire types live in crates/protocol; the terminal client in crates/tui.
 [workspace]
-members = ["crates/protocol", "crates/auth", "crates/push", "crates/tui", "crates/hub"]
+members = ["crates/protocol", "crates/auth", "crates/push", "crates/tui", "crates/hub", "crates/summary"]
 resolver = "2"
 
 [package]
@@ -67,6 +67,11 @@ mime_guess = "2"
 # machinery lives in cc-screen-push (shared with the hub); the agent keeps the
 # busy→waiting sweep (push::finish_watcher).
 cc-screen-push = { path = "crates/push" }
+# The shared Haiku summarizer. The agent uses it only for the optional
+# standalone-only CCWEB_ANTHROPIC_API_KEY fallback; the hub is the canonical
+# keyholder. The Summary type is shared from here. See proposal 0022.
+cc-screen-summary = { path = "crates/summary" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 http = "1"
 
 [profile.release]
