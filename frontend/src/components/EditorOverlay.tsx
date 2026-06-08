@@ -604,12 +604,21 @@ export default function EditorOverlay({
     }
   }, [open, sessionKey]);
 
-  // Persist the open file when the viewer closes / unmounts so it survives a
-  // reopen + reload (the switch-out save above only fires on a session change).
+  // Persist the open file so it survives a reopen + reload (the switch-out save
+  // above only fires on a session change). A graceful close runs the cleanup; a
+  // hard reload / tab-close does NOT run React cleanups, so also flush on
+  // `pagehide` (covers reload/navigation, incl. mobile) and `visibilitychange`.
   useEffect(() => {
     if (!open) return;
-    return () => {
+    const flush = () =>
       writeViewerState(prevSessionKey.current, { activePath: activePathRef.current });
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      flush();
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [open]);
 

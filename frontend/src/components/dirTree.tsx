@@ -287,14 +287,24 @@ export function useDirTree(
       .catch((e) => setErrs((p) => ({ ...p, share: errMsg(e) })));
   }, [open, autoExpand, currentSession, machine, loadByPath, loadBySession]);
 
-  // Persist the expansion when the tree closes / unmounts so it survives a
-  // reopen + reload (the switch-out save above only fires on a session change).
+  // Persist the expansion so it survives a reopen + reload (the switch-out save
+  // above only fires on a session change). A graceful close runs the cleanup;
+  // a hard reload / tab-close does NOT run React cleanups, so also flush on
+  // `pagehide` (covers reload/navigation, incl. mobile) and `visibilitychange`.
   useEffect(() => {
     if (!open) return;
-    return () => {
+    const flush = () => {
       if (prevKeyRef.current) {
         writeViewerState(prevKeyRef.current, { expanded: [...expandedRef.current] });
       }
+    };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      flush();
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [open]);
 

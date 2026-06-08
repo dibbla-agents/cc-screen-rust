@@ -55,6 +55,21 @@ const FONT_KEY = "ccweb.fontSize";
 // dismissed v1.
 const COPY_HINT_KEY = "ccweb.copyHintSeen.v2";
 
+// Whether the file-viewer overlay (vs the agent/terminal grid) was the active
+// view, persisted so a page reload comes back in the same mode (proposal 0019
+// follow-up). Only the open/closed *mode* is stored — never the path: the file
+// the viewer should reopen on is restored from the per-session viewer memory
+// (viewerState.ts, keyed by machine+session), which avoids reopening a stale
+// path the user had since navigated away from in the tree.
+const EDITOR_OPEN_KEY = "ccweb.editorOpen.v1";
+const loadEditorOpen = (): boolean => {
+  try {
+    return localStorage.getItem(EDITOR_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
 // useIsDesktop is true on a wide window with a precise pointer (mouse/trackpad
 // — Chrome desktop). The multi-pane UI is gated on this; phones always render
 // a single pane and never see the layout picker.
@@ -160,12 +175,22 @@ export default function App() {
   // screen). `path` is the file to open; null means "let the user pick from the
   // desktop tree" (the Ctrl+B e entry). editorOpenRef shadows it so the global
   // keyboard handler can go inert while the editor owns the screen.
-  const [editor, setEditor] = useState<{ open: boolean; path: string | null }>({
-    open: false,
+  // Restore the file-viewer *mode* across reloads (path stays null — the file is
+  // restored from per-session viewer memory once the overlay mounts).
+  const [editor, setEditor] = useState<{ open: boolean; path: string | null }>(() => ({
+    open: loadEditorOpen(),
     path: null,
-  });
+  }));
   const editorOpenRef = useRef(false);
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
+  // Persist the open/closed mode so a reload returns to the file viewer or the
+  // terminal grid, whichever was active.
+  useEffect(() => {
+    try {
+      if (editor.open) localStorage.setItem(EDITOR_OPEN_KEY, "1");
+      else localStorage.removeItem(EDITOR_OPEN_KEY);
+    } catch { /* quota — ignore */ }
+  }, [editor.open]);
   // The editor reports its unsaved-buffer state up here so a session switch under
   // the open viewer (Ctrl+B ↑/↓ or a drawer pick) can prompt before discarding
   // it — the source-side dirty guard from proposal 0019. A ref shadows it so the
