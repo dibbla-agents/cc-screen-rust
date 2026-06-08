@@ -312,6 +312,10 @@ export default function CreateSession({
   // Printable keys still type into the focused input natively.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // The extra-folders disclosure runs its own capture-phase handler while
+      // its pane holds focus; yield the whole keystroke so the two never both
+      // act on one ⏎/arrow/Esc (proposal 0020).
+      if (document.activeElement?.closest("[data-extra-dirs]")) return;
       // Let the name field own its keys (Enter creates, arrows move the caret),
       // except Esc which is layered below.
       const onName = document.activeElement === nameRef.current;
@@ -594,9 +598,13 @@ export default function CreateSession({
 }
 
 // ── Extra-folders disclosure (off the hot path) ─────────────────────────────
-// A collapsible folder browser to add extra workspace dirs for tools that
-// support them (claude --add-dir, etc.). Ported from NewSessionPanel; only the
-// chrome is compacted for the narrow sidebar column.
+// A collapsible folder picker to add extra workspace dirs for tools that
+// support them (claude --add-dir, etc.). Search-first (proposal 0020): typing
+// fuzzy-searches anywhere under $HOME via the same GET /api/dirs/search the base
+// picker uses, mirroring its muscle memory; an empty query falls back to the
+// one-level browse. The one real divergence from the base picker is multi-select
+// — ⏎/Space *toggle* a folder's membership and keep the picker open rather than
+// creating the session.
 function ExtraDirs({
   machine,
   projectDir,
@@ -614,7 +622,13 @@ function ExtraDirs({
 }) {
   const [open, setOpen] = useState(false);
   const [dirs, setDirs] = useState<DirsResp | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<DirSearchResult[]>([]);
+  const [cursor, setCursor] = useState(0);
   const [err, setErr] = useState<string | null>(null);
+
+  const paneRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const rel = (p: string) => {
     if (!home) return p;
@@ -637,21 +651,113 @@ function ExtraDirs({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const toggle = (path: string) => {
-    setErr(null);
-    if (path === projectDir) {
-      setErr("That is the project folder");
+  // Focus the search box when the disclosure opens so typing filters at once.
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => searchRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [open]);
+
+  // Debounced recursive search (mirrors the base picker; root = $HOME default).
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults([]);
       return;
     }
-    if (!value.includes(path) && limit > 0 && value.length >= limit) {
-      setErr(`Up to ${limit} extra folders`);
-      return;
-    }
-    onChange(value.includes(path) ? value.filter((p) => p !== path) : [...value, path]);
-  };
+    const id = setTimeout(() => {
+      searchDirs(q, undefined, machine)
+        .then((r) => setResults(r.results))
+        .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+    }, 120);
+    return () => clearTimeout(id);
+  }, [query, machine]);
+
+  const toggle = useCallback(
+    (path: string) => {
+      setErr(null);
+      if (path === projectDir) {
+        setErr("That is the project folder");
+        return;
+      }
+      if (!value.includes(path) && limit > 0 && value.length >= limit) {
+        setErr(`Up to ${limit} extra folders`);
+        return;
+      }
+      onChange(value.includes(path) ? value.filter((p) => p !== path) : [...value, path]);
+    },
+    [projectDir, value, limit, onChange]
+  );
+
+  // The cursor-navigable rows: search hits when querying, else browse subdirs.
+  const rows = useMemo(
+    () =>
+      query.trim()
+        ? results.map((r) => ({ path: r.path, label: r.rel }))
+        : (dirs?.dirs || []).map((d) => ({ path: d.path, label: d.name })),
+    [query, results, dirs]
+  );
+  useEffect(() => {
+    setCursor(0);
+  }, [query]);
+  useEffect(() => {
+    setCursor((c) => (c >= rows.length ? 0 : c));
+  }, [rows.length]);
+
+  // Capture-phase keyboard, scoped to while the pane holds focus so it never
+  // races the base picker's handler (which yields on [data-extra-dirs] focus).
+  // The key divergence: ⏎/Space *toggle* membership and stay open.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      if (!paneRef.current || !active || !paneRef.current.contains(active)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (query) {
+          setQuery("");
+          searchRef.current?.focus();
+        } else {
+          setOpen(false);
+        }
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setCursor((i) => Math.min(rows.length - 1, i + 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setCursor((i) => Math.max(0, i - 1));
+      } else if (e.key === "ArrowRight") {
+        // → descends in browse mode (search recursion makes it rarely needed).
+        if (!query.trim() && rows[cursor]) {
+          e.preventDefault();
+          e.stopPropagation();
+          void go(rows[cursor].path);
+        }
+      } else if (e.key === "ArrowLeft") {
+        if (!query.trim() && dirs && !dirs.atHome) {
+          e.preventDefault();
+          e.stopPropagation();
+          void go(dirs.parent);
+        }
+      } else if (e.key === "Enter" || (e.key === " " && active !== searchRef.current)) {
+        // Toggle membership and STAY — never creates the session (that stays the
+        // base picker / Create button's job). Space only when not typing a query.
+        e.preventDefault();
+        e.stopPropagation();
+        if (rows[cursor]) toggle(rows[cursor].path);
+      }
+    };
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
+  }, [open, query, rows, cursor, dirs, toggle]);
+
+  const searching = !!query.trim();
 
   return (
-    <div className="mb-1.5 rounded-md border border-edge/70 bg-bar/60">
+    <div ref={paneRef} data-extra-dirs className="mb-1.5 rounded-md border border-edge/70 bg-bar/60">
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] text-slate-300"
@@ -674,48 +780,92 @@ function ExtraDirs({
       )}
       {open && (
         <div className="border-t border-edge/50">
-          <div className="flex items-center gap-1.5 px-2 py-1">
-            <button
-              onClick={() => dirs && go(dirs.parent)}
-              disabled={!dirs || dirs.atHome}
-              className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-edge disabled:opacity-30"
-            >
-              ⬆︎
-            </button>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">{dirs ? rel(dirs.path) : "…"}</span>
-            <button
-              onClick={() => dirs && toggle(dirs.path)}
-              disabled={!dirs || dirs.path === projectDir}
-              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold disabled:opacity-30 ${
-                dirs && value.includes(dirs.path) ? "bg-accent text-bar" : "bg-panel text-slate-300"
-              }`}
-            >
-              {dirs && value.includes(dirs.path) ? "Added" : "Add here"}
-            </button>
+          {/* Search box — first row, mirrors the base picker. */}
+          <div className="flex items-center gap-1.5 border-b border-edge/40 px-2 py-1">
+            <span className="text-slate-500">🔎</span>
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search folders…"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-slate-100 placeholder:text-slate-600 outline-none"
+            />
           </div>
-          {err && <div className="px-2 pb-1 text-[10px] text-red-400">{err}</div>}
-          <div className="max-h-40 overflow-y-auto">
-            {dirs?.dirs.map((d) => {
-              const selected = value.includes(d.path);
-              return (
-                <div key={d.path} className="flex items-center gap-1 px-2 py-1">
-                  <button onClick={() => go(d.path)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] text-slate-200">
-                    <span className="text-slate-500">📁</span>
-                    <span className="min-w-0 flex-1 truncate">{d.name}</span>
-                  </button>
-                  <button
-                    onClick={() => toggle(d.path)}
-                    disabled={d.path === projectDir}
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-semibold disabled:opacity-30 ${
-                      selected ? "bg-accent text-bar" : "bg-panel text-slate-300"
-                    }`}
-                  >
-                    {selected ? "Added" : "Add"}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
+          {err && <div className="px-2 pb-1 pt-1 text-[10px] text-red-400">{err}</div>}
+          {searching ? (
+            // Search mode: ranked recursive results, multi-toggle.
+            <div className="max-h-40 overflow-y-auto">
+              {rows.length === 0 && (
+                <div className="px-2 py-3 text-center text-[11px] text-slate-600">No matching folders.</div>
+              )}
+              {results.map((r, i) => {
+                const selected = value.includes(r.path);
+                const focused = i === cursor;
+                return (
+                  <div key={r.path} className={`flex items-center gap-1 px-2 py-1 ${focused ? "bg-edge/60" : ""}`}>
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-slate-200" title={r.rel}>
+                      {r.rel}
+                    </span>
+                    <button
+                      onClick={() => toggle(r.path)}
+                      disabled={r.path === projectDir}
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold disabled:opacity-30 ${
+                        selected ? "bg-accent text-bar" : "bg-panel text-slate-300"
+                      }`}
+                    >
+                      {selected ? "Added" : "Add"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            // Empty query → today's one-level browse (current path, ⬆︎, subdirs).
+            <>
+              <div className="flex items-center gap-1.5 px-2 py-1">
+                <button
+                  onClick={() => dirs && go(dirs.parent)}
+                  disabled={!dirs || dirs.atHome}
+                  className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-edge disabled:opacity-30"
+                >
+                  ⬆︎
+                </button>
+                <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">{dirs ? rel(dirs.path) : "…"}</span>
+                <button
+                  onClick={() => dirs && toggle(dirs.path)}
+                  disabled={!dirs || dirs.path === projectDir}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold disabled:opacity-30 ${
+                    dirs && value.includes(dirs.path) ? "bg-accent text-bar" : "bg-panel text-slate-300"
+                  }`}
+                >
+                  {dirs && value.includes(dirs.path) ? "Added" : "Add here"}
+                </button>
+              </div>
+              <div className="max-h-40 overflow-y-auto">
+                {dirs?.dirs.map((d, i) => {
+                  const selected = value.includes(d.path);
+                  const focused = i === cursor;
+                  return (
+                    <div key={d.path} className={`flex items-center gap-1 px-2 py-1 ${focused ? "bg-edge/60" : ""}`}>
+                      <button onClick={() => go(d.path)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[12px] text-slate-200">
+                        <span className="text-slate-500">📁</span>
+                        <span className="min-w-0 flex-1 truncate">{d.name}</span>
+                      </button>
+                      <button
+                        onClick={() => toggle(d.path)}
+                        disabled={d.path === projectDir}
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold disabled:opacity-30 ${
+                          selected ? "bg-accent text-bar" : "bg-panel text-slate-300"
+                        }`}
+                      >
+                        {selected ? "Added" : "Add"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
