@@ -15,6 +15,29 @@ export function toolColor(tool: string): string {
   }
 }
 
+// machineAccent — a stable accent for a machine id, derived from a hash so the
+// colour is deterministic across reloads and clients with no server state.
+// Same machine → same hue everywhere; panes from the same box read as a group.
+// Empty machine (single-agent / no hub) → null: there is nothing to
+// disambiguate, so callers leave the bar neutral (no spine, no hostname).
+//   spine — the short vertical machine "spine" bar
+//   text  — the hostname tint (lighter, for ≥4.5:1 contrast on the dark bar)
+//   tint  — an optional faint background wash for the active pane
+export function machineAccent(
+  machine: string
+): { spine: string; text: string; tint: string } | null {
+  if (!machine) return null;
+  let h = 0;
+  for (let i = 0; i < machine.length; i++) h = (h * 31 + machine.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  // Fixed S/L so every machine reads at the same intensity on the dark bar.
+  return {
+    spine: `hsl(${hue} 62% 55%)`,
+    text: `hsl(${hue} 70% 74%)`,
+    tint: `hsl(${hue} 55% 50% / 0.12)`,
+  };
+}
+
 // toPng normalises any browser-decodable image (phone screenshots are PNG;
 // photos may be HEIC/JPEG; pasted clipboard items can be anything Chrome
 // decodes) to the PNG that Claude Code's clipboard read expects, by drawing

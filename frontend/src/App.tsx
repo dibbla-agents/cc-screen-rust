@@ -1802,6 +1802,7 @@ export default function App() {
             panes={panes}
             active={active}
             sessions={sessions}
+            machines={machines}
             fontSize={fontSize}
             onActivate={setActive}
             onConn={setPaneConn}

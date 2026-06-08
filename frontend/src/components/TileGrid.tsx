@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
-import { type PaneRef, type Session } from "../api";
-import { toolColor } from "../util";
+import { type MachineInfo, type PaneRef, type Session } from "../api";
+import { machineAccent, toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -65,6 +65,9 @@ interface Props {
   panes: (PaneRef | null)[];
   active: number;
   sessions: Session[];
+  // Hub roster — resolves a machine id to a hostname for the per-pane identity
+  // bar. Standalone agent (no hub) → []; the bar then drops the machine segment.
+  machines: MachineInfo[];
   fontSize: number;
   onActivate: (idx: number) => void;
   onConn: (idx: number, c: ConnState) => void;
@@ -100,6 +103,7 @@ export default function TileGrid({
   panes,
   active,
   sessions,
+  machines,
   fontSize,
   onActivate,
   onConn,
@@ -131,6 +135,7 @@ export default function TileGrid({
           active={idx === active}
           session={pane}
           sessions={sessions}
+          machines={machines}
           fontSize={fontSize}
           onActivate={() => onActivate(idx)}
           onConn={(c) => onConn(idx, c)}
@@ -153,6 +158,7 @@ interface PaneProps {
   active: boolean;
   session: PaneRef | null;
   sessions: Session[];
+  machines: MachineInfo[];
   fontSize: number;
   onActivate: () => void;
   onConn: (c: ConnState) => void;
@@ -171,6 +177,7 @@ function PaneBox({
   active,
   session,
   sessions,
+  machines,
   fontSize,
   onActivate,
   onConn,
@@ -185,6 +192,16 @@ function PaneBox({
   const meta = sessions.find(
     (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
   );
+
+  // Per-pane identity (proposal 0021): the machine "spine" + hostname tint.
+  // Resolved exactly like the session drawer — hostname falls back to the raw
+  // machine id, then "". machineAccent returns null for the empty machine
+  // (single-agent / no hub), so the bar drops the machine segment entirely.
+  const host =
+    machines.find((m) => m.machine === session?.machine)?.hostname ||
+    session?.machine ||
+    "";
+  const acc = machineAccent(session?.machine ?? "");
 
   // Drag-and-drop overlay state. We track a counter (incremented on
   // dragenter, decremented on dragleave) because dragenter/leave also fire
@@ -227,45 +244,11 @@ function PaneBox({
     onDropFiles!(e.dataTransfer);
   };
 
-  // Per-pane chrome (the [pane-number / tool / name] chip + download icon)
-  // auto-hides: visible while the mouse is moving over this pane, faded
-  // out after ~2.5s of stillness, hidden on leave. Tracked with a ref so
-  // mousemove doesn't trigger a setState on every frame — only the
-  // transition hidden→visible does.
-  const [chromeVisible, setChromeVisible] = useState(false);
-  const chromeVisibleRef = useRef(false);
-  const chromeTimerRef = useRef<number | null>(null);
-  const chromeActivity = () => {
-    if (chromeTimerRef.current != null) window.clearTimeout(chromeTimerRef.current);
-    if (!chromeVisibleRef.current) {
-      chromeVisibleRef.current = true;
-      setChromeVisible(true);
-    }
-    chromeTimerRef.current = window.setTimeout(() => {
-      chromeVisibleRef.current = false;
-      setChromeVisible(false);
-      chromeTimerRef.current = null;
-    }, 2500);
-  };
-  const chromeLeave = () => {
-    if (chromeTimerRef.current != null) {
-      window.clearTimeout(chromeTimerRef.current);
-      chromeTimerRef.current = null;
-    }
-    if (chromeVisibleRef.current) {
-      chromeVisibleRef.current = false;
-      setChromeVisible(false);
-    }
-  };
-
   return (
     <div
       // Capture-phase pointerdown so clicking inside the xterm canvas still
       // promotes this pane to active *before* xterm processes the click.
       onPointerDownCapture={onActivate}
-      onMouseEnter={chromeActivity}
-      onMouseMove={chromeActivity}
-      onMouseLeave={chromeLeave}
       // Drag-and-drop file upload: handlers attached on the outer pane so
       // they cover the entire surface (including the xterm canvas inside).
       // xterm.js doesn't register its own drop handlers, so a bubble-phase
@@ -286,46 +269,6 @@ function PaneBox({
       className="relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-bar"
       style={{ gridArea: area }}
     >
-      {/* Auto-hide chrome cluster, top-right: pane chip + (if mounted)
-          download button. Fades in on mouse activity inside the pane and
-          out after ~2.5s of stillness; leaves immediately on mouseleave.
-          One container, one fade, so they move together.
-          The download button click goes through the surrounding PaneBox
-          onPointerDownCapture first → currentSession reflects this pane
-          by the time onClick fires → files sheet roots itself here
-          automatically, no extra prop wiring. */}
-      <div
-        className={`absolute right-1.5 top-1 z-10 flex items-center gap-1.5 transition-opacity duration-200 ${
-          chromeVisible ? "opacity-100" : "pointer-events-none opacity-0"
-        }`}
-      >
-        <div className="pointer-events-none flex items-center gap-1.5 rounded bg-bar/70 px-1.5 py-0.5 text-[10px] backdrop-blur-sm">
-          <span className="font-mono text-slate-500">{index + 1}</span>
-          {meta && (
-            <>
-              <span
-                className={`rounded px-1 py-px text-[9px] font-bold uppercase text-bar ${toolColor(
-                  meta.tool
-                )}`}
-              >
-                {meta.tool}
-              </span>
-              <span className="max-w-[10rem] truncate text-slate-300">{meta.short}</span>
-            </>
-          )}
-        </div>
-        {session && (
-          <button
-            onClick={onOpenEditor}
-            aria-label="Open file browser / editor"
-            title="Files — browse, view, edit, download"
-            className="flex items-center justify-center rounded-md border border-edge bg-bar/70 p-1.5 text-accent backdrop-blur-sm hover:bg-bar hover:text-slate-100"
-          >
-            <FileEditIcon className="h-4 w-4" />
-          </button>
-        )}
-      </div>
-
       {session ? (
         <TerminalView
           key={`${session.machine}/${session.name}`}
@@ -402,6 +345,63 @@ function PaneBox({
           Rendered last so it also wins DOM order over the highlight/drop
           layers. */}
       {overlay}
+
+      {/* Per-pane identity bar (proposal 0021) — a persistent bottom status
+          line naming the machine + session, so a multi-pane / multi-machine
+          grid is legible at a glance. A `shrink-0` flex row: it never gets
+          squeezed, and the `flex-1` TerminalView above absorbs the height
+          change (its ResizeObserver re-fits xterm to the shorter box). Empty
+          panes render no bar — there's nothing to identify. */}
+      {session && meta && (
+        <div
+          className={`flex h-6 shrink-0 items-center gap-2 border-t px-2 text-[11px] ${
+            active ? "border-accent/40 bg-panel" : "border-edge/70 bg-bar"
+          }`}
+        >
+          {/* Machine spine + hostname — the machine identity. Dropped when
+              acc is null (single-agent / no hub): nothing to disambiguate. */}
+          {acc && (
+            <>
+              <span
+                aria-hidden
+                className="h-3.5 w-[3px] shrink-0 rounded-full"
+                style={{ background: acc.spine }}
+              />
+              <span
+                className="shrink-0 font-semibold tracking-wide"
+                style={{ color: acc.text }}
+                title={host}
+              >
+                {host}
+              </span>
+            </>
+          )}
+          <span
+            className={`shrink-0 rounded px-1 py-px text-[9px] font-bold uppercase text-bar ${toolColor(
+              meta.tool
+            )}`}
+          >
+            {meta.tool}
+          </span>
+          <span
+            className={`min-w-0 flex-1 truncate ${
+              active ? "text-slate-100" : "text-slate-300"
+            }`}
+          >
+            {meta.short}
+          </span>
+          <button
+            onClick={onOpenEditor}
+            title="Files — browse, view, edit, download"
+            aria-label="Open file browser / editor"
+            className="shrink-0 text-accent hover:text-slate-100"
+          >
+            <FileEditIcon className="h-4 w-4" />
+          </button>
+          {/* Pane number — the Ctrl+B prefix mnemonic. */}
+          <span className="shrink-0 font-mono text-slate-500">{index + 1}</span>
+        </div>
+      )}
     </div>
   );
 }
