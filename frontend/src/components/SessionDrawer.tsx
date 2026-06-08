@@ -3,6 +3,7 @@ import { type MachineInfo, type PaneRef, type RestorableSession, type Session } 
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
+import SummaryTip from "./SummaryTip";
 import ToastsButton from "./ToastsButton";
 import CreateSession from "./CreateSession";
 
@@ -518,16 +519,17 @@ export default function SessionDrawer({
                 </span>
               </span>
               {/* Proposal 0022: the LLM headline replaces the bare preview when
-                  present (and titles the row with the fuller detail), falling
-                  back to the preview line otherwise. */}
-              <span
-                className={`mt-0.5 block truncate text-[11px] leading-tight ${
-                  s.headline ? "text-slate-400" : "font-mono text-slate-600"
-                }`}
-                title={s.detail || undefined}
-              >
-                {s.headline || s.preview || "—"}
-              </span>
+                  present; the full summary is on hover (desktop) / long-press
+                  (touch) via SummaryTip. Falls back to the preview line. */}
+              <SummaryTip text={s.detail || s.headline || undefined} className="mt-0.5 block min-w-0">
+                <span
+                  className={`block truncate text-[11px] leading-tight ${
+                    s.headline ? "text-slate-400" : "font-mono text-slate-600"
+                  }`}
+                >
+                  {s.headline || s.preview || "—"}
+                </span>
+              </SummaryTip>
             </span>
           </button>
 

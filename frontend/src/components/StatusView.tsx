@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
+import SummaryTip from "./SummaryTip";
 
 interface Props {
   open: boolean;
@@ -125,7 +126,6 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                     <button
                       type="button"
                       onClick={() => onPick(s)}
-                      title={s.detail || undefined}
                       className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-bar active:bg-edge"
                     >
                       <span
@@ -151,16 +151,19 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                             {ago(s.activity)}
                           </span>
                         </span>
-                        {/* Latest status: the LLM headline, else the preview. */}
-                        <span
-                          className={`mt-0.5 truncate text-[12px] leading-tight ${
-                            s.headline ? "text-slate-300" : "font-mono text-slate-500"
-                          }`}
-                        >
-                          {s.headline || s.preview || "—"}
-                        </span>
-                        {/* The fuller detail, reachable on phone (inline, clamped)
-                            and on desktop (also the row title on hover). */}
+                        {/* Latest status: the LLM headline, else the preview.
+                            Full summary on hover (desktop) / long-press (touch). */}
+                        <SummaryTip text={s.detail || s.headline || undefined} className="mt-0.5 block min-w-0">
+                          <span
+                            className={`block truncate text-[12px] leading-tight ${
+                              s.headline ? "text-slate-300" : "font-mono text-slate-500"
+                            }`}
+                          >
+                            {s.headline || s.preview || "—"}
+                          </span>
+                        </SummaryTip>
+                        {/* The fuller detail inline (clamped); long-press/hover the
+                            line above for the complete text. */}
                         {s.detail && (
                           <span className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-slate-500">
                             {s.detail}

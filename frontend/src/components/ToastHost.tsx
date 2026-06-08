@@ -24,6 +24,7 @@ import type { ReadyEdge } from "../readyEdges";
 import { sessionKey } from "../readyEdges";
 import { toolColor } from "../util";
 import { XIcon } from "../icons";
+import SummaryTip from "./SummaryTip";
 
 // Auto-dismiss window. Long enough to read + click, short enough to stay
 // transient. Paused while hovered/focused (desktop) so it can't vanish under
@@ -201,11 +202,16 @@ export default ToastHost;
 // drops the translate).
 // The toast's status line: the LLM summary detail (or headline) when present —
 // the whole point of proposal 0022 is that the buzz says what's needed — else
-// the generic "ready for input". A longer detail is clamped to two lines.
+// the generic "ready for input". The clamped line shows the full text on hover
+// (desktop) / long-press (touch) via SummaryTip.
 function ToastStatus({ entry }: { entry: ToastEntry }) {
   const summary = entry.detail || entry.headline;
   if (summary) {
-    return <span className="line-clamp-2 text-xs text-slate-300">{summary}</span>;
+    return (
+      <SummaryTip text={summary} className="block min-w-0">
+        <span className="line-clamp-2 text-xs text-slate-300">{summary}</span>
+      </SummaryTip>
+    );
   }
   return <span className="text-xs text-emerald-400">ready for input</span>;
 }

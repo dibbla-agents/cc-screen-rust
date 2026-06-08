@@ -40,10 +40,17 @@ pub struct Summary {
 pub const SYSTEM_PROMPT: &str = "You summarize the live state of an AI coding-agent terminal session for an \
 operator who is NOT currently looking at it. You are given the operator's most recent typed submissions \
 and a window of the session's recent terminal output. Produce a terse status by calling the record_status \
-tool. headline: at most 6 words naming the current state or the action it needs (e.g. \"Waiting to run tests\", \
-\"Needs your answer\", \"Build failed\"). detail: 2-3 plain sentences covering what the operator asked, what \
-the agent did, and what it is now waiting on or needs from the operator. Be concrete and specific; never \
-invent facts that are not present in the input. If the session looks idle or finished, say so.";
+tool. \
+LEAD WITH THE ACTION THE OPERATOR NEEDS TO TAKE, if any — both fields are often shown cropped, so the \
+required action must come first. \
+headline: at most 6 words. If the agent needs the operator to do something, make it an imperative naming \
+that action (e.g. \"Approve running tests\", \"Answer its question\", \"Resolve merge conflict\"); otherwise \
+name the current state (e.g. \"Working — refactoring auth\", \"Idle, task done\"). \
+detail: 2-3 plain sentences. If the agent is waiting on the operator, the FIRST sentence must state exactly \
+what to do (e.g. \"Approve the test run.\" / \"Tell it which DB to use.\" / \"Review the diff and confirm.\"); \
+then briefly give context — what the operator asked and what the agent did. If nothing is needed from the \
+operator, start with the current state instead. Be concrete and specific; never invent facts that are not \
+present in the input. If the session looks idle or finished, say so.";
 
 /// Build the JSON request body for the Messages API. Pure (no I/O) so it is
 /// unit-testable; `summarize` POSTs whatever this returns.
