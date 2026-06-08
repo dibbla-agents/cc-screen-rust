@@ -269,24 +269,34 @@ function PaneBox({
       className="relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-bar"
       style={{ gridArea: area }}
     >
-      {session ? (
-        <TerminalView
-          key={`${session.machine}/${session.name}`}
-          session={session.name}
-          machine={session.machine}
-          fontSize={fontSize}
-          onState={onConn}
-          active={active}
-          onTerm={onTerm}
-        />
-      ) : (
-        <EmptyPanePicker
-          sessions={sessions}
-          onPick={onPick}
-          onOpenDrawer={onOpenDrawer}
-          onNew={onNew}
-        />
-      )}
+      {/* The terminal (or picker) is the *flexible* flow child: flex-1 to
+          take the space the footer doesn't, and min-h-0 so it can actually
+          shrink below the xterm canvas's intrinsic height (the flexbox
+          `min-height: auto` default would otherwise let a tall canvas refuse
+          to give up room, pushing the shrink-0 footer past the pane's
+          overflow-hidden bottom edge — which clipped the identity bar in
+          multi-row layouts). overflow-hidden keeps a transient oversized
+          canvas inside this box rather than bleeding over the footer. */}
+      <div className="min-h-0 w-full flex-1 overflow-hidden">
+        {session ? (
+          <TerminalView
+            key={`${session.machine}/${session.name}`}
+            session={session.name}
+            machine={session.machine}
+            fontSize={fontSize}
+            onState={onConn}
+            active={active}
+            onTerm={onTerm}
+          />
+        ) : (
+          <EmptyPanePicker
+            sessions={sessions}
+            onPick={onPick}
+            onOpenDrawer={onOpenDrawer}
+            onNew={onNew}
+          />
+        )}
+      </div>
 
       {/* Highlight overlay — a separate borrowed div drawn on top of the
           terminal so the border is visible regardless of where the pane
