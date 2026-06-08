@@ -4,7 +4,8 @@
 //! (with modal overlays) and the tiled grid of attached boxes.
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::io::Write;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use cc_screen_protocol::{CreateReq, MachineInfo, SessionInfo, ToolInfo};
@@ -20,8 +21,19 @@ use crate::config::Config;
 use crate::input;
 use crate::layout::{self, Layout};
 use crate::pane::{ConnState, Pane, WsOut};
+use crate::ready::{self, ReadyEdge};
 use crate::term::Tui;
 use crate::ui;
+
+/// How long a foreground ready-toast (0018 §3) stays up before the 1 s ticker
+/// auto-dismisses it. A fresh edge for the same session resets the clock.
+const TOAST_TTL: Duration = Duration::from_secs(8);
+
+/// Current Unix time in seconds (0 on the impossible pre-epoch clock), for the
+/// ready-edge gates. Kept tiny so the detector itself stays pure + testable.
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 /// Everything the event loop reacts to.
 pub enum AppMsg {
@@ -415,6 +427,19 @@ pub struct App {
     rx: Option<mpsc::Receiver<AppMsg>>,
     should_quit: bool,
     pending_refresh: bool,
+
+    // ── ready-session notifications (0018) ──────────────────────────────────
+    /// Sessions that crossed the gated busy→waiting edge and are still ready,
+    /// awaiting a `^A g` / click. Replace-not-stack by `(machine, name)`; empty
+    /// = no toast. Rendered as a transient statusbar segment in the grid (§3).
+    toast: Vec<ReadyEdge>,
+    /// When the toast auto-dismisses (checked each 1 s `refresh`); `None` = no
+    /// toast pending. No separate timer — it rides the existing ticker (§3).
+    toast_until: Option<Instant>,
+    /// Terminal focus (DECSET 1004), the TUI analog of `document.visibilityState`
+    /// (§5). Drives the foreground/background split; defaults true so terminals
+    /// without focus reporting always take the (harmless) statusbar toast.
+    is_focused: bool,
 }
 
 impl App {
@@ -447,6 +472,9 @@ impl App {
             rx: Some(rx),
             should_quit: false,
             pending_refresh: false,
+            toast: Vec::new(),
+            toast_until: None,
+            is_focused: true,
         }
     }
 
@@ -557,7 +585,19 @@ impl App {
         match self.rest.sessions().await {
             Ok(mut list) => {
                 list.sort_by(|a, b| a.name.cmp(&b.name));
+                // 0018: detect sessions that crossed the gated busy→waiting edge
+                // between the previous and current snapshot, excluding any
+                // mounted in a box (they carry their own status). The detector is
+                // pure; the focus split + toast/bell plumbing is `note_ready_edges`.
+                let mounted: HashSet<(String, String)> = self
+                    .panes
+                    .iter()
+                    .filter_map(|p| p.as_ref())
+                    .map(|p| (p.machine.clone(), p.session.clone()))
+                    .collect();
+                let edges = ready::detect_ready_edges(&self.sessions, &list, &mounted, now_secs());
                 self.sessions = list;
+                self.note_ready_edges(edges, &mounted);
                 if self.selected >= self.sessions.len() {
                     self.selected = self.sessions.len().saturating_sub(1);
                 }
@@ -590,6 +630,128 @@ impl App {
                 }
             }
         }
+    }
+
+    // ── ready-session notifications (0018) ───────────────────────────────────
+    /// Act on the ready edges from a `refresh`, applying the focus split (§5):
+    /// focused → a foreground statusbar toast (§3); unfocused → a terminal bell
+    /// + OSC 9 desktop notification (§4). Also prunes/expires the standing toast
+    /// so it never points at a gone, resumed, or now-mounted session.
+    fn note_ready_edges(&mut self, edges: Vec<ReadyEdge>, mounted: &HashSet<(String, String)>) {
+        // Auto-dismiss rides the 1 s ticker — no separate timer.
+        if self.toast_until.is_some_and(|until| Instant::now() >= until) {
+            self.toast.clear();
+            self.toast_until = None;
+        }
+        // Drop toast entries that no longer warrant a jump: session ended,
+        // resumed work (no longer waiting), or got mounted in a box.
+        let still_ready: HashSet<(String, String)> = self
+            .sessions
+            .iter()
+            .filter(|s| s.waiting)
+            .map(|s| (s.machine.clone(), s.name.clone()))
+            .collect();
+        self.toast.retain(|e| still_ready.contains(&e.key()) && !mounted.contains(&e.key()));
+        if self.toast.is_empty() {
+            self.toast_until = None;
+        }
+
+        if edges.is_empty() {
+            return;
+        }
+        if self.is_focused {
+            // Foreground: a non-modal statusbar toast. Replace-not-stack by key,
+            // mirroring the web's per-session replace.
+            if self.cfg.notify.wants_toast() {
+                for e in edges {
+                    self.toast.retain(|x| x.key() != e.key());
+                    self.toast.push(e);
+                }
+                self.toast_until = Some(Instant::now() + TOAST_TTL);
+            }
+        } else if self.cfg.notify.wants_bell() {
+            // Background: a statusbar line helps no one — emit the out-of-app
+            // signal instead. The standing §6 indicator surfaces them on refocus.
+            self.emit_bell_osc(&edges);
+        }
+    }
+
+    /// Emit a terminal BEL + an OSC 9 desktop notification for `edges` — the
+    /// background analog of Web Push (§4). Written straight to stdout as
+    /// out-of-band control bytes the terminal consumes; ratatui repaints the
+    /// screen on the next draw. Not deep-linkable (terminals can't route a
+    /// notification click back into a session) — the actionable jump is the §3
+    /// toast the user sees once the terminal is focused again.
+    fn emit_bell_osc(&self, edges: &[ReadyEdge]) {
+        let label = match edges {
+            [one] => format!("{} ready", one.short),
+            many => format!("{} sessions ready", many.len()),
+        };
+        let mut out = std::io::stdout();
+        // BEL raises the terminal's urgency hint; OSC 9 is the desktop toast on
+        // iTerm2 / kitty / WezTerm and friends.
+        let _ = write!(out, "\x07\x1b]9;cc-screen: {label}\x07");
+        let _ = out.flush();
+    }
+
+    /// `^A g` / a toast click: jump to the ready session(s) (§3). One ready →
+    /// mount it directly in the active box (the common case); several → open the
+    /// switcher with the cursor on the first ready session (no ready-only filter
+    /// — the §6 dots mark them). No-op when nothing is ready.
+    fn jump_ready(&mut self) {
+        if self.toast.is_empty() {
+            return;
+        }
+        if self.toast.len() == 1 {
+            let e = self.toast[0].clone();
+            self.clear_toast();
+            self.fill_box(self.active, e.name, e.machine);
+        } else {
+            let keys: HashSet<(String, String)> = self.toast.iter().map(|e| e.key()).collect();
+            if let Some(idx) = self
+                .sessions
+                .iter()
+                .position(|s| keys.contains(&(s.machine.clone(), s.name.clone())))
+            {
+                self.selected = idx;
+            }
+            self.clear_toast();
+            self.grid_overlay = GridOverlay::None;
+            self.mode = Mode::Switcher;
+        }
+    }
+
+    fn clear_toast(&mut self) {
+        self.toast.clear();
+        self.toast_until = None;
+    }
+
+    /// The toast's rendered text (right-aligned in the grid statusbar), or `None`
+    /// when no session is ready. Coalesced when several fire.
+    fn toast_text(&self) -> Option<String> {
+        if self.toast.is_empty() {
+            return None;
+        }
+        let p = self.prefix_label();
+        Some(if self.toast.len() == 1 {
+            format!("✦ {} ready  {p} g to jump ", self.toast[0].short)
+        } else {
+            format!("✦ {} sessions ready  {p} g ", self.toast.len())
+        })
+    }
+
+    /// The screen rect the toast occupies — the rightmost columns of the bottom
+    /// statusbar row — for mouse hit-testing. `None` when no toast is up.
+    fn toast_rect(&self) -> Option<Rect> {
+        let t = self.toast_text()?;
+        let w = (t.chars().count() as u16).min(self.area.0);
+        Some(Rect::new(self.area.0.saturating_sub(w), self.area.1.saturating_sub(1), w, 1))
+    }
+
+    fn toast_hit(&self, col: u16, row: u16) -> bool {
+        self.toast_rect().is_some_and(|r| {
+            col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+        })
     }
 
     fn handle_created(&mut self, res: Result<(String, String), String>) {
@@ -669,6 +831,10 @@ impl App {
                 }
             }
             Event::Mouse(me) => self.handle_mouse(me),
+            // Terminal focus (DECSET 1004) drives the 0018 notification split
+            // (§5): toast while focused, bell + OSC 9 while not.
+            Event::FocusGained => self.is_focused = true,
+            Event::FocusLost => self.is_focused = false,
             _ => {}
         }
     }
@@ -691,6 +857,12 @@ impl App {
                     }
                     // Click focuses the box; clicking an empty one opens the menu.
                     Down(_) => {
+                        // A click on the statusbar toast jumps to the ready
+                        // session(s) — the mouse path for ^A g (§3).
+                        if self.toast_hit(me.column, me.row) {
+                            self.jump_ready();
+                            return;
+                        }
                         if let Some(idx) = self.box_at(me.column, me.row) {
                             self.active = idx;
                             if self.panes.get(idx).and_then(|x| x.as_ref()).is_none() {
@@ -938,6 +1110,7 @@ impl App {
             match k.code {
                 KeyCode::Char('d') => self.open_menu(self.active),
                 KeyCode::Char('x') => self.kill_focused(),
+                KeyCode::Char('g') => self.jump_ready(), // 0018: go to ready session(s)
                 KeyCode::Char('l') | KeyCode::Char(' ') => self.open_palette(),
                 KeyCode::Char(c) if c.is_ascii_digit() => {
                     // Direct power-shortcut (the palette is the visual path).
@@ -1354,6 +1527,7 @@ impl App {
                     self.active,
                     &self.prefix_label(),
                     self.prefix_armed,
+                    self.toast_text().as_deref(),
                 );
                 match &self.grid_overlay {
                     GridOverlay::None => {}

@@ -5,6 +5,39 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Ready-session notification mode (proposal 0018). Gates the two TUI-native
+/// surfaces: the foreground statusbar toast (§3) and the background terminal
+/// bell + OSC 9 desktop notification (§4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMode {
+    /// No ready-session notifications at all.
+    Off,
+    /// Foreground statusbar toast only; suppress the bell/OSC.
+    Toast,
+    /// Background bell + OSC 9 only; suppress the statusbar toast.
+    Bell,
+    /// Both surfaces (the default): toast when focused, bell + OSC 9 when not.
+    All,
+}
+
+impl NotifyMode {
+    /// Whether the foreground statusbar toast (§3) should show in this mode.
+    pub fn wants_toast(self) -> bool {
+        matches!(self, NotifyMode::Toast | NotifyMode::All)
+    }
+    /// Whether the background bell + OSC 9 (§4) should fire in this mode.
+    pub fn wants_bell(self) -> bool {
+        matches!(self, NotifyMode::Bell | NotifyMode::All)
+    }
+}
+
+impl Default for NotifyMode {
+    fn default() -> Self {
+        NotifyMode::All
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -19,6 +52,11 @@ pub struct Config {
     /// the web password. Overridable by `--token` or `CCS_API_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
+    /// Ready-session notifications (0018): `off` | `toast` | `bell` | `all`.
+    /// Defaults to `all` — the statusbar toast is non-intrusive; the louder
+    /// bell + OSC 9 only fire when the terminal is unfocused.
+    #[serde(default)]
+    pub notify: NotifyMode,
 }
 
 impl Default for Config {
@@ -28,6 +66,7 @@ impl Default for Config {
             prefix: "C-a".into(),
             recents: Vec::new(),
             api_token: None,
+            notify: NotifyMode::default(),
         }
     }
 }
@@ -90,6 +129,25 @@ api_token = "secret123""#)
         let c: Config = toml::from_str(r#"server = "http://h:1""#).unwrap();
         assert_eq!(c.api_token, None);
         assert_eq!(c.prefix, "C-a");
+    }
+
+    #[test]
+    fn notify_defaults_to_all_and_parses() {
+        // Absent → All (notify on, both surfaces).
+        let c: Config = toml::from_str(r#"server = "http://h:1""#).unwrap();
+        assert_eq!(c.notify, NotifyMode::All);
+        assert!(c.notify.wants_toast() && c.notify.wants_bell());
+        // Each mode parses lowercase and gates the right surfaces.
+        let parse = |v: &str| -> NotifyMode {
+            toml::from_str::<Config>(&format!("notify = \"{v}\"")).unwrap().notify
+        };
+        assert_eq!(parse("off"), NotifyMode::Off);
+        assert!(!NotifyMode::Off.wants_toast() && !NotifyMode::Off.wants_bell());
+        assert_eq!(parse("toast"), NotifyMode::Toast);
+        assert!(NotifyMode::Toast.wants_toast() && !NotifyMode::Toast.wants_bell());
+        assert_eq!(parse("bell"), NotifyMode::Bell);
+        assert!(!NotifyMode::Bell.wants_toast() && NotifyMode::Bell.wants_bell());
+        assert_eq!(parse("all"), NotifyMode::All);
     }
 
     #[test]

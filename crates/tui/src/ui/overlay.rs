@@ -303,9 +303,10 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
 
     // Size the name column to the longest name so names show in full; the tool
     // column is fixed and the preview takes whatever's left (it's the croppable
-    // one). lead = marker (2) + dot (2); the two inter-column gaps add 2 more.
+    // one). lead = marker (2) + attached dot (2) + ready marker (2); the two
+    // inter-column gaps add 2 more.
     const TOOL_W: usize = 7;
-    let lead = 4usize;
+    let lead = 6usize;
     let longest = v.sessions.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
     let name_cap = inner_w.saturating_sub(lead + 2 + TOOL_W + 8).max(12); // keep ≥8 for preview
     let name_w = longest.clamp(12, name_cap);
@@ -327,12 +328,18 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
         for (i, s) in v.sessions.iter().enumerate().skip(start).take(shown) {
             let sel = 2 + i == v.selected;
             let dot = if s.attached { "●" } else { "○" };
+            // A ready/working indicator (0018 §6), mirroring the switcher: an
+            // amber ● marks a session still producing output, absent once it's
+            // waiting (ready). So the durable menu agrees with the toast about
+            // who is ready — not just who is attached.
+            let work = if s.waiting { "  " } else { "● " };
             let mut spans = vec![
                 menu_marker(sel),
                 Span::styled(
                     format!("{dot} "),
                     Style::default().fg(if sel { Color::Cyan } else { Color::DarkGray }),
                 ),
+                Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!("{:<name_w$} ", truncate(&s.name, name_w)),
                     if sel { sel_style } else { gray },
@@ -406,6 +413,24 @@ mod tests {
         assert!(s.contains("claude-a"), "{s}");
         assert!(s.contains("codex-b"), "{s}");
         assert!(s.contains('▸'), "selection marker: {s}");
+    }
+
+    #[test]
+    fn grid_menu_marks_ready_vs_busy_sessions() {
+        // A busy (working) session carries the amber ● marker; a waiting (ready)
+        // one doesn't — both rows are detached (○) so the only ● is the worker.
+        let mut busy = sess("busy");
+        busy.waiting = false;
+        let mut ready = sess("ready");
+        ready.waiting = true;
+        let s = render_to(72, 16, |f| {
+            grid_menu(f, &MenuView { sessions: &[busy], selected: 1, box_num: 1, box_count: 1 })
+        });
+        assert!(s.contains('●'), "busy row should show the working marker: {s}");
+        let s = render_to(72, 16, |f| {
+            grid_menu(f, &MenuView { sessions: &[ready], selected: 1, box_num: 1, box_count: 1 })
+        });
+        assert!(!s.contains('●'), "ready/waiting row should not show the working marker: {s}");
     }
 
     #[test]

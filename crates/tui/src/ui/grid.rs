@@ -17,6 +17,7 @@ use crate::ui::statusbar;
 const FOCUS: Color = Color::Cyan;
 const DIM_BORDER: Color = Color::Rgb(60, 70, 85);
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     layout: Layout,
@@ -24,6 +25,7 @@ pub fn render(
     active: usize,
     prefix_label: &str,
     prefix_armed: bool,
+    toast: Option<&str>,
 ) {
     let rows = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
     let body = rows[0];
@@ -35,7 +37,9 @@ pub fn render(
     }
 
     let focused = panes.get(active).and_then(|p| p.as_ref());
-    statusbar::render(f, rows[1], focused, layout, active, panes.len(), prefix_label, prefix_armed);
+    statusbar::render(
+        f, rows[1], focused, layout, active, panes.len(), prefix_label, prefix_armed, toast,
+    );
 }
 
 fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, single: bool) {
@@ -91,7 +95,7 @@ mod tests {
     async fn quad_shows_titles_hints_and_bar() {
         let panes = vec![Some(dummy(1, "shell-a")), None, None, None];
         let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        t.draw(|f| render(f, Layout::Quad, &panes, 0, "^A", false)).unwrap();
+        t.draw(|f| render(f, Layout::Quad, &panes, 0, "^A", false, None)).unwrap();
         let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("shell-a"), "filled box title: {s:?}");
         assert!(s.contains("for menu"), "empty box hint: {s:?}");

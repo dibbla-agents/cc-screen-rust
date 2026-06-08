@@ -14,6 +14,8 @@ use crate::layout::Layout;
 use crate::pane::{ConnState, Pane};
 
 const BAR_BG: Color = Color::Rgb(15, 23, 32);
+/// Amber accent for the ready-session toast (0018 §3), matching the web toast.
+const TOAST_BG: Color = Color::Rgb(245, 158, 11);
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -25,6 +27,9 @@ pub fn render(
     count: usize,
     prefix_label: &str,
     prefix_armed: bool,
+    // The ready-session toast (0018 §3); when present it takes the bar's
+    // right-aligned segment in place of the key hints.
+    toast: Option<&str>,
 ) {
     f.render_widget(Block::default().style(Style::default().bg(BAR_BG)), area);
 
@@ -69,14 +74,22 @@ pub fn render(
     }
     f.render_widget(Paragraph::new(Line::from(left)), area);
 
-    let hint = if count > 1 {
-        format!("{prefix_label} ←/→ focus · l layout · d menu  ")
-    } else {
-        format!("{prefix_label} l layout · d menu  ")
+    // The right segment is the ready-session toast when one is up (0018 §3),
+    // otherwise the usual key hints. The toast is non-modal — it lives in the
+    // app-owned bar and never occludes a pane.
+    let right = match toast {
+        Some(t) => Line::from(Span::styled(
+            t.to_string(),
+            Style::default().fg(Color::Black).bg(TOAST_BG).add_modifier(Modifier::BOLD),
+        )),
+        None => {
+            let hint = if count > 1 {
+                format!("{prefix_label} ←/→ focus · l layout · d menu  ")
+            } else {
+                format!("{prefix_label} l layout · d menu  ")
+            };
+            Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
+        }
     };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))))
-            .alignment(Alignment::Right),
-        area,
-    );
+    f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }

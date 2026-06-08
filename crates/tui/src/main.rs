@@ -9,6 +9,7 @@ mod config;
 mod input;
 mod layout;
 mod pane;
+mod ready;
 mod term;
 mod ui;
 

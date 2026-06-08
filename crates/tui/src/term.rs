@@ -7,7 +7,8 @@ use anyhow::Result;
 use crossterm::{
     cursor,
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -26,8 +27,17 @@ pub fn enter() -> Result<Tui> {
     let mut out = io::stdout();
     // Mouse capture lets the wheel drive the pane's scrollback. It disables the
     // terminal's own click-to-select, but Shift+drag still selects on every
-    // common terminal (the bytes bypass mouse reporting).
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, cursor::Hide)?;
+    // common terminal (the bytes bypass mouse reporting). Focus reporting
+    // (DECSET 1004) drives the 0018 foreground/background notification split:
+    // toast when focused, bell + OSC 9 when not.
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture,
+        EnableFocusChange,
+        cursor::Hide
+    )?;
     install_panic_hook();
     Ok(Terminal::new(AnchoredBackend::new(out))?)
 }
@@ -35,7 +45,14 @@ pub fn enter() -> Result<Tui> {
 /// Undo `enter()`. Safe to call more than once.
 pub fn restore() -> Result<()> {
     let mut out = io::stdout();
-    execute!(out, cursor::Show, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen)?;
+    execute!(
+        out,
+        cursor::Show,
+        DisableFocusChange,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
     out.flush()?;
     Ok(())
