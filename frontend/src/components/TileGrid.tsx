@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
-import { machineAccent, toolColor, toolQuietBadge } from "../util";
+import { machineAccent, toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -202,6 +202,9 @@ function PaneBox({
     session?.machine ||
     "";
   const acc = machineAccent(session?.machine ?? "");
+  // The identity bar shows only when we can name the session. When it shows,
+  // the terminal area stops `bottom-6` short so the bar owns that fixed strip.
+  const hasBar = !!(session && meta);
 
   // Drag-and-drop overlay state. We track a counter (incremented on
   // dragenter, decremented on dragleave) because dragenter/leave also fire
@@ -266,18 +269,21 @@ function PaneBox({
       // download button) keeps its own subtle rounding.
       // Highlight border is rendered as a separate overlay div below, not
       // on this element — see the long comment there for why.
-      className="relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-bar"
+      className="relative min-h-0 min-w-0 overflow-hidden bg-bar"
       style={{ gridArea: area }}
     >
-      {/* The terminal (or picker) is the *flexible* flow child: flex-1 to
-          take the space the footer doesn't, and min-h-0 so it can actually
-          shrink below the xterm canvas's intrinsic height (the flexbox
-          `min-height: auto` default would otherwise let a tall canvas refuse
-          to give up room, pushing the shrink-0 footer past the pane's
-          overflow-hidden bottom edge — which clipped the identity bar in
-          multi-row layouts). overflow-hidden keeps a transient oversized
-          canvas inside this box rather than bleeding over the footer. */}
-      <div className="min-h-0 w-full flex-1 overflow-hidden">
+      {/* The terminal (or picker) area is absolutely positioned and stops
+          `bottom-6` short whenever the identity bar is shown, so the bar owns
+          a fixed 24px strip pinned to the pane bottom. Shrinking the window
+          shrinks ONLY this box (xterm's ResizeObserver re-fits into it); the
+          bar's height never changes and it can't be clipped — which is the
+          whole point of a persistent identity line. overflow-hidden keeps a
+          transient oversized canvas inside this box, off the bar. */}
+      <div
+        className={`absolute inset-x-0 top-0 overflow-hidden ${
+          hasBar ? "bottom-6" : "bottom-0"
+        }`}
+      >
         {session ? (
           <TerminalView
             key={`${session.machine}/${session.name}`}
@@ -358,13 +364,15 @@ function PaneBox({
 
       {/* Per-pane identity bar (proposal 0021) — a persistent bottom status
           line naming the machine + session, so a multi-pane / multi-machine
-          grid is legible at a glance. A `shrink-0` flex row: it never gets
-          squeezed, and the `flex-1` TerminalView above absorbs the height
-          change (its ResizeObserver re-fits xterm to the shorter box). Empty
-          panes render no bar — there's nothing to identify. */}
+          grid is legible at a glance. Absolutely pinned to the pane bottom at
+          a fixed h-6: resizing the window never touches it (only the terminal
+          area above shrinks). Empty panes render no bar — nothing to identify.
+          No z-index, so the pointer-events-none highlight border (z-10) still
+          draws its full outline over it and the switcher overlay (z-30) still
+          covers it; the files button stays clickable underneath the border. */}
       {session && meta && (
         <div
-          className={`flex h-6 shrink-0 items-center gap-2 border-t px-2 text-[11px] ${
+          className={`absolute inset-x-0 bottom-0 flex h-6 items-center gap-2 border-t px-2 ${
             active ? "border-accent/40 bg-panel" : "border-edge/70 bg-bar"
           }`}
         >
@@ -378,7 +386,7 @@ function PaneBox({
                 style={{ background: acc.spine }}
               />
               <span
-                className="shrink-0 font-semibold tracking-wide"
+                className="shrink-0 text-[11px] font-semibold tracking-wide"
                 style={{ color: acc.text }}
                 title={host}
               >
@@ -386,19 +394,16 @@ function PaneBox({
               </span>
             </>
           )}
-          {/* Quiet tool label — brand hue as text on a faint wash, normal
-              weight. De-emphasised vs the loud solid chip so the session name
-              (below) reads as the primary identity. */}
+          {/* Tool identity as a quiet coloured dot (was a loud text chip) so
+              the session name reads as the primary label. */}
           <span
-            className={`shrink-0 rounded px-1 py-px text-[9px] font-medium uppercase tracking-wide ${toolQuietBadge(
-              meta.tool
-            )}`}
-          >
-            {meta.tool}
-          </span>
+            className={`h-2 w-2 shrink-0 rounded-full ${toolColor(meta.tool)}`}
+            title={meta.tool}
+            aria-label={meta.tool}
+          />
           <span
-            className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
-              active ? "text-slate-100" : "text-slate-300"
+            className={`min-w-0 flex-1 truncate text-sm font-medium ${
+              active ? "text-slate-100" : "text-slate-200"
             }`}
           >
             {meta.short}
@@ -412,7 +417,9 @@ function PaneBox({
             <FileEditIcon className="h-4 w-4" />
           </button>
           {/* Pane number — the Ctrl+B prefix mnemonic. */}
-          <span className="shrink-0 font-mono text-slate-500">{index + 1}</span>
+          <span className="shrink-0 text-[11px] font-mono text-slate-500">
+            {index + 1}
+          </span>
         </div>
       )}
     </div>

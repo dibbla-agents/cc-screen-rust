@@ -15,29 +15,6 @@ export function toolColor(tool: string): string {
   }
 }
 
-// toolQuietBadge — the quiet badge variant: brand hue as *text* on a faint
-// tinted wash, for the per-pane identity bar where a solid fill would shout.
-// (The solid `toolColor` fill is still right for dots / full chips elsewhere.)
-// Both classes are written as literals so Tailwind's content scanner generates
-// them — a concatenated `${toolColor()}/15` would never appear in source and so
-// the opacity wash would silently not be built.
-export function toolQuietBadge(tool: string): string {
-  switch (tool) {
-    case "claude":
-      return "text-claude bg-claude/15";
-    case "kimi":
-      return "text-kimi bg-kimi/15";
-    case "gemini":
-      return "text-gemini bg-gemini/15";
-    case "codex":
-      return "text-codex bg-codex/15";
-    case "shell":
-      return "text-shell bg-shell/15";
-    default:
-      return "text-slate-400 bg-edge/40";
-  }
-}
-
 // machineAccent — a stable accent for a machine id, derived from a hash so the
 // colour is deterministic across reloads and clients with no server state.
 // Same machine → same hue everywhere; panes from the same box read as a group.
