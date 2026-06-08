@@ -10,6 +10,7 @@ import {
 } from "react";
 import { fetchFiles, type DirEntry, type FileEntry, type FilesResp } from "../api";
 import { useFileWatch } from "./useFileWatch";
+import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
 
 // Shared $HOME directory-tree machinery, used by both the phone Files sheet
 // (download browser) and the desktop editor's file tree. The data layer (cache,
@@ -140,6 +141,15 @@ export function useDirTree(
   const [projectPath, setProjectPath] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
 
+  // Per-session expansion memory (proposal 0019 follow-up). `expandedRef` mirrors
+  // the live `expanded` set so the save points (switch-out, close) read the
+  // freshest value without depending on it; `prevKeyRef` is the machine+session
+  // entry the current expansion belongs to, so a switch saves it under the OLD
+  // key before re-anchoring under the new one. See viewerState.ts.
+  const expandedRef = useRef<Set<string>>(expanded);
+  expandedRef.current = expanded;
+  const prevKeyRef = useRef<string | null>(null);
+
   // Real-time filesystem watch (shared with the editor's open-file watcher via
   // the returned `watch` handle). Active only while the tree is `open`.
   const watch = useFileWatch(open, machine);
@@ -225,6 +235,28 @@ export function useDirTree(
 
   useEffect(() => {
     if (!open) return;
+    // Save the OUTGOING session's expansion before we wipe + re-anchor, so a
+    // switch (or a browse-machine change) remembers what was open. Read the live
+    // set off the ref — `expanded` in this closure is still the previous render's
+    // value, which is exactly the outgoing state we want to keep.
+    const curKey = viewerKey(machine, currentSession);
+    if (prevKeyRef.current && prevKeyRef.current !== curKey) {
+      writeViewerState(prevKeyRef.current, { expanded: [...expandedRef.current] });
+    }
+    prevKeyRef.current = curKey;
+    // Restore this session's remembered open folders (best-effort: a folder that
+    // no longer exists just renders nothing). Captured before the wipe so the
+    // async loads below can fan it back out.
+    const remembered = currentSession ? readViewerState(curKey)?.expanded ?? [] : [];
+    // Re-fetch each remembered folder (except the already-loaded root) so its and
+    // its children's rows repaint. Swallow per-folder failures — a folder that's
+    // since been deleted just stays empty rather than rejecting.
+    const loadRemembered = (rootPath: string) => {
+      for (const p of remembered) {
+        if (p && p !== rootPath) void loadByPath(p).catch(() => {});
+      }
+    };
+
     setCache(new Map());
     setExpanded(new Set());
     setLoading(new Set());
@@ -234,23 +266,37 @@ export function useDirTree(
     setHomePath("");
     // Project-first (editor): load the session's cwd — that listing also
     // carries share + home for the other section headers, so one fetch seeds
-    // everything — and open only the project. Falls through to the base
-    // listing when there's no session to anchor on.
+    // everything — and open the project plus whatever was remembered. Falls
+    // through to the base listing when there's no session to anchor on.
     if (autoExpand === "project" && currentSession) {
       loadBySession(currentSession)
         .then((r) => {
           setProjectPath(r.path);
-          setExpanded(new Set([r.path]));
+          setExpanded(new Set([r.path, ...remembered]));
+          loadRemembered(r.path);
         })
         .catch((e) => setErrs((p) => ({ ...p, project: errMsg(e) })));
       return;
     }
     loadByPath("")
       .then((r) => {
-        if (autoExpand === "share") setExpanded(new Set([r.path]));
+        const base = autoExpand === "share" ? [r.path] : [];
+        setExpanded(new Set([...base, ...remembered]));
+        loadRemembered(r.path);
       })
       .catch((e) => setErrs((p) => ({ ...p, share: errMsg(e) })));
-  }, [open, autoExpand, currentSession, loadByPath, loadBySession]);
+  }, [open, autoExpand, currentSession, machine, loadByPath, loadBySession]);
+
+  // Persist the expansion when the tree closes / unmounts so it survives a
+  // reopen + reload (the switch-out save above only fires on a session change).
+  useEffect(() => {
+    if (!open) return;
+    return () => {
+      if (prevKeyRef.current) {
+        writeViewerState(prevKeyRef.current, { expanded: [...expandedRef.current] });
+      }
+    };
+  }, [open]);
 
   // Keep the live filesystem watch tracking exactly the expanded folders: watch
   // what's on screen, nothing more. Diff each `expanded` change against the

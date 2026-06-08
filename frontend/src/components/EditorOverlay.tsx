@@ -31,6 +31,7 @@ import {
 } from "../api";
 import ContextMenu, { type CtxTarget } from "./ContextMenu";
 import { errMsg, isMarkdownFile, isPdfFile, useDirTree, type DirTreeOpts, type TreeCtxInfo } from "./dirTree";
+import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
 import MarkdownEditor from "./MarkdownEditor";
 import EditorTree from "./EditorTree";
 import MoveDialog from "./MoveDialog";
@@ -557,21 +558,37 @@ export default function EditorOverlay({
     };
   }, [open]);
 
-  // When the overlay opens (or the requested file changes), point at it.
+  // When the overlay opens (or the requested file changes), point at it. An
+  // explicit initialPath (a Files-sheet tap on a file) always wins; otherwise
+  // (Ctrl+B e / desktop tree entry) restore the file this session last had open
+  // (proposal 0019 follow-up) so reopening the viewer lands you back where you
+  // were. Intentionally keyed only on [open, initialPath]: a session/machine
+  // change is the switch effect's job below, not this one's.
   useEffect(() => {
-    if (open) setActivePath(initialPath);
+    if (!open) return;
+    if (initialPath) {
+      setActivePath(initialPath);
+      return;
+    }
+    // Desktop restores the session's last open file; phone lands on the tree as
+    // before (the phone-tree effect below surfaces it) — phone behaviour is
+    // unchanged per proposal 0019.
+    const restored = isDesktop
+      ? readViewerState(viewerKey(fileMachine, session))?.activePath ?? null
+      : null;
+    setActivePath(restored);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialPath]);
 
-  // Proposal 0019 — follow a session switch under the open viewer. When the
-  // underlying session changes (the user cycled sessions / picked one from the
-  // switcher while the viewer stayed open), the previously-open file belongs to
-  // the *old* session's machine/cwd, so drop back to the new session's tree
-  // instead of trying to re-read a stale path on the new machine. The tree,
-  // mirror, and fileMachine already retarget off the new props (see the
-  // initialMachine/useDirTree/AgentMirror-key effects); the only missing piece
-  // is clearing the stale activePath. Skip the very first run (the open
-  // transition) so this never fights the initialPath effect above.
-  const sessionKey = `${agentMachine}/${session ?? ""}`;
+  // Proposal 0019 (+ follow-up) — follow a session switch under the open viewer.
+  // When the underlying session (or browse machine) changes while the viewer
+  // stays open, save the file that was open under the OUTGOING session and
+  // restore the one this INCOMING session last had open (null → its tree). The
+  // open file is specific to a machine/cwd, so we never carry a path across; the
+  // tree, mirror, and fileMachine retarget off the new props (see the
+  // initialMachine/useDirTree/AgentMirror-key effects). prevSessionKey starts at
+  // the current key so the open transition is owned by the initialPath effect.
+  const sessionKey = viewerKey(fileMachine, session);
   const prevSessionKey = useRef(sessionKey);
   useEffect(() => {
     if (!open) {
@@ -579,11 +596,22 @@ export default function EditorOverlay({
       return;
     }
     if (prevSessionKey.current !== sessionKey) {
+      writeViewerState(prevSessionKey.current, { activePath: activePathRef.current });
       prevSessionKey.current = sessionKey;
-      setActivePath(null); // → tree for the new session
-      setTreePanelOpen(true); // phone: surface the tree (no-op on desktop)
+      const restored = readViewerState(sessionKey)?.activePath ?? null;
+      setActivePath(restored);
+      if (!restored) setTreePanelOpen(true); // phone: surface the tree
     }
   }, [open, sessionKey]);
+
+  // Persist the open file when the viewer closes / unmounts so it survives a
+  // reopen + reload (the switch-out save above only fires on a session change).
+  useEffect(() => {
+    if (!open) return;
+    return () => {
+      writeViewerState(prevSessionKey.current, { activePath: activePathRef.current });
+    };
+  }, [open]);
 
   // Opened with no file (the ⬇ Files entry / Ctrl+B e) on a phone? Land directly
   // on the file browser rather than the empty state — this overlay IS the file
