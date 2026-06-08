@@ -7,7 +7,7 @@ resolver = "2"
 
 [package]
 name = "cc-screen-rust"
-version = "0.3.21"
+version = "0.3.22"
 edition = "2021"
 description = "Web-only, tmux-free engine for driving AI coding CLIs from a phone"
 
