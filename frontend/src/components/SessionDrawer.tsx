@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
-import { PlusIcon, RefreshIcon, TrashIcon, XIcon } from "../icons";
+import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import ToastsButton from "./ToastsButton";
 import CreateSession from "./CreateSession";
@@ -39,6 +39,10 @@ interface Props {
   onPick: (s: Session) => void;
   onClose: () => void;
   onRefresh: () => void;
+  // Open the searchable Session × Status overview (proposal 0022). Surfaced in the
+  // drawer so it's reachable on phones, where the full-screen drawer is home and
+  // covers the header's status button.
+  onStatus: () => void;
   // Called when the user chooses "New session" — App records which pane to mount
   // into; the create flow itself now lives in-drawer (proposal 0016).
   onNew: () => void;
@@ -105,6 +109,7 @@ export default function SessionDrawer({
   onPick,
   onClose,
   onRefresh,
+  onStatus,
   onNew,
   createInitialMachine,
   recentDirs,
@@ -594,6 +599,9 @@ export default function SessionDrawer({
         <span className="ml-auto hidden text-[10px] text-slate-600 sm:inline">↑↓ ⏎ · Esc · ⌃B</span>
         <ToastsButton on={toastsOn} onToggle={onToggleToasts} className={`${iconBtn} ml-auto sm:ml-0`} />
         <NotificationsButton className={iconBtn} />
+        <button onClick={onStatus} aria-label="Session status overview" title="Status — what each session needs" className={iconBtn}>
+          <StatusListIcon className="h-4 w-4" />
+        </button>
         <button onClick={onRefresh} aria-label="Refresh sessions" className={iconBtn}>
           <RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
         </button>

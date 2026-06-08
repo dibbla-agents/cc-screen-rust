@@ -1646,6 +1646,7 @@ export default function App() {
       onPick={pick}
       onClose={() => setDrawerOpen(false)}
       onRefresh={refresh}
+      onStatus={() => setStatusOpen(true)}
       onNew={() => setNewForPane(active)}
       createInitialMachine={currentSession?.machine || firstOnlineMachine}
       recentDirs={restorable.map((r) => r.dir)}
