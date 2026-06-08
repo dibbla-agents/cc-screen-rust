@@ -41,6 +41,8 @@ import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
 import UploadSheet from "./components/UploadSheet";
 import LoginScreen from "./components/LoginScreen";
+import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
+import { detectReadyEdges, sessionKey } from "./readyEdges";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
@@ -140,6 +142,12 @@ export default function App() {
   const [paneState, setPaneState] = useState<PaneState>(loadPaneState);
   const { layout, panes, active } = paneState;
   const currentSession = panes[active] ?? null;
+  // The set of sessions currently on screen in any pane (sessionKey()s) — the
+  // toast host uses it to never toast (and to retract) a mounted session.
+  const mountedKeys = useMemo(
+    () => new Set(panes.filter((p): p is PaneRef => p != null).map(sessionKey)),
+    [panes]
+  );
 
   // Mirror layout/active/sessions/panes into refs so the keyboard handler can
   // read fresh values without re-binding (which would reset its in-flight
@@ -250,6 +258,12 @@ export default function App() {
   }, []);
   const composeRef = useRef<ComposeHandle>(null);
   const favRef = useRef<FavoritesHandle>(null);
+  // In-app "session went ready" toasts (proposal 0017). The host owns its own
+  // toast list + dismissal timers; we feed it gated busy→waiting edges below.
+  const toastHostRef = useRef<ToastHostHandle>(null);
+  // Previous session snapshot for the ready-edge diff. null until the first poll
+  // establishes a baseline (that snapshot toasts nothing).
+  const prevSnapshotRef = useRef<Session[] | null>(null);
 
   // Track the visible area (shrinks when the soft keyboard opens) so the app —
   // terminal, footer, and the compose/image sheets — stays above the keyboard
@@ -588,6 +602,28 @@ export default function App() {
     };
     if (working > 0) nav.setAppBadge?.(working).catch(() => {});
     else nav.clearAppBadge?.().catch(() => {});
+  }, [sessions]);
+
+  // In-app session toasts (proposal 0017): diff each new poll snapshot against
+  // the previous one and toast any non-mounted session that crossed the gated
+  // busy→waiting edge (§2 — same gate the 0002 OS push uses server-side). This
+  // runs on every `sessions` update (one per poll, since applySessionList always
+  // sets a fresh array), so it is exactly per-snapshot.
+  //
+  // Foreground-only: when the tab is hidden, 0002's OS push owns the event — we
+  // still advance the baseline (so a busy→waiting that happened while hidden is
+  // never retroactively toasted on return) but emit nothing. The first snapshot
+  // (prev === null) is baseline-only.
+  useEffect(() => {
+    const prev = prevSnapshotRef.current;
+    prevSnapshotRef.current = sessions;
+    if (prev === null) return; // first snapshot: baseline only
+    if (document.visibilityState !== "visible") return; // hidden: OS push owns it
+    const mounted = new Set(
+      panesRef.current.filter((p): p is PaneRef => p != null).map(sessionKey)
+    );
+    const edges = detectReadyEdges(prev, sessions, mounted, Date.now());
+    if (edges.length) toastHostRef.current?.push(edges);
   }, [sessions]);
 
   // Initial load.
@@ -1911,6 +1947,18 @@ export default function App() {
         onAdd={addFavorite}
         onUpdate={updateFavorite}
         onDelete={deleteFavorite}
+      />
+
+      {/* In-app session-ready toasts (proposal 0017). Fed gated busy→waiting
+          edges by the detector effect above; retracts a toast once its session
+          is mounted. Routes a click through the same openSessionByName mount
+          path as a notification tap / deep link. */}
+      <ToastHost
+        ref={toastHostRef}
+        isDesktop={isDesktop}
+        mountedKeys={mountedKeys}
+        onOpen={(name) => { openSessionByName(name).catch(() => {}); }}
+        onOverflow={() => setDrawerOpen(true)}
       />
 
       {/* Transient feedback (paste confirmation, future one-shots). */}

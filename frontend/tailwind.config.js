@@ -19,6 +19,17 @@ export default {
       fontFamily: {
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
+      // Session-toast entry (proposal 0017). Applied via `motion-safe:animate-
+      // toastIn` so reduced-motion just gets a plain (un-animated) appearance.
+      keyframes: {
+        toastIn: {
+          "0%": { opacity: "0", transform: "translateY(6px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        toastIn: "toastIn 0.18s ease-out",
+      },
     },
   },
   plugins: [],
