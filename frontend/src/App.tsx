@@ -634,7 +634,7 @@ export default function App() {
   // PWA) app-icon badge show how many sessions are actively producing output.
   // `waiting` is an idle agent's resting state, so we surface the inverse — the
   // count of *working* agents — which falls to zero once everything has
-  // finished and is waiting for you. (See the server's IDLE_AFTER_SECS.)
+  // finished and is waiting for you. (See the server's WORK_GRACE_SECS.)
   useEffect(() => {
     const working = sessions.filter((s) => !s.waiting).length;
     document.title = working > 0 ? `${working} running — Pine` : "Pine";

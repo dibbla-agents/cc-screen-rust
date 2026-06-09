@@ -101,9 +101,9 @@ export async function writeClipboard(text: string): Promise<void> {
 //   • error   (red)    — the connection is believed broken (WS dropped). Only a
 //                        *closed* socket counts; a still-`connecting` one is just
 //                        establishing and must not flash red on every attach.
-//   • running (amber)  — the agent is producing output (`waiting === false`).
-//   • ready   (green)  — it has gone quiet and is waiting for input
-//                        (`waiting === true`; see the server's IDLE_AFTER_SECS).
+//   • running (amber)  — in an open, submit-armed busy window (`waiting === false`).
+//   • ready   (green)  — not in a busy window; your turn
+//                        (`waiting === true`; see the server's WORK_GRACE_SECS).
 // `conn` is the per-session WebSocket state when we have one (a session open in a
 // pane); omit it for rows we aren't attached to — those can't have a connection
 // problem, so they fall straight through to running/ready.

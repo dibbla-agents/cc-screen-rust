@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -144,16 +144,19 @@ export default function SessionDrawer({
 
   // Triage order: the agent that *just became ready for input* floats to the top
   // of its machine group, so finishing work surfaces itself like a priority
-  // queue. Within a group: ready (waiting) before running, then most-recently
-  // active first. Machine stays the primary key so the multiMachine grouping
-  // (contiguous-run header detection below) still holds.
+  // queue. Within a group: ready (waiting) before working, then freshest state
+  // transition first — keyed on the stable state anchor (0023/0024), not raw
+  // activity, so the order doesn't jitter as numbers tick and, with input-gated
+  // busy, focusing a session no longer reshuffles the list. Machine stays the
+  // primary key so the multiMachine grouping (contiguous-run header detection
+  // below) still holds.
   const ordered = useMemo(() => {
     return [...sessions].sort((a, b) => {
       const ma = a.machine ?? "";
       const mb = b.machine ?? "";
       if (ma !== mb) return ma < mb ? -1 : 1;
       if (a.waiting !== b.waiting) return a.waiting ? -1 : 1;
-      return b.activity - a.activity;
+      return stateAnchor(b) - stateAnchor(a);
     });
   }, [sessions]);
 

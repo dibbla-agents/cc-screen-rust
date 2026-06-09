@@ -33,16 +33,20 @@ pub struct SessionInfo {
     /// agents parse as 0; used by notification gating and future UI affordances.
     #[serde(default)]
     pub last_input_at: u64,
-    /// When the current output-producing turn began (Unix seconds), measured
-    /// from output resuming after a waiting gap. 0 means unknown.
+    /// When the current/last turn began (Unix seconds) — the time of the user
+    /// *submit* that armed it (proposal 0024). 0 = never submitted to. Used as the
+    /// "working for N" timer anchor and the notification work-duration gate.
     #[serde(default)]
     pub busy_since: u64,
     pub preview: String,
-    /// True when the agent has produced no output for a few seconds — it has
-    /// stopped streaming and is (almost always) waiting for input. `false` while
-    /// it's actively working (the CLIs animate a sub-second spinner). The server
-    /// computes this from `activity`; see the server's `IDLE_AFTER_SECS`.
-    /// `#[serde(default)]` so a TUI talking to an older server still parses.
+    /// True when the session is ready / "your turn": it is **not** in an open,
+    /// submit-armed busy window. Under the input-gated model (proposal 0024) a
+    /// session reads ready until a user submit (Enter) arms it, stays `false`
+    /// (working) while the agent's output sustains the window, and flips back to
+    /// `true` a grace window after output goes quiet — so cosmetic repaints
+    /// (focus/resize/spinner) never make it read busy. The server computes this;
+    /// see the server's `WORK_GRACE_SECS`. `#[serde(default)]` so a TUI talking to
+    /// an older server still parses.
     #[serde(default)]
     pub waiting: bool,
     /// Whether the session launched in YOLO mode (its approval-bypass flag).

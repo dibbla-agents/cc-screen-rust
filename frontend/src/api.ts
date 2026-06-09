@@ -9,10 +9,11 @@ export interface Session {
   last_input_at?: number;
   busy_since?: number;
   preview: string;
-  // True when the agent has gone quiet for a few seconds — it has stopped
-  // streaming and is (almost always) waiting for input. False while it's
-  // actively working (the CLIs animate a sub-second spinner). Server-computed;
-  // see engine.rs IDLE_AFTER_SECS.
+  // True when the session is ready / "your turn": not in an open, submit-armed
+  // busy window. A user submit (Enter) arms busy; the agent's output sustains it;
+  // it flips back to ready a grace window after output goes quiet — so cosmetic
+  // repaints (focus/resize/spinner) never read as busy. Server-computed; see
+  // engine.rs WORK_GRACE_SECS (proposal 0024).
   waiting: boolean;
   // The machine (agent) this session lives on, set by the hub when it aggregates
   // several agents. Absent/empty when talking to a single agent directly.

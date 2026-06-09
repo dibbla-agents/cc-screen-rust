@@ -26,14 +26,17 @@ const BROADCAST_CAP: usize = 2048;
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
 
-/// How long a session must produce *no* PTY output before we call its agent
-/// "waiting for input". The AI CLIs animate a sub-second spinner while they
-/// work — Claude's elapsed-time counter ticks ~1×/s, codex/gemini similar, and
-/// the spinner keeps moving even while a tool/sub-process runs — so a few
-/// seconds of total quiet cleanly separates "still going" from "your turn".
-/// Deliberately conservative: a false *busy* (we're a touch slow to flag a
-/// finish) is harmless; a false *waiting* mid-task would be a wrong signal.
-pub const IDLE_AFTER_SECS: u64 = 4;
+/// Input-gated busy model (proposal 0024). "Working" is **armed by a user submit**
+/// (Enter) and **sustained by output**, not armed by output. A submit opens a work
+/// window (`busy_until = now + WORK_GRACE_SECS`); each output burst pushes the
+/// window out while it's still open; after this many seconds of output-silence the
+/// session flips to "waiting" (ready). Because only a submit opens the window,
+/// cosmetic output — a focus/resize repaint on attach, the cursor, the spinner —
+/// never makes a session read busy. The window is generous enough to bridge a
+/// turn's mid-task silent gaps (model thinking / a tool running, ~10–16 s) so a
+/// genuinely-working session doesn't false-flip to ready between its output bursts;
+/// since focus no longer arms busy, this length carries no focus penalty.
+pub const WORK_GRACE_SECS: u64 = 8;
 /// Minimum output-producing work time before a busy→waiting edge is worth a
 /// phone notification. Short answers should update the UI, not buzz a device.
 pub const NOTIFY_MIN_WORK_SECS: u64 = 60;
@@ -45,15 +48,55 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Pure predicate behind `Session::waiting`, split out so it's testable without
-/// a real clock: the session has gone quiet for at least `IDLE_AFTER_SECS`.
-fn is_waiting(last_activity: u64, now: u64) -> bool {
-    now.saturating_sub(last_activity) >= IDLE_AFTER_SECS
+/// Pure predicate behind `Session::waiting`, split out so it's testable without a
+/// real clock: a session is "working" while its submit-armed window is still open
+/// (`now < busy_until`); once the deadline passes it reads as waiting/ready. The
+/// window is opened in `write_input` (on a submit) and extended in `pump` (on
+/// output that lands while it's open) — see proposal 0024. `busy_until == 0` (never
+/// armed) reads as waiting.
+fn is_working(busy_until: u64, now: u64) -> bool {
+    now < busy_until
 }
 
-/// Shared gate for "agent finished" push notifications. `busy_since == 0`
-/// means we never observed a clean output-resumed-after-waiting transition, so
-/// first-sight / startup-busy sessions are suppressed conservatively.
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Detect a user *submit* in a chunk of input bytes — a bare carriage return that
+/// arms the busy window (proposal 0024). A submit is a `\r` (0x0D) that is **not**
+/// inside a bracketed-paste span (`\e[200~ … \e[201~`, so a pasted newline doesn't
+/// arm) and **not** immediately preceded by `ESC` (so a Shift-Enter / `\e\r`-style
+/// newline encoding doesn't arm). `in_paste` carries the bracketed-paste state
+/// across calls, since a paste may span several `write_input`s. A trailing `\r`
+/// *after* the closing marker — as `wrap_bracketed_paste(text, enter=true)` emits —
+/// correctly counts as a submit.
+fn scan_for_submit(data: &[u8], in_paste: &mut bool) -> bool {
+    let mut submit = false;
+    let mut i = 0;
+    while i < data.len() {
+        if data[i..].starts_with(PASTE_START) {
+            *in_paste = true;
+            i += PASTE_START.len();
+            continue;
+        }
+        if data[i..].starts_with(PASTE_END) {
+            *in_paste = false;
+            i += PASTE_END.len();
+            continue;
+        }
+        if !*in_paste && data[i] == b'\r' && !(i > 0 && data[i - 1] == 0x1b) {
+            submit = true;
+        }
+        i += 1;
+    }
+    submit
+}
+
+/// Shared gate for "agent finished" push notifications. `busy_since == 0` means
+/// the session has never been submitted to (no turn yet), so first-sight /
+/// startup sessions are suppressed conservatively; otherwise the turn must have
+/// run ≥ `NOTIFY_MIN_WORK_SECS` and the user must have been quiet ≥
+/// `NOTIFY_INPUT_QUIET_SECS`. Under 0024 `busy_since` is the submit (turn-start)
+/// time, so "the turn ran long enough" is measured from when you hit Enter.
 pub fn notification_eligible(busy_since: u64, last_input_at: u64, now: u64) -> bool {
     busy_since != 0
         && now.saturating_sub(busy_since) >= NOTIFY_MIN_WORK_SECS
@@ -64,7 +107,18 @@ struct SessionState {
     emu: Emulator,
     last_activity: u64,
     last_input_at: u64,
+    /// Turn start (Unix secs): the time of the submit that armed the current/last
+    /// busy window. 0 = never submitted to. Surfaced as `SessionInfo.busy_since`
+    /// and used as the "working for N" timer anchor (proposal 0024).
     busy_since: u64,
+    /// Busy-window deadline (Unix secs): the session reads as "working" while
+    /// `now < busy_until`. Opened by a submit in `write_input`, extended by output
+    /// in `pump` while still open; cosmetic output after it lapses does NOT reopen
+    /// it (only a submit does). 0 = never armed (proposal 0024).
+    busy_until: u64,
+    /// Whether the input stream is currently inside a bracketed-paste span — so a
+    /// `\r` within a paste isn't mistaken for a submit (carries across calls).
+    in_bracketed_paste: bool,
     cols: u16,
     rows: u16,
     // Per-attached-client requested sizes, keyed by connection id. The PTY is
@@ -194,6 +248,8 @@ impl Session {
             last_activity: now,
             last_input_at: now,
             busy_since: 0,
+            busy_until: 0,
+            in_bracketed_paste: false,
             cols: INIT_COLS,
             rows: INIT_ROWS,
             client_sizes: HashMap::new(),
@@ -232,7 +288,18 @@ impl Session {
     pub fn write_input(&self, data: &[u8]) {
         if !data.is_empty() {
             if let Ok(mut st) = self.state.lock() {
-                st.last_input_at = now_secs();
+                let now = now_secs();
+                st.last_input_at = now;
+                // A user *submit* (Enter) arms the busy window that output then
+                // sustains — this is what makes "busy" mean "I gave the agent a
+                // task," not "the terminal repainted." Detected as a bare CR
+                // outside a bracketed paste (proposal 0024); cosmetic input
+                // (focus events, cursor) never arms. This is the single input
+                // choke point, so it covers web, ccs, and hub-relayed clients.
+                if scan_for_submit(data, &mut st.in_bracketed_paste) {
+                    st.busy_since = now;
+                    st.busy_until = now + WORK_GRACE_SECS;
+                }
                 // Capture into the bounded input ring (drop-oldest). This is the
                 // single choke point every input path funnels through, so one
                 // append covers typed keys, named keys, paste, and Ctrl-combos.
@@ -472,15 +539,18 @@ impl Session {
         self.state.lock().map(|s| s.busy_since).unwrap_or(0)
     }
 
-    /// True when the agent has stopped streaming for `IDLE_AFTER_SECS` and is
-    /// (almost always) waiting for input — the "your turn" signal the clients
-    /// surface. A pure function of last-output time; see `is_waiting`.
+    /// True when the session is **not** in an open, submit-armed busy window — the
+    /// "your turn" / ready signal the clients surface. Under the input-gated model
+    /// (proposal 0024) this is `now >= busy_until`: a session reads ready until a
+    /// user submit opens a window, and again once the window lapses after the
+    /// agent's output goes quiet. A session never submitted to reads ready.
     pub fn waiting(&self) -> bool {
         self.waiting_at(now_secs())
     }
 
     pub fn waiting_at(&self, now: u64) -> bool {
-        is_waiting(self.last_activity(), now)
+        let busy_until = self.state.lock().map(|s| s.busy_until).unwrap_or(0);
+        !is_working(busy_until, now)
     }
 
     /// True when the current busy→waiting edge should produce a push
@@ -525,8 +595,15 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
                 let chunk = &buf[..n];
                 if let Ok(mut st) = sess.state.lock() {
                     let now = now_secs();
-                    if is_waiting(st.last_activity, now) {
-                        st.busy_since = now;
+                    // Sustain an *active* turn: output that lands while the busy
+                    // window is still open pushes the deadline out. Output after
+                    // the window has lapsed (or with no turn ever armed) is
+                    // cosmetic — a focus/resize repaint, the cursor, the spinner —
+                    // and must NOT reopen it; only a user submit does (see
+                    // `write_input`). This is what stops focusing a session from
+                    // flashing it busy. Proposal 0024.
+                    if is_working(st.busy_until, now) {
+                        st.busy_until = now + WORK_GRACE_SECS;
                     }
                     st.emu.process(chunk);
                     st.last_activity = now;
@@ -751,16 +828,39 @@ mod tests {
     }
 
     #[test]
-    fn waiting_after_idle_threshold() {
-        // Fresh output → working; quiet past the threshold → waiting. Boundary at
-        // exactly IDLE_AFTER_SECS counts as waiting (>=).
+    fn working_while_busy_window_open() {
+        // Working iff the submit-armed deadline is still in the future (0024).
         let now = 1_000_000;
-        assert!(!is_waiting(now, now), "just produced output → working");
-        assert!(!is_waiting(now - (IDLE_AFTER_SECS - 1), now), "one second short → still working");
-        assert!(is_waiting(now - IDLE_AFTER_SECS, now), "quiet for the threshold → waiting");
-        assert!(is_waiting(now - 3600, now), "quiet for an hour → waiting");
-        // A clock that went backwards must not underflow into "waiting".
-        assert!(!is_waiting(now + 5, now), "future last-activity → working, not underflow");
+        assert!(is_working(now + WORK_GRACE_SECS, now), "deadline ahead → working");
+        assert!(is_working(now + 1, now), "one second left → working");
+        assert!(!is_working(now, now), "deadline reached → waiting");
+        assert!(!is_working(now - 3600, now), "deadline long past → waiting");
+        assert!(!is_working(0, now), "never armed (busy_until = 0) → waiting");
+    }
+
+    #[test]
+    fn submit_detection_arms_only_on_real_enter() {
+        let mut p = false;
+        assert!(scan_for_submit(b"\r", &mut p), "a bare CR is a submit");
+        assert!(scan_for_submit(b"y\r", &mut p), "text then CR is a submit");
+        assert!(!scan_for_submit(b"y", &mut p), "no CR → no submit");
+        assert!(!scan_for_submit(b"hello world", &mut p), "plain text → no submit");
+        assert!(!scan_for_submit(b"\x1b\r", &mut p), "ESC-prefixed CR (newline escape) → not a submit");
+        assert!(!scan_for_submit(b"\x1b[I", &mut p), "a focus-in event is not a submit");
+
+        // Bracketed paste: a CR *inside* the markers is pasted text (not a submit);
+        // a CR *after* the closing marker (wrap_bracketed_paste enter=true) is.
+        let mut p2 = false;
+        assert!(!scan_for_submit(b"\x1b[200~a\rb\x1b[201~", &mut p2), "CR inside paste → not a submit");
+        assert!(!p2, "paste closed in the same chunk → flag reset");
+        assert!(scan_for_submit(b"\x1b[200~pasted\x1b[201~\r", &mut p2), "CR after paste close → submit");
+
+        // A paste spanning two write_input calls: the flag persists, inner CRs ignored.
+        let mut p3 = false;
+        assert!(!scan_for_submit(b"\x1b[200~line1\r", &mut p3), "open paste, inner CR ignored");
+        assert!(p3, "still inside the paste across calls");
+        assert!(!scan_for_submit(b"line2\rline3\x1b[201~", &mut p3), "still in paste → inner CRs ignored");
+        assert!(!p3, "paste now closed across calls");
     }
 
     #[test]
@@ -792,17 +892,17 @@ mod tests {
         );
     }
 
-    // End-to-end over a real PTY + real time: a session streaming output reads as
-    // "working" (waiting=false), and once its output stops for IDLE_AFTER_SECS it
-    // flips to "waiting". This is the live integration behind the pure
-    // `waiting_after_idle_threshold` test above — it exercises the pump thread
-    // stamping `last_activity` on every read.
+    // End-to-end over a real PTY + real time for the input-gated model (0024):
+    // a session reads ready until a *submit* arms it, stays working while the
+    // window is open, and flips back to ready a grace-window after output stops.
+    // The session's own startup output must NOT arm it (only a submit does).
     #[tokio::test]
-    async fn waiting_flips_with_live_output() {
-        let tmp = std::env::temp_dir().join(format!("ccr-wait-{}", std::process::id()));
+    async fn busy_is_submit_armed_then_grace_released() {
+        let tmp = std::env::temp_dir().join(format!("ccr-busy-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        // Stream a byte every 200ms for ~2s, then go quiet.
-        let tool = shell_tool("for i in $(seq 1 10); do printf x; sleep 0.2; done; sleep 6");
+        // A quiet shell that stays alive — no auto output to lean on; we drive the
+        // state purely via a submit so the test asserts the arming semantics.
+        let tool = shell_tool("sleep 30");
         let state = AppState::new(
             vec![tool.clone()],
             std::env::var("PATH").unwrap_or_default(),
@@ -816,13 +916,22 @@ mod tests {
         let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
         let sess = state.get(&name).unwrap();
 
-        // ~1s in: mid-stream, output landed well under IDLE_AFTER_SECS ago.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        assert!(!sess.waiting(), "streaming output should read as working");
+        // Before any submit (and despite any startup repaint), it reads ready.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(sess.waiting(), "a session never submitted to reads as ready");
 
-        // Output stops at ~2s; wait past IDLE_AFTER_SECS of quiet (2s + 5s).
-        tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
-        assert!(sess.waiting(), "after a quiet spell it should read as waiting");
+        // A submit arms the busy window immediately, with no agent output needed.
+        sess.write_input(b"\r");
+        assert!(!sess.waiting(), "right after Enter it reads as working");
+        assert!(sess.busy_since() > 0, "busy_since is stamped at the submit (turn start)");
+
+        // Still inside the window a few seconds later → still working.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(!sess.waiting(), "within the grace window it stays working");
+
+        // Past the window with no further output → back to ready.
+        tokio::time::sleep(std::time::Duration::from_secs(WORK_GRACE_SECS + 2)).await;
+        assert!(sess.waiting(), "a grace window after output stops it reads ready again");
 
         sess.kill();
         let _ = std::fs::remove_dir_all(&tmp);

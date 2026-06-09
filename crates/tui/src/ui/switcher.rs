@@ -63,7 +63,7 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             // `waiting` is the resting state for an idle agent, so we surface the
             // inverse: an amber marker on sessions still producing output. A
             // glance then shows which agents are working vs done — mirrors the
-            // web PWA's "running" badge. (See the server's IDLE_AFTER_SECS.)
+            // web PWA's "running" badge. (See the server's WORK_GRACE_SECS.)
             let work = if s.waiting { "  " } else { "● " };
             let mut spans = vec![
                 Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
