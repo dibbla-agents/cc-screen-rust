@@ -8,11 +8,17 @@
 // cached summary (≤ ~5 min, or instant on an attention edge).
 //
 // Search reuses the same fuzzy filter as the search-first sidebar (0016); the
-// status dot + ordering reuse the drawer's helpers so the two surfaces agree.
+// status dot reuses the drawer's helper so the two surfaces agree.
+//
+// The timer + sort are state-aware (proposal 0023): the right-hand number is
+// time-in-current-state (ready → since it went quiet; working → since the turn
+// began) rather than time-since-last-output, and the list is attention-ordered
+// — ready floats up, freshest transition on top — sorted on the stable state
+// anchor so the numbers tick live without the rows reshuffling.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
-import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 
@@ -55,16 +61,28 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Ordering mirrors the drawer: by machine, then waiting floats to the top, then
-  // most-recent activity.
+  // Live 1 s tick while open so the state-aware timers visibly climb. Bumps a
+  // dummy state to re-run render; `ordered`/`view` are memoised on `[sessions]`
+  // (not the tick), so the sort does NOT recompute each second — only the
+  // rendered numbers update, and row order changes only on the 4 s data poll.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [open]);
+
+  // Attention-ordered (0023): ready floats to the top, then freshest state
+  // transition first (descending anchor == most-recently-snapped first). Sorting
+  // on the stable anchor — not the live elapsed — keeps row order stable between
+  // polls while the numbers tick. No machine grouping: this is a global,
+  // cross-fleet attention monitor, so the freshest-ready session wins regardless
+  // of machine (the machine stays visible as the row badge).
   const ordered = useMemo(
     () =>
       [...sessions].sort((a, b) => {
-        const ma = a.machine ?? "";
-        const mb = b.machine ?? "";
-        if (ma !== mb) return ma < mb ? -1 : 1;
         if (a.waiting !== b.waiting) return a.waiting ? -1 : 1;
-        return b.activity - a.activity;
+        return stateAnchor(b) - stateAnchor(a);
       }),
     [sessions]
   );
@@ -153,8 +171,17 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                               {machineLabel}
                             </span>
                           )}
-                          <span className="ml-auto shrink-0 pl-2 text-[10px] tabular-nums text-slate-500">
-                            {ago(s.activity)}
+                          {/* State-aware timer (0023): time-in-current-state,
+                              color-matched to the status dot. The column means
+                              two things depending on state, so the tooltip says
+                              which. */}
+                          <span
+                            title={`${s.waiting ? "ready" : "working"} for ${ago(stateAnchor(s))}`}
+                            className={`ml-auto shrink-0 pl-2 text-[10px] tabular-nums ${
+                              s.waiting ? "text-emerald-400/80" : "text-amber/80"
+                            }`}
+                          >
+                            {ago(stateAnchor(s))}
                           </span>
                         </span>
                         {/* Latest status: the LLM headline, else the preview.

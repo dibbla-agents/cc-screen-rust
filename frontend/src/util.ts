@@ -1,3 +1,5 @@
+import type { Session } from "./api";
+
 export function toolColor(tool: string): string {
   switch (tool) {
     case "claude":
@@ -185,4 +187,16 @@ export function ago(unixSeconds: number): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h`;
   return `${Math.floor(h / 24)}d`;
+}
+
+// The unix-seconds anchor of a session's *current* state — the moment it last
+// transitioned. Elapsed-in-state = now - stateAnchor(s); it climbs from ~0 at
+// the transition. Used by the status view (0023) for both the timer and the
+// sort key (sorting on the anchor, not the live elapsed, keeps row order stable
+// while the number ticks).
+//   ready   (waiting=true):  since it went quiet      → activity (last output)
+//   working (waiting=false): since this turn began    → busy_since, else activity
+export function stateAnchor(s: Session): number {
+  if (s.waiting) return s.activity;
+  return s.busy_since && s.busy_since > 0 ? s.busy_since : s.activity;
 }
