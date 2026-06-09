@@ -8,6 +8,12 @@ export interface Session {
   activity: number;
   last_input_at?: number;
   busy_since?: number;
+  // Busy-window deadline. While working it's in the future; once ready it equals
+  // the busy→ready transition instant and (unlike `activity`) is NOT bumped by a
+  // cosmetic focus/resize repaint — so the ready timer/sort anchor to it for a
+  // stable "ready for N" that doesn't reset on focus. 0/absent → fall back to
+  // `activity` (proposal 0024).
+  busy_until?: number;
   preview: string;
   // True when the session is ready / "your turn": not in an open, submit-armed
   // busy window. A user submit (Enter) arms busy; the agent's output sustains it;

@@ -38,6 +38,15 @@ pub struct SessionInfo {
     /// "working for N" timer anchor and the notification work-duration gate.
     #[serde(default)]
     pub busy_since: u64,
+    /// The busy-window deadline (Unix seconds). While the session is **working**
+    /// this is in the future (it's extended by output); once the session is
+    /// **ready** it sits in the past and equals the instant it transitioned
+    /// busy→ready — and, unlike `activity`, it is NOT bumped by cosmetic repaints
+    /// (focus/resize), so the ready surfaces anchor their "ready for N" timer and
+    /// sort to it for a stable count that doesn't reset when you focus a session
+    /// (proposal 0024). 0 = never armed → clients fall back to `activity`.
+    #[serde(default)]
+    pub busy_until: u64,
     pub preview: String,
     /// True when the session is ready / "your turn": it is **not** in an open,
     /// submit-armed busy window. Under the input-gated model (proposal 0024) a
@@ -339,6 +348,7 @@ mod tests {
             activity: 0,
             last_input_at: 0,
             busy_since: 0,
+            busy_until: 0,
             preview: "p".into(),
             waiting: false,
             skip_permissions: None,
@@ -368,6 +378,7 @@ mod tests {
             activity: 0,
             last_input_at: 111,
             busy_since: 222,
+            busy_until: 333,
             preview: String::new(),
             waiting: false,
             skip_permissions: Some(true),
@@ -390,6 +401,7 @@ mod tests {
         assert_eq!(old.machine, "");
         assert_eq!(old.last_input_at, 0);
         assert_eq!(old.busy_since, 0);
+        assert_eq!(old.busy_until, 0, "old payload → no busy_until, falls back to activity");
         assert_eq!(old.skip_permissions, None);
         assert_eq!(old.headline, None, "old payload → no summary");
         assert_eq!(old.detail, None);
@@ -400,6 +412,7 @@ mod tests {
         assert_eq!(back.machine, "laptop");
         assert_eq!(back.last_input_at, 111);
         assert_eq!(back.busy_since, 222);
+        assert_eq!(back.busy_until, 333);
     }
 
     #[test]

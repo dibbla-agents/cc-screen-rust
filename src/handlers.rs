@@ -117,6 +117,7 @@ pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
                 activity: s.last_activity() as i64,
                 last_input_at: s.last_input_at(),
                 busy_since: s.busy_since(),
+                busy_until: s.busy_until(),
                 preview: s.preview(),
                 waiting: s.waiting(),
                 // This agent knows the policy → report it concretely (Some), so a

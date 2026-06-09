@@ -191,12 +191,16 @@ export function ago(unixSeconds: number): string {
 
 // The unix-seconds anchor of a session's *current* state — the moment it last
 // transitioned. Elapsed-in-state = now - stateAnchor(s); it climbs from ~0 at
-// the transition. Used by the status view (0023) for both the timer and the
-// sort key (sorting on the anchor, not the live elapsed, keeps row order stable
-// while the number ticks).
-//   ready   (waiting=true):  since it went quiet      → activity (last output)
-//   working (waiting=false): since this turn began    → busy_since, else activity
+// the transition. Used by the status view (0023) and the switcher for both the
+// timer and the sort key (sorting on the anchor, not the live elapsed, keeps row
+// order stable while the number ticks).
+//   ready   (waiting=true):  since it went busy→ready  → busy_until, else activity
+//   working (waiting=false): since this turn began     → busy_since, else activity
+// The ready anchor is busy_until (the busy→ready instant), NOT activity: under
+// input-gated busy (0024) a cosmetic focus/resize repaint still bumps `activity`
+// but never moves busy_until, so the "ready for N" counter no longer resets — and
+// a focused session no longer jumps to the top of the attention-ordered lists.
 export function stateAnchor(s: Session): number {
-  if (s.waiting) return s.activity;
+  if (s.waiting) return s.busy_until && s.busy_until > 0 ? s.busy_until : s.activity;
   return s.busy_since && s.busy_since > 0 ? s.busy_since : s.activity;
 }

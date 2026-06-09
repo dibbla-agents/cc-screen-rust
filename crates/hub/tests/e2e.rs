@@ -61,6 +61,7 @@ fn sess(name: &str) -> SessionInfo {
         activity: 0,
         last_input_at: 0,
         busy_since: 0,
+        busy_until: 0,
         preview: String::new(),
         waiting: false,
         skip_permissions: None,

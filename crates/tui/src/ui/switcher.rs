@@ -119,6 +119,7 @@ mod tests {
             activity: 0,
             last_input_at: 0,
             busy_since: 0,
+            busy_until: 0,
             preview: preview.into(),
             waiting,
             skip_permissions: None,

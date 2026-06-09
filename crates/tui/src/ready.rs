@@ -114,6 +114,7 @@ mod tests {
             activity: 0,
             last_input_at,
             busy_since,
+            busy_until: 0,
             preview: String::new(),
             waiting,
             skip_permissions: None,

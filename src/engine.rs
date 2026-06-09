@@ -539,6 +539,13 @@ impl Session {
         self.state.lock().map(|s| s.busy_since).unwrap_or(0)
     }
 
+    /// The busy-window deadline. While working it's in the future; once ready it
+    /// equals the busy→ready transition instant and is not bumped by cosmetic
+    /// output — clients anchor the "ready for N" timer/sort to it (proposal 0024).
+    pub fn busy_until(&self) -> u64 {
+        self.state.lock().map(|s| s.busy_until).unwrap_or(0)
+    }
+
     /// True when the session is **not** in an open, submit-armed busy window — the
     /// "your turn" / ready signal the clients surface. Under the input-gated model
     /// (proposal 0024) this is `now >= busy_until`: a session reads ready until a

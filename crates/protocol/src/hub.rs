@@ -269,6 +269,7 @@ mod tests {
             activity: 7,
             last_input_at: 8,
             busy_since: 9,
+            busy_until: 10,
             preview: "hi".into(),
             waiting: false,
             skip_permissions: Some(true),
