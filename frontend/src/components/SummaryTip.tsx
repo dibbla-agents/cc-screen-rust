@@ -15,6 +15,15 @@ type Mode = "hover" | "press" | null;
 const MAX_W = 360;
 const LONG_PRESS_MS = 450;
 
+// A global "close every open tip now" signal. Callers fire it on a deliberate
+// context change that should retract any open summary popover — e.g. the user
+// edits the search box (the row under the tip may be about to disappear). Cheaper
+// and more deterministic than each tip guessing from pointer movement.
+const DISMISS_EVENT = "ccweb:dismiss-summary-tips";
+export function dismissSummaryTips() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(DISMISS_EVENT));
+}
+
 export default function SummaryTip({
   text,
   children,
@@ -49,6 +58,64 @@ export default function SummaryTip({
     clearLp();
   };
   useEffect(() => clearLp, []);
+
+  // Robust dismissal: a hover tip is normally closed on pointerleave, but if its
+  // trigger row is filtered out / unmounted from under the cursor (e.g. you type a
+  // search that drops the session) no pointerleave fires and the tip would orphan.
+  // While open, watch globally and close on: pointer moved off the trigger, any
+  // scroll, Escape, window blur, or an outside pointerdown. Listeners live only
+  // while a tip is open, so this is cheap.
+  useEffect(() => {
+    if (!mode) return;
+    const dismiss = () => {
+      setMode(null);
+      clearLp();
+    };
+    const onMove = (e: PointerEvent) => {
+      if (mode !== "hover") return; // press mode is dismissed by its tap-away layer
+      const el = ref.current;
+      if (!el) return dismiss(); // trigger gone → never going to get a leave event
+      const r = el.getBoundingClientRect();
+      const pad = 6;
+      if (
+        e.clientX < r.left - pad ||
+        e.clientX > r.right + pad ||
+        e.clientY < r.top - pad ||
+        e.clientY > r.bottom + pad
+      ) {
+        dismiss();
+      }
+    };
+    const onScroll = () => dismiss();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    const onDown = (e: PointerEvent) => {
+      const el = ref.current;
+      if (el && !el.contains(e.target as Node)) dismiss();
+    };
+    document.addEventListener("pointermove", onMove, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onScroll);
+    window.addEventListener(DISMISS_EVENT, dismiss);
+    if (mode === "hover") document.addEventListener("pointerdown", onDown, true);
+    return () => {
+      document.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onScroll);
+      window.removeEventListener(DISMISS_EVENT, dismiss);
+      document.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [mode]);
+
+  // If this instance is reused for a different row (list reconciliation) or its
+  // summary refreshes, drop any open tip rather than show it against new content.
+  useEffect(() => {
+    setMode(null);
+    clearLp();
+  }, [text]);
 
   if (!text) return <>{children}</>;
 

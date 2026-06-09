@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
-import SummaryTip from "./SummaryTip";
+import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 
 interface Props {
   open: boolean;
@@ -38,6 +38,12 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
       setQuery("");
     }
   }, [open]);
+
+  // Retract any open summary tip when the search changes (the row it's over may
+  // be filtered out) — proposal 0022.
+  useEffect(() => {
+    dismissSummaryTips();
+  }, [query]);
 
   // Esc closes.
   useEffect(() => {

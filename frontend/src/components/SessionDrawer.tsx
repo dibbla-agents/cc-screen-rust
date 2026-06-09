@@ -3,7 +3,7 @@ import { type MachineInfo, type PaneRef, type RestorableSession, type Session } 
 import { ago, agentStatus, fuzzyScore, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
-import SummaryTip from "./SummaryTip";
+import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 import ToastsButton from "./ToastsButton";
 import CreateSession from "./CreateSession";
 
@@ -135,6 +135,12 @@ export default function SessionDrawer({
   // The type-to-filter query (Part A). Empty = exactly today's resting list.
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
+
+  // Editing the search can drop the very row a summary tip is open over — retract
+  // any open tip on every query change so it can't orphan (proposal 0022).
+  useEffect(() => {
+    dismissSummaryTips();
+  }, [query]);
 
   // Triage order: the agent that *just became ready for input* floats to the top
   // of its machine group, so finishing work surfaces itself like a priority
