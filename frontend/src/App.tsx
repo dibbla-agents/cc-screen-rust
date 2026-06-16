@@ -32,7 +32,7 @@ import {
   type PaneState,
 } from "./paneState";
 import TerminalView, { type ConnState } from "./components/TerminalView";
-import SessionDrawer from "./components/SessionDrawer";
+import SessionDrawer, { type PaneSwitcherProps } from "./components/SessionDrawer";
 import ControlBar from "./components/ControlBar";
 import ComposeSheet, { type ComposeHandle } from "./components/ComposeSheet";
 import ImageSheet from "./components/ImageSheet";
@@ -271,11 +271,10 @@ export default function App() {
   const [favorites, setFavorites] = useState<Favorite[]>([]);
   // When the create flow starts we remember which pane to mount the
   // newly-created session into. -1 means "phone path / default — pane 0".
-  // The create flow now lives in-drawer (proposal 0016); `createReq` is a token
-  // bumped to ask the (already-open) drawer to jump straight into create mode —
-  // used by the per-pane "new session" affordances in TileGrid.
+  // The create flow lives in-drawer (proposal 0016). Empty panes now host the
+  // switcher inline (proposal 0026), so their create flow runs in place and
+  // mounts via onPaneCreated — no cross-component "jump to create" token needed.
   const [newForPane, setNewForPane] = useState<number>(-1);
-  const [createReq, setCreateReq] = useState(0);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
   // Small ephemeral toast for paste-event feedback (and any other one-shot
   // confirmation we add later). Auto-dismissed by the show() helper below.
@@ -1654,22 +1653,15 @@ export default function App() {
     else scheduleHide(1200);
   }, [isDesktop, paletteOpen, showHeader, scheduleHide]);
 
-  // openNewFor opens the drawer straight into the in-sidebar create flow
-  // (proposal 0016) and remembers which pane to mount the new session into. Used
-  // by the per-pane "new session" affordances in TileGrid. The `createReq` bump
-  // tells the (now-open) drawer to jump to create mode.
-  const openNewFor = (idx: number) => {
-    setNewForPane(idx);
-    setActive(idx);
-    setDrawerOpen(true);
-    setCreateReq((n) => n + 1);
-  };
+  // "New session" inside an empty pane's inline switcher (proposal 0026): just
+  // focus that pane. The create flow runs in place in the pane's own drawer and
+  // mounts via onPaneCreated below — no sidebar to open, no create-mode token.
+  const onNewForPane = (idx: number) => setActive(idx);
 
-  // Mount + refresh once a session is created from the in-drawer flow. Mirrors
-  // the old NewSessionPanel onCreated: mount in the remembered pane (−1 = active
-  // fallback), mark a propagation grace window so the immediate refresh (and the
-  // background poll) don't null the pane before the hub's session list catches
-  // up, then close the drawer.
+  // Mount + refresh once a session is created from the sidebar's in-drawer flow.
+  // Mounts in the remembered pane (−1 = active fallback), marks a propagation
+  // grace window so the immediate refresh (and the background poll) don't null
+  // the pane before the hub's session list catches up, then closes the drawer.
   const onSessionCreated = useCallback(
     (session: PaneRef) => {
       setDrawerOpen(false);
@@ -1683,6 +1675,46 @@ export default function App() {
     [newForPane, active, mountAt, setActive, refresh]
   );
 
+  // Same mount/grace/refresh, but for a session created straight inside an empty
+  // grid pane (proposal 0026) — the target pane is explicit, so it bypasses the
+  // newForPane handshake entirely.
+  const onPaneCreated = useCallback(
+    (idx: number, session: PaneRef) => {
+      recentMounts.current.set(refKey(session), Date.now() + 15000);
+      mountAt(idx, session);
+      setActive(idx);
+      refresh();
+    },
+    [mountAt, setActive, refresh]
+  );
+
+  // The non-pane-specific switcher props, hoisted once so the sidebar drawer and
+  // every empty-pane switcher (proposal 0026) share one source of truth — no
+  // hand-kept parallel copy to drift.
+  const paneSwitcher: PaneSwitcherProps = {
+    sessions,
+    connByRef,
+    machines,
+    multiMachine,
+    loading,
+    error,
+    onRefresh: refresh,
+    onStatus: () => setStatusOpen(true),
+    createInitialMachine: currentSession?.machine || firstOnlineMachine,
+    recentDirs: restorable.map((r) => r.dir),
+    showLayout: isDesktop,
+    onLayout: () => {
+      setDrawerOpen(false);
+      openPalette();
+    },
+    deleting,
+    onDelete: removeSession,
+    restorable,
+    onRestore,
+    toastsOn: toastsEnabled,
+    onToggleToasts: toggleToasts,
+  };
+
   // The session switcher, built once and rendered in one of two places:
   //  - phone  → full-screen takeover at the app root (embedded=false)
   //  - desktop → a left-pinned slide-in sidebar over the terminal area
@@ -1690,37 +1722,16 @@ export default function App() {
   //    terminal you were in (proposal 0006).
   const renderDrawer = (embedded: boolean, sidebar = false, elevated = false) => (
     <SessionDrawer
+      {...paneSwitcher}
       open={drawerOpen}
       embedded={embedded}
       sidebar={sidebar}
       elevated={elevated}
-      sessions={sessions}
-      connByRef={connByRef}
-      machines={machines}
-      multiMachine={multiMachine}
       current={currentSession}
-      loading={loading}
-      error={error}
       onPick={pick}
       onClose={() => setDrawerOpen(false)}
-      onRefresh={refresh}
-      onStatus={() => setStatusOpen(true)}
       onNew={() => setNewForPane(active)}
-      createInitialMachine={currentSession?.machine || firstOnlineMachine}
-      recentDirs={restorable.map((r) => r.dir)}
       onCreated={onSessionCreated}
-      createReq={createReq}
-      showLayout={isDesktop}
-      onLayout={() => {
-        setDrawerOpen(false);
-        openPalette();
-      }}
-      deleting={deleting}
-      onDelete={removeSession}
-      restorable={restorable}
-      onRestore={onRestore}
-      toastsOn={toastsEnabled}
-      onToggleToasts={toggleToasts}
     />
   );
 
@@ -1918,15 +1929,17 @@ export default function App() {
             onActivate={setActive}
             onConn={setPaneConn}
             onPickFor={(idx, ref) => mountAt(idx, ref)}
-            onOpenDrawerFor={(idx) => {
-              setActive(idx);
-              setDrawerOpen(true);
-            }}
-            onNewFor={openNewFor}
+            onNewFor={onNewForPane}
+            onPaneCreated={onPaneCreated}
             onOpenEditor={() => openEditor(null)}
             onMarkColor={markColor}
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
+            switcher={paneSwitcher}
+            // Empty panes yield the keyboard while the sidebar switcher or the
+            // file viewer is up — otherwise two window-capture handlers fight
+            // over ↑/↓/⏎ (proposal 0026).
+            gridKeyboardActive={!drawerOpen && !editor.open}
           />
         ) : currentSession ? (
           // Phone path: one terminal, single pane — but it shows `panes[active]`
@@ -2046,8 +2059,9 @@ export default function App() {
         </>
       )}
 
-      {/* Phone: full-screen switcher. Desktop renders it pane-scoped inside
-          TileGrid (see paneOverlay above), so it only covers the active box. */}
+      {/* Phone: full-screen switcher. Desktop renders the switcher as the
+          left slide-in sidebar (above) plus, for empty grid panes, inline via
+          TileGrid's pane variant (proposal 0026). */}
       {!isDesktop && renderDrawer(false)}
       <ComposeSheet
         ref={composeRef}

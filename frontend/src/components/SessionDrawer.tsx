@@ -22,6 +22,16 @@ interface Props {
   // viewer's z-[60] overlay so the switcher renders on top of it instead of
   // behind it (proposal 0019). Only meaningful with `sidebar`.
   elevated?: boolean;
+  // Pane-embedded variant (proposal 0026): an empty desktop grid pane renders
+  // the *full* switcher in normal flow (filling its PaneBox), always open, with
+  // no scrim / slide / close button. Picking or creating mounts into that pane.
+  // Mutually exclusive with `sidebar`/`embedded`.
+  pane?: boolean;
+  // Keyboard + autofocus ownership (proposal 0026). With several empty-pane
+  // switchers on screen, only the focused one may grab the `window` ↑/↓/⏎
+  // listener and steal search focus. Defaults true, so the lone sidebar/phone
+  // instance behaves exactly as before.
+  keyboardActive?: boolean;
   sessions: Session[];
   // Per-session WebSocket state, keyed `${machine}/${name}`, for sessions open
   // in a pane — lets a row's status dot go red when its connection drops. Rows
@@ -52,9 +62,6 @@ interface Props {
   createInitialMachine: string;
   recentDirs?: string[];
   onCreated: (ref: PaneRef) => void;
-  // A token bumped by App to ask the (open) drawer to jump straight into create
-  // mode — the per-pane "new session" affordances in TileGrid use this.
-  createReq?: number;
   // "New layout" routes here (desktop only — there's no multi-pane grid on
   // phone). Reaches the existing LayoutPalette. `showLayout` gates the row.
   showLayout?: boolean;
@@ -71,6 +78,32 @@ interface Props {
   toastsOn: boolean;
   onToggleToasts: () => void;
 }
+
+// The slice of switcher props that aren't pane-specific — shared verbatim by the
+// sidebar drawer and every empty-pane switcher (proposal 0026). The per-pane
+// bits (open/pane/current/keyboardActive + onPick/onNew/onCreated/onClose) are
+// supplied by TileGrid; everything here is hoisted once in App and threaded in.
+export type PaneSwitcherProps = Pick<
+  Props,
+  | "sessions"
+  | "connByRef"
+  | "machines"
+  | "multiMachine"
+  | "loading"
+  | "error"
+  | "onRefresh"
+  | "onStatus"
+  | "createInitialMachine"
+  | "recentDirs"
+  | "showLayout"
+  | "onLayout"
+  | "deleting"
+  | "onDelete"
+  | "restorable"
+  | "onRestore"
+  | "toastsOn"
+  | "onToggleToasts"
+>;
 
 // A navigable item the keyboard cursor can land on (proposal 0011, generalized
 // by 0016 to include "New layout"). Empty filter → today's order; a non-empty
@@ -110,6 +143,8 @@ export default function SessionDrawer({
   embedded = false,
   sidebar = false,
   elevated = false,
+  pane = false,
+  keyboardActive = true,
   sessions,
   connByRef,
   machines,
@@ -125,7 +160,6 @@ export default function SessionDrawer({
   createInitialMachine,
   recentDirs,
   onCreated,
-  createReq = 0,
   showLayout = false,
   onLayout,
   deleting,
@@ -278,7 +312,13 @@ export default function SessionDrawer({
   // likely thing); otherwise on the currently-attached session, else "New
   // session" (proposal 0011 behaviour preserved for the resting list).
   useEffect(() => {
-    if (!open || mode !== "list") return;
+    if ((!open && !pane) || mode !== "list") return;
+    // An unfocused empty pane shows no cursor ring (proposal 0026) — only the
+    // keyboard owner parks a cursor.
+    if (!keyboardActive) {
+      setCursor(-1);
+      return;
+    }
     if (filtering) {
       setCursor(view.length > 0 ? 0 : -1);
       return;
@@ -288,7 +328,7 @@ export default function SessionDrawer({
       (s) => s.name === current?.name && (s.machine ?? "") === current?.machine
     );
     setCursor(cur >= 0 ? sessionBase + cur : 0);
-  }, [open, mode, filtering, view.length, baseItems.length, ordered, current]);
+  }, [open, pane, mode, keyboardActive, filtering, view.length, baseItems.length, ordered, current]);
 
   // Keep the cursor item in view when it moves off-screen (long lists).
   useEffect(() => {
@@ -296,25 +336,13 @@ export default function SessionDrawer({
     itemRefs.current[cursor]?.scrollIntoView({ block: "nearest" });
   }, [cursor]);
 
-  // An external create request (TileGrid's per-pane "new session") jumps the
-  // open drawer straight to create mode. Only react to a *change* in the token,
-  // so a normal open (Ctrl+B) stays on the list.
-  const lastCreateReq = useRef(createReq);
-  useEffect(() => {
-    if (createReq === lastCreateReq.current) return;
-    lastCreateReq.current = createReq;
-    if (!open) return;
-    setCreateQuery("");
-    setMode("create");
-  }, [createReq, open]);
-
   // Autofocus the filter box on open / when returning to the list, so typing
   // filters immediately (deferred a frame so the input is mounted).
   useEffect(() => {
-    if (!open || mode !== "list") return;
+    if ((!open && !pane) || mode !== "list" || !keyboardActive) return;
     const id = requestAnimationFrame(() => filterRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, [open, mode]);
+  }, [open, pane, mode, keyboardActive]);
 
   // Shared by the Restore button's click and the Enter-on-Restore keyboard path.
   const runRestore = useCallback(async () => {
@@ -353,7 +381,9 @@ export default function SessionDrawer({
   // drawer opens via Ctrl+B; capture phase fires before that handler so we win.
   // Printable keys still type into the (focused) filter input natively.
   useEffect(() => {
-    if (!open || mode !== "list") return;
+    // Only the focused instance owns the global keys — a non-active empty pane
+    // never even registers the listener, so ↑/↓/⏎ are unambiguous (0026).
+    if ((!open && !pane) || mode !== "list" || !keyboardActive) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -382,12 +412,13 @@ export default function SessionDrawer({
     };
     window.addEventListener("keydown", handler, { capture: true });
     return () => window.removeEventListener("keydown", handler, { capture: true });
-  }, [open, mode, view, cursor, query, onClose, activate]);
+  }, [open, pane, keyboardActive, mode, view, cursor, query, onClose, activate]);
 
-  // Phone / pane-embedded variants unmount when closed. The sidebar variant
-  // stays mounted so its slide-out transition can play; the keyboard/cursor
-  // effects above are gated on `open`, so a mounted-but-closed sidebar is inert.
-  if (!open && !sidebar) return null;
+  // Phone full-screen drawer unmounts when closed. The sidebar variant stays
+  // mounted so its slide-out transition can play (its effects are gated on
+  // `open`, so a mounted-but-closed sidebar is inert). The pane variant is the
+  // empty pane itself — there is no closed state, so it always renders.
+  if (!open && !sidebar && !pane) return null;
 
   const iconBtn =
     "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-edge/60 hover:text-slate-100";
@@ -396,7 +427,11 @@ export default function SessionDrawer({
   // in/out over the terminal area (proposal 0006). It overlays — never pushes —
   // so the width-locked PTY is never resized. While closed it slides off-screen
   // and drops pointer events so clicks fall through to the terminal.
-  const rootClass = sidebar
+  const rootClass = pane
+    ? // In-flow, fills the (relative, overflow-hidden) PaneBox — no overlay,
+      // scrim, slide, or inline width. The pane paints its own background.
+      "relative flex h-full w-full flex-col text-slate-200 bg-transparent"
+    : sidebar
     ? [
         `absolute inset-y-0 left-0 ${elevated ? "z-[70]" : "z-30"} flex max-w-[85%] flex-col text-slate-200`,
         "border-r border-edge/80 bg-bar/95 backdrop-blur-md shadow-xl",
@@ -407,7 +442,7 @@ export default function SessionDrawer({
         embedded ? "bg-bar/95 backdrop-blur-md" : "bg-bar pt-safe"
       }`;
   // Content-sized width for the sidebar (see `sidebarWidth`); the phone/embedded
-  // variants fill their parent, so they take no inline width.
+  // /pane variants fill their parent, so they take no inline width.
   const rootStyle = sidebar ? { width: sidebarWidth } : undefined;
 
   // ── Create mode: the in-sidebar search-first create flow (proposal 0016). ──
@@ -593,6 +628,16 @@ export default function SessionDrawer({
                     safe
                   </span>
                 )}
+                {/* Proposal 0026: in a grid pane, flag a session already shown in
+                    another pane (the picker's old amber dot) — a real signal when
+                    you're filling an empty pane. Pane-only, so the sidebar row is
+                    unchanged. */}
+                {pane && s.attached && (
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber"
+                    title="already shown in another pane"
+                  />
+                )}
                 {/* When filtering across machines, show the machine inline since
                     the group headers are suppressed. */}
                 {filtering && multiMachine && s.machine && (
@@ -699,18 +744,26 @@ export default function SessionDrawer({
             {sessions.length}
           </span>
         )}
-        <span className="ml-auto hidden text-[10px] text-slate-600 sm:inline">↑↓ ⏎ · Esc · ⌃B</span>
-        <ToastsButton on={toastsOn} onToggle={onToggleToasts} className={`${iconBtn} ml-auto sm:ml-0`} />
-        <NotificationsButton className={iconBtn} />
-        <button onClick={onStatus} aria-label="Session status overview" title="Status — what each session needs" className={iconBtn}>
-          <StatusListIcon className="h-4 w-4" />
-        </button>
-        <button onClick={onRefresh} aria-label="Refresh sessions" className={iconBtn}>
-          <RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-        </button>
-        <button onClick={onClose} aria-label="Close" className={iconBtn}>
-          <XIcon className="h-4 w-4" />
-        </button>
+        {/* The keyboard hint + app-global icon cluster + Close are chrome that
+            makes no sense inside a (possibly small) grid pane — they're already
+            reachable from the sidebar header and the toolbar. The pane variant
+            keeps only title + count + search (proposal 0026). */}
+        {!pane && (
+          <>
+            <span className="ml-auto hidden text-[10px] text-slate-600 sm:inline">↑↓ ⏎ · Esc · ⌃B</span>
+            <ToastsButton on={toastsOn} onToggle={onToggleToasts} className={`${iconBtn} ml-auto sm:ml-0`} />
+            <NotificationsButton className={iconBtn} />
+            <button onClick={onStatus} aria-label="Session status overview" title="Status — what each session needs" className={iconBtn}>
+              <StatusListIcon className="h-4 w-4" />
+            </button>
+            <button onClick={onRefresh} aria-label="Refresh sessions" className={iconBtn}>
+              <RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            </button>
+            <button onClick={onClose} aria-label="Close" className={iconBtn}>
+              <XIcon className="h-4 w-4" />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Filter box (Part A) — autofocused; type to filter sessions + actions. */}

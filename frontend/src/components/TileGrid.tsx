@@ -1,9 +1,10 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useRef, useState } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
+import SessionDrawer, { type PaneSwitcherProps } from "./SessionDrawer";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
 import { dirCrumb, machineAccent, nextSessionColor, sessionAccent, toolColor } from "../util";
-import { FileEditIcon, PlusIcon } from "../icons";
+import { FileEditIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -72,8 +73,10 @@ interface Props {
   onActivate: (idx: number) => void;
   onConn: (idx: number, c: ConnState) => void;
   onPickFor: (idx: number, ref: PaneRef) => void;
-  onOpenDrawerFor: (idx: number) => void;
   onNewFor: (idx: number) => void;
+  // The new session created from an empty pane's switcher mounts into that pane
+  // (proposal 0026) — App handles the propagation grace + refresh.
+  onPaneCreated: (idx: number, ref: PaneRef) => void;
   onOpenEditor: () => void; // opens the file-editor overlay (the single file
   // view: browse / view / edit / download). The active pane — which the
   // pointerdown above has just set — is the implicit target, so the tree roots
@@ -89,11 +92,16 @@ interface Props {
   // DataTransfer is handed up; the parent flattens it (folders included)
   // and opens the UploadSheet targeting `panes[idx]`.
   onDropFiles?: (idx: number, dt: DataTransfer) => void;
-  // Pane-scoped overlay (the session switcher on desktop): rendered as an
-  // `absolute inset-0` child of pane `paneOverlayIdx`, so it covers exactly
-  // that terminal box rather than the whole screen. Null = nothing to show.
-  paneOverlay?: ReactNode;
-  paneOverlayIdx?: number | null;
+  // Shared switcher props for the empty-pane variant (proposal 0026): an empty
+  // pane renders the *real* SessionDrawer (search · create · restore · kill ·
+  // breadcrumb · tooltip), not a cut-down picker. These are the non-pane-specific
+  // props, hoisted once in App; the per-pane routing is wired in PaneBox.
+  switcher: PaneSwitcherProps;
+  // Whether an empty *active* pane's inline switcher may own the global ↑/↓/⏎
+  // keys + search autofocus (proposal 0026). False while the left sidebar
+  // switcher or the full-screen file viewer is up — they own the keyboard then,
+  // and two window-capture handlers would fight over the same keys.
+  gridKeyboardActive: boolean;
 }
 
 // Tile up to four <TerminalView>s in one of four fixed CSS-grid layouts.
@@ -111,14 +119,14 @@ export default function TileGrid({
   onActivate,
   onConn,
   onPickFor,
-  onOpenDrawerFor,
   onNewFor,
+  onPaneCreated,
   onOpenEditor,
   onMarkColor,
   onTermFor,
   onDropFiles,
-  paneOverlay,
-  paneOverlayIdx,
+  switcher,
+  gridKeyboardActive,
 }: Props) {
   const tpl = TEMPLATES[layout];
 
@@ -144,13 +152,14 @@ export default function TileGrid({
           onActivate={() => onActivate(idx)}
           onConn={(c) => onConn(idx, c)}
           onPick={(ref) => onPickFor(idx, ref)}
-          onOpenDrawer={() => onOpenDrawerFor(idx)}
           onNew={() => onNewFor(idx)}
+          onCreated={(ref) => onPaneCreated(idx, ref)}
           onOpenEditor={onOpenEditor}
           onMarkColor={onMarkColor}
           onTerm={(t) => onTermFor?.(idx, t)}
           onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
-          overlay={paneOverlayIdx === idx ? paneOverlay : null}
+          switcher={switcher}
+          keyboardActive={idx === active && gridKeyboardActive}
         />
       ))}
     </div>
@@ -168,13 +177,16 @@ interface PaneProps {
   onActivate: () => void;
   onConn: (c: ConnState) => void;
   onPick: (ref: PaneRef) => void;
-  onOpenDrawer: () => void;
   onNew: () => void;
+  onCreated: (ref: PaneRef) => void;
   onOpenEditor: () => void;
   onMarkColor: (ref: PaneRef, color: string | null) => void;
   onTerm?: (term: Terminal | null) => void;
   onDropFiles?: (dt: DataTransfer) => void;
-  overlay?: ReactNode;
+  switcher: PaneSwitcherProps;
+  // Only the focused pane (and only when no sidebar/viewer owns the keyboard)
+  // drives its inline switcher's ↑/↓/⏎ + autofocus (proposal 0026).
+  keyboardActive: boolean;
 }
 
 function PaneBox({
@@ -188,13 +200,14 @@ function PaneBox({
   onActivate,
   onConn,
   onPick,
-  onOpenDrawer,
   onNew,
+  onCreated,
   onOpenEditor,
   onMarkColor,
   onTerm,
   onDropFiles,
-  overlay,
+  switcher,
+  keyboardActive,
 }: PaneProps) {
   const meta = sessions.find(
     (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
@@ -305,11 +318,22 @@ function PaneBox({
             onTerm={onTerm}
           />
         ) : (
-          <EmptyPanePicker
-            sessions={sessions}
-            onPick={onPick}
-            onOpenDrawer={onOpenDrawer}
+          // Proposal 0026: an empty pane *is* the session switcher. We render the
+          // real SessionDrawer in its `pane` variant (in-flow, always open, no
+          // scrim/close) instead of a cut-down picker — so it inherits search,
+          // create, restore, kill, the breadcrumb (0025) and the summary tooltip
+          // (0022) for free. Per-pane routing: pick/create act on THIS pane;
+          // keyboard + autofocus only when this pane is focused.
+          <SessionDrawer
+            {...switcher}
+            pane
+            open
+            current={null}
+            keyboardActive={keyboardActive}
+            onPick={(s) => onPick({ name: s.name, machine: s.machine ?? "" })}
             onNew={onNew}
+            onCreated={onCreated}
+            onClose={() => {}}
           />
         )}
       </div>
@@ -364,13 +388,6 @@ function PaneBox({
           </div>
         </div>
       )}
-
-      {/* Pane-scoped overlay (desktop session switcher). The drawer positions
-          itself `absolute inset-0 z-30` so it covers this terminal box only —
-          PaneBox is `relative overflow-hidden`, which clips it to the pane.
-          Rendered last so it also wins DOM order over the highlight/drop
-          layers. */}
-      {overlay}
 
       {/* Per-pane identity bar (proposal 0021) — a persistent bottom status
           line naming the machine + session, so a multi-pane / multi-machine
@@ -473,87 +490,6 @@ function PaneBox({
           </span>
         </div>
       )}
-    </div>
-  );
-}
-
-interface PickerProps {
-  sessions: Session[];
-  onPick: (ref: PaneRef) => void;
-  onOpenDrawer: () => void;
-  onNew: () => void;
-}
-
-// Inline picker shown inside an empty pane. Lists existing sessions one-tap
-// away, with shortcuts to the full drawer and the new-session panel — so
-// mounting a session into a freshly-split pane is a single click without
-// ever opening any sheet.
-function EmptyPanePicker({ sessions, onPick, onOpenDrawer, onNew }: PickerProps) {
-  // Most-recently-active first — what you probably want to bring up.
-  const sorted = useMemo(
-    () => [...sessions].sort((a, b) => b.activity - a.activity),
-    [sessions]
-  );
-
-  return (
-    <div className="flex h-full w-full flex-col items-stretch justify-center gap-2 p-6 pt-10">
-      <div className="mb-2 text-center text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
-        Empty pane — pick a session
-      </div>
-
-      <div className="mx-auto flex w-full max-w-sm flex-col gap-0.5 overflow-y-auto">
-        <button
-          onClick={onNew}
-          className="flex items-center gap-2 rounded-md py-2 pl-2 pr-2 text-left text-[13px] text-slate-200 transition-colors hover:bg-edge/50"
-        >
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center">
-            <PlusIcon className="h-4 w-4 text-accent" />
-          </span>
-          <span className="font-medium">New session…</span>
-        </button>
-
-        {sorted.length === 0 && (
-          <div className="rounded-md px-3 py-2 text-center text-[12px] text-slate-600">
-            No sessions yet.
-          </div>
-        )}
-
-        {sorted.map((s) => (
-          <button
-            key={`${s.machine ?? ""}/${s.name}`}
-            onClick={() => onPick({ name: s.name, machine: s.machine ?? "" })}
-            className="flex items-center gap-2 rounded-md py-1.5 pl-2 pr-2 text-left text-[13px] transition-colors hover:bg-edge/40"
-            title={s.preview}
-          >
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center">
-              <span className={`h-2 w-2 rounded-full ${toolColor(s.tool)}`} title={s.tool} />
-            </span>
-            <span className="min-w-0 flex-1 truncate font-medium text-slate-100">{s.short}</span>
-            {/* Amber pulse = in an open, submit-armed busy window (working); see
-                App.tsx / the server's WORK_GRACE_SECS. The pulse distinguishes it
-                from the solid "already shown" dot below. */}
-            {!s.waiting && (
-              <span
-                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber"
-                title="working"
-              />
-            )}
-            {s.attached && (
-              <span
-                className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber"
-                title="already shown in another pane"
-              />
-            )}
-          </button>
-        ))}
-
-        <button
-          onClick={onOpenDrawer}
-          className="mt-2 rounded-md px-3 py-2 text-center text-[11px] text-slate-600 transition-colors hover:text-slate-300"
-        >
-          Open the session switcher ⌃B
-        </button>
-      </div>
     </div>
   );
 }
