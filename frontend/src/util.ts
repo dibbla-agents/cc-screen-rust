@@ -64,14 +64,17 @@ export const SESSION_COLOR_TOKENS = Object.keys(SESSION_COLORS);
 
 export function sessionAccent(
   color?: string
-): { border: string; swatch: string; wash: string } | null {
+): { border: string; swatch: string; wash: string; bar: string } | null {
   if (!color) return null;
   const hue = SESSION_COLORS[color];
   if (hue === undefined) return null; // unknown token (forward-compat) → unmarked
   return {
     border: `hsl(${hue} 60% 58%)`, // the pane border / agent-view spine
     swatch: `hsl(${hue} 62% 60%)`, // the switcher-row swatch dot
-    wash: `hsl(${hue} 55% 50% / 0.10)`, // optional faint bar wash when marked
+    wash: `hsl(${hue} 55% 50% / 0.10)`, // optional faint wash
+    // The desktop pane identity-bar fill — a clearly-coloured but muted-dark
+    // panel the light bar text (slate-100/200) still reads on.
+    bar: `hsl(${hue} 45% 26%)`,
   };
 }
 

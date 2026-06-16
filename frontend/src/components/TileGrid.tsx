@@ -331,22 +331,9 @@ function PaneBox({
       <div
         aria-hidden
         className={`pointer-events-none absolute inset-0 z-10 ${
-          active ? "border-2 border-accent" : markAcc ? "" : "border border-edge/70"
+          active ? "border-2 border-accent" : "border border-edge/70"
         }`}
       />
-
-      {/* Per-session mark border (proposal 0029) — a second, inset border in the
-          chosen colour, drawn BELOW the cyan active border (z-[9] < z-10) and
-          inset 2px so the active read always wins; on an inactive marked pane it
-          replaces the neutral border above. Easy on the eye: a thin frame, never
-          a fill. */}
-      {markAcc && (
-        <div
-          aria-hidden
-          className="pointer-events-none absolute z-[9]"
-          style={{ inset: 2, border: `2px solid ${markAcc.border}` }}
-        />
-      )}
 
       {/* Drop-target overlay. pointer-events-none keeps the drag events
           flowing to the outer PaneBox handlers; this layer is purely
@@ -395,9 +382,14 @@ function PaneBox({
           covers it; the files button stays clickable underneath the border. */}
       {session && meta && (
         <div
+          // Marked panes (proposal 0029): the whole bottom identity bar takes the
+          // mark colour as a filled panel — the dominant, scannable mark. Inline
+          // style wins over the bg-* class, so we keep the border classes for the
+          // active accent and just override the background when marked.
           className={`absolute inset-x-0 bottom-0 flex h-6 items-center gap-2 border-t px-2 ${
             active ? "border-accent/40 bg-panel" : "border-edge/70 bg-bar"
           }`}
+          style={markAcc ? { background: markAcc.bar } : undefined}
         >
           {/* Machine spine + hostname — the machine identity. Dropped when
               acc is null (single-agent / no hub): nothing to disambiguate. */}
