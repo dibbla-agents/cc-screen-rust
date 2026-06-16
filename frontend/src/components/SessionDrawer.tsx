@@ -160,6 +160,22 @@ export default function SessionDrawer({
     });
   }, [sessions]);
 
+  // Desktop sidebar width, sized to content so the whole folder breadcrumb —
+  // crucially the leaf (0025) — is visible without truncation. We grow from the
+  // 320px floor only as far as the widest label needs, capped at 480px (and at
+  // 85% of the viewport via `max-w-[85%]` on the root). Short names keep the
+  // narrow column; deep paths widen it. ~7px/char at text-[13px] plus fixed row
+  // chrome (tool dot, status dot, `ago`, paddings, the hover trash button).
+  const sidebarWidth = useMemo(() => {
+    let maxLen = 0;
+    for (const s of sessions) {
+      const c = dirCrumb(s.cwd);
+      const label = c ? (c.parent ? `${c.parent} / ${c.leaf}` : c.leaf) : s.short;
+      if (label.length > maxLen) maxLen = label.length;
+    }
+    return Math.min(480, Math.max(320, Math.round(150 + maxLen * 7)));
+  }, [sessions]);
+
   // The base (unfiltered) item list — actions first, then session rows. The
   // cursor indexes the *visible* list (`view`), which equals this when the
   // filter is empty.
@@ -349,19 +365,22 @@ export default function SessionDrawer({
   // and drops pointer events so clicks fall through to the terminal.
   const rootClass = sidebar
     ? [
-        `absolute inset-y-0 left-0 ${elevated ? "z-[70]" : "z-30"} flex w-[320px] max-w-[85%] flex-col text-slate-200`,
+        `absolute inset-y-0 left-0 ${elevated ? "z-[70]" : "z-30"} flex max-w-[85%] flex-col text-slate-200`,
         "border-r border-edge/80 bg-bar/95 backdrop-blur-md shadow-xl",
-        "transition-transform duration-200 ease-out",
+        "transition-[transform,width] duration-200 ease-out",
         open ? "translate-x-0" : "-translate-x-full pointer-events-none",
       ].join(" ")
     : `absolute inset-0 z-30 flex flex-col text-slate-200 ${
         embedded ? "bg-bar/95 backdrop-blur-md" : "bg-bar pt-safe"
       }`;
+  // Content-sized width for the sidebar (see `sidebarWidth`); the phone/embedded
+  // variants fill their parent, so they take no inline width.
+  const rootStyle = sidebar ? { width: sidebarWidth } : undefined;
 
   // ── Create mode: the in-sidebar search-first create flow (proposal 0016). ──
   if (mode === "create") {
     return (
-      <div className={rootClass} aria-hidden={sidebar && !open}>
+      <div className={rootClass} style={rootStyle} aria-hidden={sidebar && !open}>
         <CreateSession
           machines={machines}
           multiMachine={multiMachine}
@@ -476,6 +495,7 @@ export default function SessionDrawer({
     const active = s.name === current?.name && (s.machine ?? "") === current?.machine;
     const focused = i === cursor;
     const isDeleting = deleting.has(s.name);
+    const crumb = dirCrumb(s.cwd);
     const status = agentStatus(
       s.waiting,
       connByRef[`${s.machine ?? ""}/${s.name}`] as "connecting" | "open" | "closed" | undefined
@@ -507,22 +527,19 @@ export default function SessionDrawer({
                     leaf bright) derived from the live cwd; the leaf yields space
                     last so it stays legible. Falls back to `short` when there's
                     no usable cwd. */}
-                {(() => {
-                  const crumb = dirCrumb(s.cwd);
-                  return crumb ? (
-                    <span className="flex min-w-0 items-baseline text-[13px] font-medium">
-                      {crumb.parent && (
-                        <>
-                          <span className="truncate text-slate-500">{crumb.parent}</span>
-                          <span className="shrink-0 px-0.5 text-slate-600">/</span>
-                        </>
-                      )}
-                      <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
-                    </span>
-                  ) : (
-                    <span className="truncate text-[13px] font-medium text-slate-100">{s.short}</span>
-                  );
-                })()}
+                {crumb ? (
+                  <span className="flex min-w-0 items-baseline text-[13px] font-medium">
+                    {crumb.parent && (
+                      <>
+                        <span className="truncate text-slate-500">{crumb.parent}</span>
+                        <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                      </>
+                    )}
+                    <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
+                  </span>
+                ) : (
+                  <span className="truncate text-[13px] font-medium text-slate-100">{s.short}</span>
+                )}
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                   title={statusTitle(status)}
@@ -546,6 +563,16 @@ export default function SessionDrawer({
                   {ago(s.activity)}
                 </span>
               </span>
+              {/* On mobile, stack the session name on its own row beneath the
+                  folder breadcrumb (folder ▸ name ▸ summary). Desktop keeps the
+                  name in the tooltip and widens the sidebar instead. Skipped
+                  when there's no cwd — the breadcrumb already falls back to the
+                  name, so a second copy would just duplicate it. */}
+              {!sidebar && crumb && (
+                <span className="mt-0.5 block truncate text-[13px] font-medium text-slate-100">
+                  {s.short}
+                </span>
+              )}
               {/* Proposal 0022: the LLM headline replaces the bare preview when
                   present; the full summary is on hover (desktop) / long-press
                   (touch) via SummaryTip. Falls back to the preview line. */}
@@ -622,7 +649,7 @@ export default function SessionDrawer({
   let lastMachine: string | null = null;
 
   return (
-    <div className={rootClass} aria-hidden={sidebar && !open}>
+    <div className={rootClass} style={rootStyle} aria-hidden={sidebar && !open}>
       {/* Header: title + count, then the keyboard hint and icon chrome. */}
       <div className="flex items-center gap-2 border-b border-edge/80 px-3 py-2.5">
         <span className="text-[13px] font-semibold tracking-wide text-slate-100">Sessions</span>
