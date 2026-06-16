@@ -89,6 +89,16 @@ const ACTION_TERMS: Record<string, string[]> = {
   restore: ["restore", "resume", "saved sessions"],
 };
 
+// Tiered field weighting for session search (proposal 0028). A session's score
+// is `TIER_BASE + fuzzyScore(q, field)` for its best-matching field. The tier
+// gap is far above any realistic fuzzyScore (low hundreds), so a tier strictly
+// dominates: name always outranks a path-only hit, path always outranks a
+// summary/metadata-only hit, and fuzzyScore only ever breaks ties *within* a
+// tier. Widen the constants if a future field could exceed the gap.
+const NAME_TIER = 100_000; // s.short — the session name
+const PATH_TIER = 10_000; // s.cwd — the working directory / folder
+const META_TIER = 0; // headline, detail, preview, tool, machine
+
 // Session switcher — the one search-first place to switch, create, and re-layout
 // (proposals 0006 / 0011 / 0016). Open it and just start typing: the list filters
 // in place across sessions *and* the actions New session / New layout / Restore,
@@ -198,11 +208,34 @@ export default function SessionDrawer({
     (it: NavItem): number | null => {
       if (it.kind === "session") {
         const s = it.session;
-        const fields = [s.short, s.headline ?? "", s.detail ?? "", s.preview, s.tool, s.machine ?? ""];
+        // The cwd *leaf* (basename) is scored as its own PATH-tier field so a
+        // folder literally named the query outranks one that merely contains it
+        // as an ancestor (proposal 0028 follow-up). `fuzzyScore` matches
+        // greedy-leftmost, so on the full path `/home/erik` the "e" lands in
+        // "home" and the leaf's head/word-start/contiguous bonuses are lost —
+        // making `/home/erik` tie a deep `/home/erik/…/darktide`. Scoring the
+        // leaf on its own recovers those bonuses (so an exact leaf wins within
+        // the tier) while the full-path field keeps ancestor folders findable.
+        const cwd = s.cwd ?? "";
+        const cwdLeaf = cwd.replace(/\/+$/, "").split("/").pop() ?? "";
+        // (field, tierBase) pairs, ordered name → path → meta (proposal 0028).
+        const tiers: [string, number][] = [
+          [s.short, NAME_TIER],
+          [cwdLeaf, PATH_TIER],
+          [cwd, PATH_TIER],
+          [s.headline ?? "", META_TIER],
+          [s.detail ?? "", META_TIER],
+          [s.preview, META_TIER],
+          [s.tool, META_TIER],
+          [s.machine ?? "", META_TIER],
+        ];
         let best: number | null = null;
-        for (const f of fields) {
-          const sc = fuzzyScore(q, f);
-          if (sc !== null) best = best === null ? sc : Math.max(best, sc);
+        for (const [field, base] of tiers) {
+          const sc = fuzzyScore(q, field);
+          if (sc !== null) {
+            const total = base + sc;
+            best = best === null ? total : Math.max(best, total);
+          }
         }
         return best;
       }
