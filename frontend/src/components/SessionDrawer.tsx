@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, dirCrumb, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -503,7 +503,26 @@ export default function SessionDrawer({
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5">
-                <span className="truncate text-[13px] font-medium text-slate-100">{s.short}</span>
+                {/* Proposal 0025: a two-segment folder breadcrumb (parent dim,
+                    leaf bright) derived from the live cwd; the leaf yields space
+                    last so it stays legible. Falls back to `short` when there's
+                    no usable cwd. */}
+                {(() => {
+                  const crumb = dirCrumb(s.cwd);
+                  return crumb ? (
+                    <span className="flex min-w-0 items-baseline text-[13px] font-medium">
+                      {crumb.parent && (
+                        <>
+                          <span className="truncate text-slate-500">{crumb.parent}</span>
+                          <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                        </>
+                      )}
+                      <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
+                    </span>
+                  ) : (
+                    <span className="truncate text-[13px] font-medium text-slate-100">{s.short}</span>
+                  );
+                })()}
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                   title={statusTitle(status)}
@@ -530,7 +549,12 @@ export default function SessionDrawer({
               {/* Proposal 0022: the LLM headline replaces the bare preview when
                   present; the full summary is on hover (desktop) / long-press
                   (touch) via SummaryTip. Falls back to the preview line. */}
-              <SummaryTip text={s.detail || s.headline || undefined} className="mt-0.5 block min-w-0">
+              <SummaryTip
+                title={s.short}
+                path={s.cwd}
+                text={s.detail || s.headline || undefined}
+                className="mt-0.5 block min-w-0"
+              >
                 <span
                   className={`block truncate text-[11px] leading-tight ${
                     s.headline ? "text-slate-400" : "font-mono text-slate-600"

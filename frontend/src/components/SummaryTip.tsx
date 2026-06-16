@@ -26,10 +26,17 @@ export function dismissSummaryTips() {
 
 export default function SummaryTip({
   text,
+  title,
+  path,
   children,
   className,
 }: {
   text?: string;
+  // Proposal 0025: an optional header above the summary body. `title` is the
+  // session name, `path` the full cwd (left-truncated to one line so the deepest
+  // dirs survive). Either may be present without `text`.
+  title?: string;
+  path?: string;
   children: React.ReactNode;
   className?: string;
 }) {
@@ -115,9 +122,9 @@ export default function SummaryTip({
   useEffect(() => {
     setMode(null);
     clearLp();
-  }, [text]);
+  }, [text, title, path]);
 
-  if (!text) return <>{children}</>;
+  if (!text && !title && !path) return <>{children}</>;
 
   const vw = typeof window !== "undefined" ? window.innerWidth : MAX_W;
   const w = Math.min(MAX_W, vw - 24);
@@ -179,11 +186,29 @@ export default function SummaryTip({
             <div
               role="tooltip"
               style={style}
-              className={`fixed z-[200] whitespace-pre-wrap break-words rounded-lg border border-edge bg-panel px-3 py-2 text-xs leading-snug text-slate-100 shadow-xl ${
+              className={`fixed z-[200] break-words rounded-lg border border-edge bg-panel px-3 py-2 text-xs leading-snug text-slate-100 shadow-xl ${
                 mode === "hover" ? "pointer-events-none" : ""
               }`}
             >
-              {text}
+              {/* Proposal 0025 header: session name + full path. */}
+              {title && <div className="font-semibold text-slate-100">{title}</div>}
+              {path && (
+                // Left-truncate: an overflowing line in a right-to-left box
+                // ellipsises on the LEFT, so the meaningful tail (…/foo/bar)
+                // survives. <bdi> keeps the path's own chars in normal LTR order.
+                <div dir="rtl" className="mt-0.5 truncate text-left font-mono text-[11px] text-slate-400">
+                  <bdi>{path}</bdi>
+                </div>
+              )}
+              {text && (
+                <div
+                  className={`whitespace-pre-wrap break-words ${
+                    title || path ? "mt-1.5 border-t border-edge/60 pt-1.5" : ""
+                  }`}
+                >
+                  {text}
+                </div>
+              )}
             </div>
           </>,
           document.body

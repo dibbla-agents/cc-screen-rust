@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
-import { machineAccent, toolColor } from "../util";
+import { dirCrumb, machineAccent, toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -401,13 +401,28 @@ function PaneBox({
             title={meta.tool}
             aria-label={meta.tool}
           />
-          <span
-            className={`min-w-0 flex-1 truncate text-sm font-medium ${
-              active ? "text-slate-100" : "text-slate-200"
-            }`}
-          >
-            {meta.short}
-          </span>
+          {/* Proposal 0025: folder breadcrumb (parent dim, leaf emphasised)
+              from the live cwd; falls back to `short`. The machine spine to the
+              left already carries the host identity. */}
+          {(() => {
+            const crumb = dirCrumb(meta.cwd);
+            const leafColor = active ? "text-slate-100" : "text-slate-200";
+            return crumb ? (
+              <span className="flex min-w-0 flex-1 items-baseline text-sm font-medium">
+                {crumb.parent && (
+                  <>
+                    <span className="truncate text-slate-500">{crumb.parent}</span>
+                    <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                  </>
+                )}
+                <span className={`shrink-0 truncate ${leafColor}`}>{crumb.leaf}</span>
+              </span>
+            ) : (
+              <span className={`min-w-0 flex-1 truncate text-sm font-medium ${leafColor}`}>
+                {meta.short}
+              </span>
+            );
+          })()}
           <button
             onClick={onOpenEditor}
             title="Files — browse, view, edit, download"

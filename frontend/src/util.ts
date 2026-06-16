@@ -40,6 +40,24 @@ export function machineAccent(
   };
 }
 
+// dirCrumb — the last two segments of an absolute path: the leaf directory and
+// its parent (proposal 0025). Drives the two-segment folder breadcrumb label, a
+// far better disambiguator than the bare leaf for sessions auto-named after the
+// dir basename (`…/projectA/frontend` vs `…/projectB/frontend`).
+//   "/home/erik"                            → { parent: "home", leaf: "erik" }
+//   "/home/erik/development/cc-screen-rust" → { parent: "development", leaf: "cc-screen-rust" }
+//   "/home"                                 → { parent: "",   leaf: "home" }
+//   "" / "/"                                → null  (nothing usable → caller falls back to `short`)
+export function dirCrumb(cwd?: string): { parent: string; leaf: string } | null {
+  if (!cwd) return null;
+  const segs = cwd.split("/").filter(Boolean);
+  if (segs.length === 0) return null;
+  return {
+    leaf: segs[segs.length - 1]!,
+    parent: segs.length >= 2 ? segs[segs.length - 2]! : "",
+  };
+}
+
 // toPng normalises any browser-decodable image (phone screenshots are PNG;
 // photos may be HEIC/JPEG; pasted clipboard items can be anything Chrome
 // decodes) to the PNG that Claude Code's clipboard read expects, by drawing

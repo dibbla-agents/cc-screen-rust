@@ -33,6 +33,12 @@ export interface Session {
   // every surface falls back to `preview`.
   headline?: string;
   detail?: string;
+  // The session's live working directory (proposal 0025). The server already
+  // computes and sends it (`handlers.rs` `live_cwd()` → `/proc/<pid>/cwd`,
+  // falling back to the launch dir); it's omitted on the wire only when the
+  // server genuinely can't read it. Drives the folder-breadcrumb label and the
+  // tooltip's path row.
+  cwd?: string;
 }
 
 // PaneRef is the identity the app stores for an open session: the session name

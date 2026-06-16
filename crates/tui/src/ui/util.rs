@@ -12,6 +12,23 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// The last two segments of an absolute path as a `parent/leaf` breadcrumb
+/// (proposal 0025), falling back to `name` when there's no usable cwd. A far
+/// better disambiguator than the bare leaf for sessions auto-named after the dir
+/// basename (`…/projectA/frontend` vs `…/projectB/frontend`).
+///   "/home/erik/development/cc-screen-rust" → "development/cc-screen-rust"
+///   "/home/erik"                            → "home/erik"
+///   "/home"                                 → "home"
+///   "" / "/"                                → `name`
+pub fn dir_crumb(cwd: &str, name: &str) -> String {
+    let segs: Vec<&str> = cwd.split('/').filter(|s| !s.is_empty()).collect();
+    match segs.as_slice() {
+        [.., parent, leaf] => format!("{parent}/{leaf}"),
+        [leaf] => leaf.to_string(),
+        [] => name.to_string(),
+    }
+}
+
 /// Compact "time ago" from a unix-seconds timestamp (the session's last
 /// activity). Returns "-" for an unknown (zero) or future-ish timestamp.
 pub fn ago(unix_secs: i64) -> String {
@@ -39,6 +56,17 @@ mod tests {
     fn truncate_marks_cut() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn dir_crumb_segments() {
+        assert_eq!(dir_crumb("/home/erik/development/cc-screen-rust", "x"), "development/cc-screen-rust");
+        assert_eq!(dir_crumb("/home/erik", "x"), "home/erik");
+        assert_eq!(dir_crumb("/home", "x"), "home");
+        assert_eq!(dir_crumb("/", "fallback"), "fallback");
+        assert_eq!(dir_crumb("", "fallback"), "fallback");
+        // Trailing slash is ignored (empty segments filtered).
+        assert_eq!(dir_crumb("/a/b/c/", "x"), "b/c");
     }
 
     #[test]

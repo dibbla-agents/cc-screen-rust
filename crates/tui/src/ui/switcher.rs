@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::ui::util::{ago, truncate};
+use crate::ui::util::{ago, dir_crumb, truncate};
 
 const BAR_BG: Color = Color::Rgb(15, 23, 32);
 const SEL_BG: Color = Color::Rgb(30, 41, 59);
@@ -68,7 +68,10 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             let mut spans = vec![
                 Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                 Span::styled(
-                    format!("{:<26}", truncate(&s.name, 26)),
+                    // Folder breadcrumb (parent/leaf) from the live cwd, so two
+                    // same-named sessions in different dirs read apart at a
+                    // glance (proposal 0025). Falls back to the name with no cwd.
+                    format!("{:<26}", truncate(&dir_crumb(&s.cwd, &s.name), 26)),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{:<8}", truncate(&s.tool, 8)), Style::default().fg(Color::Cyan)),

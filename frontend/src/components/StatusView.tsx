@@ -18,7 +18,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
-import { ago, agentStatus, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, dirCrumb, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 
@@ -165,7 +165,25 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                           >
                             {s.tool}
                           </span>
-                          <span className="truncate text-sm font-medium text-slate-100">{s.short}</span>
+                          {/* Proposal 0025: two-segment folder breadcrumb
+                              (parent dim, leaf bright) from the live cwd; falls
+                              back to `short` with no usable cwd. */}
+                          {(() => {
+                            const crumb = dirCrumb(s.cwd);
+                            return crumb ? (
+                              <span className="flex min-w-0 items-baseline text-sm font-medium">
+                                {crumb.parent && (
+                                  <>
+                                    <span className="truncate text-slate-500">{crumb.parent}</span>
+                                    <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                                  </>
+                                )}
+                                <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
+                              </span>
+                            ) : (
+                              <span className="truncate text-sm font-medium text-slate-100">{s.short}</span>
+                            );
+                          })()}
                           {machineLabel && (
                             <span className="shrink-0 rounded bg-edge/60 px-1 py-px text-[9px] text-slate-400">
                               {machineLabel}
@@ -186,7 +204,12 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                         </span>
                         {/* Latest status: the LLM headline, else the preview.
                             Full summary on hover (desktop) / long-press (touch). */}
-                        <SummaryTip text={s.detail || s.headline || undefined} className="mt-0.5 block min-w-0">
+                        <SummaryTip
+                          title={s.short}
+                          path={s.cwd}
+                          text={s.detail || s.headline || undefined}
+                          className="mt-0.5 block min-w-0"
+                        >
                           <span
                             className={`block truncate text-[12px] leading-tight ${
                               s.headline ? "text-slate-300" : "font-mono text-slate-500"
