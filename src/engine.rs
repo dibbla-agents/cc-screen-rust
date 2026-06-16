@@ -168,6 +168,10 @@ pub struct Session {
     pub created: u64,
     /// Whether this session launched YOLO — reported to clients as a badge.
     pub skip_permissions: bool,
+    /// Operator-chosen mark colour (proposal 0029): a curated palette token, or
+    /// `None` when unmarked. Mirrored on the live session for a lowest-latency
+    /// read in `session_list`; the authoritative copy persists in the manifest.
+    color: Mutex<Option<String>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -268,6 +272,7 @@ impl Session {
             extra_dirs,
             created: now,
             skip_permissions,
+            color: Mutex::new(None),
             pid,
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
@@ -341,6 +346,19 @@ impl Session {
     /// The current cached LLM summary, if any.
     pub fn summary(&self) -> Option<crate::summary::Summary> {
         self.state.lock().ok().and_then(|st| st.summary.clone())
+    }
+
+    /// The operator-chosen mark colour (proposal 0029), or `None` when unmarked.
+    pub fn color(&self) -> Option<String> {
+        self.color.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Set (or clear, with `None`) the live mark colour. Persistence to the
+    /// manifest is the caller's job (see `handlers::set_color_core`).
+    pub fn set_color(&self, color: Option<String>) {
+        if let Ok(mut c) = self.color.lock() {
+            *c = color;
+        }
     }
 
     /// Build the redacted summary extract for a candidacy check: the recent
@@ -748,6 +766,9 @@ impl AppState {
                 extra_dirs,
                 created_at: now_secs() as i64,
                 skip_permissions,
+                // A fresh session starts unmarked; a restored one re-applies its
+                // saved colour below (this record overwrote any prior entry).
+                color: String::new(),
             },
         );
 
@@ -795,7 +816,18 @@ impl AppState {
                 true,
                 e.skip_permissions,
             ) {
-                Ok(name) => restored.push(name),
+                Ok(name) => {
+                    // `create` re-recorded the manifest entry with an empty colour
+                    // — re-apply the saved mark to both the live session and the
+                    // persisted entry so it survives the restore (proposal 0029).
+                    if !e.color.is_empty() {
+                        if let Some(sess) = self.get(&name) {
+                            sess.set_color(Some(e.color.clone()));
+                        }
+                        manifest::set_color(&self.inner.config_dir, &name, Some(e.color.clone()));
+                    }
+                    restored.push(name);
+                }
                 Err(err) => {
                     failed.insert(e.session.clone(), err.to_string());
                 }

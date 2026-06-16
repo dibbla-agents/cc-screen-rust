@@ -69,6 +69,7 @@ fn sess(name: &str) -> SessionInfo {
         machine: String::new(),
         headline: None,
         detail: None,
+        color: None,
     }
 }
 

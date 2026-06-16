@@ -54,6 +54,7 @@ pub fn build_router(hub: HubState) -> Router {
         // Session lifecycle + control, routed to the owning agent (?machine=).
         .route("/api/session", post(handlers::create))
         .route("/api/session/delete", post(handlers::delete))
+        .route("/api/session/color", post(handlers::set_color))
         .route("/api/session/root", get(handlers::session_root))
         .route("/api/sessions/restorable", get(handlers::restorable))
         .route("/api/sessions/restore", post(handlers::restore))

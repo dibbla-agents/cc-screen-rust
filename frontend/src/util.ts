@@ -40,6 +40,48 @@ export function machineAccent(
   };
 }
 
+// sessionAccent — the curated per-session mark palette (proposal 0029). Tokens
+// are stable ids stored on the session; the rendered HSL is owned here so the
+// shade stays tuned to the dark `bar` and clear of the reserved status hues
+// (cyan accent ~199° / amber ~43° / green / red). Fixed S/L → every mark reads at
+// one calm intensity. `null`/absent/unknown-token = no mark. Returns the border,
+// the switcher-swatch, and a faint wash for emphasis.
+//
+// IMPORTANT: keep the token set in lockstep with the agent's
+// `SESSION_COLOR_TOKENS` (crates/protocol/src/lib.rs) — the agent validates a
+// SetColor against it. An unknown token here renders unmarked (forward-compat).
+const SESSION_COLORS: Record<string, number> = {
+  rose: 350,
+  magenta: 320,
+  violet: 270,
+  indigo: 230,
+  teal: 175,
+  lime: 95,
+  orange: 25,
+  slate: 210,
+};
+export const SESSION_COLOR_TOKENS = Object.keys(SESSION_COLORS);
+
+export function sessionAccent(
+  color?: string
+): { border: string; swatch: string; wash: string } | null {
+  if (!color) return null;
+  const hue = SESSION_COLORS[color];
+  if (hue === undefined) return null; // unknown token (forward-compat) → unmarked
+  return {
+    border: `hsl(${hue} 60% 58%)`, // the pane border / agent-view spine
+    swatch: `hsl(${hue} 62% 60%)`, // the switcher-row swatch dot
+    wash: `hsl(${hue} 55% 50% / 0.10)`, // optional faint bar wash when marked
+  };
+}
+
+// nextSessionColor — pick a *different* random token than `current` (so a re-roll
+// always visibly changes). Wired to the mark button + the ⌃B c chord.
+export function nextSessionColor(current?: string): string {
+  const pool = SESSION_COLOR_TOKENS.filter((t) => t !== current);
+  return pool[Math.floor(Math.random() * pool.length)]!;
+}
+
 // dirCrumb — the last two segments of an absolute path: the leaf directory and
 // its parent (proposal 0025). Drives the two-segment folder breadcrumb label, a
 // far better disambiguator than the bare leaf for sessions auto-named after the

@@ -214,6 +214,32 @@ pub async fn clear_history(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ColorBody {
+    session: String,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+// Set/clear a session's mark colour (proposal 0029), routed to the owning agent;
+// the agent replies with the updated SessionInfo as JSON.
+pub async fn set_color(
+    State(hub): State<HubState>,
+    Query(q): Query<MachineQ>,
+    Json(b): Json<ColorBody>,
+) -> Response {
+    let session = b.session.clone();
+    let cmd = Cmd::SetColor { session: b.session, color: b.color };
+    match route(&hub, &q.machine, Some(&session), cmd).await {
+        Ok(CmdResult::Json(v)) => Json(v).into_response(),
+        Ok(CmdResult::Error { code, msg }) => {
+            (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
+        }
+        Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
+        Err(resp) => resp,
+    }
+}
+
 pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -> Response {
     let session = q.session.clone();
     match route(&hub, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {

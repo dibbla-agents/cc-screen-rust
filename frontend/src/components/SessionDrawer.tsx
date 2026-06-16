@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, dirCrumb, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, dirCrumb, fuzzyScore, sessionAccent, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -513,6 +513,14 @@ export default function SessionDrawer({
             itemRefs.current[i] = el;
           }}
           className={`group flex items-center rounded-md transition-colors ${rowState}`}
+          // Per-session mark (proposal 0029): a thin left colour spine via an
+          // inset box-shadow (no layout shift), so a marked session is scannable
+          // in the list. Unmarked rows render exactly as before.
+          style={
+            sessionAccent(s.color)
+              ? { boxShadow: `inset 3px 0 0 ${sessionAccent(s.color)!.border}` }
+              : undefined
+          }
         >
           <button
             onClick={() => onPick(s)}

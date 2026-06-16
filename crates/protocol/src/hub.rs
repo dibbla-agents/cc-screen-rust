@@ -145,6 +145,11 @@ pub enum Cmd {
     Key { session: String, key: String },
     Paste { session: String, text: String, enter: bool },
     ClearHistory { session: String },
+    /// Set (or clear) a session's operator-chosen mark colour (proposal 0029).
+    /// `color` is a curated palette token; `None` clears the mark. The agent
+    /// validates the token, persists it on the session + manifest, and replies
+    /// with the updated [`SessionInfo`] as [`CmdResult::Json`].
+    SetColor { session: String, color: Option<String> },
     Restore,
     Restorable,
     SessionRoot { session: Option<String> },
@@ -277,6 +282,7 @@ mod tests {
             machine: "box1".into(),
             headline: None,
             detail: None,
+            color: Some("rose".into()),
         };
         let cases = vec![
             AgentMsg::Register {
@@ -321,6 +327,8 @@ mod tests {
             HubMsg::Command { req: 2, cmd: Cmd::Delete(DeleteReq { session: "claude-x".into(), mode: "kill".into() }) },
             HubMsg::Command { req: 3, cmd: Cmd::Key { session: "claude-x".into(), key: "enter".into() } },
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
+            HubMsg::Command { req: 5, cmd: Cmd::SetColor { session: "claude-x".into(), color: Some("teal".into()) } },
+            HubMsg::Command { req: 6, cmd: Cmd::SetColor { session: "claude-x".into(), color: None } },
             HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::SummaryResult {
                 session: "claude-x".into(),

@@ -13,6 +13,7 @@ import {
   saveFavorites,
   sendImage,
   sendKey,
+  setSessionColor,
   setUnauthorizedHandler,
   type Favorite,
   type MachineInfo,
@@ -48,7 +49,7 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { agentStatus, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
@@ -178,6 +179,21 @@ export default function App() {
     }),
     []
   );
+  // markColor sets (or clears, with null) a session's mark colour (proposal
+  // 0029). Optimistic: update local state immediately so the border/swatch flips
+  // at once, then POST; the next /api/sessions poll reconciles either way. Routed
+  // to the owning agent (direct or via the hub) by the ref's machine.
+  const markColor = useCallback((ref: PaneRef | null, color: string | null) => {
+    if (!ref) return;
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.name === ref.name && (s.machine ?? "") === ref.machine
+          ? { ...s, color: color ?? undefined }
+          : s
+      )
+    );
+    setSessionColor(ref.name, color, ref.machine).catch(() => {});
+  }, []);
   // Live xterm.js instance per pane, populated by TerminalView's onTerm
   // callback. The global Cmd/Ctrl+C handler reads the active slot to decide
   // whether there's a selection to copy. Length 4 matches the max layout.
@@ -984,6 +1000,20 @@ export default function App() {
           openEditor(null);
           return;
         }
+        if (k === "c" || k === "C") {
+          // Mark the focused pane's session with a colour (proposal 0029):
+          // `c` re-rolls to a different palette token; `Shift+C` clears it.
+          stop();
+          clearArm();
+          const ref = panesRef.current[activeRef.current];
+          if (ref) {
+            const meta = sessionsRef.current.find(
+              (s) => s.name === ref.name && (s.machine ?? "") === ref.machine
+            );
+            markColor(ref, e.shiftKey ? null : nextSessionColor(meta?.color));
+          }
+          return;
+        }
         if (k === "Escape") {
           stop();
           clearArm();
@@ -1017,7 +1047,7 @@ export default function App() {
       clearArm();
       clearRepeat();
     };
-  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor]);
+  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, markColor]);
 
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //
@@ -1726,6 +1756,33 @@ export default function App() {
           )}
         </button>
 
+        {/* Mark-colour button (proposal 0029) — assigns the active session a
+            colour from the curated palette (click re-rolls; Shift-click clears).
+            Same action as the ⌃B c chord and the per-pane bar button. Hollow ring
+            when unmarked, filled swatch when marked. */}
+        {cur &&
+          (() => {
+            const acc = sessionAccent(cur.color);
+            return (
+              <button
+                onClick={(e) => markColor(currentSession, e.shiftKey ? null : nextSessionColor(cur.color))}
+                aria-label="Mark session colour"
+                title="Mark colour (⌃B c) — Shift-click to clear"
+                className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 active:bg-edge"
+              >
+                <span
+                  aria-hidden
+                  className="h-3.5 w-3.5 rounded-full"
+                  style={
+                    acc
+                      ? { background: acc.swatch }
+                      : { border: "1.5px solid rgb(100 116 139)" }
+                  }
+                />
+              </button>
+            );
+          })()}
+
         <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={statusTitle(headerStatus)} />
 
         {/* Session-status overview (proposal 0022): what every session needs, at a
@@ -1809,6 +1866,17 @@ export default function App() {
         </button>
       </header>
 
+      {/* Agent/phone-view mark spine (proposal 0029): a thin colour bar under the
+          header when the active session is marked — the single-pane analogue of
+          the desktop pane's mark border. Quiet, never a full-surface wash. */}
+      {!isDesktop && cur && sessionAccent(cur.color) && (
+        <div
+          aria-hidden
+          className="shrink-0"
+          style={{ height: 2, background: sessionAccent(cur.color)!.border }}
+        />
+      )}
+
       {/* Terminal(s) */}
       <main className="relative min-h-0 flex-1">
         {isDesktop ? (
@@ -1828,6 +1896,7 @@ export default function App() {
             }}
             onNewFor={openNewFor}
             onOpenEditor={() => openEditor(null)}
+            onMarkColor={markColor}
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
           />

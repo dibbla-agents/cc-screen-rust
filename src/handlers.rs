@@ -105,33 +105,38 @@ pub async fn logout(State(app): State<AppState>) -> Response {
 /// the hub stamps it when aggregating (empty is omitted on the wire, so the
 /// single-machine UI is unchanged).
 pub fn session_list(app: &AppState) -> Vec<SessionInfo> {
-    app.list()
-        .into_iter()
-        .map(|s| {
-            let summary = s.summary();
-            SessionInfo {
-                name: s.name.clone(),
-                tool: s.tool.clone(),
-                short: s.short.clone(),
-                attached: s.attached(),
-                activity: s.last_activity() as i64,
-                last_input_at: s.last_input_at(),
-                busy_since: s.busy_since(),
-                busy_until: s.busy_until(),
-                preview: s.preview(),
-                waiting: s.waiting(),
-                // This agent knows the policy → report it concretely (Some), so a
-                // 0005-aware client renders an accurate YOLO affordance.
-                skip_permissions: Some(s.skip_permissions),
-                cwd: s.live_cwd(),
-                machine: String::new(),
-                // The cached LLM summary (proposal 0022), if any. Reaches every
-                // client — direct or hub-relayed — through this one list.
-                headline: summary.as_ref().map(|x| x.headline.clone()),
-                detail: summary.map(|x| x.detail),
-            }
-        })
-        .collect()
+    app.list().into_iter().map(|s| session_info(&s)).collect()
+}
+
+/// Serialize one live session into the wire `SessionInfo`. Shared by
+/// `session_list` (the `/api/sessions` + hub-uplink list) and the single-session
+/// reply from `set_color_core`, so every surface reports the same fields.
+pub fn session_info(s: &Arc<Session>) -> SessionInfo {
+    let summary = s.summary();
+    SessionInfo {
+        name: s.name.clone(),
+        tool: s.tool.clone(),
+        short: s.short.clone(),
+        attached: s.attached(),
+        activity: s.last_activity() as i64,
+        last_input_at: s.last_input_at(),
+        busy_since: s.busy_since(),
+        busy_until: s.busy_until(),
+        preview: s.preview(),
+        waiting: s.waiting(),
+        // This agent knows the policy → report it concretely (Some), so a
+        // 0005-aware client renders an accurate YOLO affordance.
+        skip_permissions: Some(s.skip_permissions),
+        cwd: s.live_cwd(),
+        machine: String::new(),
+        // The cached LLM summary (proposal 0022), if any. Reaches every client —
+        // direct or hub-relayed — through this one list.
+        headline: summary.as_ref().map(|x| x.headline.clone()),
+        detail: summary.map(|x| x.detail),
+        // Operator-chosen mark colour (proposal 0029). Read from the live session
+        // mirror; reaches every client — direct or hub-relayed — through the list.
+        color: s.color(),
+    }
 }
 
 pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
@@ -311,6 +316,44 @@ pub async fn clear_history(State(app): State<AppState>, Json(req): Json<ClearReq
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown session"))?;
     sess.clear_history();
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ── POST /api/session/color ──────────────────────────────────────────────────
+#[derive(Deserialize)]
+pub struct ColorReq {
+    session: String,
+    /// A curated palette token (proposal 0029), or `null`/empty to clear the mark.
+    #[serde(default)]
+    color: Option<String>,
+}
+
+/// Set (or clear) a session's mark colour, validating the token, mirroring it on
+/// the live session, and persisting it to the manifest so it survives restart.
+/// Returns the updated `SessionInfo`. Shared by the REST handler and the hub
+/// `Cmd::SetColor` dispatch (`crate::ops`), so both run identical validation.
+pub fn set_color_core(
+    app: &AppState,
+    session: &str,
+    color: Option<String>,
+) -> Result<SessionInfo, (StatusCode, String)> {
+    // Normalize: an empty string is "clear", same as absent/null.
+    let color = color.filter(|c| !c.is_empty());
+    if let Some(tok) = &color {
+        if !cc_screen_protocol::is_valid_color_token(tok) {
+            return Err(err(StatusCode::BAD_REQUEST, format!("unknown colour: {tok}")));
+        }
+    }
+    let sess = app
+        .get(session)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown session"))?;
+    sess.set_color(color.clone());
+    crate::manifest::set_color(&app.inner.config_dir, session, color);
+    Ok(session_info(&sess))
+}
+
+pub async fn set_color(State(app): State<AppState>, Json(req): Json<ColorReq>) -> ApiResult {
+    let info = set_color_core(&app, &req.session, req.color)?;
+    Ok(Json(info).into_response())
 }
 
 // ── GET /api/sessions/restorable ─────────────────────────────────────────────

@@ -84,6 +84,26 @@ pub struct SessionInfo {
     /// body. Same lifecycle + back-compat as `headline`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Operator-chosen accent colour for this session (proposal 0029): a short
+    /// palette token (e.g. "rose"/"teal"), NOT a raw colour — the client owns the
+    /// rendered shade. `None`/absent = unmarked. Additive + omitted-when-absent,
+    /// so older clients and feature-off agents are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// The curated per-session mark palette tokens (proposal 0029). The *rendered*
+/// shade is owned by the client (`frontend/src/util.ts` `SESSION_COLORS`); the
+/// wire only carries these stable ids, so an old client renders an unknown token
+/// as unmarked rather than a broken colour. The agent validates a `SetColor`
+/// against this set — **keep it in lockstep with `util.ts`**. The set deliberately
+/// excludes hues near the reserved status colours (cyan/amber/green/red).
+pub const SESSION_COLOR_TOKENS: &[&str] =
+    &["rose", "magenta", "violet", "indigo", "teal", "lime", "orange", "slate"];
+
+/// Whether `token` is a known session-mark colour (proposal 0029).
+pub fn is_valid_color_token(token: &str) -> bool {
+    SESSION_COLOR_TOKENS.contains(&token)
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
@@ -356,6 +376,7 @@ mod tests {
             machine: String::new(),
             headline: None,
             detail: None,
+            color: None,
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
@@ -364,6 +385,7 @@ mod tests {
         assert!(!v.contains("machine"), "empty machine should be omitted: {v}");
         assert!(!v.contains("remote_control"), "retired policy must never serialize: {v}");
         assert!(!v.contains("skip_permissions"), "unknown policy should be omitted: {v}");
+        assert!(!v.contains("color"), "absent color should be omitted: {v}");
         assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
     }
 
@@ -386,9 +408,11 @@ mod tests {
             machine: "laptop".into(),
             headline: Some("Waiting to run tests".into()),
             detail: Some("It refactored auth and is paused.".into()),
+            color: Some("teal".into()),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
+        assert!(v.contains(r#""color":"teal""#), "color should serialize when set: {v}");
         assert!(v.contains(r#""headline":"Waiting to run tests""#), "headline serializes when set: {v}");
         assert!(v.contains(r#""skip_permissions":true"#), "yolo should serialize when set: {v}");
 
@@ -405,6 +429,7 @@ mod tests {
         assert_eq!(old.skip_permissions, None);
         assert_eq!(old.headline, None, "old payload → no summary");
         assert_eq!(old.detail, None);
+        assert_eq!(old.color, None, "old payload → no mark colour");
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.
@@ -413,6 +438,7 @@ mod tests {
         assert_eq!(back.last_input_at, 111);
         assert_eq!(back.busy_since, 222);
         assert_eq!(back.busy_until, 333);
+        assert_eq!(back.color, Some("teal".into()));
     }
 
     #[test]

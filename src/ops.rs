@@ -57,6 +57,17 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             }
             None => unknown_session(),
         },
+        Cmd::SetColor { session, color } => {
+            // Same validate-set-persist path as the REST handler; reply with the
+            // updated SessionInfo so a hub client renders the mark immediately.
+            match crate::handlers::set_color_core(app, &session, color) {
+                Ok(info) => match serde_json::to_value(info) {
+                    Ok(v) => CmdResult::Json(v),
+                    Err(e) => CmdResult::Error { code: 500, msg: e.to_string() },
+                },
+                Err((code, msg)) => CmdResult::Error { code: code.as_u16(), msg },
+            }
+        }
         Cmd::Restorable => {
             let list = app
                 .restorable()
@@ -150,6 +161,31 @@ mod tests {
         assert!(matches!(
             run_cmd(&app, Cmd::ClearHistory { session: s.clone() }),
             CmdResult::Ok
+        ));
+
+        // SetColor (proposal 0029): a valid token sets + persists + echoes the
+        // updated SessionInfo; an unknown token is a 400; None clears the mark.
+        match run_cmd(&app, Cmd::SetColor { session: s.clone(), color: Some("teal".into()) }) {
+            CmdResult::Json(v) => assert_eq!(v["color"], "teal"),
+            other => panic!("expected Json reply, got {other:?}"),
+        }
+        assert!(matches!(
+            app.get(&s).unwrap().color().as_deref(),
+            Some("teal")
+        ));
+        assert!(matches!(
+            run_cmd(&app, Cmd::SetColor { session: s.clone(), color: Some("chartreuse".into()) }),
+            CmdResult::Error { code: 400, .. }
+        ));
+        match run_cmd(&app, Cmd::SetColor { session: s.clone(), color: None }) {
+            CmdResult::Json(v) => assert!(v.get("color").is_none(), "cleared color is omitted: {v}"),
+            other => panic!("expected Json reply, got {other:?}"),
+        }
+        assert_eq!(app.get(&s).unwrap().color(), None);
+        // Unknown session → 404.
+        assert!(matches!(
+            run_cmd(&app, Cmd::SetColor { session: "shell-nope".into(), color: Some("teal".into()) }),
+            CmdResult::Error { code: 404, .. }
         ));
 
         // Delete actually runs (kills the session) rather than 403-ing.

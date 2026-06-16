@@ -227,6 +227,7 @@ async fn main() {
         .route("/api/tools", get(handlers::tools))
         .route("/api/session", post(handlers::create_session))
         .route("/api/session/delete", post(handlers::delete_session))
+        .route("/api/session/color", post(handlers::set_color))
         .route("/api/session/root", get(handlers::session_root))
         .route(
             "/api/favorites",

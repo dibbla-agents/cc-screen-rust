@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
-import { dirCrumb, machineAccent, toolColor } from "../util";
+import { dirCrumb, machineAccent, nextSessionColor, sessionAccent, toolColor } from "../util";
 import { FileEditIcon, PlusIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -78,6 +78,9 @@ interface Props {
   // view: browse / view / edit / download). The active pane — which the
   // pointerdown above has just set — is the implicit target, so the tree roots
   // at this session.
+  // Set/clear this pane's session mark colour (proposal 0029). `color` null
+  // clears the mark; a token re-rolls it. The owning machine rides on the ref.
+  onMarkColor: (ref: PaneRef, color: string | null) => void;
   // Pane-indexed xterm registration — see TerminalView.onTerm. Lets the
   // app's global copy shortcut read the active pane's current selection.
   onTermFor?: (idx: number, term: Terminal | null) => void;
@@ -111,6 +114,7 @@ export default function TileGrid({
   onOpenDrawerFor,
   onNewFor,
   onOpenEditor,
+  onMarkColor,
   onTermFor,
   onDropFiles,
   paneOverlay,
@@ -143,6 +147,7 @@ export default function TileGrid({
           onOpenDrawer={() => onOpenDrawerFor(idx)}
           onNew={() => onNewFor(idx)}
           onOpenEditor={onOpenEditor}
+          onMarkColor={onMarkColor}
           onTerm={(t) => onTermFor?.(idx, t)}
           onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
           overlay={paneOverlayIdx === idx ? paneOverlay : null}
@@ -166,6 +171,7 @@ interface PaneProps {
   onOpenDrawer: () => void;
   onNew: () => void;
   onOpenEditor: () => void;
+  onMarkColor: (ref: PaneRef, color: string | null) => void;
   onTerm?: (term: Terminal | null) => void;
   onDropFiles?: (dt: DataTransfer) => void;
   overlay?: ReactNode;
@@ -185,6 +191,7 @@ function PaneBox({
   onOpenDrawer,
   onNew,
   onOpenEditor,
+  onMarkColor,
   onTerm,
   onDropFiles,
   overlay,
@@ -192,6 +199,9 @@ function PaneBox({
   const meta = sessions.find(
     (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
   );
+  // The chosen per-session mark (proposal 0029), if any — drives the inset pane
+  // border and the identity-bar swatch.
+  const markAcc = sessionAccent(meta?.color);
 
   // Per-pane identity (proposal 0021): the machine "spine" + hostname tint.
   // Resolved exactly like the session drawer — hostname falls back to the raw
@@ -321,9 +331,22 @@ function PaneBox({
       <div
         aria-hidden
         className={`pointer-events-none absolute inset-0 z-10 ${
-          active ? "border-2 border-accent" : "border border-edge/70"
+          active ? "border-2 border-accent" : markAcc ? "" : "border border-edge/70"
         }`}
       />
+
+      {/* Per-session mark border (proposal 0029) — a second, inset border in the
+          chosen colour, drawn BELOW the cyan active border (z-[9] < z-10) and
+          inset 2px so the active read always wins; on an inactive marked pane it
+          replaces the neutral border above. Easy on the eye: a thin frame, never
+          a fill. */}
+      {markAcc && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute z-[9]"
+          style={{ inset: 2, border: `2px solid ${markAcc.border}` }}
+        />
+      )}
 
       {/* Drop-target overlay. pointer-events-none keeps the drag events
           flowing to the outer PaneBox handlers; this layer is purely
@@ -423,6 +446,27 @@ function PaneBox({
               </span>
             );
           })()}
+          {/* Mark-colour swatch (proposal 0029): click re-rolls the session's
+              colour; Shift-click clears it. Hollow ring when unmarked, filled
+              swatch when marked. Same action as the ⌃B c chord. */}
+          {session && (
+            <button
+              onClick={(e) => onMarkColor(session, e.shiftKey ? null : nextSessionColor(meta?.color))}
+              title="Mark colour (⌃B c) — Shift-click to clear"
+              aria-label="Mark session colour"
+              className="flex shrink-0 items-center justify-center"
+            >
+              <span
+                aria-hidden
+                className="h-3 w-3 rounded-full"
+                style={
+                  markAcc
+                    ? { background: markAcc.swatch }
+                    : { border: "1.5px solid rgb(100 116 139)" }
+                }
+              />
+            </button>
+          )}
           <button
             onClick={onOpenEditor}
             title="Files — browse, view, edit, download"

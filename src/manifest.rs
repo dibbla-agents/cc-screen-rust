@@ -39,6 +39,10 @@ pub struct Entry {
     /// ignored, and the session restores editable.)
     #[serde(default = "default_true")]
     pub skip_permissions: bool,
+    /// Operator-chosen mark colour (proposal 0029), persisted so the mark
+    /// survives restart/redeploy. Empty = unmarked; old files default to empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub color: String,
 }
 
 /// Default for `Entry::skip_permissions` — a pre-0005 manifest entry was always
@@ -87,6 +91,18 @@ pub fn record(config_dir: &Path, e: Entry) {
     save_locked(config_dir, entries);
 }
 
+/// Set (or clear) the mark colour on an existing entry (proposal 0029). Empty/`None`
+/// clears it. Best-effort: a no-op if the session isn't recorded (it has no entry
+/// to mark yet). Keyed by session, persisted atomically like `record`.
+pub fn set_color(config_dir: &Path, session: &str, color: Option<String>) {
+    let _g = LOCK.lock().unwrap();
+    let mut entries = load_locked(config_dir);
+    if let Some(slot) = entries.iter_mut().find(|x| x.session == session) {
+        slot.color = color.unwrap_or_default();
+        save_locked(config_dir, entries);
+    }
+}
+
 /// Drop an entry — a deliberate end (clean /exit or a web delete) that must not
 /// come back on the next restore.
 pub fn forget(config_dir: &Path, session: &str) {
@@ -118,6 +134,7 @@ mod tests {
             extra_dirs: vec![],
             created_at: 1,
             skip_permissions: true,
+            color: String::new(),
         }
     }
 
@@ -133,6 +150,22 @@ mod tests {
         let left = entries(&dir);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].session, "claude-b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_color_upserts_and_clears() {
+        let dir = std::env::temp_dir().join(format!("ccr-mcolor-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        record(&dir, entry("claude-a"));
+        // No-op for an unknown session (nothing recorded yet).
+        set_color(&dir, "claude-ghost", Some("teal".into()));
+        // Set, then read back.
+        set_color(&dir, "claude-a", Some("teal".into()));
+        assert_eq!(entries(&dir)[0].color, "teal");
+        // Clear with None → empty.
+        set_color(&dir, "claude-a", None);
+        assert_eq!(entries(&dir)[0].color, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

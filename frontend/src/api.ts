@@ -39,6 +39,11 @@ export interface Session {
   // server genuinely can't read it. Drives the folder-breadcrumb label and the
   // tooltip's path row.
   cwd?: string;
+  // Operator-chosen accent colour (proposal 0029): a curated palette token
+  // (e.g. "rose"/"teal"), not a raw colour — util.ts owns the rendered shade via
+  // sessionAccent(). Absent/empty = unmarked. Persisted on the agent so it
+  // survives reload/restart and reaches every client (direct or hub-relayed).
+  color?: string;
 }
 
 // PaneRef is the identity the app stores for an open session: the session name
@@ -581,6 +586,24 @@ export async function deleteSession(
   if (!r.ok && r.status !== 202 && r.status !== 204) {
     throw new Error((await r.text()).trim() || `delete: ${r.status}`);
   }
+}
+
+// setSessionColor marks a session with a curated palette token (proposal 0029),
+// or clears the mark when `color` is null. The agent validates the token,
+// persists it (survives restart), and returns the updated Session. Routed to the
+// owning agent via `?machine=` exactly like key/paste/delete.
+export async function setSessionColor(
+  session: string,
+  color: string | null,
+  machine?: string
+): Promise<Session> {
+  const r = await fetch(withMachine("/api/session/color", machine), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session, color }),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || `color: ${r.status}`);
+  return r.json();
 }
 
 // wsURL builds the terminal WebSocket URL for a session, honouring the page's

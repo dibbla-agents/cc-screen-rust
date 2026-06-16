@@ -297,6 +297,7 @@ mod tests {
             machine: String::new(),
             headline: None,
             detail: None,
+            color: None,
         }
     }
 
