@@ -30,7 +30,8 @@ import { writeClipboard } from "../util";
 //   - "line":    add a CSS class to the whole line (headings, blockquotes, …)
 //   - "table":   replace a whole GFM table block with a rendered <table> widget
 //   - "copybtn": float a "Copy" button over a code block (carries the code text)
-export type DecoType = "replace" | "bullet" | "mark" | "line" | "table" | "copybtn";
+//   - "checkbox": replace a `[ ]`/`[x]` task marker with a clickable checkbox
+export type DecoType = "replace" | "bullet" | "mark" | "line" | "table" | "copybtn" | "checkbox";
 
 // One column's alignment, parsed from a GFM delimiter row (`:--`, `--:`, `:-:`).
 export type TableAlign = "left" | "right" | "center" | null;
@@ -50,6 +51,7 @@ export interface DecoSpec {
   cls?: string; // for "mark"/"line"
   table?: TableData; // for "table"
   text?: string; // for "copybtn": the code-block contents to copy
+  checked?: boolean; // for "checkbox": the task marker's state ([x] → true)
 }
 
 // Heading levels map to CSS classes cm-md-h1..h6.
@@ -123,6 +125,29 @@ export function parseTableSource(src: string): TableData | null {
   });
   const body = lines.slice(2).map(splitRow);
   return { header, align, body };
+}
+
+// toggleTaskAt flips a GFM task-list checkbox at the line containing `pos`,
+// rewriting only the single box character (`[ ]` ⇄ `[x]`) so the rest of the
+// document is byte-for-byte unchanged — no reflow, clean diffs for the agent,
+// and the optimistic-mtime save path stays happy. Checked normalises to a
+// lowercase `x`, unchecked to a space (GFM-canonical). Pure and shared by both
+// render modes (the reading view passes the `<li>`'s source offset). Returns
+// `changed: false` and the input untouched if `pos`'s line isn't actually a
+// task item — a no-op, never a corruption.
+export function toggleTaskAt(src: string, pos: number): { next: string; changed: boolean } {
+  if (pos < 0 || pos > src.length) return { next: src, changed: false };
+  const lineStart = src.lastIndexOf("\n", pos - 1) + 1;
+  let lineEnd = src.indexOf("\n", pos);
+  if (lineEnd === -1) lineEnd = src.length;
+  const line = src.slice(lineStart, lineEnd);
+  // Anchored to the list bullet so a literal `[x]` in prose is never matched,
+  // tolerant of indentation and `-`/`*`/`+` bullets (nested + mixed lists).
+  const m = /^(\s*[-*+]\s+\[)([ xX])(\])/.exec(line);
+  if (!m) return { next: src, changed: false };
+  const boxAbs = lineStart + m[1].length; // index of the box char in `src`
+  const next = m[2].toLowerCase() === "x" ? " " : "x";
+  return { next: src.slice(0, boxAbs) + next + src.slice(boxAbs + 1), changed: true };
 }
 
 // codeBlockText extracts what a code block's Copy button should put on the
@@ -303,10 +328,29 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
         return;
       }
 
-      // Unordered list markers → a bullet glyph (off the active line).
+      // GFM task marker (`[ ]`/`[x]`) → a clickable checkbox off the active
+      // line. On the active line we leave the raw `[ ]` so it stays keyboard-
+      // editable, exactly like every other syntax mark. The marker node is the
+      // 3 chars `[`, box-char, `]`; the box char sits at node.from + 1.
+      if (name === "TaskMarker") {
+        if (isActive(node.from)) return;
+        const checked = state.doc.sliceString(node.from, node.to).toLowerCase().includes("x");
+        specs.push({ from: node.from, to: node.to, type: "checkbox", checked });
+        // A completed item reads as done: dim + strike the whole task line.
+        if (checked) {
+          const line = state.doc.lineAt(node.from);
+          specs.push({ from: line.from, to: line.from, type: "line", cls: "cm-md-task-done" });
+        }
+        return;
+      }
+
+      // Unordered list markers → a bullet glyph (off the active line). For a
+      // task list item the checkbox IS the marker, so suppress the bullet there
+      // (matches the reading view, which drops the bullet for task items too).
       if (name === "ListMark") {
         const grandparent = node.node.parent?.parent?.name;
         if (grandparent === "BulletList" && !isActive(node.from)) {
+          if (node.node.parent?.getChild("Task")) return; // task item → no bullet
           specs.push({ from: node.from, to: node.to, type: "bullet" });
         }
         return;
@@ -371,6 +415,48 @@ class CopyButtonWidget extends WidgetType {
         .catch(() => {});
     });
     return btn;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+// CheckboxWidget is the clickable task-list checkbox shown off the active line
+// in place of the raw `[ ]`/`[x]` marker. It carries the marker's source range
+// (`from`..`to`, the 3 chars `[`, box, `]`); tapping it dispatches a one-char
+// CodeMirror change at the box position, which flows through the editor's
+// normal onChange → setContent → live-save path (no save code here). Like the
+// table/copy widgets it toggles on `mousedown` + `preventDefault()` so the tap
+// never drops the caret into the line (which would re-reveal the raw source and
+// re-render the widget) and — the [0009] lesson — never blurs the editor or
+// dismisses the soft keyboard on the touch PWA.
+class CheckboxWidget extends WidgetType {
+  constructor(
+    readonly checked: boolean,
+    readonly from: number,
+    readonly to: number
+  ) {
+    super();
+  }
+  eq(o: CheckboxWidget) {
+    return o.checked === this.checked && o.from === this.from && o.to === this.to;
+  }
+  toDOM(view: EditorView) {
+    const box = document.createElement("span");
+    box.className = "cm-md-task" + (this.checked ? " cm-md-task-checked" : "");
+    box.setAttribute("role", "checkbox");
+    box.setAttribute("aria-checked", this.checked ? "true" : "false");
+    box.setAttribute("aria-label", this.checked ? "Mark task incomplete" : "Mark task complete");
+    box.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // The box char sits just inside the opening bracket: from + 1.
+      const boxPos = this.from + 1;
+      const cur = view.state.doc.sliceString(boxPos, boxPos + 1).toLowerCase();
+      const next = cur === "x" ? " " : "x";
+      view.dispatch({ changes: { from: boxPos, to: boxPos + 1, insert: next } });
+    });
+    return box;
   }
   ignoreEvent() {
     return true;
@@ -483,6 +569,14 @@ function buildInlineDecorations(state: EditorState): DecorationSet {
       case "copybtn":
         ranges.push(
           Decoration.widget({ widget: new CopyButtonWidget(s.text ?? ""), side: 1 }).range(s.from)
+        );
+        break;
+      case "checkbox":
+        ranges.push(
+          Decoration.replace({
+            widget: new CheckboxWidget(!!s.checked, s.from, s.to),
+            side: -1,
+          }).range(s.from, s.to)
         );
         break;
       case "replace":
@@ -615,6 +709,48 @@ const livePreviewTheme = EditorView.baseTheme({
     borderColor: "var(--cc-accent, #38bdf8)",
   },
   ".cm-md-bullet": { paddingRight: "0.5em", color: "var(--cc-accent, #38bdf8)" },
+  // GFM task checkbox. A rounded square sized to the text; the *visual* box is
+  // ~1em but the tap target is enlarged via padding (a ~28px hit area) so it's
+  // easy to thumb on the phone PWA without looking heavy. Not hover-dependent.
+  ".cm-md-task": {
+    display: "inline-block",
+    boxSizing: "content-box",
+    width: "1em",
+    height: "1em",
+    margin: "0 0.45em 0 0",
+    padding: "6px",
+    // pull the padding back so the box still sits inline without bloating line height
+    marginTop: "-6px",
+    marginBottom: "-6px",
+    verticalAlign: "middle",
+    backgroundClip: "content-box",
+    border: "1.5px solid var(--cc-edge, #243042)",
+    borderRadius: "5px",
+    cursor: "pointer",
+    transition: "background-color 0.12s ease, border-color 0.12s ease",
+  },
+  ".cm-md-task:hover": { borderColor: "var(--cc-accent, #38bdf8)" },
+  // Checked: accent fill + a crisp check glyph drawn with a rotated border.
+  ".cm-md-task-checked": {
+    background: "var(--cc-accent, #38bdf8)",
+    borderColor: "var(--cc-accent, #38bdf8)",
+    position: "relative",
+  },
+  ".cm-md-task-checked::after": {
+    content: '""',
+    position: "absolute",
+    left: "50%",
+    top: "46%",
+    width: "0.32em",
+    height: "0.6em",
+    transform: "translate(-50%, -55%) rotate(45deg)",
+    border: "solid var(--cc-bar, #0b1118)",
+    borderWidth: "0 2px 2px 0",
+  },
+  // A completed task line reads as done: dimmed, with struck-through text. The
+  // checkbox widget itself opts out of the strike so the box stays crisp.
+  ".cm-md-task-done": { opacity: "0.55", textDecoration: "line-through" },
+  ".cm-md-task-done .cm-md-task": { textDecoration: "none", opacity: "1" },
   // Rendered GFM tables (the TableWidget) — mirrors the reading view's
   // `.cc-prose table` rules (index.css) so Edit<->Read stay one document.
   ".cm-md-table-wrap": { margin: "0.9em 0", overflowX: "auto" },

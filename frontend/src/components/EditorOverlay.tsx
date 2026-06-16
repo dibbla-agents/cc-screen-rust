@@ -1,4 +1,6 @@
 import {
+  Children,
+  isValidElement,
   lazy,
   Suspense,
   useCallback,
@@ -8,6 +10,7 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -44,6 +47,7 @@ import {
 } from "./dirTree";
 import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
 import MarkdownEditor from "./MarkdownEditor";
+import { toggleTaskAt } from "../editor/livePreview";
 import EditorTree from "./EditorTree";
 import MoveDialog from "./MoveDialog";
 import AgentMirror, { type ConnState } from "./AgentMirror";
@@ -803,6 +807,19 @@ export default function EditorOverlay({
     },
     [activePath, content, baseMtime, status, saving, fileMachine]
   );
+
+  // Toggle a reading-mode task checkbox: flip the `[ ]`/`[x]` at `sourceOffset`
+  // in the document (Part A) via the same `setContent` the editor uses, so it
+  // marks the buffer dirty and rides the normal live-save / Save-button path —
+  // no separate checkbox store, no extra endpoint. Functional update keeps the
+  // callback stable (no `content` dep) so ReadingView's memoised components
+  // don't churn on every keystroke.
+  const onToggleTask = useCallback((sourceOffset: number) => {
+    setContent((cur) => {
+      const { next, changed } = toggleTaskAt(cur, sourceOffset);
+      return changed ? next : cur;
+    });
+  }, []);
 
   // Live save: debounce a write after edits settle. Skipped while a conflict is
   // unresolved (otherwise it would 409 in a loop) or a save is already running.
@@ -1632,7 +1649,7 @@ export default function EditorOverlay({
           )}
           {status === "ready" &&
             (reading && isMd ? (
-              <ReadingView content={content} />
+              <ReadingView content={content} onToggleTask={onToggleTask} />
             ) : (
               <MarkdownEditor
                 value={content}
@@ -2020,16 +2037,80 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
-const MARKDOWN_COMPONENTS = { pre: CodeBlock };
+// TaskCheckbox is the enabled, styled checkbox rendered in reading mode in place
+// of react-markdown's disabled task-list input. It's purely presentational + one
+// callback; the actual source rewrite + save happens in the parent. `preventDefault`
+// on press stops a tap from focus-stealing / scroll-jumping on the phone PWA (the
+// [0009] lesson); the toggle runs on click so keyboard (Enter/Space) works too.
+function TaskCheckbox({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      aria-label={checked ? "Mark task incomplete" : "Mark task complete"}
+      className={"cc-task-checkbox" + (checked ? " is-checked" : "")}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onToggle();
+      }}
+    />
+  );
+}
+
+// makeMarkdownComponents builds the react-markdown component overrides for the
+// reading view: the fenced-code copy button (`pre`) plus a task-list `li` that
+// swaps react-markdown's disabled checkbox for an enabled, clickable one. The
+// `<li>` carries the source position via remark's `node.position` (the input
+// itself has none), so toggling is anchored to the exact line — robust to
+// duplicate text and nesting (Part A). Built per-`onToggleTask` so the handler
+// stays current.
+function makeMarkdownComponents(onToggleTask: (sourceOffset: number) => void) {
+  return {
+    pre: CodeBlock,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    li: (props: any) => {
+      const cls: unknown = props.node?.properties?.className;
+      const isTask = Array.isArray(cls) && cls.includes("task-list-item");
+      const offset: unknown = props.node?.position?.start?.offset;
+      if (isTask && typeof offset === "number") {
+        const kids = Children.toArray(props.children);
+        const idx = kids.findIndex(
+          (k) => isValidElement(k) && (k as ReactElement<{ type?: string }>).props.type === "checkbox"
+        );
+        if (idx >= 0) {
+          const checked = !!(kids[idx] as ReactElement<{ checked?: boolean }>).props.checked;
+          const rest = kids.filter((_, i) => i !== idx);
+          return (
+            <li className={"task-list-item" + (checked ? " cc-task-done" : "")}>
+              <TaskCheckbox checked={checked} onToggle={() => onToggleTask(offset)} />
+              {rest}
+            </li>
+          );
+        }
+      }
+      return <li>{props.children}</li>;
+    },
+  };
+}
 
 // ReadingView renders the markdown fully (Obsidian's "reading mode"). It shares
 // the writing surface's centered measure so toggling Edit<->Read doesn't shift
-// the text column.
-function ReadingView({ content }: { content: string }) {
+// the text column. `onToggleTask` flips a task-list checkbox at a source offset.
+function ReadingView({
+  content,
+  onToggleTask,
+}: {
+  content: string;
+  onToggleTask: (sourceOffset: number) => void;
+}) {
+  const components = useMemo(() => makeMarkdownComponents(onToggleTask), [onToggleTask]);
   return (
     <div className="h-full overflow-y-auto px-6 py-10">
       <div className="cc-prose mx-auto" style={{ maxWidth: "var(--cc-measure, 44rem)" }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
           {content}
         </ReactMarkdown>
       </div>

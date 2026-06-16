@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { EditorState, EditorSelection } from "@codemirror/state";
 import { markdownLanguage } from "@codemirror/lang-markdown";
-import { computeDecorations, parseTableSource, type DecoSpec } from "./livePreview";
+import { computeDecorations, parseTableSource, toggleTaskAt, type DecoSpec } from "./livePreview";
 
 // Build an EditorState for `doc` with the cursor at `cursor` (default 0). The
 // markdown language is what gives syntaxTree() a parse to walk.
@@ -187,5 +187,92 @@ describe("parseTableSource", () => {
 
   it("returns null for non-tables", () => {
     expect(parseTableSource("just a line")).toBeNull();
+  });
+});
+
+describe("computeDecorations — task lists", () => {
+  it("renders an off-cursor task marker as a checkbox and suppresses its bullet", () => {
+    const doc = "- [ ] todo\n- [x] done\n\nz\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1)); // cursor in 'z'
+    const boxes = specs.filter((s) => s.type === "checkbox");
+    expect(boxes.length).toBe(2);
+    // First marker "[ ]" is the 3 chars at 2..5, unchecked.
+    expect(boxes[0].from).toBe(2);
+    expect(boxes[0].to).toBe(5);
+    expect(boxes[0].checked).toBe(false);
+    // Second marker "[x]" checked.
+    expect(boxes[1].checked).toBe(true);
+    // No bullet glyphs for task items (the checkbox is the marker).
+    expect(specs.some((s) => s.type === "bullet")).toBe(false);
+    // The checked item's line gets the done class.
+    expect(specs.some((s) => s.type === "line" && s.cls === "cm-md-task-done")).toBe(true);
+  });
+
+  it("reveals the raw marker (no checkbox) when the cursor is on the task line", () => {
+    const doc = "- [ ] todo\n- [x] done\n";
+    const specs = computeDecorations(stateFor(doc, 4)); // cursor on line 1
+    // Line 1's marker is revealed; line 2's still renders a checkbox.
+    const boxes = specs.filter((s) => s.type === "checkbox");
+    expect(boxes.length).toBe(1);
+    expect(boxes[0].from).toBe(doc.indexOf("[x]"));
+  });
+
+  it("handles nested and mixed-bullet task items", () => {
+    const doc = "- [ ] a\n  * [x] b\n  + [X] c\n\nz\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    const boxes = specs.filter((s) => s.type === "checkbox");
+    expect(boxes.length).toBe(3);
+    expect(boxes.map((b) => b.checked)).toEqual([false, true, true]);
+    expect(specs.some((s) => s.type === "bullet")).toBe(false);
+  });
+
+  it("still bullets a plain (non-task) list item", () => {
+    const doc = "- plain\n- [ ] task\n\nz\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    expect(specs.filter((s) => s.type === "bullet").length).toBe(1); // only the plain one
+    expect(specs.filter((s) => s.type === "checkbox").length).toBe(1);
+  });
+});
+
+describe("toggleTaskAt", () => {
+  it("flips an unchecked box to checked, touching only one char", () => {
+    const src = "- [ ] todo\nother line\n";
+    const pos = 0; // anywhere on the task line
+    const { next, changed } = toggleTaskAt(src, pos);
+    expect(changed).toBe(true);
+    expect(next).toBe("- [x] todo\nother line\n");
+  });
+
+  it("flips a checked box (any case) back to a space", () => {
+    expect(toggleTaskAt("- [x] a\n", 3).next).toBe("- [ ] a\n");
+    expect(toggleTaskAt("- [X] a\n", 3).next).toBe("- [ ] a\n");
+  });
+
+  it("targets the right item among many, anchored by position", () => {
+    const src = "- [ ] a\n- [ ] b\n- [ ] c\n";
+    const posB = src.indexOf("] b"); // a position on line 2
+    const { next } = toggleTaskAt(src, posB);
+    expect(next).toBe("- [ ] a\n- [x] b\n- [ ] c\n");
+  });
+
+  it("handles nested / mixed-bullet items and only changes one char", () => {
+    const src = "- [ ] a\n  * [ ] b\n  + [ ] c\n";
+    const posC = src.indexOf("+");
+    const { next, changed } = toggleTaskAt(src, posC);
+    expect(changed).toBe(true);
+    expect(next).toBe("- [ ] a\n  * [ ] b\n  + [x] c\n");
+  });
+
+  it("is a no-op on a non-task line (never a corruption)", () => {
+    const src = "just prose with a literal [x] in it\n";
+    const r = toggleTaskAt(src, 5);
+    expect(r.changed).toBe(false);
+    expect(r.next).toBe(src);
+  });
+
+  it("is a no-op for an out-of-range position", () => {
+    const src = "- [ ] a\n";
+    expect(toggleTaskAt(src, -1).changed).toBe(false);
+    expect(toggleTaskAt(src, 999).changed).toBe(false);
   });
 });

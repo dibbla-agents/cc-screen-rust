@@ -81,6 +81,49 @@ body {
 .cc-prose ol { list-style: decimal; margin: 0.5em 0; padding-left: 1.4em; }
 .cc-prose li { margin: 0.25em 0; }
 .cc-prose li::marker { color: var(--cc-ink-faint); }
+/* GFM task-list items: the checkbox is the marker, so drop the list bullet and
+   hang the box in the gutter. Mirrors the live-preview editor (livePreview.ts)
+   so Edit<->Read stay one continuous document. */
+.cc-prose .task-list-item { list-style: none; }
+.cc-prose ul:has(> .task-list-item) { padding-left: 0; }
+/* The clickable checkbox. Visual box ~1.05em; tap target enlarged to ~28px via
+   padding (backgroundClip keeps the fill at box size) so it's easy to thumb on
+   the phone PWA without reading heavy. Not hover-dependent. */
+.cc-task-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: content-box;
+  flex: none;
+  width: 1.05em;
+  height: 1.05em;
+  padding: 6px;
+  margin: 0 0.5em 0 0;
+  vertical-align: -0.22em;
+  background-clip: content-box;
+  border: 1.5px solid var(--cc-edge, #243042);
+  border-radius: 5px;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+.cc-task-checkbox:hover { border-color: var(--cc-accent, #38bdf8); }
+.cc-task-checkbox:focus-visible { outline: 2px solid var(--cc-accent, #38bdf8); outline-offset: 1px; }
+.cc-task-checkbox.is-checked { background: var(--cc-accent, #38bdf8); border-color: var(--cc-accent, #38bdf8); }
+/* The check glyph: a rotated open-corner border, drawn in the bar/ink colour. */
+.cc-task-checkbox.is-checked::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: 0.32em;
+  height: 0.6em;
+  transform: translate(-50%, -55%) rotate(45deg);
+  border: solid var(--cc-bar, #0b1118);
+  border-width: 0 2px 2px 0;
+}
+/* A completed item reads as done: dim + strike the text. The inline-block box
+   establishes its own decoration context, so the strike doesn't cross it. */
+.cc-prose .task-list-item.cc-task-done { opacity: 0.6; text-decoration: line-through; }
 .cc-prose a { color: #7cc2ff; text-decoration: none; border-bottom: 1px solid rgba(124, 194, 255, 0.4); }
 .cc-prose a:hover { border-bottom-color: #7cc2ff; }
 .cc-prose strong { color: var(--cc-ink-strong); font-weight: 700; }
