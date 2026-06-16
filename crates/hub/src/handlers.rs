@@ -381,6 +381,20 @@ pub async fn dirs_search(State(hub): State<HubState>, Query(qy): Query<DirSearch
     file_route(&hub, &qy.machine, opt(&qy.session), "dirs_search", json!({ "q": qy.q, "root": qy.root })).await
 }
 
+// Recursive fuzzy *file* search (proposal 0027), per-agent like `dirs_search`:
+// the chosen machine searches its own $HOME. `?session=` both disambiguates the
+// owning agent and lets that agent default the root to the session's project.
+pub async fn files_search(State(hub): State<HubState>, Query(qy): Query<DirSearchQ>) -> Response {
+    file_route(
+        &hub,
+        &qy.machine,
+        opt(&qy.session),
+        "files_search",
+        json!({ "q": qy.q, "root": qy.root, "session": qy.session }),
+    )
+    .await
+}
+
 pub async fn file_read(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
     file_route(&hub, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
 }

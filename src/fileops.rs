@@ -57,6 +57,7 @@ pub fn run(app: &AppState, op: &str, args: Value) -> CmdResult {
     match op {
         "dirs" => dirs(app, args),
         "dirs_search" => dirs_search(app, args),
+        "files_search" => files_search(app, args),
         "files" => files(app, args),
         "read" => read(app, args),
         "write" => write(app, args),
@@ -122,8 +123,38 @@ fn dirs_search(app: &AppState, args: Value) -> CmdResult {
         return err(403, "path outside home");
     };
     let recent: HashSet<PathBuf> = app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect();
-    let hits = crate::dirsearch::search(&home, &root, &a.q, &recent);
+    let hits = crate::dirsearch::search(&home, &root, &a.q, &recent, crate::dirsearch::Kind::Dirs);
     CmdResult::Json(crate::dirsearch::results_json(&home, &root, &hits))
+}
+
+#[derive(Deserialize, Default)]
+struct FileSearchArgs {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    session: String,
+}
+
+/// Recursive fuzzy *file* search (proposal 0027), hub-relayed mirror of
+/// files.rs::files_search. Same confinement + ranking via the shared core, but
+/// harvests files name-first. Root defaults to the session's project cwd.
+fn files_search(app: &AppState, args: Value) -> CmdResult {
+    let a: FileSearchArgs = serde_json::from_value(args).unwrap_or_default();
+    let home = home(app);
+    let mut root = a.root.trim().to_string();
+    if root.is_empty() && !a.session.trim().is_empty() {
+        if let Some(sess) = app.get(a.session.trim()) {
+            root = sess.live_cwd();
+        }
+    }
+    let Some(root) = resolve_existing_under(&home, &root) else {
+        return err(403, "path outside home");
+    };
+    let recent: HashSet<PathBuf> = app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect();
+    let hits = crate::dirsearch::search(&home, &root, &a.q, &recent, crate::dirsearch::Kind::Files);
+    CmdResult::Json(crate::dirsearch::files_results_json(&home, &root, &hits))
 }
 
 fn files(app: &AppState, args: Value) -> CmdResult {

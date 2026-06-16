@@ -215,9 +215,12 @@ export default function App() {
   // keyboard handler can go inert while the editor owns the screen.
   // Restore the file-viewer *mode* across reloads (path stays null — the file is
   // restored from per-session viewer memory once the overlay mounts).
-  const [editor, setEditor] = useState<{ open: boolean; path: string | null }>(() => ({
+  // `focusSearchSeq` is bumped by the `Ctrl+B f` chord (proposal 0027) to focus
+  // the viewer's in-tree Find bar — even when the viewer is already open.
+  const [editor, setEditor] = useState<{ open: boolean; path: string | null; focusSearchSeq: number }>(() => ({
     open: loadEditorOpen(),
     path: null,
+    focusSearchSeq: 0,
   }));
   const editorOpenRef = useRef(false);
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
@@ -491,14 +494,23 @@ export default function App() {
 
   // openEditor surfaces the singleton editor overlay (closing any sheet first
   // so it doesn't peek through). `path` null = desktop tree-pick entry.
+  // `focusSearch` (the Ctrl+B f path) bumps focusSearchSeq so the viewer focuses
+  // its Find bar — also when already open, so re-pressing re-focuses in place.
   const openEditor = useCallback(
-    (path: string | null) => {
+    (path: string | null, focusSearch = false) => {
       closeAllSheets();
-      setEditor({ open: true, path });
+      setEditor((s) => ({
+        open: true,
+        path,
+        focusSearchSeq: s.focusSearchSeq + (focusSearch ? 1 : 0),
+      }));
     },
     [closeAllSheets]
   );
-  const closeEditor = useCallback(() => setEditor({ open: false, path: null }), []);
+  const closeEditor = useCallback(
+    () => setEditor((s) => ({ open: false, path: null, focusSearchSeq: s.focusSearchSeq })),
+    []
+  );
 
   // Sessions just created via New Session, keyed `machine/name` → grace expiry
   // (ms). A create confirms the agent made the session, but the hub's union list
@@ -906,6 +918,14 @@ export default function App() {
             openDrawer();
             return;
           }
+          if (k === "f" || k === "F") {
+            // Find-file (proposal 0027): the viewer already owns the screen, so
+            // just re-focus its Find bar in place (bump focusSearchSeq).
+            stop();
+            clearArm();
+            openEditor(null, true);
+            return;
+          }
           // Esc and every other chord key is inert over the viewer: drop the
           // prefix. (Esc-to-close is the editor's own capture-phase handler.)
           clearArm();
@@ -998,6 +1018,14 @@ export default function App() {
           stop();
           clearArm();
           openEditor(null);
+          return;
+        }
+        if (k === "f" || k === "F") {
+          // Find file (proposal 0027): open the viewer AND focus its Find bar in
+          // one step — one chord from the agent view straight to file search.
+          stop();
+          clearArm();
+          openEditor(null, true);
           return;
         }
         if (k === "c" || k === "C") {
@@ -2064,6 +2092,8 @@ export default function App() {
             // over the viewer; onDirtyChange feeds the source-side switch guard.
             onOpenSwitcher={isDesktop ? () => setDrawerOpen(true) : undefined}
             onDirtyChange={onEditorDirtyChange}
+            // Proposal 0027: Ctrl+B f bumps this to focus the in-tree Find bar.
+            focusSearchSeq={editor.focusSearchSeq}
           />
         </Suspense>
       )}

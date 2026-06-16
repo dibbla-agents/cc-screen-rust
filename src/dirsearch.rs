@@ -19,15 +19,43 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-/// One ranked directory hit.
-pub struct DirHit {
+/// What the confined BFS harvests. Both variants share the same walk, prune
+/// list, caps, and $HOME re-confinement; only the harvested node type and its
+/// name-over-path bonus differ.
+///
+/// - [`Kind::Dirs`] — the create-session folder search (proposal 0016): collect
+///   directories, descend directories.
+/// - [`Kind::Files`] — the file-viewer quick search (proposal 0027): collect
+///   *files* but still descend directories to reach nested ones.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Dirs,
+    Files,
+}
+
+/// One ranked hit. `dir`/`size` are only meaningful for file hits (proposal
+/// 0027) — they are `""`/`0` for directory hits.
+pub struct Hit {
     pub path: String,
     pub name: String,
     pub rel: String,
+    /// Home-relative parent directory (file hits only; `""` for dir hits).
+    pub dir: String,
     pub depth: usize,
     pub score: i64,
     pub mtime: i64,
+    /// File size in bytes (file hits only; `0` for dir hits).
+    pub size: i64,
 }
+
+// A basename match outscores a path-only match for the same query. For
+// directories (0016) this is a gentle nudge — a shallow name match should still
+// be able to lose to a recently-used session cwd. For files (0027) the product
+// rule is stronger ("file names are much more relevant than paths"): a file
+// *name* match must ALWAYS beat one that only hit a parent folder's name, so the
+// file tier uses a separator large enough to dominate any path-only score.
+const DIR_NAME_BONUS: i64 = 20;
+const FILE_NAME_BONUS: i64 = 10_000;
 
 // Hard bounds so a large $HOME can't hang the walk. These are a deliberate cap,
 // not a silent truncation — results are ranked and the best matches survive the
@@ -119,15 +147,27 @@ fn fuzzy(needle: &[char], hay: &str) -> Option<i64> {
 }
 
 /// Walk the subtree under `root` (already `$HOME`-confined by the caller) and
-/// return the directories whose basename or home-relative path fuzzy-match
-/// `query`, ranked best-first and capped. `recent` is the set of live/restorable
-/// session cwds, which float to the top. Empty query → no results (the client
-/// uses `/api/dirs` + a recents shortcut instead).
-pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) -> Vec<DirHit> {
+/// return the nodes of the requested [`Kind`] whose basename or home-relative
+/// path fuzzy-match `query`, ranked best-first and capped. Directories always
+/// drive the BFS (so files are reachable); `kind` only decides which nodes are
+/// *harvested* into the result list. `recent` is the set of live/restorable
+/// session cwds, which float matching directories to the top (it never matches a
+/// file path, so it is a no-op for [`Kind::Files`]). Empty query → no results.
+pub fn search(
+    home: &Path,
+    root: &Path,
+    query: &str,
+    recent: &HashSet<PathBuf>,
+    kind: Kind,
+) -> Vec<Hit> {
     let q = query.trim();
     if q.is_empty() {
         return Vec::new();
     }
+    let name_bonus = match kind {
+        Kind::Dirs => DIR_NAME_BONUS,
+        Kind::Files => FILE_NAME_BONUS,
+    };
     let needle: Vec<char> = q.chars().flat_map(|c| c.to_lowercase()).collect();
     let start = Instant::now();
     let now = SystemTime::now()
@@ -149,7 +189,7 @@ pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) 
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
     queue.push_back((root.to_path_buf(), 0));
     let mut count = 0usize;
-    let mut hits: Vec<DirHit> = Vec::new();
+    let mut hits: Vec<Hit> = Vec::new();
 
     'walk: while let Some((dir, depth)) = queue.pop_front() {
         if start.elapsed().as_millis() > TIME_BUDGET_MS {
@@ -163,7 +203,7 @@ pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) 
             }
             count += 1;
             let name = ent.file_name().to_string_lossy().into_owned();
-            // Prune heavy + hidden directories: never descended, never returned.
+            // Prune heavy + hidden entries: never descended, never returned.
             if name.starts_with('.') || PRUNE.contains(&name.as_str()) {
                 continue;
             }
@@ -172,11 +212,17 @@ pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) 
             // as a folder — matching /api/dirs and keeping symlink-farm homes
             // searchable. Broken links fail metadata() and are skipped.
             let Ok(meta) = std::fs::metadata(&path) else { continue };
-            if !meta.is_dir() {
+            let is_dir = meta.is_dir();
+            // We only care about directories (to descend / harvest in Dirs mode)
+            // and, in Files mode, regular files. Anything else (sockets, fifos…)
+            // is skipped.
+            if !is_dir && !(kind == Kind::Files && meta.is_file()) {
                 continue;
             }
             // Re-confine: the real target must stay within $HOME (drops an
             // outward-pointing symlink), and the canonical path dedupes cycles.
+            // Applied to every node we keep or descend — so a symlinked-outside
+            // file can't surface any more than a symlinked-outside dir can.
             let Ok(canon) = std::fs::canonicalize(&path) else { continue };
             if !(canon == real_home || canon.starts_with(&real_home)) {
                 continue;
@@ -185,43 +231,57 @@ pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) 
                 continue;
             }
 
-            let rel = rel_home(home, &path);
-            // Score basename first (the strong signal), else the home-relative
-            // path so a query like `dev/foo` still matches across separators.
-            let base = fuzzy(&needle, &name);
-            let m = match base {
-                Some(s) => Some(s + 20), // basename match weighs more than a path-only match
-                None => fuzzy(&needle, &rel),
-            };
-            if let Some(mut score) = m {
-                // Shallower is better; the obvious top-level project wins ties.
-                score += (MAX_DEPTH.saturating_sub(child_depth)) as i64 * 3;
-                let mt = mtime_secs(&meta);
-                // Recently-modified bonus, graded by age (≤2d, ≤14d, ≤90d).
-                let age = (now - mt).max(0);
-                if age <= 2 * 86_400 {
-                    score += 12;
-                } else if age <= 14 * 86_400 {
-                    score += 6;
-                } else if age <= 90 * 86_400 {
-                    score += 2;
+            // Harvest only the node type this search is for; directories are
+            // still descended below regardless (files live inside them).
+            let harvest = (is_dir && kind == Kind::Dirs) || (!is_dir && kind == Kind::Files);
+            if harvest {
+                let rel = rel_home(home, &path);
+                // Score basename first (the strong signal), else the home-relative
+                // path so a query like `dev/foo` still matches across separators.
+                let base = fuzzy(&needle, &name);
+                let m = match base {
+                    Some(s) => Some(s + name_bonus), // basename match weighs more than a path-only match
+                    None => fuzzy(&needle, &rel),
+                };
+                if let Some(mut score) = m {
+                    // Shallower is better; the obvious top-level project wins ties.
+                    score += (MAX_DEPTH.saturating_sub(child_depth)) as i64 * 3;
+                    let mt = mtime_secs(&meta);
+                    // Recently-modified bonus, graded by age (≤2d, ≤14d, ≤90d).
+                    let age = (now - mt).max(0);
+                    if age <= 2 * 86_400 {
+                        score += 12;
+                    } else if age <= 14 * 86_400 {
+                        score += 6;
+                    } else if age <= 90 * 86_400 {
+                        score += 2;
+                    }
+                    // Recently-used: this folder is (or hosts) a live/restorable
+                    // session — a very strong "you want this" signal. Never
+                    // matches a file path, so it is inert for Kind::Files.
+                    if recent.contains(&path) {
+                        score += 40;
+                    }
+                    let (dir, size) = if is_dir {
+                        (String::new(), 0)
+                    } else {
+                        let parent = path.parent().map(|p| rel_home(home, p)).unwrap_or_default();
+                        (parent, meta.len() as i64)
+                    };
+                    hits.push(Hit {
+                        path: path.to_string_lossy().into_owned(),
+                        name,
+                        rel,
+                        dir,
+                        depth: child_depth,
+                        score,
+                        mtime: mt,
+                        size,
+                    });
                 }
-                // Recently-used: this folder is (or hosts) a live/restorable
-                // session — a very strong "you want this" signal.
-                if recent.contains(&path) {
-                    score += 40;
-                }
-                hits.push(DirHit {
-                    path: path.to_string_lossy().into_owned(),
-                    name,
-                    rel,
-                    depth: child_depth,
-                    score,
-                    mtime: mt,
-                });
             }
 
-            if child_depth < MAX_DEPTH {
+            if is_dir && child_depth < MAX_DEPTH {
                 queue.push_back((path, child_depth));
             }
         }
@@ -237,8 +297,9 @@ pub fn search(home: &Path, root: &Path, query: &str, recent: &HashSet<PathBuf>) 
     hits
 }
 
-/// Build the JSON response body shared by the REST handler and the hub op.
-pub fn results_json(home: &Path, root: &Path, hits: &[DirHit]) -> Value {
+/// Build the directory-search JSON body (proposal 0016) shared by the REST
+/// handler and the hub op.
+pub fn results_json(home: &Path, root: &Path, hits: &[Hit]) -> Value {
     let results: Vec<Value> = hits
         .iter()
         .map(|h| {
@@ -249,6 +310,32 @@ pub fn results_json(home: &Path, root: &Path, hits: &[DirHit]) -> Value {
                 "depth": h.depth,
                 "score": h.score,
                 "mtime": h.mtime,
+            })
+        })
+        .collect();
+    json!({
+        "root": root.to_string_lossy(),
+        "home": home.to_string_lossy(),
+        "results": results,
+    })
+}
+
+/// Build the file-search JSON body (proposal 0027). Same envelope as
+/// [`results_json`] but each hit also carries its parent `dir` (home-relative)
+/// and `size`, so the viewer can show where the file lives.
+pub fn files_results_json(home: &Path, root: &Path, hits: &[Hit]) -> Value {
+    let results: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            json!({
+                "path": h.path,
+                "name": h.name,
+                "rel": h.rel,
+                "dir": h.dir,
+                "depth": h.depth,
+                "score": h.score,
+                "mtime": h.mtime,
+                "size": h.size,
             })
         })
         .collect();
@@ -279,7 +366,7 @@ mod tests {
         touch_dir(&home.join("misc/unrelated"));
 
         let recent = HashSet::new();
-        let hits = search(&home, &home, "screen", &recent);
+        let hits = search(&home, &home, "screen", &recent, Kind::Dirs);
         let rels: Vec<&str> = hits.iter().map(|h| h.rel.as_str()).collect();
 
         assert!(rels.contains(&"~/development/cc-screen-rust"), "got {rels:?}");
@@ -306,7 +393,7 @@ mod tests {
 
         let mut recent = HashSet::new();
         recent.insert(home.join("zzz/app-helper"));
-        let hits = search(&home, &home, "app", &recent);
+        let hits = search(&home, &home, "app", &recent, Kind::Dirs);
         assert!(!hits.is_empty());
         // The recently-used folder should outrank the shallower plain matches.
         assert_eq!(hits[0].rel, "~/zzz/app-helper", "ranking: {:?}", hits.iter().map(|h| (&h.rel, h.score)).collect::<Vec<_>>());
@@ -320,8 +407,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let home = base.join("home");
         touch_dir(&home.join("a"));
-        assert!(search(&home, &home, "", &HashSet::new()).is_empty());
-        assert!(search(&home, &home, "   ", &HashSet::new()).is_empty());
+        assert!(search(&home, &home, "", &HashSet::new(), Kind::Dirs).is_empty());
+        assert!(search(&home, &home, "   ", &HashSet::new(), Kind::Dirs).is_empty());
+        assert!(search(&home, &home, "", &HashSet::new(), Kind::Files).is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -338,12 +426,96 @@ mod tests {
         // A symlink under home named to match the query, pointing OUTSIDE.
         symlink(&outside, home.join("escape-screen")).unwrap();
 
-        let hits = search(&home, &home, "screen", &HashSet::new());
+        let hits = search(&home, &home, "screen", &HashSet::new(), Kind::Dirs);
         // The symlink target sits outside home → its contents must not surface.
         assert!(
             !hits.iter().any(|h| h.rel.contains("secret-screen")),
             "outward symlink leaked: {:?}",
             hits.iter().map(|h| &h.rel).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn touch_file(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    #[test]
+    fn files_name_match_outranks_path_only_match() {
+        // Proposal 0027: a file whose *name* contains the query must always rank
+        // above one that matches only via a parent-folder name.
+        let base = std::env::temp_dir().join(format!("ccr-filesearch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        // name matches for "develop"
+        touch_file(&home.join("proj/docs/remove-development.md"));
+        touch_file(&home.join("proj/DEVELOPING.md"));
+        // path-only match: basename has no "develop", but the folder does
+        touch_file(&home.join("development/infra/setup.md"));
+
+        let hits = search(&home, &home, "develop", &HashSet::new(), Kind::Files);
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"remove-development.md"), "got {names:?}");
+        assert!(names.contains(&"DEVELOPING.md"), "got {names:?}");
+        assert!(names.contains(&"setup.md"), "got {names:?}");
+
+        // Every name match sorts strictly above the path-only match.
+        let setup_pos = hits.iter().position(|h| h.name == "setup.md").unwrap();
+        let last_name_match = hits
+            .iter()
+            .rposition(|h| h.name == "remove-development.md" || h.name == "DEVELOPING.md")
+            .unwrap();
+        assert!(
+            last_name_match < setup_pos,
+            "path-only match outranked a name match: {:?}",
+            hits.iter().map(|h| (&h.name, h.score)).collect::<Vec<_>>()
+        );
+
+        // File hits carry their parent dir + size; dirs aren't returned.
+        let dev = hits.iter().find(|h| h.name == "remove-development.md").unwrap();
+        assert_eq!(dev.dir, "~/proj/docs");
+        assert!(dev.size > 0);
+        assert!(!hits.iter().any(|h| h.name == "docs" || h.name == "proj"), "dirs leaked into file search");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn files_search_prunes_heavy_dirs_but_descends_for_nested_files() {
+        let base = std::env::temp_dir().join(format!("ccr-filesearch-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        touch_file(&home.join("a/b/c/target-deep.txt")); // nested file, must be found
+        touch_file(&home.join("node_modules/pkg/target-junk.txt")); // pruned dir
+        touch_file(&home.join(".git/target-obj.txt")); // hidden dir
+
+        let hits = search(&home, &home, "target", &HashSet::new(), Kind::Files);
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"target-deep.txt"), "nested file missing: {names:?}");
+        assert!(!names.iter().any(|n| n.contains("junk") || n.contains("obj")), "heavy/hidden leaked: {names:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_outward_symlinked_file_is_not_followed() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("ccr-filesearch-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let outside = base.join("outside");
+        touch_dir(&home);
+        touch_file(&outside.join("secret-token.txt"));
+        // A symlink under home, named to match, pointing at a file OUTSIDE home.
+        symlink(outside.join("secret-token.txt"), home.join("token.txt")).unwrap();
+
+        let hits = search(&home, &home, "token", &HashSet::new(), Kind::Files);
+        assert!(
+            !hits.iter().any(|h| h.path.contains("outside")),
+            "outward symlinked file leaked: {:?}",
+            hits.iter().map(|h| &h.path).collect::<Vec<_>>()
         );
         let _ = std::fs::remove_dir_all(&base);
     }

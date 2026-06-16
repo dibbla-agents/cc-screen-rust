@@ -24,13 +24,24 @@ import {
   movePath,
   flattenDataTransfer,
   uploadFiles,
+  searchFiles,
   FileNotEditable,
   FileChangedOnDisk,
   type FileEntry,
+  type FileSearchResult,
   type MachineInfo,
 } from "../api";
 import ContextMenu, { type CtxTarget } from "./ContextMenu";
-import { errMsg, isMarkdownFile, isPdfFile, useDirTree, type DirTreeOpts, type TreeCtxInfo } from "./dirTree";
+import {
+  errMsg,
+  isMarkdownFile,
+  isPdfFile,
+  canOpenInEditor,
+  fmtAge,
+  useDirTree,
+  type DirTreeOpts,
+  type TreeCtxInfo,
+} from "./dirTree";
 import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
 import MarkdownEditor from "./MarkdownEditor";
 import EditorTree from "./EditorTree";
@@ -99,6 +110,11 @@ interface Props {
   // guard lives at the switch source (App.tsx) because an effect reacting to an
   // already-changed prop can't cleanly cancel the switch.
   onDirtyChange?: (dirty: boolean) => void;
+  // Quick-file-search focus signal (proposal 0027). A monotonically-bumped
+  // counter from App.tsx's `Ctrl+B f` chord: each bump focuses (and selects) the
+  // in-tree Find bar. 0 = never requested, so the bar isn't auto-focused on a
+  // plain `Ctrl+B e` open.
+  focusSearchSeq?: number;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -187,6 +203,7 @@ export default function EditorOverlay({
   termFontSize = 14,
   onOpenSwitcher,
   onDirtyChange,
+  focusSearchSeq = 0,
 }: Props) {
   // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
   // on open; switchable via the header dropdown (multi-machine only).
@@ -256,6 +273,70 @@ export default function EditorOverlay({
   // panel. Enabled on both now (it's also what gives the phone a real folder to
   // anchor new files in and the ~-abbreviated status-bar path).
   const tree = useDirTree(open, session, EDITOR_TREE_OPTS, fileMachine);
+
+  // ── Quick file search (proposal 0027) ────────────────────────────────────
+  // A recursive name-first file search scoped to the session's project root.
+  // Typing ≥3 chars fires a debounced GET /api/files/search; results REPLACE the
+  // lazy tree while a query is active; clearing the query restores the tree.
+  // Opening a result reuses the exact tree-click path (setActivePath / download).
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<FileSearchResult[]>([]);
+  const [resultCursor, setResultCursor] = useState(0);
+  const [searching, setSearching] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const resultRowRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const trimmedQuery = query.trim();
+  // 3-char minimum so a 1–2 char query never fans out a full recursive walk.
+  const searchActive = trimmedQuery.length >= 3;
+  // Default search root = the session you're in (project → share → home). [0019]
+  // re-anchors `tree` on a session switch, so this follows automatically.
+  const searchRoot = tree.projectPath || tree.sharePath || tree.homePath || "";
+
+  // Debounced search whenever the query / root / machine changes. <3 chars clears
+  // results (and the request) so the tree shows through.
+  useEffect(() => {
+    if (!searchActive) {
+      setResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const id = window.setTimeout(() => {
+      searchFiles(trimmedQuery, {
+        root: searchRoot || undefined,
+        session: session || undefined,
+        machine: fileMachine,
+      })
+        .then((r) => setResults(r.results))
+        .catch((e) => setError(errMsg(e)))
+        .finally(() => setSearching(false));
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [searchActive, trimmedQuery, searchRoot, session, fileMachine]);
+
+  // Keep the result cursor in range and parked on the top row as results change.
+  useEffect(() => {
+    setResultCursor((c) => (c >= results.length ? 0 : c));
+  }, [results.length]);
+  useEffect(() => {
+    setResultCursor(0);
+  }, [trimmedQuery]);
+  useEffect(() => {
+    resultRowRefs.current[resultCursor]?.scrollIntoView({ block: "nearest" });
+  }, [resultCursor]);
+
+  // Focus (and select) the Find bar whenever App bumps focusSearchSeq via
+  // `Ctrl+B f` — including when the overlay was already open. On phone the bar
+  // lives in the slide-over, so reveal it first (desktop is a no-op there).
+  useEffect(() => {
+    if (!open || focusSearchSeq === 0) return;
+    if (!isDesktop) setTreePanelOpen(true);
+    const id = requestAnimationFrame(() => {
+      searchRef.current?.focus();
+      searchRef.current?.select();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [focusSearchSeq, open, isDesktop]);
 
   // Drag-and-drop upload INTO a tree folder. A drop on a folder row, a folder's
   // file listing, or a section header (wired through EditorTree → FolderChildren
@@ -338,6 +419,21 @@ export default function EditorOverlay({
       setDownloading(null);
     }
   }, [fileMachine]);
+
+  // Open a search result through the SAME machinery a tree click uses: editable
+  // text / PDF → setActivePath (live read, dirty, watch, [0019] memory); anything
+  // else → download, matching the tree's open-vs-download fork (proposal 0027).
+  const openResult = useCallback(
+    (r: FileSearchResult) => {
+      if (canOpenInEditor(r.name)) {
+        setActivePath(r.path);
+        if (!isDesktop) setTreePanelOpen(false);
+      } else {
+        void onDownload({ name: r.name, path: r.path, size: r.size, mtime: r.mtime });
+      }
+    },
+    [isDesktop, onDownload]
+  );
 
   // ── Right-click / long-press file-tree context menu ──────────────────────
   // The tree (EditorTree → FolderChildren) reports a target + cursor; we open a
@@ -789,6 +885,16 @@ export default function EditorOverlay({
   const closeRef = useRef(requestClose);
   doSaveRef.current = doSave;
   closeRef.current = requestClose;
+  // Live refs so the capture-phase keydown handler (minimal deps) can drive the
+  // result cursor / open / clear without going stale on every keystroke.
+  const queryRef = useRef(query);
+  const resultsRef = useRef(results);
+  const resultCursorRef = useRef(resultCursor);
+  const openResultRef = useRef(openResult);
+  queryRef.current = query;
+  resultsRef.current = results;
+  resultCursorRef.current = resultCursor;
+  openResultRef.current = openResult;
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -796,9 +902,44 @@ export default function EditorOverlay({
       // shortcuts go inert so every key (including Esc / Ctrl+S) reaches the
       // focused terminal instead of leaking into the editor.
       if (agentControlRef.current) return;
+      // Find-bar result navigation: while the Find input is focused with a live
+      // query, ↑/↓/⏎ drive the result cursor (printable keys still type into the
+      // input). Intercepted before the input/CodeMirror see them so no stray
+      // caret move leaks through (the [0011]/[0016] capture-phase rule).
+      const inFind =
+        searchRef.current !== null && document.activeElement === searchRef.current;
+      if (inFind && queryRef.current.trim().length >= 3) {
+        const n = resultsRef.current.length;
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          e.stopPropagation();
+          setResultCursor((c) => (n === 0 ? 0 : Math.min(c + 1, n - 1)));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          e.stopPropagation();
+          setResultCursor((c) => Math.max(0, c - 1));
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          const r = resultsRef.current[resultCursorRef.current];
+          if (r) openResultRef.current(r);
+          return;
+        }
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        // A non-empty Find query clears first (a second Esc then backs out),
+        // matching the overlay's layered-Esc convention.
+        if (queryRef.current.trim()) {
+          setQuery("");
+          searchRef.current?.focus();
+          return;
+        }
         // Peel transient surfaces off one at a time before closing the overlay.
         if (movePicker) {
           setMovePicker(null);
@@ -888,6 +1029,80 @@ export default function EditorOverlay({
     "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-panel hover:text-slate-100 active:bg-edge";
   const saveLabel = saving ? "Saving…" : dirty ? "Save" : "Saved";
   const showFooter = status === "ready";
+
+  // ── Find bar + results (proposal 0027) ───────────────────────────────────
+  // Rendered as the header of the tree column in both the desktop sidebar and
+  // the phone slide-over (only one mounts at a time, so the single searchRef is
+  // unambiguous). While a query is active the results list REPLACES the tree.
+  const findBar = (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-edge/60 px-2 py-1.5">
+      <span className="text-slate-500" aria-hidden="true">🔎</span>
+      <input
+        ref={searchRef}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Find file…"
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        aria-label="Find file by name"
+        className="min-w-0 flex-1 bg-transparent text-[13px] text-slate-100 placeholder:text-slate-600 outline-none"
+      />
+      {query && (
+        <button
+          onClick={() => {
+            setQuery("");
+            searchRef.current?.focus();
+          }}
+          title="Clear (Esc)"
+          aria-label="Clear search"
+          className="shrink-0 rounded px-1 text-slate-500 hover:text-slate-200"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+
+  const resultsList = (
+    <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">
+      {searching && results.length === 0 && (
+        <div className="px-3 py-8 text-center text-[12px] text-slate-600">Searching…</div>
+      )}
+      {!searching && results.length === 0 && (
+        <div className="px-3 py-8 text-center text-[12px] text-slate-600">
+          No files match “{trimmedQuery}”.
+        </div>
+      )}
+      {results.map((r, i) => {
+        const focused = i === resultCursor;
+        const ring = focused ? "bg-edge/70 ring-1 ring-inset ring-accent/40" : "hover:bg-edge/40";
+        const openable = canOpenInEditor(r.name);
+        return (
+          <button
+            key={r.path}
+            ref={(el) => {
+              resultRowRefs.current[i] = el;
+            }}
+            onClick={() => openResult(r)}
+            onMouseEnter={() => setResultCursor(i)}
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${ring}`}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] text-slate-100">{r.name}</span>
+              {/* Parent dir, left-cropped (direction:rtl + a leading LRM so the
+                  path still reads LTR) so the immediate folder is always shown. */}
+              <span className="block truncate text-[11px] text-slate-500" dir="rtl">
+                {"‎" + (r.dir || "~")}
+              </span>
+            </span>
+            <span className="shrink-0 text-[10px] tabular-nums text-slate-600">{fmtAge(r.mtime)}</span>
+            {!openable && <DownloadIcon className="h-3.5 w-3.5 shrink-0 text-slate-600" />}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div
@@ -1325,19 +1540,26 @@ export default function EditorOverlay({
           <div
             ref={treeRef}
             onPointerDownCapture={releaseControl}
-            className="relative shrink-0"
+            className="relative flex shrink-0 flex-col border-r border-edge"
             style={{ width: `${treeWidth}px` }}
           >
-            <EditorTree
-              tree={tree}
-              onOpenFile={setActivePath}
-              onDownload={onDownload}
-              downloadingPath={downloading}
-              onContextMenu={onTreeContextMenu}
-              onDropFiles={onTreeDropFiles}
-              onMoveNode={onMoveNodeDrag}
-              activePath={activePath}
-            />
+            {findBar}
+            {searchActive ? (
+              resultsList
+            ) : (
+              <div className="min-h-0 flex-1">
+                <EditorTree
+                  tree={tree}
+                  onOpenFile={setActivePath}
+                  onDownload={onDownload}
+                  downloadingPath={downloading}
+                  onContextMenu={onTreeContextMenu}
+                  onDropFiles={onTreeDropFiles}
+                  onMoveNode={onMoveNodeDrag}
+                  activePath={activePath}
+                />
+              </div>
+            )}
             {/* Resize splitter — straddles the tree's right border. The hit area
                 (w-2) is wider than the visible hairline for an easy grab; the
                 line lights up on hover and stays lit while dragging. */}
@@ -1519,22 +1741,27 @@ export default function EditorOverlay({
                 <XIcon className="h-[18px] w-[18px]" />
               </button>
             </div>
-            <div className="min-h-0 flex-1">
-              <EditorTree
-                tree={tree}
-                activePath={activePath}
-                touch
-                onDownload={onDownload}
-                downloadingPath={downloading}
-                onContextMenu={onTreeContextMenu}
-                onDropFiles={onTreeDropFiles}
-                onMoveNode={onMoveNodeDrag}
-                onOpenFile={(p) => {
-                  setActivePath(p);
-                  setTreePanelOpen(false);
-                }}
-              />
-            </div>
+            {findBar}
+            {searchActive ? (
+              resultsList
+            ) : (
+              <div className="min-h-0 flex-1">
+                <EditorTree
+                  tree={tree}
+                  activePath={activePath}
+                  touch
+                  onDownload={onDownload}
+                  downloadingPath={downloading}
+                  onContextMenu={onTreeContextMenu}
+                  onDropFiles={onTreeDropFiles}
+                  onMoveNode={onMoveNodeDrag}
+                  onOpenFile={(p) => {
+                    setActivePath(p);
+                    setTreePanelOpen(false);
+                  }}
+                />
+              </div>
+            )}
           </div>
           {activePath && (
             <div

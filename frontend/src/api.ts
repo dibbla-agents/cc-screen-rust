@@ -328,6 +328,44 @@ export async function searchDirs(
   return r.json();
 }
 
+// One ranked hit from the recursive file search (GET /api/files/search,
+// proposal 0027). Like DirSearchResult but for files: `dir` is the home-relative
+// parent directory (~/proj/docs) and `size` is the file's byte size.
+export interface FileSearchResult {
+  path: string;
+  name: string;
+  rel: string;
+  dir: string;
+  depth: number;
+  score: number;
+  mtime: number;
+  size: number;
+}
+
+export interface FilesSearchResp {
+  root: string;
+  home: string;
+  results: FileSearchResult[];
+}
+
+// searchFiles fuzzy-matches files (name-first, path second) anywhere below
+// `root` on the chosen agent. The agent defaults `root` to the session's
+// project when `session` is given, so the viewer's search is scoped to the
+// session you're in. Per-agent like searchDirs (the hub routes by ?machine=);
+// empty `q` returns no results — the caller only fires at ≥3 chars.
+export async function searchFiles(
+  q: string,
+  opts?: { root?: string; session?: string; machine?: string }
+): Promise<FilesSearchResp> {
+  const params = new URLSearchParams();
+  params.set("q", q);
+  if (opts?.root) params.set("root", opts.root);
+  if (opts?.session) params.set("session", opts.session);
+  const r = await fetch(withMachine(`/api/files/search?${params.toString()}`, opts?.machine));
+  if (!r.ok) throw new Error((await r.text()).trim() || `files search: ${r.status}`);
+  return r.json();
+}
+
 export interface FileEntry {
   name: string;
   path: string;

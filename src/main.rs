@@ -241,6 +241,7 @@ async fn main() {
         // files / editor
         .route("/api/dirs", get(files::dirs))
         .route("/api/dirs/search", get(files::dirs_search))
+        .route("/api/files/search", get(files::files_search))
         .route("/api/files", get(files::files))
         .route("/api/download", get(files::download))
         .route("/api/file/read", get(files::file_read))

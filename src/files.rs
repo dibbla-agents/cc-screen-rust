@@ -115,8 +115,40 @@ pub async fn dirs_search(State(app): State<AppState>, Query(q): Query<DirSearchQ
     let root =
         resolve_existing_under(&home, &q.root).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
     let recent = recent_cwds(&app);
-    let hits = crate::dirsearch::search(&home, &root, &q.q, &recent);
+    let hits = crate::dirsearch::search(&home, &root, &q.q, &recent, crate::dirsearch::Kind::Dirs);
     Ok(Json(crate::dirsearch::results_json(&home, &root, &hits)).into_response())
+}
+
+// ── GET /api/files/search ──────────────────────────────────────────────────
+// Recursive, $HOME-confined fuzzy *file* search for the file viewer (proposal
+// 0027). Sibling of /api/dirs/search: same confined BFS + ranking core, but it
+// harvests files (name-first) instead of directories. `root` defaults to the
+// session's project cwd (then $HOME); ranked + capped; empty `q` → no results.
+#[derive(Deserialize)]
+pub struct FileSearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    session: String,
+}
+
+pub async fn files_search(State(app): State<AppState>, Query(q): Query<FileSearchQuery>) -> R {
+    let home = home(&app);
+    // Default the search root to the session's project (its live cwd), falling
+    // back to $HOME, then confine it like every other path.
+    let mut root = q.root.trim().to_string();
+    if root.is_empty() && !q.session.trim().is_empty() {
+        if let Some(sess) = app.get(q.session.trim()) {
+            root = sess.live_cwd();
+        }
+    }
+    let root =
+        resolve_existing_under(&home, &root).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let recent = recent_cwds(&app);
+    let hits = crate::dirsearch::search(&home, &root, &q.q, &recent, crate::dirsearch::Kind::Files);
+    Ok(Json(crate::dirsearch::files_results_json(&home, &root, &hits)).into_response())
 }
 
 /// The cwds of live sessions — fed to the search ranker so a folder you already
