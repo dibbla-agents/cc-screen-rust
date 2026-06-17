@@ -115,6 +115,21 @@ export interface DirTreeOpts {
   bareProjectLabel?: boolean;
 }
 
+// Map an /api/watch frame's `dir` to the cache key whose folder we should
+// re-list, or null when we aren't showing that folder. The agent emits the
+// lexical parent path (watch.rs route()); the tree caches by the listing's
+// resp.path (files.rs). They normally match exactly, but a trailing-slash
+// mismatch on one side would silently fail the cache lookup and DROP the change
+// frame — while the already-cached siblings keep rendering, which reads as
+// "new files never appear" (proposal 0034). Try the path as-is, then with a
+// trailing slash trimmed, so a "…/foo/" frame still matches a "…/foo" key.
+export function resolveWatchDir(dir: string, has: (key: string) => boolean): string | null {
+  if (has(dir)) return dir;
+  const trimmed = dir.length > 1 && dir.endsWith("/") ? dir.slice(0, -1) : dir;
+  if (trimmed !== dir && has(trimmed)) return trimmed;
+  return null;
+}
+
 // useDirTree owns the cache/expand/loading state and the lazy fetches. It
 // bootstraps on `open` (a /api/files listing gives share + home; one section
 // auto-expands per `opts.autoExpand`), and exposes `toggle` for both section
@@ -320,8 +335,16 @@ export function useDirTree(
   }, [expanded, watch]);
 
   // When a watched folder changes on disk (the agent created/renamed/deleted a
-  // file in it), re-fetch its listing so the tree reflects it live. Registered
-  // once; reads cache/refresh through refs so it never re-binds.
+  // file in it), re-fetch its listing so the tree reflects it live. A re-list
+  // returns the folder's full truth, so creates, deletes, and renames all
+  // surface uniformly — the create half is no longer the weak one (0034).
+  // Registered once; reads cache/refresh through refs so it never re-binds.
+  //
+  // We only refresh a folder we're already showing (it's in the cache). A create
+  // in a folder the user has never expanded is a documented non-goal: it isn't
+  // watched, and it appears the moment the user expands that folder (toggle →
+  // loadByPath). resolveWatchDir hardens the cache lookup against a trailing-
+  // slash path-shape mismatch that would otherwise drop the frame silently.
   const cacheRef = useRef(cache);
   cacheRef.current = cache;
   const refreshRef = useRef(refresh);
@@ -329,7 +352,8 @@ export function useDirTree(
   useEffect(
     () =>
       watch.addListener((dir) => {
-        if (cacheRef.current.has(dir)) void refreshRef.current(dir);
+        const key = resolveWatchDir(dir, (k) => cacheRef.current.has(k));
+        if (key) void refreshRef.current(key);
       }),
     [watch]
   );
