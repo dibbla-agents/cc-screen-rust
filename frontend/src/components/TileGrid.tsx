@@ -433,12 +433,41 @@ function PaneBox({
             title={meta.tool}
             aria-label={meta.tool}
           />
-          {/* Proposal 0025: folder breadcrumb (parent dim, leaf emphasised)
-              from the live cwd; falls back to `short`. The machine spine to the
+          {/* Proposal 0033: name-first identity. The session name always leads
+              as the bright primary label and the breadcrumb (0025) trails as
+              dim, first-to-truncate context — even when the name equals the
+              folder leaf, the name is shown verbatim with the full path after it
+              (so every pane bar names its session). The machine spine to the
               left already carries the host identity. */}
           {(() => {
             const crumb = dirCrumb(meta.cwd);
-            const leafColor = active ? "text-slate-100" : "text-slate-200";
+            const name = meta.short;
+            const nameColor = active ? "text-slate-100" : "text-slate-200";
+
+            // Name-first: the session name always leads, bright; the breadcrumb
+            // trails as dim, first-to-truncate context. Shown verbatim even when
+            // it duplicates the folder leaf.
+            if (name) {
+              return (
+                <span className="flex min-w-0 flex-1 items-baseline gap-1 text-sm font-medium">
+                  <span className={`shrink truncate ${nameColor}`}>{name}</span>
+                  {crumb && (
+                    <span className="flex min-w-0 items-baseline truncate text-[12px] text-slate-500">
+                      <span className="shrink-0 px-0.5 text-slate-600">·</span>
+                      {crumb.parent && (
+                        <>
+                          <span className="truncate">{crumb.parent}</span>
+                          <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                        </>
+                      )}
+                      <span className="truncate text-slate-400">{crumb.leaf}</span>
+                    </span>
+                  )}
+                </span>
+              );
+            }
+
+            // No name (shouldn't normally happen): fall back to the breadcrumb.
             return crumb ? (
               <span className="flex min-w-0 flex-1 items-baseline text-sm font-medium">
                 {crumb.parent && (
@@ -447,11 +476,11 @@ function PaneBox({
                     <span className="shrink-0 px-0.5 text-slate-600">/</span>
                   </>
                 )}
-                <span className={`shrink-0 truncate ${leafColor}`}>{crumb.leaf}</span>
+                <span className={`shrink-0 truncate ${nameColor}`}>{crumb.leaf}</span>
               </span>
             ) : (
-              <span className={`min-w-0 flex-1 truncate text-sm font-medium ${leafColor}`}>
-                {meta.short}
+              <span className={`min-w-0 flex-1 truncate text-sm font-medium ${nameColor}`}>
+                {name}
               </span>
             );
           })()}

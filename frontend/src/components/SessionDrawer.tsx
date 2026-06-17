@@ -599,23 +599,12 @@ export default function SessionDrawer({
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5">
-                {/* Proposal 0025: a two-segment folder breadcrumb (parent dim,
-                    leaf bright) derived from the live cwd; the leaf yields space
-                    last so it stays legible. Falls back to `short` when there's
-                    no usable cwd. */}
-                {crumb ? (
-                  <span className="flex min-w-0 items-baseline text-[13px] font-medium">
-                    {crumb.parent && (
-                      <>
-                        <span className="truncate text-slate-500">{crumb.parent}</span>
-                        <span className="shrink-0 px-0.5 text-slate-600">/</span>
-                      </>
-                    )}
-                    <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
-                  </span>
-                ) : (
-                  <span className="truncate text-[13px] font-medium text-slate-100">{s.short}</span>
-                )}
+                {/* Top row: the session name, always. Proposal 0032 makes the
+                    name the leading element in every variant — pane switcher,
+                    mobile, and the desktop sidebar — so a row is identifiable by
+                    name at a glance on every surface (consistent layout, name
+                    above ▸ path ▸ summary). It always appears, even with no cwd. */}
+                <span className="truncate text-[13px] font-semibold text-slate-100">{s.short}</span>
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                   title={statusTitle(status)}
@@ -649,14 +638,20 @@ export default function SessionDrawer({
                   {ago(s.activity)}
                 </span>
               </span>
-              {/* On mobile, stack the session name on its own row beneath the
-                  folder breadcrumb (folder ▸ name ▸ summary). Desktop keeps the
-                  name in the tooltip and widens the sidebar instead. Skipped
-                  when there's no cwd — the breadcrumb already falls back to the
-                  name, so a second copy would just duplicate it. */}
-              {!sidebar && crumb && (
-                <span className="mt-0.5 block truncate text-[13px] font-medium text-slate-100">
-                  {s.short}
+              {/* Second row: the folder breadcrumb (parent dim, leaf bright),
+                  proposal-0025 markup verbatim. Proposal 0032 sits it under the
+                  name on every variant (pane, mobile, and sidebar) — name ▸ path
+                  ▸ summary, consistent everywhere. Omitted when there's no cwd —
+                  the name above already identifies the row. */}
+              {crumb && (
+                <span className="mt-0.5 flex min-w-0 items-baseline text-[13px] font-medium">
+                  {crumb.parent && (
+                    <>
+                      <span className="truncate text-slate-500">{crumb.parent}</span>
+                      <span className="shrink-0 px-0.5 text-slate-600">/</span>
+                    </>
+                  )}
+                  <span className="shrink-0 truncate text-slate-100">{crumb.leaf}</span>
                 </span>
               )}
               {/* Proposal 0022: the LLM headline replaces the bare preview when
