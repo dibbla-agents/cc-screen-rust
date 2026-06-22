@@ -90,6 +90,13 @@ pub struct SessionInfo {
     /// so older clients and feature-off agents are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Operator-chosen display label for this session (proposal 0035): a free-text
+    /// name shown *in place of* `short` wherever the session is named. Display-only
+    /// — it never replaces the identity `name`/`short`, so routing/persistence keys
+    /// are untouched. `None`/absent = no label, fall back to `short`. Additive +
+    /// omitted-when-absent, so older clients and feature-off agents are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// The curated per-session mark palette tokens (proposal 0029). The *rendered*
@@ -104,6 +111,26 @@ pub const SESSION_COLOR_TOKENS: &[&str] =
 /// Whether `token` is a known session-mark colour (proposal 0029).
 pub fn is_valid_color_token(token: &str) -> bool {
     SESSION_COLOR_TOKENS.contains(&token)
+}
+
+/// Max display-label length in chars (proposal 0035). Display-only, so generous
+/// but bounded — sized to the identity bar / switcher row before truncation.
+pub const MAX_SESSION_LABEL_LEN: usize = 60;
+
+/// Trim + length-check a proposed display label (proposal 0035). Returns the
+/// normalized label, or `None` to clear (empty after trim). `Err` if it exceeds
+/// the cap. Unlike a session slug, the label is display-only and never becomes a
+/// process/filesystem name, so it is passed through verbatim (spaces, capitals,
+/// punctuation, emoji allowed) — no `sanitize_name` rules.
+pub fn normalize_session_label(raw: &str) -> Result<Option<String>, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if t.chars().count() > MAX_SESSION_LABEL_LEN {
+        return Err(format!("label too long (max {MAX_SESSION_LABEL_LEN})"));
+    }
+    Ok(Some(t.to_string()))
 }
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
@@ -377,6 +404,7 @@ mod tests {
             headline: None,
             detail: None,
             color: None,
+            label: None,
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
@@ -386,6 +414,7 @@ mod tests {
         assert!(!v.contains("remote_control"), "retired policy must never serialize: {v}");
         assert!(!v.contains("skip_permissions"), "unknown policy should be omitted: {v}");
         assert!(!v.contains("color"), "absent color should be omitted: {v}");
+        assert!(!v.contains("label"), "absent label should be omitted: {v}");
         assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
     }
 
@@ -409,10 +438,12 @@ mod tests {
             headline: Some("Waiting to run tests".into()),
             detail: Some("It refactored auth and is paused.".into()),
             color: Some("teal".into()),
+            label: Some("Auth refactor".into()),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
         assert!(v.contains(r#""color":"teal""#), "color should serialize when set: {v}");
+        assert!(v.contains(r#""label":"Auth refactor""#), "label should serialize when set: {v}");
         assert!(v.contains(r#""headline":"Waiting to run tests""#), "headline serializes when set: {v}");
         assert!(v.contains(r#""skip_permissions":true"#), "yolo should serialize when set: {v}");
 
@@ -430,6 +461,7 @@ mod tests {
         assert_eq!(old.headline, None, "old payload → no summary");
         assert_eq!(old.detail, None);
         assert_eq!(old.color, None, "old payload → no mark colour");
+        assert_eq!(old.label, None, "old payload → no display label");
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.
@@ -439,6 +471,24 @@ mod tests {
         assert_eq!(back.busy_since, 222);
         assert_eq!(back.busy_until, 333);
         assert_eq!(back.color, Some("teal".into()));
+        assert_eq!(back.label, Some("Auth refactor".into()));
+    }
+
+    #[test]
+    fn normalize_session_label_trims_clears_and_caps() {
+        // Trim surrounding whitespace, keep inner spacing/case verbatim.
+        assert_eq!(
+            normalize_session_label("  My Session  ").unwrap(),
+            Some("My Session".into())
+        );
+        // Empty (or whitespace-only) → clear.
+        assert_eq!(normalize_session_label("").unwrap(), None);
+        assert_eq!(normalize_session_label("   ").unwrap(), None);
+        // Exactly at the cap is fine; over the cap is rejected.
+        let at_cap: String = "a".repeat(MAX_SESSION_LABEL_LEN);
+        assert_eq!(normalize_session_label(&at_cap).unwrap(), Some(at_cap.clone()));
+        let over_cap: String = "a".repeat(MAX_SESSION_LABEL_LEN + 1);
+        assert!(normalize_session_label(&over_cap).is_err());
     }
 
     #[test]

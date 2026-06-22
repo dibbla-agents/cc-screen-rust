@@ -22,7 +22,7 @@ import {
 } from "react";
 import type { ReadyEdge } from "../readyEdges";
 import { sessionKey } from "../readyEdges";
-import { toolColor } from "../util";
+import { displayName, toolColor } from "../util";
 import { XIcon } from "../icons";
 import SummaryTip from "./SummaryTip";
 
@@ -234,14 +234,14 @@ function DesktopToast({
       >
         <span className={`h-2.5 w-2.5 flex-none rounded-full ${toolColor(entry.tool)}`} />
         <span className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium text-slate-100">{entry.short}</span>
+          <span className="truncate text-sm font-medium text-slate-100">{displayName(entry)}</span>
           <ToastStatus entry={entry} />
         </span>
       </button>
       <button
         type="button"
         onClick={() => onDismiss(entry.id)}
-        aria-label={`Dismiss ${entry.short} notification`}
+        aria-label={`Dismiss ${displayName(entry)} notification`}
         className="flex flex-none items-center px-2 text-slate-500 hover:text-slate-300 active:bg-edge"
       >
         <XIcon className="h-4 w-4" />
@@ -292,14 +292,14 @@ function MobileBanner({
       >
         <span className={`h-2.5 w-2.5 flex-none rounded-full ${toolColor(entry.tool)}`} />
         <span className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium text-slate-100">{entry.short}</span>
+          <span className="truncate text-sm font-medium text-slate-100">{displayName(entry)}</span>
           <ToastStatus entry={entry} />
         </span>
       </button>
       <button
         type="button"
         onClick={() => onDismiss(entry.id)}
-        aria-label={`Dismiss ${entry.short} notification`}
+        aria-label={`Dismiss ${displayName(entry)} notification`}
         className="flex flex-none items-center px-3 text-slate-500 active:bg-edge"
       >
         <XIcon className="h-4 w-4" />

@@ -85,6 +85,20 @@ export function nextSessionColor(current?: string): string {
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
 
+// Max display-label length (proposal 0035). Keep in lockstep with the agent's
+// `MAX_SESSION_LABEL_LEN` (crates/protocol/src/lib.rs): the agent rejects a
+// longer label with a 400, so the input caps here to keep the UI in agreement.
+export const MAX_SESSION_LABEL_LEN = 60;
+
+// displayName — the session's display name (proposal 0035): the operator-chosen
+// label if set, else the slug `short`. The single rule applied at every
+// name-render site (switcher rows, pane identity bar, status view, tooltips,
+// upload target, search), so a label shows consistently everywhere while the
+// identity `short` stays the routing/persistence key underneath.
+export function displayName(s: Pick<Session, "label" | "short">): string {
+  return s.label?.trim() || s.short;
+}
+
 // dirCrumb — the last two segments of an absolute path: the leaf directory and
 // its parent (proposal 0025). Drives the two-segment folder breadcrumb label, a
 // far better disambiguator than the bare leaf for sessions auto-named after the

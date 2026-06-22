@@ -43,6 +43,10 @@ pub struct Entry {
     /// survives restart/redeploy. Empty = unmarked; old files default to empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub color: String,
+    /// Operator-chosen display label (proposal 0035), persisted so it survives
+    /// restart/redeploy. Empty = no label; old files default to empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 /// Default for `Entry::skip_permissions` — a pre-0005 manifest entry was always
@@ -103,6 +107,18 @@ pub fn set_color(config_dir: &Path, session: &str, color: Option<String>) {
     }
 }
 
+/// Set (or clear) the display label on an existing entry (proposal 0035).
+/// Empty/`None` clears it. Best-effort no-op if the session isn't recorded.
+/// Keyed by session, persisted atomically like `record`.
+pub fn set_label(config_dir: &Path, session: &str, label: Option<String>) {
+    let _g = LOCK.lock().unwrap();
+    let mut entries = load_locked(config_dir);
+    if let Some(slot) = entries.iter_mut().find(|x| x.session == session) {
+        slot.label = label.unwrap_or_default();
+        save_locked(config_dir, entries);
+    }
+}
+
 /// Drop an entry — a deliberate end (clean /exit or a web delete) that must not
 /// come back on the next restore.
 pub fn forget(config_dir: &Path, session: &str) {
@@ -135,6 +151,7 @@ mod tests {
             created_at: 1,
             skip_permissions: true,
             color: String::new(),
+            label: String::new(),
         }
     }
 
@@ -166,6 +183,22 @@ mod tests {
         // Clear with None → empty.
         set_color(&dir, "claude-a", None);
         assert_eq!(entries(&dir)[0].color, "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_label_upserts_and_clears() {
+        let dir = std::env::temp_dir().join(format!("ccr-mlabel-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        record(&dir, entry("claude-a"));
+        // No-op for an unknown session (nothing recorded yet).
+        set_label(&dir, "claude-ghost", Some("Ghost".into()));
+        // Set, then read back.
+        set_label(&dir, "claude-a", Some("My Session".into()));
+        assert_eq!(entries(&dir)[0].label, "My Session");
+        // Clear with None → empty.
+        set_label(&dir, "claude-a", None);
+        assert_eq!(entries(&dir)[0].label, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

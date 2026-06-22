@@ -14,6 +14,7 @@ import {
   sendImage,
   sendKey,
   setSessionColor,
+  setSessionLabel,
   setUnauthorizedHandler,
   type Favorite,
   type MachineInfo,
@@ -49,7 +50,7 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { agentStatus, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
@@ -194,6 +195,23 @@ export default function App() {
     );
     setSessionColor(ref.name, color, ref.machine).catch(() => {});
   }, []);
+  // renameSession sets (or clears, with null/empty) a session's display label
+  // (proposal 0035). Same optimistic shape as markColor: flip local state at once
+  // so the rename feels instant, then POST; the next /api/sessions poll
+  // reconciles (and self-heals if the server rejects, e.g. too long). Identity
+  // (`name`/`short`) is never touched. Routed to the owning agent by the ref.
+  const renameSession = useCallback((ref: PaneRef | null, label: string | null) => {
+    if (!ref) return;
+    const next = label?.trim() || null;
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.name === ref.name && (s.machine ?? "") === ref.machine
+          ? { ...s, label: next ?? undefined }
+          : s
+      )
+    );
+    setSessionLabel(ref.name, next, ref.machine).catch(() => {});
+  }, []);
   // Live xterm.js instance per pane, populated by TerminalView's onTerm
   // callback. The global Cmd/Ctrl+C handler reads the active slot to decide
   // whether there's a selection to copy. Length 4 matches the max layout.
@@ -203,6 +221,10 @@ export default function App() {
   useEffect(() => { panesRef.current = panes; }, [panes]);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Bumped by the `⌃B r` chord (proposal 0035) to put the active pane's
+  // identity-bar name into edit mode — even with no pointer. Same focus-seq
+  // trick as the editor's `focusSearchSeq`.
+  const [renameSeq, setRenameSeq] = useState(0);
   const [composeOpen, setComposeOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
   const [favOpen, setFavOpen] = useState(false);
@@ -1041,6 +1063,15 @@ export default function App() {
           }
           return;
         }
+        if (k === "r" || k === "R") {
+          // Rename the focused pane's session (proposal 0035): put its
+          // identity-bar name into inline edit mode. Desktop power path for the
+          // double-click affordance; mirrors the ⌃B c colour chord.
+          stop();
+          clearArm();
+          setRenameSeq((n) => n + 1);
+          return;
+        }
         if (k === "Escape") {
           stop();
           clearArm();
@@ -1709,6 +1740,9 @@ export default function App() {
     },
     deleting,
     onDelete: removeSession,
+    // Rename via the switcher (proposal 0035): build the ref from the row's
+    // session (carrying its machine) and reuse the optimistic renameSession.
+    onRename: (s, label) => renameSession({ name: s.name, machine: s.machine ?? "" }, label),
     restorable,
     onRestore,
     toastsOn: toastsEnabled,
@@ -1788,7 +1822,7 @@ export default function App() {
               >
                 {cur.tool}
               </span>
-              <span className="truncate font-medium text-slate-100">{cur.short}</span>
+              <span className="truncate font-medium text-slate-100">{displayName(cur)}</span>
             </>
           ) : (
             <span className="text-slate-400">Pick a session</span>
@@ -1933,6 +1967,8 @@ export default function App() {
             onPaneCreated={onPaneCreated}
             onOpenEditor={() => openEditor(null)}
             onMarkColor={markColor}
+            onRename={renameSession}
+            renameSeq={renameSeq}
             onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
             onDropFiles={onPaneDrop}
             switcher={paneSwitcher}

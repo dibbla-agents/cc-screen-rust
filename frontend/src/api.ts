@@ -44,6 +44,12 @@ export interface Session {
   // sessionAccent(). Absent/empty = unmarked. Persisted on the agent so it
   // survives reload/restart and reaches every client (direct or hub-relayed).
   color?: string;
+  // Operator-chosen display label (proposal 0035): shown in place of `short`
+  // wherever the session is named. Display-only — identity (`name`/`short`) is
+  // unchanged. Absent/empty = no label, fall back to `short`. Persisted on the
+  // agent so it survives reload/restart and reaches every client (direct or
+  // hub-relayed). Read it everywhere via `displayName(s)` (util.ts).
+  label?: string;
 }
 
 // PaneRef is the identity the app stores for an open session: the session name
@@ -641,6 +647,25 @@ export async function setSessionColor(
     body: JSON.stringify({ session, color }),
   });
   if (!r.ok) throw new Error((await r.text()).trim() || `color: ${r.status}`);
+  return r.json();
+}
+
+// setSessionLabel sets a session's free-text display label (proposal 0035), or
+// clears it when `label` is null/empty. The agent trims + length-caps it,
+// persists it (survives restart), and returns the updated Session. Display-only:
+// the identity `name`/`short` is untouched. Routed to the owning agent via
+// `?machine=` exactly like setSessionColor.
+export async function setSessionLabel(
+  session: string,
+  label: string | null,
+  machine?: string
+): Promise<Session> {
+  const r = await fetch(withMachine("/api/session/label", machine), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session, label }),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || `rename: ${r.status}`);
   return r.json();
 }
 

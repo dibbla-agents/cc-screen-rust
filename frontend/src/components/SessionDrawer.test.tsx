@@ -39,6 +39,7 @@ const baseProps = {
   onLayout: () => {},
   deleting: new Set<string>(),
   onDelete: () => {},
+  onRename: () => {},
   restorable: [],
   onRestore: () => {},
   toastsOn: true,
@@ -111,6 +112,7 @@ describe("SessionDrawer — name-on-top row (proposal 0032)", () => {
     onLayout: () => {},
     deleting: new Set<string>(),
     onDelete: () => {},
+    onRename: () => {},
     restorable: [],
     onRestore: () => {},
     toastsOn: true,
@@ -165,6 +167,41 @@ describe("SessionDrawer — name-on-top row (proposal 0032)", () => {
     // No breadcrumb path row — nothing to show without a cwd.
     expect(html).not.toContain(
       '<span class="mt-0.5 flex min-w-0 items-baseline text-[13px] font-medium">'
+    );
+  });
+});
+
+// Proposal 0035 — a session's display label overrides `short` on the name row
+// (the identity `short` stays the routing key underneath). Static-render
+// structural assertions, matching the style above.
+describe("SessionDrawer — display label (proposal 0035)", () => {
+  it("renders the label in place of the slug on the name row", () => {
+    const labelled = {
+      ...baseProps,
+      sessions: [session({ name: "claude-x", short: "claude-x", label: "Auth refactor" })],
+    };
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...labelled} pane open current={null} keyboardActive />
+    );
+    // The name row shows the label, not the slug.
+    expect(html).toContain(
+      '<span class="truncate text-[13px] font-semibold text-slate-100">Auth refactor</span>'
+    );
+    expect(html).not.toContain(
+      '<span class="truncate text-[13px] font-semibold text-slate-100">claude-x</span>'
+    );
+  });
+
+  it("falls back to the slug when the label is empty/whitespace", () => {
+    const blank = {
+      ...baseProps,
+      sessions: [session({ name: "claude-y", short: "claude-y", label: "   " })],
+    };
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...blank} pane open current={null} keyboardActive />
+    );
+    expect(html).toContain(
+      '<span class="truncate text-[13px] font-semibold text-slate-100">claude-y</span>'
     );
   });
 });

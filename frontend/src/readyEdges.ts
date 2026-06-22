@@ -34,6 +34,9 @@ export interface ReadyEdge {
   machine: string;
   tool: string;
   short: string;
+  // Operator-chosen display label (proposal 0035), when set — the toast names the
+  // session by `displayName` (label || short) so a renamed session reads right.
+  label?: string;
   // The session's LLM summary (proposal 0022), when available — the toast shows
   // `detail` (or `headline`) instead of the generic "ready for input".
   headline?: string;
@@ -85,6 +88,7 @@ export function detectReadyEdges(
       machine: c.machine ?? "",
       tool: c.tool,
       short: c.short,
+      label: c.label,
       headline: c.headline,
       detail: c.detail,
     });

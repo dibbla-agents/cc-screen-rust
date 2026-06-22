@@ -136,6 +136,9 @@ pub fn session_info(s: &Arc<Session>) -> SessionInfo {
         // Operator-chosen mark colour (proposal 0029). Read from the live session
         // mirror; reaches every client — direct or hub-relayed — through the list.
         color: s.color(),
+        // Operator-chosen display label (proposal 0035). Same live-mirror read and
+        // every-client propagation as the colour above.
+        label: s.label(),
     }
 }
 
@@ -353,6 +356,44 @@ pub fn set_color_core(
 
 pub async fn set_color(State(app): State<AppState>, Json(req): Json<ColorReq>) -> ApiResult {
     let info = set_color_core(&app, &req.session, req.color)?;
+    Ok(Json(info).into_response())
+}
+
+// ── POST /api/session/label ──────────────────────────────────────────────────
+#[derive(Deserialize)]
+pub struct LabelReq {
+    session: String,
+    /// Free-text display label (proposal 0035), or `null`/empty to clear it.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// Set (or clear) a session's display label, normalizing (trim + length cap) it,
+/// mirroring it on the live session, and persisting it to the manifest so it
+/// survives restart. Returns the updated `SessionInfo`. Shared by the REST handler
+/// and the hub `Cmd::SetLabel` dispatch (`crate::ops`), so both run identical
+/// validation. Unlike the colour token, the label is display-only — never a
+/// process/filesystem name — so it is passed through verbatim, only trimmed/capped.
+pub fn set_label_core(
+    app: &AppState,
+    session: &str,
+    label: Option<String>,
+) -> Result<SessionInfo, (StatusCode, String)> {
+    let label = match label {
+        Some(raw) => cc_screen_protocol::normalize_session_label(&raw)
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))?,
+        None => None,
+    };
+    let sess = app
+        .get(session)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown session"))?;
+    sess.set_label(label.clone());
+    crate::manifest::set_label(&app.inner.config_dir, session, label);
+    Ok(session_info(&sess))
+}
+
+pub async fn set_label(State(app): State<AppState>, Json(req): Json<LabelReq>) -> ApiResult {
+    let info = set_label_core(&app, &req.session, req.label)?;
     Ok(Json(info).into_response())
 }
 

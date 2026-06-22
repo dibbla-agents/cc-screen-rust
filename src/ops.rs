@@ -68,6 +68,17 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
                 Err((code, msg)) => CmdResult::Error { code: code.as_u16(), msg },
             }
         }
+        Cmd::SetLabel { session, label } => {
+            // Same normalize-set-persist path as the REST handler; reply with the
+            // updated SessionInfo so a hub client renders the rename immediately.
+            match crate::handlers::set_label_core(app, &session, label) {
+                Ok(info) => match serde_json::to_value(info) {
+                    Ok(v) => CmdResult::Json(v),
+                    Err(e) => CmdResult::Error { code: 500, msg: e.to_string() },
+                },
+                Err((code, msg)) => CmdResult::Error { code: code.as_u16(), msg },
+            }
+        }
         Cmd::Restorable => {
             let list = app
                 .restorable()

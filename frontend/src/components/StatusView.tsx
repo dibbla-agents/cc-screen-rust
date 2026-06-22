@@ -18,7 +18,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
-import { ago, agentStatus, dirCrumb, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 
@@ -93,7 +93,9 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
     if (!q) return ordered;
     return ordered
       .map((s) => {
-        const fields = [s.short, s.headline ?? "", s.detail ?? "", s.preview, s.tool, s.machine ?? ""];
+        // Index both the slug and the operator label (proposal 0035) so a
+        // renamed session is findable by either.
+        const fields = [s.short, s.label ?? "", s.headline ?? "", s.detail ?? "", s.preview, s.tool, s.machine ?? ""];
         let best: number | null = null;
         for (const f of fields) {
           const sc = fuzzyScore(q, f);
@@ -167,9 +169,17 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                           </span>
                           {/* Proposal 0025: two-segment folder breadcrumb
                               (parent dim, leaf bright) from the live cwd; falls
-                              back to `short` with no usable cwd. */}
+                              back to `short` with no usable cwd. Proposal 0035:
+                              an operator label, when set, leads over the crumb. */}
                           {(() => {
                             const crumb = dirCrumb(s.cwd);
+                            if (s.label?.trim()) {
+                              return (
+                                <span className="truncate text-sm font-medium text-slate-100">
+                                  {displayName(s)}
+                                </span>
+                              );
+                            }
                             return crumb ? (
                               <span className="flex min-w-0 items-baseline text-sm font-medium">
                                 {crumb.parent && (
@@ -205,7 +215,7 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
                         {/* Latest status: the LLM headline, else the preview.
                             Full summary on hover (desktop) / long-press (touch). */}
                         <SummaryTip
-                          title={s.short}
+                          title={displayName(s)}
                           path={s.cwd}
                           text={s.detail || s.headline || undefined}
                           className="mt-0.5 block min-w-0"

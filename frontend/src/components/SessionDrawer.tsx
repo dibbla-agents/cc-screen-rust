@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, dirCrumb, fuzzyScore, sessionAccent, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
+import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -68,6 +68,10 @@ interface Props {
   onLayout: () => void;
   deleting: Set<string>;
   onDelete: (name: string, mode: "exit" | "kill", machine?: string) => void;
+  // Set/clear a session's display label (proposal 0035). Reached from a row's
+  // right-click (desktop) / long-press (touch) → Rename… inline input. `label`
+  // null/empty clears it (falls back to the slug). Identity is never touched.
+  onRename: (s: Session, label: string | null) => void;
   // Sessions a reboot/tmux restart took down that can be resumed; the button
   // appears only when non-empty. onRestore brings them all back.
   restorable: RestorableSession[];
@@ -99,6 +103,7 @@ export type PaneSwitcherProps = Pick<
   | "onLayout"
   | "deleting"
   | "onDelete"
+  | "onRename"
   | "restorable"
   | "onRestore"
   | "toastsOn"
@@ -164,12 +169,22 @@ export default function SessionDrawer({
   onLayout,
   deleting,
   onDelete,
+  onRename,
   restorable,
   onRestore,
   toastsOn,
   onToggleToasts,
 }: Props) {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  // Inline rename (proposal 0035): the session name currently being renamed
+  // (its `${machine}/${name}` key), plus the draft text. Mirrors the inline
+  // delete-confirm pattern rather than a separate popover.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  // ~450 ms long-press timer for the touch rename gesture (no right-click on
+  // touch); cancelled on move/up, the same threshold as SummaryTip's long-press.
+  const renamePressTimer = useRef<number | null>(null);
   const [restoring, setRestoring] = useState(false);
   // The sidebar has two body modes: the list (default) and the in-sidebar create
   // flow (proposal 0016). `createQuery` seeds the folder search from the list
@@ -179,6 +194,34 @@ export default function SessionDrawer({
   // The type-to-filter query (Part A). Empty = exactly today's resting list.
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
+
+  // Rename helpers (proposal 0035). `beginRename` opens the inline input seeded
+  // with the current display name; `commitRename` posts the trimmed value (empty
+  // → clear) and closes. The owning machine rides through onRename's Session.
+  const rowKey = (s: Session) => `${s.machine ?? ""}/${s.name}`;
+  const clearRenamePress = () => {
+    if (renamePressTimer.current !== null) {
+      clearTimeout(renamePressTimer.current);
+      renamePressTimer.current = null;
+    }
+  };
+  const beginRename = (s: Session) => {
+    setConfirmDel(null);
+    setRenameDraft(displayName(s));
+    setRenaming(rowKey(s));
+  };
+  const commitRename = (s: Session) => {
+    onRename(s, renameDraft.trim() || null);
+    setRenaming(null);
+  };
+  // Autofocus + select-all when the rename input opens.
+  useEffect(() => {
+    if (renaming && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renaming]);
+  useEffect(() => () => clearRenamePress(), []);
 
   // Editing the search can drop the very row a summary tip is open over — retract
   // any open tip on every query change so it can't orphan (proposal 0022).
@@ -254,7 +297,10 @@ export default function SessionDrawer({
         const cwdLeaf = cwd.replace(/\/+$/, "").split("/").pop() ?? "";
         // (field, tierBase) pairs, ordered name → path → meta (proposal 0028).
         const tiers: [string, number][] = [
+          // Name tier indexes BOTH the operator label (proposal 0035) and the
+          // original slug, so a renamed session is findable by either.
           [s.short, NAME_TIER],
+          [s.label ?? "", NAME_TIER],
           [cwdLeaf, PATH_TIER],
           [cwd, PATH_TIER],
           [s.headline ?? "", META_TIER],
@@ -589,7 +635,43 @@ export default function SessionDrawer({
               ? { boxShadow: `inset 3px 0 0 ${sessionAccent(s.color)!.border}` }
               : undefined
           }
+          // Right-click anywhere on the row → rename (proposal 0035), the
+          // desktop secondary path (the touch path is long-press on the name).
+          onContextMenu={(e) => {
+            e.preventDefault();
+            beginRename(s);
+          }}
         >
+          {renaming === rowKey(s) ? (
+            // Inline rename input (proposal 0035) — replaces the pick button so
+            // an <input> isn't nested inside a <button> (invalid + unfocusable).
+            // Enter/blur commits, Esc cancels; empty clears the label.
+            <div className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-2 pr-1">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center">
+                <span className={`h-2 w-2 rounded-full ${toolColor(s.tool)}`} title={s.tool} />
+              </span>
+              <input
+                ref={renameInputRef}
+                value={renameDraft}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitRename(s);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setRenaming(null);
+                  }
+                }}
+                onBlur={() => commitRename(s)}
+                maxLength={MAX_SESSION_LABEL_LEN}
+                placeholder={`empty = use ${s.short}`}
+                aria-label="Rename session"
+                className="min-w-0 flex-1 rounded border border-accent bg-transparent px-1 py-0.5 text-[13px] font-semibold text-slate-100 outline-none"
+              />
+            </div>
+          ) : (
           <button
             onClick={() => onPick(s)}
             className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-2 pr-1 text-left"
@@ -603,8 +685,23 @@ export default function SessionDrawer({
                     name the leading element in every variant — pane switcher,
                     mobile, and the desktop sidebar — so a row is identifiable by
                     name at a glance on every surface (consistent layout, name
-                    above ▸ path ▸ summary). It always appears, even with no cwd. */}
-                <span className="truncate text-[13px] font-semibold text-slate-100">{s.short}</span>
+                    above ▸ path ▸ summary). It always appears, even with no cwd.
+                    Proposal 0035: shows the operator label if set, and long-press
+                    on touch opens the inline rename (right-click on desktop). */}
+                <span
+                  className="truncate text-[13px] font-semibold text-slate-100"
+                  onPointerDown={(e) => {
+                    if (e.pointerType === "touch") {
+                      clearRenamePress();
+                      renamePressTimer.current = window.setTimeout(() => beginRename(s), 450);
+                    }
+                  }}
+                  onPointerMove={clearRenamePress}
+                  onPointerUp={clearRenamePress}
+                  onPointerCancel={clearRenamePress}
+                >
+                  {displayName(s)}
+                </span>
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                   title={statusTitle(status)}
@@ -658,7 +755,7 @@ export default function SessionDrawer({
                   present; the full summary is on hover (desktop) / long-press
                   (touch) via SummaryTip. Falls back to the preview line. */}
               <SummaryTip
-                title={s.short}
+                title={displayName(s)}
                 path={s.cwd}
                 text={s.detail || s.headline || undefined}
                 className="mt-0.5 block min-w-0"
@@ -673,9 +770,10 @@ export default function SessionDrawer({
               </SummaryTip>
             </span>
           </button>
+          )}
 
           <div className="flex shrink-0 items-center pr-1">
-            {isDeleting ? (
+            {renaming === rowKey(s) ? null : isDeleting ? (
               <span
                 className="mx-1.5 inline-block h-4 w-4 animate-spin rounded-full border-2 border-edge border-t-accent"
                 title="ending…"

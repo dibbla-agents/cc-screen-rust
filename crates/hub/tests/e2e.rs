@@ -70,6 +70,7 @@ fn sess(name: &str) -> SessionInfo {
         headline: None,
         detail: None,
         color: None,
+        label: None,
     }
 }
 

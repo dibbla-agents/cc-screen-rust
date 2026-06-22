@@ -240,6 +240,32 @@ pub async fn set_color(
     }
 }
 
+#[derive(Deserialize)]
+pub struct LabelBody {
+    session: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+// Set/clear a session's display label (proposal 0035), routed to the owning agent;
+// the agent replies with the updated SessionInfo as JSON.
+pub async fn set_label(
+    State(hub): State<HubState>,
+    Query(q): Query<MachineQ>,
+    Json(b): Json<LabelBody>,
+) -> Response {
+    let session = b.session.clone();
+    let cmd = Cmd::SetLabel { session: b.session, label: b.label };
+    match route(&hub, &q.machine, Some(&session), cmd).await {
+        Ok(CmdResult::Json(v)) => Json(v).into_response(),
+        Ok(CmdResult::Error { code, msg }) => {
+            (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
+        }
+        Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
+        Err(resp) => resp,
+    }
+}
+
 pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -> Response {
     let session = q.session.clone();
     match route(&hub, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {

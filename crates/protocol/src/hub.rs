@@ -150,6 +150,11 @@ pub enum Cmd {
     /// validates the token, persists it on the session + manifest, and replies
     /// with the updated [`SessionInfo`] as [`CmdResult::Json`].
     SetColor { session: String, color: Option<String> },
+    /// Set (or clear) a session's operator-chosen display label (proposal 0035).
+    /// `label` is free text (trimmed + length-capped); `None`/empty clears it. The
+    /// agent normalizes it, persists it on the session + manifest, and replies
+    /// with the updated [`SessionInfo`] as [`CmdResult::Json`].
+    SetLabel { session: String, label: Option<String> },
     Restore,
     Restorable,
     SessionRoot { session: Option<String> },
@@ -283,6 +288,7 @@ mod tests {
             headline: None,
             detail: None,
             color: Some("rose".into()),
+            label: None,
         };
         let cases = vec![
             AgentMsg::Register {

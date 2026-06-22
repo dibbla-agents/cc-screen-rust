@@ -123,6 +123,7 @@ mod tests {
             headline: None,
             detail: None,
             color: None,
+            label: None,
         }
     }
 

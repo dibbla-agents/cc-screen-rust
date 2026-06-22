@@ -172,6 +172,11 @@ pub struct Session {
     /// `None` when unmarked. Mirrored on the live session for a lowest-latency
     /// read in `session_list`; the authoritative copy persists in the manifest.
     color: Mutex<Option<String>>,
+    /// Operator-chosen display label (proposal 0035): free text shown in place of
+    /// `short` wherever the session is named, or `None` for no label. Display-only
+    /// — identity (`name`/`short`) is untouched. Mirrored on the live session for a
+    /// lowest-latency read; the authoritative copy persists in the manifest.
+    label: Mutex<Option<String>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -273,6 +278,7 @@ impl Session {
             created: now,
             skip_permissions,
             color: Mutex::new(None),
+            label: Mutex::new(None),
             pid,
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
@@ -358,6 +364,19 @@ impl Session {
     pub fn set_color(&self, color: Option<String>) {
         if let Ok(mut c) = self.color.lock() {
             *c = color;
+        }
+    }
+
+    /// The operator-chosen display label (proposal 0035), or `None` when unset.
+    pub fn label(&self) -> Option<String> {
+        self.label.lock().ok().and_then(|l| l.clone())
+    }
+
+    /// Set (or clear, with `None`) the live display label. Persistence to the
+    /// manifest is the caller's job (see `handlers::set_label_core`).
+    pub fn set_label(&self, label: Option<String>) {
+        if let Ok(mut l) = self.label.lock() {
+            *l = label;
         }
     }
 
@@ -769,6 +788,8 @@ impl AppState {
                 // A fresh session starts unmarked; a restored one re-applies its
                 // saved colour below (this record overwrote any prior entry).
                 color: String::new(),
+                // Likewise unlabelled on create; restore re-applies it below.
+                label: String::new(),
             },
         );
 
@@ -825,6 +846,13 @@ impl AppState {
                             sess.set_color(Some(e.color.clone()));
                         }
                         manifest::set_color(&self.inner.config_dir, &name, Some(e.color.clone()));
+                    }
+                    // Same re-apply for the saved display label (proposal 0035).
+                    if !e.label.is_empty() {
+                        if let Some(sess) = self.get(&name) {
+                            sess.set_label(Some(e.label.clone()));
+                        }
+                        manifest::set_label(&self.inner.config_dir, &name, Some(e.label.clone()));
                     }
                     restored.push(name);
                 }

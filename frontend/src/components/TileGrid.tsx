@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import SessionDrawer, { type PaneSwitcherProps } from "./SessionDrawer";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
-import { dirCrumb, machineAccent, nextSessionColor, sessionAccent, toolColor } from "../util";
+import { dirCrumb, displayName, machineAccent, nextSessionColor, sessionAccent, toolColor } from "../util";
 import { FileEditIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
@@ -61,6 +61,134 @@ export function paneCount(l: Layout): number {
   return PANE_COUNT[l];
 }
 
+// Max display-label length (proposal 0035) — kept in lockstep with the agent's
+// `MAX_SESSION_LABEL_LEN`; the input caps here so the UI agrees with the 400.
+const MAX_SESSION_LABEL_LEN = 60;
+
+// InlineName — the identity-bar session name as an inline-editable field
+// (proposal 0035). Renders as text until activated (double-click on desktop,
+// long-press on touch, or the `⌃B r` chord via `editSeq`), then swaps to an
+// <input> seeded with the current name. Enter/blur commits via onCommit; Esc
+// reverts. Committing an empty value clears the label (→ the slug `short`).
+// Identity (`name`/`short`) is never touched — this only sets the display label.
+function InlineName({
+  value,
+  short,
+  nameColor,
+  editSeq,
+  onCommit,
+}: {
+  value: string; // the current display name (label || short) — the seed
+  short: string; // the slug, for the "empty = use {short}" placeholder hint
+  nameColor: string;
+  editSeq: number; // bumped (active pane only) by ⌃B r → enter edit
+  onCommit: (label: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const pressTimer = useRef<number | null>(null);
+  // Track the last-seen editSeq so a bump (but not the initial mount) opens edit.
+  const lastSeq = useRef(editSeq);
+
+  const begin = () => {
+    setDraft(value);
+    setEditing(true);
+  };
+  const cancelPress = () => {
+    if (pressTimer.current !== null) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  };
+
+  // ⌃B r (active pane only): editSeq changes → enter edit mode.
+  useEffect(() => {
+    if (editSeq !== lastSeq.current) {
+      lastSeq.current = editSeq;
+      begin();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editSeq]);
+
+  // Autofocus + select-all when the field opens.
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  // Cleanup any pending long-press timer on unmount.
+  useEffect(() => () => cancelPress(), []);
+
+  if (editing) {
+    const commit = () => {
+      onCommit(draft.trim() || null);
+      setEditing(false);
+    };
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        // The input lives inside the pane (which captures pointerdown to focus
+        // the terminal) and under App's capture-phase ⌃B handler. Stop pointer +
+        // key propagation so typing/clicking here never reaches the grid.
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+          }
+        }}
+        onBlur={commit}
+        maxLength={MAX_SESSION_LABEL_LEN}
+        placeholder={`empty = use ${short}`}
+        aria-label="Rename session"
+        className="min-w-0 flex-1 rounded border border-accent bg-transparent px-1 text-sm font-medium text-slate-100 outline-none"
+      />
+    );
+  }
+
+  return (
+    <span
+      className="group/name flex min-w-0 shrink items-baseline gap-1"
+      title="Double-click to rename (⌃B r)"
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        begin();
+      }}
+      // Touch long-press → edit (no double-click on touch). ~450 ms, cancelled
+      // on move/up — the same gesture as the file-tree context menu.
+      onPointerDown={(e) => {
+        if (e.pointerType === "touch") {
+          cancelPress();
+          pressTimer.current = window.setTimeout(begin, 450);
+        }
+      }}
+      onPointerMove={cancelPress}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
+    >
+      <span className={`shrink truncate ${nameColor}`}>{value}</span>
+      {/* Faint pencil for discoverability on desktop hover; hidden on touch
+          (long-press is the trigger there, no hover state). */}
+      <span
+        aria-hidden
+        className="hidden shrink-0 text-[11px] text-slate-500 group-hover/name:inline"
+      >
+        ✎
+      </span>
+    </span>
+  );
+}
+
 interface Props {
   layout: Layout;
   panes: (PaneRef | null)[];
@@ -84,6 +212,12 @@ interface Props {
   // Set/clear this pane's session mark colour (proposal 0029). `color` null
   // clears the mark; a token re-rolls it. The owning machine rides on the ref.
   onMarkColor: (ref: PaneRef, color: string | null) => void;
+  // Set/clear this pane's session display label (proposal 0035). `label` null or
+  // empty clears it (falls back to `short`). The owning machine rides on the ref.
+  onRename: (ref: PaneRef, label: string | null) => void;
+  // Bumped by the `⌃B r` chord (proposal 0035) to put the *active* pane's
+  // identity-bar name into edit mode with no pointer. Only the active pane reacts.
+  renameSeq: number;
   // Pane-indexed xterm registration — see TerminalView.onTerm. Lets the
   // app's global copy shortcut read the active pane's current selection.
   onTermFor?: (idx: number, term: Terminal | null) => void;
@@ -123,6 +257,8 @@ export default function TileGrid({
   onPaneCreated,
   onOpenEditor,
   onMarkColor,
+  onRename,
+  renameSeq,
   onTermFor,
   onDropFiles,
   switcher,
@@ -156,6 +292,10 @@ export default function TileGrid({
           onCreated={(ref) => onPaneCreated(idx, ref)}
           onOpenEditor={onOpenEditor}
           onMarkColor={onMarkColor}
+          onRename={onRename}
+          // Only the active pane receives the live rename seq; others get a
+          // stable -1 so a ⌃B r bump only edits the focused pane.
+          renameSeq={idx === active ? renameSeq : -1}
           onTerm={(t) => onTermFor?.(idx, t)}
           onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
           switcher={switcher}
@@ -181,6 +321,9 @@ interface PaneProps {
   onCreated: (ref: PaneRef) => void;
   onOpenEditor: () => void;
   onMarkColor: (ref: PaneRef, color: string | null) => void;
+  onRename: (ref: PaneRef, label: string | null) => void;
+  // Bumped (on the active pane only) by ⌃B r to enter inline name-edit mode.
+  renameSeq: number;
   onTerm?: (term: Terminal | null) => void;
   onDropFiles?: (dt: DataTransfer) => void;
   switcher: PaneSwitcherProps;
@@ -204,6 +347,8 @@ function PaneBox({
   onCreated,
   onOpenEditor,
   onMarkColor,
+  onRename,
+  renameSeq,
   onTerm,
   onDropFiles,
   switcher,
@@ -382,7 +527,7 @@ function PaneBox({
                 <span className={`rounded px-1 py-px text-[9px] font-bold uppercase text-bar ${toolColor(meta.tool)}`}>
                   {meta.tool}
                 </span>{" "}
-                <span className="font-mono text-slate-300">{meta.short}</span>
+                <span className="font-mono text-slate-300">{displayName(meta)}</span>
               </div>
             )}
           </div>
@@ -441,16 +586,24 @@ function PaneBox({
               left already carries the host identity. */}
           {(() => {
             const crumb = dirCrumb(meta.cwd);
-            const name = meta.short;
+            // Proposal 0035: the operator label leads if set, else the slug.
+            const name = displayName(meta);
             const nameColor = active ? "text-slate-100" : "text-slate-200";
 
             // Name-first: the session name always leads, bright; the breadcrumb
             // trails as dim, first-to-truncate context. Shown verbatim even when
-            // it duplicates the folder leaf.
+            // it duplicates the folder leaf. The name itself is inline-editable
+            // (proposal 0035): double-click / long-press / ⌃B r → rename.
             if (name) {
               return (
                 <span className="flex min-w-0 flex-1 items-baseline gap-1 text-sm font-medium">
-                  <span className={`shrink truncate ${nameColor}`}>{name}</span>
+                  <InlineName
+                    value={name}
+                    short={meta.short}
+                    nameColor={nameColor}
+                    editSeq={renameSeq}
+                    onCommit={(label) => onRename(session, label)}
+                  />
                   {crumb && (
                     <span className="flex min-w-0 items-baseline truncate text-[12px] text-slate-500">
                       <span className="shrink-0 px-0.5 text-slate-600">·</span>
