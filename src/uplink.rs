@@ -19,7 +19,7 @@ use cc_screen_protocol::hub::{
 use cc_screen_protocol::SessionInfo;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, sleep, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -30,6 +30,19 @@ use crate::engine::{notification_eligible, now_secs, AppState, Session};
 
 /// How often the agent re-checks its session list and pushes a delta to the hub.
 const SESSIONS_POLL: Duration = Duration::from_secs(1);
+
+/// If the agent hears *nothing* from the hub for this long, it treats the uplink
+/// as a silently half-open (dead) connection and drops it so the run loop
+/// reconnects. The hub pings every 30s (`crates/hub` `uplink_server`), so any
+/// healthy link refreshes well inside this window; 60s is a 2× margin. Without
+/// this watchdog an idle agent behind a dropped tunnel never notices the death —
+/// it only ever *writes* on a session-list delta, so an idle fleet writes nothing,
+/// the dead socket is never exercised, and the agent zombies while the hub has
+/// long since marked it offline.
+const HUB_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often the watchdog re-checks the idle deadline above.
+const HEARTBEAT_CHECK: Duration = Duration::from_secs(15);
 
 /// A frame to write on the uplink WS: an encoded `AgentMsg`, or a WS-level Pong.
 enum WsOut {
@@ -145,6 +158,11 @@ async fn connect_and_serve(
     // Periodic summary candidacy (proposal 0022). Floor at 5s so a misconfigured
     // tiny value can't hot-loop the LLM.
     let mut summary_tick = interval(Duration::from_secs(summary.interval_secs.max(5)));
+    // Half-open watchdog: every frame from the hub (incl. its 30s ping) bumps
+    // `last_recv`; if `heartbeat` ever finds it stale past HUB_IDLE_TIMEOUT, the
+    // path is dead and we reconnect. Registration just happened, so seed it now.
+    let mut heartbeat = interval(HEARTBEAT_CHECK);
+    let mut last_recv = Instant::now();
 
     loop {
         tokio::select! {
@@ -193,28 +211,45 @@ async fn connect_and_serve(
                     request_summary(state, &out_tx, machine_id, &sess.name, summary.tail_lines).await;
                 }
             }
-            incoming = ws_read.next() => match incoming {
-                Some(Ok(Message::Binary(buf))) => match decode_frame::<HubMsg>(&buf) {
-                    Ok((msg, payload)) => {
-                        if !handle_hub(state, hub_base, token, &out_tx, &mut chans, msg, payload).await {
+            _ = heartbeat.tick() => {
+                // The hub pings every 30s; if we've heard nothing for HUB_IDLE_TIMEOUT
+                // the link is silently half-open (our socket may still read ESTABLISHED
+                // while the path is dead). Drop it — the run loop reconnects with backoff.
+                if last_recv.elapsed() > HUB_IDLE_TIMEOUT {
+                    tracing::warn!(
+                        "uplink: no frame from hub in {}s; assuming dead, reconnecting",
+                        HUB_IDLE_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
+            }
+            incoming = ws_read.next() => {
+                // Any frame at all (a HubMsg, the 30s ping, a WS ping) proves the
+                // path is live — refresh the watchdog before dispatching.
+                last_recv = Instant::now();
+                match incoming {
+                    Some(Ok(Message::Binary(buf))) => match decode_frame::<HubMsg>(&buf) {
+                        Ok((msg, payload)) => {
+                            if !handle_hub(state, hub_base, token, &out_tx, &mut chans, msg, payload).await {
+                                break;
+                            }
+                        }
+                        // Skip a malformed frame; keep the connection open.
+                        Err(_) => tracing::warn!("uplink: malformed hub frame (skipped)"),
+                    },
+                    Some(Ok(Message::Ping(p))) => {
+                        if out_tx.send(WsOut::Pong(p)).await.is_err() {
                             break;
                         }
                     }
-                    // Skip a malformed frame; keep the connection open.
-                    Err(_) => tracing::warn!("uplink: malformed hub frame (skipped)"),
-                },
-                Some(Ok(Message::Ping(p))) => {
-                    if out_tx.send(WsOut::Pong(p)).await.is_err() {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        tracing::warn!("uplink: read error: {e}");
                         break;
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {}
-                Some(Err(e)) => {
-                    tracing::warn!("uplink: read error: {e}");
-                    break;
-                }
-            },
+            }
         }
     }
 
