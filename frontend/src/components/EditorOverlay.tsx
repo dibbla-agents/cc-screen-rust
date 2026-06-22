@@ -137,6 +137,18 @@ function loadFontSize(): number {
   return Number.isFinite(n) ? clampFont(n) : FONT_DEFAULT;
 }
 
+// Code files get their own remembered size, decoupled from prose: monospace
+// glyphs read larger and denser than the proportional prose font at the same
+// px, so the size that's "just right" for markdown is too big for code. Default
+// a couple px below prose; same clamp. The A−/A+ control drives whichever size
+// applies to the open file (markdown → prose, otherwise → code).
+const CODE_FONT_KEY = "ccweb.codeFontSize";
+const CODE_FONT_DEFAULT = 13;
+function loadCodeFontSize(): number {
+  const n = parseInt(localStorage.getItem(CODE_FONT_KEY) || "", 10);
+  return Number.isFinite(n) ? clampFont(n) : CODE_FONT_DEFAULT;
+}
+
 // Live-save (autosave) preference — ON by default. Persisted so it sticks.
 const LIVE_KEY = "ccweb.editorLiveSave";
 const LIVE_DEBOUNCE_MS = 700;
@@ -224,6 +236,7 @@ export default function EditorOverlay({
   const [error, setError] = useState("");
   const [reading, setReading] = useState(false);
   const [fontSize, setFontSize] = useState(loadFontSize);
+  const [codeFontSize, setCodeFontSize] = useState(loadCodeFontSize);
   const [liveSave, setLiveSave] = useState(loadLiveSave);
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -591,7 +604,18 @@ export default function EditorOverlay({
   useEffect(() => {
     localStorage.setItem(FONT_KEY, String(fontSize));
   }, [fontSize]);
-  const bumpFont = useCallback((d: number) => setFontSize((f) => clampFont(f + d)), []);
+  useEffect(() => {
+    localStorage.setItem(CODE_FONT_KEY, String(codeFontSize));
+  }, [codeFontSize]);
+  // The size that applies to the open file: prose for markdown, code otherwise.
+  // The single A−/A+ control and the --cc-editor-font injection both read this,
+  // and bumpFont mutates whichever kind is showing — so code stays smaller while
+  // the markdown size the user tuned is untouched.
+  const editorFontSize = isMd ? fontSize : codeFontSize;
+  const bumpFont = useCallback(
+    (d: number) => (isMd ? setFontSize : setCodeFontSize)((f) => clampFont(f + d)),
+    [isMd]
+  );
 
   useEffect(() => {
     localStorage.setItem(LIVE_KEY, liveSave ? "1" : "0");
@@ -1262,7 +1286,7 @@ export default function EditorOverlay({
                 <div className="flex shrink-0 items-center rounded-lg bg-panel/70 ring-1 ring-inset ring-edge">
                   <button
                     onClick={() => bumpFont(-1)}
-                    disabled={fontSize <= FONT_MIN}
+                    disabled={editorFontSize <= FONT_MIN}
                     className="flex h-9 items-center rounded-l-lg px-2.5 text-xs text-slate-300 hover:bg-edge disabled:opacity-30"
                     title="Smaller text"
                     aria-label="Decrease font size"
@@ -1271,13 +1295,13 @@ export default function EditorOverlay({
                   </button>
                   <span
                     className="min-w-[2ch] text-center text-[11px] tabular-nums text-slate-500"
-                    title="Editor font size"
+                    title={isMd ? "Markdown font size" : "Code font size"}
                   >
-                    {fontSize}
+                    {editorFontSize}
                   </span>
                   <button
                     onClick={() => bumpFont(1)}
-                    disabled={fontSize >= FONT_MAX}
+                    disabled={editorFontSize >= FONT_MAX}
                     className="flex h-9 items-center rounded-r-lg px-2.5 text-sm text-slate-300 hover:bg-edge disabled:opacity-30"
                     title="Larger text"
                     aria-label="Increase font size"
@@ -1410,18 +1434,18 @@ export default function EditorOverlay({
                         <div className="flex items-center rounded-lg bg-panel/70 ring-1 ring-inset ring-edge">
                           <button
                             onClick={() => bumpFont(-1)}
-                            disabled={fontSize <= FONT_MIN}
+                            disabled={editorFontSize <= FONT_MIN}
                             className="flex h-8 items-center rounded-l-lg px-2.5 text-xs text-slate-300 hover:bg-edge disabled:opacity-30"
                             aria-label="Decrease font size"
                           >
                             A<span className="text-[9px]">−</span>
                           </button>
                           <span className="min-w-[2ch] text-center text-[11px] tabular-nums text-slate-500">
-                            {fontSize}
+                            {editorFontSize}
                           </span>
                           <button
                             onClick={() => bumpFont(1)}
-                            disabled={fontSize >= FONT_MAX}
+                            disabled={editorFontSize >= FONT_MAX}
                             className="flex h-8 items-center rounded-r-lg px-2.5 text-sm text-slate-300 hover:bg-edge disabled:opacity-30"
                             aria-label="Increase font size"
                           >
@@ -1605,7 +1629,7 @@ export default function EditorOverlay({
           <div
             onPointerDownCapture={releaseControl}
             className="min-h-0 flex-1 overflow-hidden"
-            style={{ "--cc-editor-font": `${fontSize}px`, background: SURFACE_BG } as CSSProperties}
+            style={{ "--cc-editor-font": `${editorFontSize}px`, background: SURFACE_BG } as CSSProperties}
           >
           {status === "loading" && (
             <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading…</div>

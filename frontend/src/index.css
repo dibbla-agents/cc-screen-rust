@@ -18,6 +18,24 @@
   --cc-ink-faint: #8a93a0;
   /* Comfortable reading measure, shared by editor + reading view. */
   --cc-measure: 44rem;
+
+  /* Code syntax palette — VS Code "Dark+" inspired. Consumed by the code
+     editor's HighlightStyle (src/editor/codeHighlight.ts) via these names, so
+     the colors live here in one place. A future light mode re-declares the same
+     --cc-syn-* names under `@media (prefers-color-scheme: light)` and both the
+     editor and any code rendered elsewhere recolor with zero JS change. */
+  --cc-syn-keyword: #569cd6; /* control / keyword (VS Code blue)       */
+  --cc-syn-string: #ce9178; /* strings (VS Code salmon)               */
+  --cc-syn-number: #b5cea8; /* numbers / constants (VS Code green)    */
+  --cc-syn-comment: #6a9955; /* comments (VS Code green, italic)       */
+  --cc-syn-function: #dcdcaa; /* function names (VS Code yellow)        */
+  --cc-syn-type: #4ec9b0; /* types / classes (VS Code teal)         */
+  --cc-syn-variable: #9cdcfe; /* variables / props (VS Code light blue) */
+  --cc-syn-def: #9cdcfe;
+  --cc-syn-punct: #d4d4d4; /* operators / punctuation                */
+  --cc-syn-tag: #569cd6;
+  --cc-syn-meta: #c586c0; /* decorators / preprocessor (purple)     */
+  --cc-syn-invalid: #f48771;
 }
 
 html,

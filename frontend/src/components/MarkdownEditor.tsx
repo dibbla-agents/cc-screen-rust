@@ -6,6 +6,7 @@ import { LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { markdownExtensions } from "../editor/markdown";
 import { livePreview } from "../editor/livePreview";
+import { codeHighlightExtension } from "../editor/codeHighlight";
 
 interface Props {
   value: string;
@@ -122,6 +123,9 @@ export default function MarkdownEditor({ value, onChange, filename, markdown, on
       exts.push(markdownExtensions(), livePreview());
     } else if (codeLang) {
       exts.push(codeLang);
+      // The missing piece: map Lezer highlight tags to our dark palette. Added
+      // after basicSetup's fallback default, so our (non-fallback) style wins.
+      exts.push(codeHighlightExtension());
     }
     return exts;
   }, [markdown, codeLang]);
