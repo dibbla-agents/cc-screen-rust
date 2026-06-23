@@ -5,7 +5,7 @@
 # See cc-screen-saas proposal 0022.
 [package]
 name = "cc-screen-summary"
-version = "0.3.50"
+version = "0.3.51"
 edition = "2021"
 description = "Haiku-backed session-status summarizer for cc-screen-rust"
 
