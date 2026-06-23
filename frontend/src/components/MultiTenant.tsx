@@ -124,10 +124,13 @@ function GoogleButton() {
 // ── Auth: login / sign up ─────────────────────────────────────────────────────
 export function AuthScreen({
   google,
+  password = true,
   hint,
   onAuthed,
 }: {
   google: boolean;
+  /// Whether to offer email/password login + signup. False on a Google-only hub.
+  password?: boolean;
   hint?: string;
   onAuthed: () => void;
 }) {
@@ -168,6 +171,8 @@ export function AuthScreen({
               {hint}
             </div>
           )}
+          {password && (
+            <>
           {/* segmented login/signup toggle */}
           <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-edge bg-bar p-1 text-center text-xs font-medium">
             {(["login", "signup"] as const).map((m) => (
@@ -224,16 +229,23 @@ export function AuthScreen({
               {busy ? "…" : mode === "login" ? "Sign in" : "Create account"}
             </button>
           </form>
+            </>
+          )}
 
           {google && (
             <>
-              <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wider text-slate-600">
-                <span className="h-px flex-1 bg-edge" />
-                or
-                <span className="h-px flex-1 bg-edge" />
-              </div>
+              {password && (
+                <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wider text-slate-600">
+                  <span className="h-px flex-1 bg-edge" />
+                  or
+                  <span className="h-px flex-1 bg-edge" />
+                </div>
+              )}
               <GoogleButton />
             </>
+          )}
+          {!password && !google && (
+            <div className="text-center text-xs text-claude">No login method is configured.</div>
           )}
         </Window>
         <p className="mt-5 text-center font-mono text-[11px] text-slate-600">

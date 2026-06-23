@@ -1848,6 +1848,7 @@ export default function App() {
       return (
         <AuthScreen
           google={me.googleEnabled}
+          password={me.passwordLogin !== false}
           hint={onActivate ? "Sign in to approve a device." : undefined}
           onAuthed={refetchMe}
         />

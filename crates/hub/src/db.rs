@@ -47,6 +47,10 @@ pub trait Store: Send + Sync {
     /// such account.
     async fn user_id_by_email(&self, email: &str) -> Option<String>;
 
+    /// Delete a user by email (and, via FK cascade, their agents). Returns true if
+    /// a row was removed. Admin CLI only.
+    async fn delete_user(&self, email: &str) -> bool;
+
     /// Hand-provision a user (Phase 1 has no public signup). Returns the new
     /// `user_id`. Errors on a duplicate email or a too-short password.
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String>;
@@ -226,6 +230,15 @@ impl Store for SqliteStore {
             .await
             .ok()??;
         row.try_get("id").ok()
+    }
+
+    async fn delete_user(&self, email: &str) -> bool {
+        sqlx::query("DELETE FROM users WHERE email = ?1")
+            .bind(normalize_email(email))
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
     }
 
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String> {

@@ -68,6 +68,9 @@ pub async fn login(
     // `secret` as that user's argon2 password, minting an identity-carrying cookie.
     // The single-tenant shared-secret path below is untouched.
     if hub.multi_tenant() {
+        if !password_login_enabled() {
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "password login disabled — use Google" }))).into_response();
+        }
         let email = req.email.as_deref().unwrap_or("");
         if !email.trim().is_empty() {
             if let Some(user_id) = hub.verify_login(email, &req.secret).await {
@@ -118,18 +121,19 @@ pub async fn logout(State(hub): State<HubState>) -> Response {
 pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
     let multi = hub.multi_tenant();
     let google = multi && google_enabled();
+    let password = password_login_enabled();
     if multi {
         if let Some(user_id) = hub.client_auth.user_from_cookie(&headers) {
             if let Some(email) = hub.user_email(&user_id).await {
                 return Json(json!({
-                    "multiTenant": true, "googleEnabled": google,
+                    "multiTenant": true, "googleEnabled": google, "passwordLogin": password,
                     "authenticated": true, "userId": user_id, "email": email,
                 }))
                 .into_response();
             }
         }
     }
-    Json(json!({ "multiTenant": multi, "googleEnabled": google, "authenticated": false }))
+    Json(json!({ "multiTenant": multi, "googleEnabled": google, "passwordLogin": password, "authenticated": false }))
         .into_response()
 }
 
@@ -140,6 +144,15 @@ fn google_enabled() -> bool {
 #[cfg(not(feature = "multi-tenant"))]
 fn google_enabled() -> bool {
     false
+}
+
+/// Whether email+password login/signup is offered (multi-tenant). Off when
+/// `CCHUB_OAUTH_ONLY` is set — a Google-only deployment. The frontend hides the
+/// password form, and `/api/login`/`/api/signup` refuse the password path.
+pub fn password_login_enabled() -> bool {
+    !std::env::var("CCHUB_OAUTH_ONLY")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 // ── Lifecycle + control, routed to the owning agent ──────────────────────────

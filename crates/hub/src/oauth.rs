@@ -109,13 +109,6 @@ pub async fn google_callback(
     let Some(cfg) = OAuthConfig::from_env() else {
         return (StatusCode::NOT_IMPLEMENTED, "google oauth not configured").into_response();
     };
-    tracing::info!(
-        "oauth-cb: enter error={:?} code={} state={} have_cookie={}",
-        q.error,
-        q.code.is_some(),
-        q.state.is_some(),
-        cookie_value(&headers, OAUTH_COOKIE).is_some()
-    );
     if let Some(err) = q.error.as_deref() {
         tracing::warn!("oauth-cb: google denied: {err}");
         return (StatusCode::UNAUTHORIZED, format!("google denied: {err}")).into_response();
@@ -184,15 +177,11 @@ pub async fn google_callback(
         return (StatusCode::BAD_GATEWAY, "id_token missing sub/email").into_response();
     };
 
-    tracing::info!("oauth-cb: claims email={email:?} verified={:?} sub_len={}", claims.email_verified, sub.len());
     let Some(user_id) = hub.upsert_google_user(sub, email).await else {
-        tracing::warn!("oauth-cb: upsert_google_user returned None for {email}");
+        tracing::warn!("oauth: could not provision user for {email}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not provision user").into_response();
     };
-
-    let secure = cc_screen_auth::is_https(&headers);
-    tracing::info!("oauth-cb: SUCCESS user_id={user_id} secure={secure} → redirect / (cookie set)");
-    let session = hub.client_auth.issue_cookie_for(&user_id, secure);
+    let session = hub.client_auth.issue_cookie_for(&user_id, cc_screen_auth::is_https(&headers));
     // Single Set-Cookie: emit ONLY the session cookie. We deliberately do NOT also
     // clear the short-lived ccs_oauth state cookie here — a second Set-Cookie on
     // this 302 can get mangled by intermediaries (Cloudflare), dropping the

@@ -24,6 +24,9 @@ pub async fn signup(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
     if !hub.multi_tenant() {
         return (StatusCode::NOT_IMPLEMENTED, "not a multi-tenant hub").into_response();
     }
+    if !crate::handlers::password_login_enabled() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": "sign-up disabled — use Google" }))).into_response();
+    }
     let source = cc_screen_auth::source_key(&headers);
     let now = std::time::Instant::now();
     if hub.login_throttle.locked_for(&source, now).is_some() {

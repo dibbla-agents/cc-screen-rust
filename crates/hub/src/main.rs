@@ -59,7 +59,8 @@ async fn user_admin(args: &[String]) -> anyhow::Result<()> {
     use cc_screen_hub::db::{SqliteStore, Store};
     let usage = "usage: cc-screen-hub user add <email> <password>\n       \
                  cc-screen-hub user agent <email> <machine_id>   (mints an uplink token)\n       \
-                 cc-screen-hub user plan <email> <plan>          (free | pro | unlimited | …)\n\
+                 cc-screen-hub user plan <email> <plan>          (free | pro | unlimited | …)\n       \
+                 cc-screen-hub user delete <email>               (removes the user + their agents)\n\
                  (database via CCHUB_DATABASE_URL, e.g. sqlite:///path/hub.db)";
     let url = std::env::var("CCHUB_DATABASE_URL")
         .ok()
@@ -93,6 +94,14 @@ async fn user_admin(args: &[String]) -> anyhow::Result<()> {
             };
             store.set_plan(email, plan).await?;
             println!("set {email} → plan '{plan}'");
+        }
+        Some("delete") => {
+            let Some(email) = args.get(1) else { anyhow::bail!("missing email\n{usage}") };
+            if store.delete_user(email).await {
+                println!("deleted {email} (and any agents)");
+            } else {
+                println!("no such user: {email}");
+            }
         }
         _ => anyhow::bail!("{usage}"),
     }

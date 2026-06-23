@@ -3,7 +3,9 @@
 //! public URL is templated in, so the dashboard can hand the user a single
 //! copy-paste one-liner:
 //!
-//!     curl -fsSL <hub>/install.sh | sh -s -- <machine-name>
+//! ```text
+//! curl -fsSL <hub>/install.sh | sh -s -- <machine-name>
+//! ```
 //!
 //! Public + unauthenticated by design (a `curl | sh` carries no cookie): it only
 //! reveals the hub URL + the public binary-installer URL, and the enrollment it

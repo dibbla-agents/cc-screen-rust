@@ -128,6 +128,8 @@ export async function logout(): Promise<void> {
 export interface MeInfo {
   multiTenant: boolean;
   googleEnabled: boolean;
+  /// Whether email+password login/signup is offered (false on a Google-only hub).
+  passwordLogin?: boolean;
   authenticated: boolean;
   userId?: string;
   email?: string;
