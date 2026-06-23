@@ -13,6 +13,7 @@ mod config;
 mod confine;
 mod dirsearch;
 mod engine;
+mod enroll;
 mod fileops;
 mod files;
 mod handlers;
@@ -58,6 +59,9 @@ RUN-DIRECTLY FLAGS (for one-off / foreground runs)
 SLAVE MODE (also register with a central hub; env in parens)
   --hub URL           hub to dial out to and register with     (CCWEB_HUB_URL)
   --hub-token TOK     this machine's per-agent uplink token    (CCWEB_HUB_TOKEN)
+  --enroll            no token? print a code to approve from your phone   (CCWEB_HUB_ENROLL)
+                      (RFC-8628 device flow against a multi-tenant hub; token is
+                      then saved and reused automatically on later starts)
   --machine-id NAME   name shown in the hub's list (default hostname, CCWEB_MACHINE_ID)
   --hub-only          bind no local port; reachable only via the hub (CCWEB_HUB_ONLY)
 
@@ -186,10 +190,29 @@ async fn main() {
             cfg.summary_tail_lines,
             cfg.summary_interval_secs
         );
+        // Resolve the uplink token (proposal 0001 §7): an explicit --hub-token
+        // wins; else a token persisted by a prior enrollment; else, only if the
+        // operator opted in with --enroll, run the RFC-8628 device flow (print a
+        // code, wait for phone approval) and persist it. With none of those, the
+        // agent connects tokenless — today's single-tenant/open-uplink behavior.
+        let token = match cfg.hub_token.clone() {
+            Some(t) => Some(t),
+            None => match enroll::load_token(&cfg.config_dir) {
+                Some(t) => Some(t),
+                None if cfg.enroll => match enroll::ensure_token(&hub, &cfg.machine_id, &cfg.config_dir).await {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        eprintln!("cc-screen-rust: device enrollment failed: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            },
+        };
         tokio::spawn(uplink::run(
             state.clone(),
             hub,
-            cfg.hub_token.clone(),
+            token,
             cfg.machine_id.clone(),
             summary_params,
         ));

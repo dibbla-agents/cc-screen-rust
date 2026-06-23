@@ -43,6 +43,13 @@ pub struct Config {
     /// With `--hub` set, bind NO inbound socket — reachable only through the hub
     /// (the YOLO box stops listening). `--hub-only`.
     pub hub_only: bool,
+    /// Opt into RFC-8628 device enrollment against a multi-tenant hub (proposal
+    /// 0001): when set and no token is otherwise available, run the device flow
+    /// (print a code, wait for phone approval) and persist the minted token.
+    /// `--enroll`/CCWEB_HUB_ENROLL. Off by default, so a tokenless open-uplink
+    /// agent connects exactly as before; once enrolled, the persisted token
+    /// auto-resumes with no flag.
+    pub enroll: bool,
     /// Comma-separated extra allowed Origin/Host values (CCWEB_ALLOWED_ORIGINS) for
     /// the browser trust boundary — a reverse-proxy domain or non-tailnet hostname.
     /// Loopback, raw IPs, and `*.ts.net` are always accepted; see auth::origin.
@@ -191,6 +198,7 @@ pub fn load() -> Config {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(default_machine_id);
     let hub_only = has_flag("--hub-only") || env_truthy("CCWEB_HUB_ONLY");
+    let enroll = has_flag("--enroll") || env_truthy("CCWEB_HUB_ENROLL");
     // No local bind in hub-only mode → no clip endpoint to reach → leave it empty
     // so the shim skips straight to the standard Go/Mac clipboard chain.
     let clip_url = if hub_only { String::new() } else { clip_url_from_addr(&addr) };
@@ -221,6 +229,7 @@ pub fn load() -> Config {
         hub_token,
         machine_id,
         hub_only,
+        enroll,
         allowed_origins,
         allow_unauthenticated_remote,
         summary_tail_lines,
