@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { EditorView, keymap } from "@codemirror/view";
 import { Prec, type Extension } from "@codemirror/state";
@@ -7,6 +7,7 @@ import { languages } from "@codemirror/language-data";
 import { markdownExtensions } from "../editor/markdown";
 import { livePreview } from "../editor/livePreview";
 import { codeHighlightExtension } from "../editor/codeHighlight";
+import { findInFileExtensions } from "../editor/findInFile";
 
 interface Props {
   value: string;
@@ -16,6 +17,9 @@ interface Props {
   // non-markdown files (we highlight them as code via language-data instead).
   markdown: boolean;
   onSave?: () => void;
+  // Proposal 0038: hand the live EditorView up to the overlay so it can drive
+  // find-in-file imperatively (toolbar 🔎 button + the layered-Esc ladder).
+  viewRef?: MutableRefObject<EditorView | null>;
 }
 
 // The editing surface comes in two flavours. Markdown = a centered editorial
@@ -42,6 +46,14 @@ const proseTheme = EditorView.theme(
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
       { backgroundColor: "rgba(56,189,248,0.18)" },
     "&.cm-editor.cm-focused": { outline: "none" },
+    // Find-in-file (0038): all matches get a soft accent wash; the current one a
+    // stronger fill + outline. A theme (not the package baseTheme) so it wins.
+    ".cm-searchMatch": { backgroundColor: "rgba(56,189,248,0.18)", borderRadius: "2px" },
+    ".cm-searchMatch-selected": {
+      backgroundColor: "rgba(56,189,248,0.42)",
+      outline: "1px solid #38bdf8",
+      borderRadius: "2px",
+    },
   },
   { dark: true }
 );
@@ -63,6 +75,12 @@ const codeTheme = EditorView.theme(
     ".cm-activeLineGutter": { backgroundColor: "transparent", color: "#64748b" },
     "&.cm-editor.cm-focused": { outline: "none" },
     ".cm-scroller": { lineHeight: "1.6", overflow: "auto" },
+    ".cm-searchMatch": { backgroundColor: "rgba(56,189,248,0.18)", borderRadius: "2px" },
+    ".cm-searchMatch-selected": {
+      backgroundColor: "rgba(56,189,248,0.42)",
+      outline: "1px solid #38bdf8",
+      borderRadius: "2px",
+    },
   },
   { dark: true }
 );
@@ -71,12 +89,20 @@ const codeTheme = EditorView.theme(
 // preview; for other text files it lazy-loads a syntax-highlighting language by
 // extension (language-data's descriptors load on demand). A Mod-s keymap (high
 // precedence so it beats the browser's Save dialog) calls onSave.
-export default function MarkdownEditor({ value, onChange, filename, markdown, onSave }: Props) {
+export default function MarkdownEditor({ value, onChange, filename, markdown, onSave, viewRef }: Props) {
   // Keep onSave in a ref so the Mod-s keymap doesn't force the whole extension
   // set (and the live-preview plugin) to rebuild on every keystroke — the
   // parent passes a fresh onSave each render.
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
+  // Drop the shared view handle when this editor instance unmounts (switch to
+  // reading view / close / non-editable file) so the overlay never drives a
+  // torn-down view. A remount re-populates it via onCreateEditor.
+  useEffect(() => {
+    return () => {
+      if (viewRef) viewRef.current = null;
+    };
+  }, [viewRef]);
   // Lazily-loaded language support for non-markdown files.
   const [codeLang, setCodeLang] = useState<Extension | null>(null);
   useEffect(() => {
@@ -106,6 +132,9 @@ export default function MarkdownEditor({ value, onChange, filename, markdown, on
   const extensions = useMemo<Extension[]>(() => {
     const exts: Extension[] = [
       EditorView.lineWrapping,
+      // Find-in-file (0038): Mod-f opens the floating widget; works for code and
+      // markdown edit alike. Above basicSetup, below the Mod-s save keymap.
+      findInFileExtensions(),
       Prec.highest(
         keymap.of([
           {
@@ -136,6 +165,9 @@ export default function MarkdownEditor({ value, onChange, filename, markdown, on
       onChange={onChange}
       extensions={extensions}
       theme={markdown ? proseTheme : codeTheme}
+      onCreateEditor={(view) => {
+        if (viewRef) viewRef.current = view;
+      }}
       height="100%"
       style={{ height: "100%" }}
       basicSetup={{

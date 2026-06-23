@@ -15,7 +15,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { writeClipboard } from "../util";
+import { writeClipboard, useDebouncedValue } from "../util";
 import {
   readFile,
   writeFile,
@@ -67,7 +67,10 @@ import {
   DownloadIcon,
   TerminalIcon,
   KeyboardIcon,
+  SearchIcon,
 } from "../icons";
+import type { EditorView } from "@codemirror/view";
+import { openFind, findIsOpen, findHasQuery, clearFindQuery, closeFind } from "../editor/findInFile";
 
 // A faint top-down glow so the centered writing column sits on a surface with
 // depth rather than a flat fill — subtle enough to stay out of the way.
@@ -119,6 +122,9 @@ interface Props {
   // in-tree Find bar. 0 = never requested, so the bar isn't auto-focused on a
   // plain `Ctrl+B e` open.
   focusSearchSeq?: number;
+  // Tree-filter focus signal (proposal 0038). Like `focusSearchSeq` but for the
+  // `Ctrl+B /` chord: each bump focuses the in-tree "Filter tree" field.
+  focusTreeFilterSeq?: number;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -220,6 +226,7 @@ export default function EditorOverlay({
   onOpenSwitcher,
   onDirtyChange,
   focusSearchSeq = 0,
+  focusTreeFilterSeq = 0,
 }: Props) {
   // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
   // on open; switchable via the header dropdown (multi-machine only).
@@ -227,6 +234,11 @@ export default function EditorOverlay({
   useEffect(() => {
     if (open) setFileMachine(initialMachine);
   }, [open, initialMachine]);
+  // Live CodeMirror view (set by MarkdownEditor via onCreateEditor) so this
+  // overlay can drive find-in-file imperatively — the toolbar 🔎 button and the
+  // layered-Esc ladder (proposal 0038, Part B/D). Null whenever no editable doc
+  // is mounted (reading view, PDF, empty).
+  const editorViewRef = useRef<EditorView | null>(null);
   const [activePath, setActivePath] = useState<string | null>(initialPath);
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(""); // last-saved/loaded content (for dirty)
@@ -310,26 +322,39 @@ export default function EditorOverlay({
   const searchRoot = tree.projectPath || tree.sharePath || tree.homePath || "";
 
   // Debounced search whenever the query / root / machine changes. <3 chars clears
-  // results (and the request) so the tree shows through.
+  // results (and the request) so the tree shows through. The 120ms settle is now
+  // the shared `useDebouncedValue` (proposal 0038, Part A) — one timing across
+  // all three searches. The live `searchActive` toggles the spinner / clears
+  // results immediately while typing; the debounced value drives the one fetch.
+  const debouncedQuery = useDebouncedValue(trimmedQuery, 120);
   useEffect(() => {
-    if (!searchActive) {
+    if (searchActive) setSearching(true);
+    else {
       setResults([]);
       setSearching(false);
-      return;
     }
-    setSearching(true);
-    const id = window.setTimeout(() => {
-      searchFiles(trimmedQuery, {
-        root: searchRoot || undefined,
-        session: session || undefined,
-        machine: fileMachine,
+  }, [searchActive, trimmedQuery]);
+  useEffect(() => {
+    if (debouncedQuery.length < 3) return;
+    let cancelled = false;
+    searchFiles(debouncedQuery, {
+      root: searchRoot || undefined,
+      session: session || undefined,
+      machine: fileMachine,
+    })
+      .then((r) => {
+        if (!cancelled) setResults(r.results);
       })
-        .then((r) => setResults(r.results))
-        .catch((e) => setError(errMsg(e)))
-        .finally(() => setSearching(false));
-    }, 120);
-    return () => window.clearTimeout(id);
-  }, [searchActive, trimmedQuery, searchRoot, session, fileMachine]);
+      .catch((e) => {
+        if (!cancelled) setError(errMsg(e));
+      })
+      .finally(() => {
+        if (!cancelled) setSearching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery, searchRoot, session, fileMachine]);
 
   // Keep the result cursor in range and parked on the top row as results change.
   useEffect(() => {
@@ -354,6 +379,32 @@ export default function EditorOverlay({
     });
     return () => cancelAnimationFrame(id);
   }, [focusSearchSeq, open, isDesktop]);
+
+  // ── Tree filter (proposal 0038, Part C) ──────────────────────────────────
+  // The "Filter tree" field lives inside EditorTree; we hold its focus ref here
+  // so `Ctrl+B /` can focus it (mirror of focusSearchSeq) and the Esc ladder can
+  // restore focus after clearing. The "Search all files →" handoff drops the
+  // tree filter and carries its query into [0027]'s project-wide name search.
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open || focusTreeFilterSeq === 0) return;
+    if (!isDesktop) setTreePanelOpen(true);
+    const id = requestAnimationFrame(() => {
+      filterInputRef.current?.focus();
+      filterInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [focusTreeFilterSeq, open, isDesktop]);
+  const onSearchAll = useCallback(
+    (q: string) => {
+      tree.setFilterQuery("");
+      setQuery(q);
+      requestAnimationFrame(() => {
+        searchRef.current?.focus();
+      });
+    },
+    [tree]
+  );
 
   // Drag-and-drop upload INTO a tree folder. A drop on a folder row, a folder's
   // file listing, or a section header (wired through EditorTree → FolderChildren
@@ -936,6 +987,12 @@ export default function EditorOverlay({
   resultsRef.current = results;
   resultCursorRef.current = resultCursor;
   openResultRef.current = openResult;
+  // Tree-filter (0038) state for the Esc ladder, via refs so the capture-phase
+  // handler stays stale-free without re-binding on every keystroke.
+  const filterQueryRef = useRef(tree.filterQuery);
+  const setFilterQueryRef = useRef(tree.setFilterQuery);
+  filterQueryRef.current = tree.filterQuery;
+  setFilterQueryRef.current = tree.setFilterQuery;
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -974,11 +1031,30 @@ export default function EditorOverlay({
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
+        // Find-in-file (0038) owns the first rungs while its widget is open: a
+        // non-empty query clears (panel stays), a second Esc closes the panel.
+        // Its state lives in CodeMirror, reached through the live view.
+        const fv = editorViewRef.current;
+        if (fv && findIsOpen(fv.state)) {
+          if (findHasQuery(fv.state)) {
+            clearFindQuery(fv);
+            return;
+          }
+          closeFind(fv);
+          return;
+        }
         // A non-empty Find query clears first (a second Esc then backs out),
         // matching the overlay's layered-Esc convention.
         if (queryRef.current.trim()) {
           setQuery("");
           searchRef.current?.focus();
+          return;
+        }
+        // Then a non-empty tree filter clears (restoring the prior expansion —
+        // it's an overlay, so it returns the moment filterActive flips false).
+        if (filterQueryRef.current.trim()) {
+          setFilterQueryRef.current("");
+          filterInputRef.current?.focus();
           return;
         }
         // Peel transient surfaces off one at a time before closing the overlay.
@@ -1280,6 +1356,20 @@ export default function EditorOverlay({
             never overflows a narrow screen. */}
         {isDesktop ? (
           <>
+            {status === "ready" && !(reading && isMd) && (
+              <button
+                onClick={() => {
+                  const v = editorViewRef.current;
+                  if (v) openFind(v);
+                }}
+                className={ghostBtn}
+                title="Find in file (Ctrl/⌘+F)"
+                aria-label="Find in file"
+              >
+                <SearchIcon className="h-[18px] w-[18px]" />
+              </button>
+            )}
+
             {status === "ready" && (
               <>
                 {/* Font stepper — a refined segmented control */}
@@ -1381,6 +1471,20 @@ export default function EditorOverlay({
           </>
         ) : (
           <>
+            {status === "ready" && !(reading && isMd) && (
+              <button
+                onClick={() => {
+                  const v = editorViewRef.current;
+                  if (v) openFind(v);
+                }}
+                className={ghostBtn}
+                title="Find in file"
+                aria-label="Find in file"
+              >
+                <SearchIcon className="h-[18px] w-[18px]" />
+              </button>
+            )}
+
             {status === "ready" && isMd && (
               <button
                 onClick={() => setReading((v) => !v)}
@@ -1598,6 +1702,8 @@ export default function EditorOverlay({
                   onDropFiles={onTreeDropFiles}
                   onMoveNode={onMoveNodeDrag}
                   activePath={activePath}
+                  onSearchAll={onSearchAll}
+                  filterInputRef={filterInputRef}
                 />
               </div>
             )}
@@ -1681,6 +1787,7 @@ export default function EditorOverlay({
                 filename={name}
                 markdown={isMd}
                 onSave={() => void doSave()}
+                viewRef={editorViewRef}
               />
             ))}
           </div>
@@ -1796,6 +1903,8 @@ export default function EditorOverlay({
                   onContextMenu={onTreeContextMenu}
                   onDropFiles={onTreeDropFiles}
                   onMoveNode={onMoveNodeDrag}
+                  onSearchAll={onSearchAll}
+                  filterInputRef={filterInputRef}
                   onOpenFile={(p) => {
                     setActivePath(p);
                     setTreePanelOpen(false);

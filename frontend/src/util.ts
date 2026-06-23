@@ -1,4 +1,23 @@
+import { useEffect, useState } from "react";
 import type { Session } from "./api";
+
+// useDebouncedValue — the single "settle, then act" primitive for the app's
+// search surfaces (proposal 0038, Part A). It returns `value` unchanged but only
+// after it has stopped changing for `delayMs`, so a consumer can derive search
+// requests / filtered views from the debounced value and get one update per
+// pause instead of one per keystroke. Replaces the ad-hoc `setTimeout(120)`
+// copies in the [0027] file search and the [0016] folder search so all three
+// searches share one timing (and one place to tune it). The per-surface "≥3
+// chars" gate stays at the call site — it differs (find-in-file allows
+// Enter-to-jump below 3; the tree/name searches don't).
+export function useDebouncedValue<T>(value: T, delayMs = 120): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const id = window.setTimeout(() => setV(value), delayMs);
+    return () => window.clearTimeout(id);
+  }, [value, delayMs]);
+  return v;
+}
 
 export function toolColor(tool: string): string {
   switch (tool) {
@@ -253,6 +272,32 @@ export function fuzzyScore(query: string, text: string): number | null {
     hi = pos + 1;
   }
   return score;
+}
+
+// fuzzyMatchPositions — the indices in `text` that `query` matches as a
+// case-insensitive subsequence (same greedy walk as fuzzyScore), or null when
+// it isn't a subsequence. The tree filter (proposal 0038, Part C) uses these to
+// wrap the matched characters in an accent <mark> so the eye lands on *why* a
+// row is shown. An empty query matches nothing to highlight (returns []).
+export function fuzzyMatchPositions(query: string, text: string): number[] | null {
+  const q = query.toLowerCase();
+  if (q.length === 0) return [];
+  const h = text.toLowerCase();
+  const pos: number[] = [];
+  let hi = 0;
+  for (const nc of q) {
+    let found = -1;
+    for (let j = hi; j < h.length; j++) {
+      if (h[j] === nc) {
+        found = j;
+        break;
+      }
+    }
+    if (found < 0) return null;
+    pos.push(found);
+    hi = found + 1;
+  }
+  return pos;
 }
 
 // Compact "time since last activity" for the switcher rows.

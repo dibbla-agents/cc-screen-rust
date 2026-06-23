@@ -197,3 +197,136 @@ body {
 .cc-prose th, .cc-prose td { border: 1px solid #243042; padding: 0.4em 0.7em; }
 .cc-prose th { background: rgba(127, 127, 127, 0.08); }
 .cc-prose img { max-width: 100%; border-radius: 8px; }
+
+/* ── Find-in-file widget (proposal 0038, Part B) ─────────────────────────────
+   A floating capsule pinned top-right of the CodeMirror editor. It rides in the
+   search extension's top panel, but is absolutely positioned so it reserves no
+   layout space (no editor shift when it opens) and floats over the code. The
+   match-highlight classes (.cm-searchMatch / -selected) are themed in
+   MarkdownEditor so they win over the package baseTheme. */
+.cm-editor { position: relative; }
+/* Our find panel lives in the top-panel slot; neutralise the package's default
+   panel chrome so only our capsule shows and nothing reserves height. */
+.cm-editor .cm-panels.cm-panels-top {
+  border-bottom: none;
+  background: transparent;
+  overflow: visible;
+}
+.cc-find {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.4rem 0.25rem 0.55rem;
+  border: 1px solid var(--cc-edge, #243042);
+  border-radius: 0.6rem;
+  background: rgba(22, 30, 41, 0.95);
+  box-shadow: 0 12px 28px -8px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  color: var(--cc-ink, #d7dade);
+  font-family: var(--cc-prose-font);
+  max-width: min(34rem, calc(100% - 1.5rem));
+}
+.cc-find::before {
+  /* the "this input is live" accent hairline along the top edge */
+  content: "";
+  position: absolute;
+  left: 0.5rem;
+  right: 0.5rem;
+  top: -1px;
+  height: 1px;
+  background: var(--cc-accent, #38bdf8);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cc-find:focus-within::before { opacity: 0.8; }
+.cc-find-glyph { color: var(--cc-ink-faint, #8a93a0); flex-shrink: 0; }
+.cc-find-input {
+  min-width: 8rem;
+  flex: 1 1 auto;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--cc-ink-strong, #eef0f3);
+  font-size: 13px;
+  padding: 0.15rem 0;
+}
+.cc-find-input::placeholder { color: var(--cc-ink-faint, #8a93a0); }
+.cc-find-count {
+  flex-shrink: 0;
+  min-width: 3.2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--cc-ink-faint, #8a93a0);
+  white-space: nowrap;
+}
+.cc-find--error .cc-find-count { color: #f48771; }
+.cc-find--empty .cc-find-count { color: var(--cc-amber, #f5b942); }
+.cc-find--hint .cc-find-count { opacity: 0.7; }
+.cc-find-group { display: flex; align-items: center; gap: 0.125rem; }
+.cc-find-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0.2rem 0.15rem;
+  background: var(--cc-edge, #243042);
+  flex-shrink: 0;
+}
+.cc-find-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  border: none;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--cc-ink-faint, #8a93a0);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.cc-find-btn:hover { background: rgba(36, 48, 66, 0.6); color: var(--cc-ink-strong, #eef0f3); }
+.cc-find-close:hover { color: #f48771; }
+.cc-find-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.65rem;
+  height: 1.65rem;
+  padding: 0 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--cc-ink-faint, #8a93a0);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: var(--cc-mono-font);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.cc-find-toggle:hover { color: var(--cc-ink-strong, #eef0f3); border-color: var(--cc-edge, #243042); }
+.cc-find-toggle.is-on {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: var(--cc-accent, #38bdf8);
+}
+/* Smart-case auto state: on-by-inference reads a touch quieter than a manual on. */
+.cc-find-toggle[data-auto="1"].is-on { opacity: 0.82; }
+
+@media (max-width: 768px) {
+  /* Phone: dock full-width under the toolbar with thumb-sized controls. */
+  .cc-find {
+    left: 0.5rem;
+    right: 0.5rem;
+    top: 0.4rem;
+    max-width: none;
+    padding: 0.35rem 0.4rem;
+  }
+  .cc-find-btn, .cc-find-toggle { width: 2.25rem; height: 2.25rem; min-width: 2.25rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-find::before, .cc-find-btn, .cc-find-toggle { transition: none; }
+}

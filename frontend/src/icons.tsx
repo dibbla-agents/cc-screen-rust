@@ -158,6 +158,46 @@ export function DownloadIcon({ className }: IconProps) {
   );
 }
 
+// A magnifier — the "find in file" action (proposal 0038). Distinct from the
+// tree's funnel/filter glyph so the two search tools read as two.
+export function SearchIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
+// A funnel — the "filter this tree in place" affordance (proposal 0038, Part C).
+// Deliberately not a magnifier: the tree filter narrows what's shown rather than
+// jumping to a file, so it gets its own glyph next to [0027]'s 🔎 find-file bar.
+export function FunnelIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M3 5h18l-7 8v6l-4 2v-8L3 5z" />
+    </svg>
+  );
+}
+
 // An up-arrow rising off a baseline — the "upload files from this device"
 // action. The mirror of DownloadIcon (down-arrow into a tray) so the two
 // read as a transfer pair.

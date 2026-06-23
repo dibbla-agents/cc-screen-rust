@@ -239,10 +239,18 @@ export default function App() {
   // restored from per-session viewer memory once the overlay mounts).
   // `focusSearchSeq` is bumped by the `Ctrl+B f` chord (proposal 0027) to focus
   // the viewer's in-tree Find bar — even when the viewer is already open.
-  const [editor, setEditor] = useState<{ open: boolean; path: string | null; focusSearchSeq: number }>(() => ({
+  const [editor, setEditor] = useState<{
+    open: boolean;
+    path: string | null;
+    focusSearchSeq: number;
+    // Proposal 0038: `Ctrl+B /` bumps this to focus the in-tree "Filter tree"
+    // field (mirror of focusSearchSeq for [0027]'s find-file bar).
+    focusTreeFilterSeq: number;
+  }>(() => ({
     open: loadEditorOpen(),
     path: null,
     focusSearchSeq: 0,
+    focusTreeFilterSeq: 0,
   }));
   const editorOpenRef = useRef(false);
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
@@ -521,6 +529,7 @@ export default function App() {
     (path: string | null, focusSearch = false) => {
       closeAllSheets();
       setEditor((s) => ({
+        ...s,
         open: true,
         path,
         focusSearchSeq: s.focusSearchSeq + (focusSearch ? 1 : 0),
@@ -528,8 +537,14 @@ export default function App() {
     },
     [closeAllSheets]
   );
+  // Open the editor and focus its tree-filter field (the `Ctrl+B /` path) —
+  // bumps focusTreeFilterSeq so it re-focuses even when already open (0038).
+  const focusTreeFilter = useCallback(() => {
+    closeAllSheets();
+    setEditor((s) => ({ ...s, open: true, path: null, focusTreeFilterSeq: s.focusTreeFilterSeq + 1 }));
+  }, [closeAllSheets]);
   const closeEditor = useCallback(
-    () => setEditor((s) => ({ open: false, path: null, focusSearchSeq: s.focusSearchSeq })),
+    () => setEditor((s) => ({ ...s, open: false, path: null })),
     []
   );
 
@@ -947,6 +962,15 @@ export default function App() {
             openEditor(null, true);
             return;
           }
+          if (k === "/" || k === "t" || k === "T") {
+            // Filter-tree (proposal 0038): focus the in-tree "Filter tree" field.
+            // "/" is the mnemonic (web-search slash); "t" is the fallback for
+            // keyboard layouts where "/" needs a modifier.
+            stop();
+            clearArm();
+            focusTreeFilter();
+            return;
+          }
           // Esc and every other chord key is inert over the viewer: drop the
           // prefix. (Esc-to-close is the editor's own capture-phase handler.)
           clearArm();
@@ -1049,6 +1073,14 @@ export default function App() {
           openEditor(null, true);
           return;
         }
+        if (k === "/" || k === "t" || k === "T") {
+          // Filter tree (proposal 0038): open the viewer AND focus its "Filter
+          // tree" field in one step (mirror of the find-file chord above).
+          stop();
+          clearArm();
+          focusTreeFilter();
+          return;
+        }
         if (k === "c" || k === "C") {
           // Mark the focused pane's session with a colour (proposal 0029):
           // `c` re-rolls to a different palette token; `Shift+C` clears it.
@@ -1105,7 +1137,7 @@ export default function App() {
       clearArm();
       clearRepeat();
     };
-  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, markColor]);
+  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, focusTreeFilter, markColor]);
 
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //
@@ -2144,6 +2176,8 @@ export default function App() {
             onDirtyChange={onEditorDirtyChange}
             // Proposal 0027: Ctrl+B f bumps this to focus the in-tree Find bar.
             focusSearchSeq={editor.focusSearchSeq}
+            // Proposal 0038: Ctrl+B / bumps this to focus the tree-filter field.
+            focusTreeFilterSeq={editor.focusTreeFilterSeq}
           />
         </Suspense>
       )}

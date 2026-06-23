@@ -7,10 +7,12 @@ import {
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
   type TouchEvent as ReactTouchEvent,
+  type ReactNode,
 } from "react";
 import { fetchFiles, type DirEntry, type FileEntry, type FilesResp } from "../api";
 import { useFileWatch } from "./useFileWatch";
 import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
+import { fuzzyScore, fuzzyMatchPositions, useDebouncedValue } from "../util";
 
 // Shared $HOME directory-tree machinery, used by both the phone Files sheet
 // (download browser) and the desktop editor's file tree. The data layer (cache,
@@ -155,6 +157,19 @@ export function useDirTree(
   const [homePath, setHomePath] = useState("");
   const [projectPath, setProjectPath] = useState("");
   const [errs, setErrs] = useState<Record<string, string>>({});
+
+  // ── Type-to-filter the tree in place (proposal 0038, Part C) ──────────────
+  // A raw input the consumer drives; the debounced value (shared 120ms settle)
+  // gates the filtered view at ≥3 chars. The narrowing is computed as an OVERLAY
+  // (filter.expandDirs) over the persisted expansion, never mutating it — so
+  // clearing the filter restores the exact prior tree (filterActive flips false
+  // → effectiveExpanded falls back to `expanded`). Distinct from [0027]'s flat
+  // jump-to-file list: this keeps the hierarchy and only sees already-loaded
+  // nodes (the lazy-load caveat; the consumer offers a "Search all files →"
+  // handoff to [0027] for the project-wide answer).
+  const [filterQuery, setFilterQuery] = useState("");
+  const debouncedFilter = useDebouncedValue(filterQuery.trim(), 120);
+  const filterActive = debouncedFilter.length >= 3;
 
   // Per-session expansion memory (proposal 0019 follow-up). `expandedRef` mirrors
   // the live `expanded` set so the save points (switch-out, close) read the
@@ -424,9 +439,35 @@ export function useDirTree(
     return ordering.map((k) => byKey[k]).filter(Boolean);
   }, [sharePath, homePath, currentSession, projectPath, rel, order, bareProjectLabel]);
 
+  // Drop the filter whenever the tree re-roots (session/machine switch) or the
+  // viewer closes, so a stale query never hides a freshly-loaded tree.
+  useEffect(() => {
+    setFilterQuery("");
+  }, [currentSession, machine, open]);
+
+  // The narrowed view: which dirs/files to show, which ancestors to auto-expand,
+  // and a flat render-order row list (for the keyboard cursor + the "shown"
+  // count). Operates over the LOADED cache only (lazy-load caveat). Null when
+  // the filter is inactive (<3 chars) — the tree then renders normally.
+  const filter = useMemo(
+    () => (filterActive ? buildTreeFilter(cache, sections, debouncedFilter) : null),
+    [filterActive, debouncedFilter, cache, sections]
+  );
+
+  // The expansion the tree should RENDER with: while filtering, force-open the
+  // ancestors of matches over the persisted set (an overlay, so clearing the
+  // filter restores the original). Otherwise the persisted set as-is.
+  const effectiveExpanded = useMemo(
+    () => (filter ? new Set<string>([...expanded, ...filter.expandDirs]) : expanded),
+    [filter, expanded]
+  );
+
   return {
     cache,
     expanded,
+    // The expansion to render with (filter overlay folded in). Use this for
+    // open-state; `expanded` stays the persisted truth (watch subscriptions).
+    effectiveExpanded,
     loading,
     sharePath,
     homePath,
@@ -439,6 +480,12 @@ export function useDirTree(
     rel,
     sections,
     watch,
+    // Type-to-filter (0038, Part C): the raw input + its narrowed view (null
+    // when inactive). The consumer renders the filter field and reads `filter`.
+    filterQuery,
+    setFilterQuery,
+    filterActive,
+    filter,
   };
 }
 
@@ -493,6 +540,109 @@ export interface FolderChildrenProps {
   // Files sheet's size. Only meaningful together with compact (the editor's
   // in-overlay tree on a phone); ignored by the already-roomy non-compact tree.
   touch?: boolean;
+  // Type-to-filter view (proposal 0038, Part C). When set, rows not in the
+  // visible set are hidden and the matched substring in each shown name is
+  // highlighted. Null/undefined = render the full tree.
+  filter?: TreeFilter | null;
+  // The keyboard-cursored row path (filter mode), drawn with the shared
+  // selection-highlight language.
+  cursorPath?: string | null;
+}
+
+// The narrowed-view shape useDirTree exposes (proposal 0038, Part C).
+export interface TreeFilter {
+  query: string;
+  matchedFiles: Set<string>;
+  matchedDirs: Set<string>;
+  visibleDirs: Set<string>;
+  expandDirs: Set<string>;
+  rows: { path: string; name: string; isDir: boolean }[];
+}
+
+// buildTreeFilter narrows the LOADED tree to `query` (proposal 0038, Part C):
+// it collects matching files/dirs, keeps + auto-expands their ancestors, and
+// produces a flat render-order row list. Pure over (cache, sections, query) so
+// it's unit-testable; the hook memoises it. Ancestors are walked via dirnameOf
+// up to (not including) "/", so paths above a section root are simply never
+// rendered (the renderer only descends from roots).
+export function buildTreeFilter(
+  cache: Map<string, DirContents>,
+  sections: TreeSection[],
+  query: string
+): TreeFilter {
+  const matchedFiles = new Set<string>();
+  const matchedDirs = new Set<string>();
+  const keepDirs = new Set<string>(); // ancestors of matches → show + expand
+  const addAncestors = (p: string) => {
+    let cur = dirnameOf(p);
+    while (cur && cur !== "/") {
+      if (keepDirs.has(cur)) break;
+      keepDirs.add(cur);
+      cur = dirnameOf(cur);
+    }
+  };
+  for (const contents of cache.values()) {
+    for (const f of contents.files) {
+      if (fuzzyScore(query, f.name) !== null) {
+        matchedFiles.add(f.path);
+        addAncestors(f.path);
+      }
+    }
+    for (const d of contents.dirs) {
+      if (fuzzyScore(query, d.name) !== null) {
+        matchedDirs.add(d.path);
+        addAncestors(d.path);
+      }
+    }
+  }
+  const visibleDirs = new Set<string>([...keepDirs, ...matchedDirs]);
+  const expandDirs = keepDirs;
+  // Walk from each section root in render order (dirs first, then files —
+  // mirrors FolderChildren) so the flat list matches what the user sees.
+  const rows: { path: string; name: string; isDir: boolean }[] = [];
+  const walk = (dirPath: string) => {
+    const c = cache.get(dirPath);
+    if (!c) return;
+    for (const d of c.dirs) {
+      if (!visibleDirs.has(d.path)) continue;
+      rows.push({ path: d.path, name: d.name, isDir: true });
+      if (expandDirs.has(d.path)) walk(d.path);
+    }
+    for (const f of c.files) {
+      if (matchedFiles.has(f.path)) rows.push({ path: f.path, name: f.name, isDir: false });
+    }
+  };
+  for (const sec of sections) if (sec.path) walk(sec.path);
+  return { query, matchedFiles, matchedDirs, visibleDirs, expandDirs, rows };
+}
+
+// HighlightedName wraps the fuzzy-matched characters of `name` in an accent
+// <mark> so the eye lands on *why* a filtered row is shown (friendlier than VS
+// Code, which only dims non-matches). No query → the bare name.
+export function HighlightedName({ name, query }: { name: string; query?: string | null }) {
+  if (!query) return <>{name}</>;
+  const pos = fuzzyMatchPositions(query, name);
+  if (!pos || pos.length === 0) return <>{name}</>;
+  const hit = new Set(pos);
+  const nodes: ReactNode[] = [];
+  let i = 0;
+  while (i < name.length) {
+    const on = hit.has(i);
+    let j = i;
+    while (j < name.length && hit.has(j) === on) j++;
+    const chunk = name.slice(i, j);
+    nodes.push(
+      on ? (
+        <mark key={i} className="bg-transparent font-medium text-accent">
+          {chunk}
+        </mark>
+      ) : (
+        <span key={i}>{chunk}</span>
+      )
+    );
+    i = j;
+  }
+  return <>{nodes}</>;
 }
 
 // Download glyph for the per-file download button (tray with a down-arrow).
@@ -744,6 +894,8 @@ function DirRow({
   ctxHandlers,
   onDropFiles,
   onMoveNode,
+  filterQuery,
+  cursored,
 }: {
   d: DirEntry;
   isOpen: boolean;
@@ -756,15 +908,19 @@ function DirRow({
   ctxHandlers: ReturnType<typeof useTreeContextHandlers>["ctxHandlers"];
   onDropFiles?: (dir: string, dt: DataTransfer) => void;
   onMoveNode?: (src: string, destDir: string) => void;
+  // Filter mode (0038): highlight the matched substring + draw the row cursor.
+  filterQuery?: string | null;
+  cursored?: boolean;
 }) {
   const { over, dropHandlers } = useFolderDrop(d.path, onDropFiles, onMoveNode);
+  const cursorCls = cursored ? "bg-edge/70 ring-1 ring-inset ring-accent/40" : "";
   return (
     <button
       onClick={() => {
         if (swallowLongPress()) return;
         onToggle(d.path);
       }}
-      className={`${rowCls} ${over ? "bg-accent/15 ring-1 ring-inset ring-accent/60" : ""}`}
+      className={`${rowCls} ${over ? "bg-accent/15 ring-1 ring-inset ring-accent/60" : cursorCls}`}
       style={pad}
       {...(onMoveNode ? nodeDragProps(d.path) : {})}
       {...ctxHandlers({ path: d.path, name: d.name, isDir: true })}
@@ -781,7 +937,7 @@ function DirRow({
         </>
       )}
       <span className={`min-w-0 flex-1 truncate ${compact ? "text-slate-300" : "text-slate-100"}`}>
-        {d.name}
+        <HighlightedName name={d.name} query={filterQuery} />
       </span>
       {isLoading && <span className="text-xs text-slate-500">…</span>}
     </button>
@@ -789,8 +945,9 @@ function DirRow({
 }
 
 export function FolderChildren(props: FolderChildrenProps) {
-  const { path, depth, cache, expanded, loading, onToggle, onFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, fileDisabled, activePath, compact, touch } = props;
+  const { path, depth, cache, expanded, loading, onToggle, onFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, fileDisabled, activePath, compact, touch, filter, cursorPath } = props;
   const { ctxHandlers, swallowLongPress } = useTreeContextHandlers(onContextMenu);
+  const fq = filter ? filter.query : null;
   // This whole block (the folder's listed contents) is a drop target for the
   // folder itself, so a drop on a *file* row or the gaps between rows lands in
   // this folder — not only a drop on the folder's own row. Nested subfolder
@@ -820,6 +977,8 @@ export function FolderChildren(props: FolderChildrenProps) {
       {...dropHandlers}
     >
       {data.dirs.map((d) => {
+        // Filter mode: hide dirs that aren't a match or an ancestor of one.
+        if (filter && !filter.visibleDirs.has(d.path)) return null;
         const isOpen = expanded.has(d.path);
         const isLoading = loading.has(d.path);
         return (
@@ -836,13 +995,18 @@ export function FolderChildren(props: FolderChildrenProps) {
               ctxHandlers={ctxHandlers}
               onDropFiles={onDropFiles}
               onMoveNode={onMoveNode}
+              filterQuery={fq}
+              cursored={cursorPath === d.path}
             />
             {isOpen && <FolderChildren {...props} path={d.path} depth={depth + 1} />}
           </div>
         );
       })}
       {data.files.map((f) => {
+        // Filter mode: only matched files survive.
+        if (filter && !filter.matchedFiles.has(f.path)) return null;
         const isActive = activePath === f.path;
+        const isCursored = cursorPath === f.path;
         const isDownloading = downloadingPath === f.path;
         // The row splits into an open-button (flex-1) and an optional download
         // button so the download tap isn't swallowed by the open handler (a
@@ -853,7 +1017,11 @@ export function FolderChildren(props: FolderChildrenProps) {
           <div
             key={f.path}
             className={`flex items-stretch ${compact ? "rounded-md" : "border-t border-edge/20"} ${
-              isActive ? "bg-accent/10 shadow-[inset_2px_0_0_#38bdf8]" : ""
+              isActive
+                ? "bg-accent/10 shadow-[inset_2px_0_0_#38bdf8]"
+                : isCursored
+                ? "bg-edge/70 ring-1 ring-inset ring-accent/40 rounded-md"
+                : ""
             }`}
           >
             <button
@@ -875,7 +1043,7 @@ export function FolderChildren(props: FolderChildrenProps) {
                   isActive ? "font-medium text-accent" : compact ? "text-slate-400" : "text-slate-100"
                 }`}
               >
-                {f.name}
+                <HighlightedName name={f.name} query={fq} />
               </span>
               {!compact && (
                 <>

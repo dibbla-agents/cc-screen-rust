@@ -11,7 +11,7 @@ import {
   type PaneRef,
   type Tool,
 } from "../api";
-import { toolColor } from "../util";
+import { toolColor, useDebouncedValue } from "../util";
 
 // Search-first create flow (proposal 0016, Part B). Rendered *inside* the
 // session drawer body — full-screen on phone (the drawer is full-screen there),
@@ -147,19 +147,25 @@ export default function CreateSession({
   }, [root, selectedMachine]);
 
   // Debounced recursive search whenever the query (or root/machine) changes.
+  // The 120ms settle is the shared `useDebouncedValue` (proposal 0038, Part A).
+  const debouncedQuery = useDebouncedValue(query.trim(), 120);
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
+    if (!debouncedQuery) {
       setResults([]);
       return;
     }
-    const id = setTimeout(() => {
-      searchDirs(q, root || undefined, selectedMachine)
-        .then((r) => setResults(r.results))
-        .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
-    }, 120);
-    return () => clearTimeout(id);
-  }, [query, root, selectedMachine]);
+    let cancelled = false;
+    searchDirs(debouncedQuery, root || undefined, selectedMachine)
+      .then((r) => {
+        if (!cancelled) setResults(r.results);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery, root, selectedMachine]);
 
   // Build the navigable row list from the current mode (search vs browse).
   const rows = useMemo<Row[]>(() => {
@@ -659,19 +665,25 @@ function ExtraDirs({
   }, [open]);
 
   // Debounced recursive search (mirrors the base picker; root = $HOME default).
+  // Shared 120ms settle via `useDebouncedValue` (proposal 0038, Part A).
+  const debouncedQuery = useDebouncedValue(query.trim(), 120);
   useEffect(() => {
-    const q = query.trim();
-    if (!q) {
+    if (!debouncedQuery) {
       setResults([]);
       return;
     }
-    const id = setTimeout(() => {
-      searchDirs(q, undefined, machine)
-        .then((r) => setResults(r.results))
-        .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
-    }, 120);
-    return () => clearTimeout(id);
-  }, [query, machine]);
+    let cancelled = false;
+    searchDirs(debouncedQuery, undefined, machine)
+      .then((r) => {
+        if (!cancelled) setResults(r.results);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedQuery, machine]);
 
   const toggle = useCallback(
     (path: string) => {

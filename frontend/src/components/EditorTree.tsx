@@ -1,4 +1,6 @@
+import { useEffect, useState, type RefObject } from "react";
 import { type FileEntry } from "../api";
+import { FunnelIcon } from "../icons";
 import {
   FolderChildren,
   canOpenInEditor,
@@ -31,6 +33,12 @@ interface Props {
   // Phone-sized rows (larger type, taller targets). Off = the tight desktop
   // sidebar. See FolderChildren's `touch`.
   touch?: boolean;
+  // Type-to-filter (proposal 0038, Part C): hand the matching query over to
+  // [0027]'s project-wide name search when the in-tree (loaded-only) filter
+  // isn't enough — the "Search all files →" handoff.
+  onSearchAll?: (query: string) => void;
+  // Focus target for the tree-filter field (Ctrl+B / focuses it).
+  filterInputRef?: RefObject<HTMLInputElement | null>;
 }
 
 // EditorTree — the editor's file tree (desktop left sidebar + phone slide-over).
@@ -40,8 +48,9 @@ interface Props {
 // overlay routes PDFs to its read-only pdf.js viewer); tapping anything else
 // downloads it, and every row carries a download button so even openable files
 // can be saved to the device. This is the single file view.
-export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, activePath, touch = false }: Props) {
-  const { cache, expanded, loading, errs, toggle, sections } = tree;
+export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPath, onContextMenu, onDropFiles, onMoveNode, activePath, touch = false, onSearchAll, filterInputRef }: Props) {
+  const { cache, effectiveExpanded, loading, errs, toggle, sections, filterQuery, setFilterQuery, filter } = tree;
+  const expanded = effectiveExpanded;
   // Section headers (Share / Project / Home) get the same right-click/long-press
   // menu as rows; FolderChildren runs its own copy for the nested rows.
   const { ctxHandlers, swallowLongPress } = useTreeContextHandlers(onContextMenu);
@@ -51,17 +60,83 @@ export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPa
     else onDownload(f);
   };
 
+  // ── Filter-mode keyboard cursor (proposal 0038, Part C) ───────────────────
+  // The filtered rows are a flat, render-ordered list (tree.filter.rows). The
+  // cursor moves through them with ↑/↓ from the filter field; Enter opens a file
+  // or toggles a folder — the keyboard nav the tree lacked entirely before.
+  const rows = filter?.rows ?? [];
+  const [cursor, setCursor] = useState(0);
+  useEffect(() => {
+    setCursor((c) => (c >= rows.length ? 0 : c));
+  }, [rows.length]);
+  useEffect(() => {
+    setCursor(0);
+  }, [filter?.query]);
+  const cursorPath = filter && rows[cursor] ? rows[cursor].path : null;
+
+  const onFilterKey = (e: React.KeyboardEvent) => {
+    if (!filter || rows.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setCursor((c) => Math.min(c + 1, rows.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setCursor((c) => Math.max(0, c - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const row = rows[cursor];
+      if (!row) return;
+      if (row.isDir) toggle(row.path);
+      else onFile({ name: row.name, path: row.path, size: 0, mtime: 0 });
+    }
+  };
+
   // Section (Share / Project / Home) header rows scale with the same touch flag
   // as their children, so the whole tree reads at one size.
   const secCls = touch
     ? "flex w-full items-center gap-2 rounded-md px-1.5 py-2 text-left text-[15px] font-medium text-slate-200 active:bg-edge/40"
     : "flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[13px] font-medium text-slate-200 hover:bg-edge/40";
 
+  const filterActiveEmpty = filter && rows.length === 0;
+
   return (
     // select-none + -webkit-touch-callout:none stop iOS Safari's long-press from
     // selecting the row text (blue highlight) and popping its native Copy / Look
     // Up callout over our context menu. A file tree never needs selectable text.
     <div className="flex h-full flex-col border-r border-edge bg-bar select-none [-webkit-touch-callout:none]">
+      {/* ── Type-to-filter field (0038) — funnel glyph + "Filter tree", visually
+          distinct from [0027]'s 🔎 "Find file…" bar so the two read as two. ── */}
+      <div className={`flex shrink-0 items-center gap-1.5 border-b border-edge/60 px-2 ${touch ? "py-2" : "py-1.5"}`}>
+        <FunnelIcon className={`shrink-0 text-slate-500 ${touch ? "h-4 w-4" : "h-3.5 w-3.5"}`} />
+        <input
+          ref={filterInputRef}
+          value={filterQuery}
+          onChange={(e) => setFilterQuery(e.target.value)}
+          onKeyDown={onFilterKey}
+          placeholder="Filter tree"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          aria-label="Filter the file tree"
+          className={`min-w-0 flex-1 bg-transparent text-slate-100 placeholder:text-slate-600 outline-none ${touch ? "text-[15px]" : "text-[13px]"}`}
+        />
+        {filter && (
+          <span className="shrink-0 rounded bg-panel/70 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-400" title="Rows shown">
+            {rows.length} shown
+          </span>
+        )}
+        {filterQuery && (
+          <button
+            onClick={() => setFilterQuery("")}
+            title="Clear filter (Esc)"
+            aria-label="Clear tree filter"
+            className="shrink-0 rounded px-1 text-slate-500 hover:text-slate-200"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+
       {/* The tiny caption is redundant on a phone (the panel header already says
           "Files"), so it's desktop-only. */}
       {!touch && (
@@ -73,9 +148,18 @@ export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPa
         {sections.length === 0 && (
           <div className="px-2 py-6 text-center text-xs text-slate-600">Loading…</div>
         )}
+        {filterActiveEmpty && (
+          <div className="px-2 py-6 text-center text-xs text-slate-600">
+            No loaded files match “{filter!.query}”.
+          </div>
+        )}
         {sections.map((sec) => {
           const path = sec.path;
           const isOpen = path ? expanded.has(path) : false;
+          // Hide a whole section while filtering if it contains no visible rows.
+          if (filter && path && !filter.visibleDirs.has(path) && !sectionHasMatch(sec, filter)) {
+            return null;
+          }
           const isLoading =
             (path && loading.has(path)) ||
             (sec.bySession ? loading.has(`session:${sec.bySession}`) : false);
@@ -114,14 +198,41 @@ export default function EditorTree({ tree, onOpenFile, onDownload, downloadingPa
                   activePath={activePath}
                   compact
                   touch={touch}
+                  filter={filter}
+                  cursorPath={cursorPath}
                 />
               )}
             </div>
           );
         })}
+
+        {/* Lazy-load caveat (0038): the in-tree filter only sees loaded nodes.
+            Hand the query to [0027]'s project-wide name search — one tap, query
+            carried over — so the two searches are two depths of one gesture. */}
+        {filter && onSearchAll && (
+          <button
+            onClick={() => onSearchAll(filter.query)}
+            className="mt-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] text-accent hover:bg-edge/40"
+          >
+            Search all files
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
       </div>
     </div>
   );
+}
+
+// A section is kept while filtering if its root is an ancestor of a match
+// (visibleDirs) or any matched node lives under it. The flat row list already
+// excludes empties, but section roots are headers (not in visibleDirs unless an
+// ancestor), so check whether any matched path sits under this root.
+function sectionHasMatch(sec: TreeSection, filter: NonNullable<ReturnType<typeof useDirTree>["filter"]>): boolean {
+  if (!sec.path) return false;
+  const prefix = sec.path.endsWith("/") ? sec.path : sec.path + "/";
+  for (const p of filter.matchedFiles) if (p === sec.path || p.startsWith(prefix)) return true;
+  for (const p of filter.matchedDirs) if (p === sec.path || p.startsWith(prefix)) return true;
+  return false;
 }
 
 // SectionHeader — one Share / Project / Home root row. Split out so it can own
