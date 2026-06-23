@@ -10,7 +10,9 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use cc_screen_protocol::hub::{decode_frame, encode_frame, AgentMsg, HubMsg, HUB_PROTO_VERSION};
+use cc_screen_protocol::hub::{
+    decode_frame, encode_frame, AgentMsg, HubMsg, HUB_PROTO_VERSION, MIN_SUPPORTED_PROTO,
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -70,11 +72,20 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
     let (machine_id, hostname, tools) = match ws_read.next().await {
         Some(Ok(Message::Binary(buf))) => match decode_frame::<AgentMsg>(&buf) {
             Ok((AgentMsg::Register { proto, machine_id, hostname, tools, .. }, _)) => {
-                if proto != HUB_PROTO_VERSION {
-                    tracing::warn!("agent {machine_id}: proto {proto} != {HUB_PROTO_VERSION}; closing");
+                // Negotiate a version *range* instead of demanding exact equality
+                // (proposal 0001 §9.3): accept any agent in
+                // [MIN_SUPPORTED_PROTO, HUB_PROTO_VERSION] so a staggered fleet
+                // rollout interoperates in both directions, then operate at the
+                // lower of the two — the highest shape both peers understand.
+                if proto < MIN_SUPPORTED_PROTO || proto > HUB_PROTO_VERSION {
+                    tracing::warn!(
+                        "agent {machine_id}: proto {proto} outside supported \
+                         [{MIN_SUPPORTED_PROTO}, {HUB_PROTO_VERSION}]; closing"
+                    );
                     let _ = ws_write.send(Message::Close(None)).await;
                     return;
                 }
+                let _negotiated = proto.min(HUB_PROTO_VERSION);
                 if !hub.uplink_token_ok_for(&machine_id, token.as_deref()) {
                     tracing::warn!("agent {machine_id}: rejected (bad uplink token)");
                     let _ = ws_write.send(Message::Close(None)).await;

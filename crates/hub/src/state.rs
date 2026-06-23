@@ -9,6 +9,44 @@ use cc_screen_auth::Auth;
 
 use crate::registry::Registry;
 
+/// A tenant identity. Single-tenant installs resolve every agent to
+/// [`cc_screen_auth::OWNER`]; a multi-tenant build resolves a real `users.id`.
+pub type UserId = String;
+/// The hub's durable identity for a registered agent. In static-map
+/// (single-tenant) mode this is just the `machine_id`; multi-tenant assigns an
+/// `agents.id` row.
+pub type AgentId = String;
+
+/// Resolve an inbound uplink `(machine_id, token)` to the `(tenant, agent)` it
+/// belongs to, or `None` to reject (proposal 0001 §9.1). Today's static token map
+/// and a future Postgres-backed lookup both implement this **one seam**, so the
+/// relay's tenant-isolation match (§4.1) runs identically in both modes — in
+/// single-tenant the owner is compared to itself (always true), so there is never
+/// a separate single-tenant relay path to maintain.
+pub trait AgentTokens: Send + Sync {
+    fn resolve(&self, machine_id: &str, token: Option<&str>) -> Option<(UserId, AgentId)>;
+}
+
+/// The single-tenant resolver: today's `machine_id → token` map. Open mode (empty
+/// map) accepts any machine; configured mode accepts only a known machine
+/// presenting its exact token. Either way the tenant is always
+/// [`cc_screen_auth::OWNER`] and the [`AgentId`] is the `machine_id`. This is the
+/// only impl that ships in single-tenant `cc-screen-rust`; the SaaS adds a
+/// `PgTokens` alongside it without touching this one.
+pub struct StaticMap {
+    pub tokens: Arc<HashMap<String, String>>,
+}
+
+impl AgentTokens for StaticMap {
+    fn resolve(&self, machine_id: &str, token: Option<&str>) -> Option<(UserId, AgentId)> {
+        let ok = match self.tokens.get(machine_id) {
+            None => self.tokens.is_empty(),
+            Some(expected) => token == Some(expected.as_str()),
+        };
+        ok.then(|| (cc_screen_auth::OWNER.to_string(), machine_id.to_string()))
+    }
+}
+
 #[derive(Clone)]
 pub struct HubState {
     pub registry: Registry,
@@ -65,6 +103,16 @@ impl HubState {
         }
     }
 
+    /// Resolve an authorized `(machine_id, token)` to its `(user_id, agent_id)`
+    /// through the [`AgentTokens`] seam (proposal 0001 §9.1) — the point a future
+    /// multi-tenant build swaps the static map for a Postgres-backed resolver.
+    /// Equivalent today to [`HubState::uplink_token_ok_for`] returning true, but it
+    /// also yields the tenant identity the relay match (§4.1) will gate on. Returns
+    /// `None` on rejection.
+    pub fn resolve_agent(&self, machine_id: &str, token: Option<&str>) -> Option<(UserId, AgentId)> {
+        StaticMap { tokens: self.agent_tokens.clone() }.resolve(machine_id, token)
+    }
+
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
     /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
     /// who reaches `/agent/ws` could impersonate any machine, so the runtime
@@ -118,5 +166,30 @@ mod tests {
         assert!(!s.uplink_token_ok_for("alpha", None));
         // An unknown machine is rejected in configured mode.
         assert!(!s.uplink_token_ok_for("ghost", Some("secretA")));
+    }
+
+    // The §9.1 `AgentTokens` seam must agree with the existing bool check in BOTH
+    // modes, and yield OWNER as the tenant + the machine_id as the agent id — so
+    // single-tenant gets tenant identity "for free" with no behavior change.
+    #[test]
+    fn resolve_agent_matches_token_check_and_yields_owner() {
+        let open = state(&[]);
+        assert_eq!(
+            open.resolve_agent("any", Some("whatever")),
+            Some((cc_screen_auth::OWNER.to_string(), "any".to_string()))
+        );
+        assert_eq!(open.resolve_agent("any", None), Some((cc_screen_auth::OWNER.to_string(), "any".to_string())));
+
+        let cfg = state(&[("alpha", "secretA"), ("beta", "secretB")]);
+        // Authorized pair ⇒ Some((OWNER, machine)); mirrors uplink_token_ok_for.
+        assert_eq!(
+            cfg.resolve_agent("alpha", Some("secretA")),
+            Some((cc_screen_auth::OWNER.to_string(), "alpha".to_string()))
+        );
+        // Every rejection the bool check makes, the resolver also rejects.
+        for (m, t) in [("alpha", Some("secretB")), ("alpha", None), ("ghost", Some("secretA"))] {
+            assert_eq!(cfg.uplink_token_ok_for(m, t), cfg.resolve_agent(m, t).is_some());
+            assert!(cfg.resolve_agent(m, t).is_none());
+        }
     }
 }

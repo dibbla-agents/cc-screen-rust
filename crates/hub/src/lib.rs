@@ -7,6 +7,10 @@ pub mod assets;
 pub mod bulk;
 pub mod client_ws;
 pub mod config;
+/// Multi-tenant Postgres store (proposal 0001) — compiled only with `--features
+/// multi-tenant`; absent from the single-tenant build.
+#[cfg(feature = "multi-tenant")]
+pub mod db;
 pub mod handlers;
 pub mod registry;
 pub mod service;

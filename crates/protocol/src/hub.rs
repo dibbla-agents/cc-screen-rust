@@ -46,6 +46,15 @@ pub type ReqId = u32;
 /// hub can refuse an incompatible agent rather than misframe its traffic.
 pub const HUB_PROTO_VERSION: u16 = 1;
 
+/// The oldest agent envelope version a current hub still speaks. The hub accepts
+/// any agent whose `proto` is in `[MIN_SUPPORTED_PROTO, HUB_PROTO_VERSION]` and
+/// operates at `min(agent, hub)` rather than demanding exact equality, so a
+/// staggered fleet rollout keeps working in both directions — an old agent
+/// against a new hub and a new agent against an old hub (proposal 0001 §9.3).
+/// Prefer additive `#[serde(default)]` fields, which need no bump at all; raise
+/// this only when an old frame shape becomes genuinely unsupportable.
+pub const MIN_SUPPORTED_PROTO: u16 = 1;
+
 /// The control channel id (`0`). Terminal/watch channels are `>= 1`.
 pub const CONTROL_CHANNEL: ChannelId = 0;
 

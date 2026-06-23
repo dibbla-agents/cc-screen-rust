@@ -51,6 +51,14 @@ const COOKIE_NAME: &str = "ccs_session";
 /// its value.
 const SESSION_TTL: u64 = 14 * 24 * 60 * 60;
 
+/// The synthetic tenant id a single-tenant (no-database) install resolves to. A
+/// legacy 2-segment cookie and the static-token agent resolver both report this
+/// owner; the multi-tenant relay's `user_id` match (proposal 0001 §4.1) then
+/// compares it to itself (always true), so there is no separate single-tenant
+/// code path to maintain. Real multi-tenant user ids are UUIDs, which never
+/// collide with this sentinel and never contain a `.`.
+pub const OWNER: &str = "owner";
+
 /// Seconds since the Unix epoch. Local to this crate so it doesn't depend on the
 /// agent's engine (the hub uses it too).
 fn now_secs() -> u64 {
@@ -158,29 +166,68 @@ impl Auth {
         c
     }
 
+    /// Mint an **identity-carrying** 3-segment cookie `<user_id>.<exp>.<sig>` for
+    /// a multi-tenant login (proposal 0001 §3.2). Single-tenant keeps minting the
+    /// 2-segment [`Auth::issue_cookie`]; both verify under the same key, so the two
+    /// shapes coexist across a rollout and no live session is invalidated.
+    /// `user_id` must not contain a `.` (our ids are UUIDs).
+    pub fn issue_cookie_for(&self, user_id: &str, secure: bool) -> String {
+        let exp = now_secs() + SESSION_TTL;
+        let signed = format!("{user_id}.{exp}");
+        let sig = URL_SAFE_NO_PAD.encode(self.sign(signed.as_bytes()));
+        let mut c = format!(
+            "{COOKIE_NAME}={signed}.{sig}; Max-Age={SESSION_TTL}; Path=/; HttpOnly; SameSite=Strict"
+        );
+        if secure {
+            c.push_str("; Secure");
+        }
+        c
+    }
+
     /// A `Set-Cookie` value that immediately clears the session (logout).
     pub fn clear_cookie(&self) -> String {
         format!("{COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict")
     }
 
-    /// Validate a `<exp>.<sig>` cookie value: well-formed, unexpired, and the
-    /// signature recomputes (constant-time) under our key.
-    fn validate_cookie(&self, value: &str) -> bool {
-        let Some((exp_str, sig_b64)) = value.split_once('.') else {
-            return false;
-        };
-        let Ok(exp) = exp_str.parse::<u64>() else {
-            return false;
-        };
-        if now_secs() >= exp {
-            return false;
-        }
-        let Ok(sig) = URL_SAFE_NO_PAD.decode(sig_b64) else {
-            return false;
-        };
+    /// Validate a session cookie value and return the tenant identity it carries.
+    /// Accepts **both** shapes so a multi-tenant rollout never logs anyone out
+    /// (proposal 0001 §9.2):
+    ///
+    /// * `<exp>.<sig>`            — legacy single-tenant ⇒ [`OWNER`]
+    /// * `<user_id>.<exp>.<sig>`  — multi-tenant, carries the tenant identity
+    ///
+    /// The HMAC always covers every byte before the final `.` (the base64url
+    /// signature never contains a `.`, and our ids are UUIDs), so a cookie minted
+    /// by today's binary still verifies under the same key after the upgrade.
+    /// Well-formed, unexpired, and the signature recomputes (constant-time).
+    fn parse_cookie(&self, value: &str) -> Option<String> {
+        let (signed, sig_b64) = value.rsplit_once('.')?;
+        let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
         let mut mac = HmacSha256::new_from_slice(&self.secret).expect("HMAC key is 32 bytes");
-        mac.update(exp_str.as_bytes());
-        mac.verify_slice(&sig).is_ok()
+        mac.update(signed.as_bytes());
+        mac.verify_slice(&sig).ok()?;
+        // `signed` is `<exp>` (legacy) or `<user_id>.<exp>` (multi-tenant).
+        let (user_id, exp_str) = match signed.rsplit_once('.') {
+            Some((uid, exp)) => (uid.to_string(), exp),
+            None => (OWNER.to_string(), signed),
+        };
+        if now_secs() >= exp_str.parse::<u64>().ok()? {
+            return None;
+        }
+        Some(user_id)
+    }
+
+    /// Back-compat bool form, used by [`Auth::is_authed`] and `GET /api/auth`.
+    fn validate_cookie(&self, value: &str) -> bool {
+        self.parse_cookie(value).is_some()
+    }
+
+    /// The tenant identity carried by the request's session cookie, if it bears a
+    /// valid one (the read side of the §3.2 cookie change). Single-tenant and
+    /// legacy 2-segment cookies resolve to [`OWNER`]; multi-tenant resolves the
+    /// real `users.id`. `None` when there is no valid session cookie.
+    pub fn user_from_cookie(&self, headers: &HeaderMap) -> Option<String> {
+        cookie_value(headers, COOKIE_NAME).and_then(|c| self.parse_cookie(c))
     }
 }
 
@@ -395,6 +442,53 @@ mod tests {
         // even the correct token in `?token=` must be rejected now.
         assert!(!a.is_authed(&HeaderMap::new(), Some("session=foo&token=tok")));
         assert!(!a.is_authed(&HeaderMap::new(), Some("session=foo&token=bad")));
+    }
+
+    #[test]
+    fn identity_cookie_round_trips_and_carries_user_id() {
+        let a = pw_auth();
+        let set = a.issue_cookie_for("11111111-2222-3333-4444-555555555555", false);
+        let value = set.strip_prefix("ccs_session=").unwrap().split("; ").next().unwrap();
+        // Three segments: <user_id>.<exp>.<sig>.
+        assert_eq!(value.split('.').count(), 3, "identity cookie is 3-segment: {value}");
+        assert!(a.validate_cookie(value));
+        // user_from_cookie pulls the subject back out.
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, format!("ccs_session={value}").parse().unwrap());
+        assert_eq!(
+            a.user_from_cookie(&h).as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
+    #[test]
+    fn legacy_two_segment_cookie_resolves_to_owner() {
+        // A cookie minted by today's single-tenant binary (2-segment) must keep
+        // validating and resolve to OWNER — nobody is logged out on the upgrade.
+        let a = pw_auth();
+        let set = a.issue_cookie(false);
+        let value = set.strip_prefix("ccs_session=").unwrap().split("; ").next().unwrap();
+        assert_eq!(value.split('.').count(), 2, "legacy cookie stays 2-segment");
+        let mut h = HeaderMap::new();
+        h.insert(header::COOKIE, format!("ccs_session={value}").parse().unwrap());
+        assert_eq!(a.user_from_cookie(&h).as_deref(), Some(OWNER));
+    }
+
+    #[test]
+    fn identity_cookie_rejects_tamper_and_expiry() {
+        let a = pw_auth();
+        // Tampered user_id segment ⇒ HMAC mismatch ⇒ rejected.
+        let set = a.issue_cookie_for("user-a", false);
+        let value = set.strip_prefix("ccs_session=").unwrap().split("; ").next().unwrap();
+        let (_, rest) = value.split_once('.').unwrap();
+        assert!(!a.validate_cookie(&format!("user-b.{rest}")), "swapping the subject breaks the sig");
+        // Expired identity cookie: sign a past expiry ourselves.
+        let past = (now_secs() - 10).to_string();
+        let signed = format!("user-a.{past}");
+        let sig = URL_SAFE_NO_PAD.encode(a.sign(signed.as_bytes()));
+        assert!(!a.validate_cookie(&format!("{signed}.{sig}")));
+        // No cookie at all ⇒ no subject.
+        assert_eq!(a.user_from_cookie(&HeaderMap::new()), None);
     }
 
     #[test]

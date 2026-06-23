@@ -18,6 +18,14 @@ dist = true
 name = "cc-screen-hub"
 path = "src/main.rs"
 
+[features]
+# The multi-tenant SaaS superset (proposal 0001). OFF by default: a plain
+# single-tenant hub never compiles sqlx/Postgres, the device-flow handlers, or
+# any per-tenant code, and behaves byte-for-byte as today. The SaaS hub is this
+# *same* crate built with `--features multi-tenant`, not a fork — every other PR
+# must keep the default (no-feature) build green.
+multi-tenant = ["dep:sqlx"]
+
 [dependencies]
 # `hub` brings in the agent↔hub envelope. The hub reuses the client-facing wire
 # types (SessionInfo, …) and cc-screen-auth verbatim.
@@ -42,6 +50,12 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 # gate and makes the Haiku call via the shared summarizer (raw POST /v1/messages).
 cc-screen-summary = { path = "../summary" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Multi-tenant store (proposal 0001), behind the `multi-tenant` feature. Optional
+# + off by default, so the single-tenant hub never pulls it in. The backend is
+# pluggable behind a store trait (like `AgentTokens`): SQLite is the first driver
+# (file-backed, zero-ops for dev + small single-node installs); a Postgres driver
+# can be added later as a second impl without touching callers.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "uuid", "time", "macros"], optional = true }
 
 [dev-dependencies]
 # In-process e2e: a fake agent + a fake client over loopback WebSockets, and HTTP
