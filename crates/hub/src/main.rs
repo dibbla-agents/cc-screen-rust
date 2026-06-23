@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use cc_screen_auth::Auth;
 use cc_screen_hub::{
-    build_router, config, registry::Registry, service, state::HubState, summarizer::Summarizer,
+    build_router, config, registry::Registry, service,
+    state::{HubState, Tenancy},
+    summarizer::Summarizer,
 };
 
 /// Runtime usage. Service setup is `cc-screen-hub install --help`.
@@ -49,6 +51,46 @@ Off-tailnet: front the hub with a TLS reverse proxy and always set CCHUB_AGENT_T
     );
 }
 
+/// `cc-screen-hub user add <email> <password>` / `user agent <email> <machine>` —
+/// hand-provision a multi-tenant account or mint an agent uplink token for it
+/// (Phase 1 has no public signup / device flow yet). Reads CCHUB_DATABASE_URL.
+#[cfg(feature = "multi-tenant")]
+async fn user_admin(args: &[String]) -> anyhow::Result<()> {
+    use cc_screen_hub::db::{SqliteStore, Store};
+    let usage = "usage: cc-screen-hub user add <email> <password>\n       \
+                 cc-screen-hub user agent <email> <machine_id>   (mints an uplink token)\n\
+                 (database via CCHUB_DATABASE_URL, e.g. sqlite:///path/hub.db)";
+    let url = std::env::var("CCHUB_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("set CCHUB_DATABASE_URL\n{usage}"))?;
+    let store = SqliteStore::connect(&url).await?;
+    match args.first().map(String::as_str) {
+        Some("add") => {
+            let (email, password) = (args.get(1), args.get(2));
+            let (Some(email), Some(password)) = (email, password) else {
+                anyhow::bail!("missing email/password\n{usage}");
+            };
+            let id = store.create_user(email, password).await?;
+            println!("created user {email}  (id {id})");
+        }
+        Some("agent") => {
+            let (Some(email), Some(machine)) = (args.get(1), args.get(2)) else {
+                anyhow::bail!("missing email/machine_id\n{usage}");
+            };
+            let user_id = store
+                .user_id_by_email(email)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no such user: {email}"))?;
+            let (token, agent_id) = store.upsert_agent(&user_id, machine).await?;
+            println!("agent '{machine}' bound to {email}  (id {agent_id})");
+            println!("uplink token (shown once — store it now):\n  {token}");
+        }
+        _ => anyhow::bail!("{usage}"),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // `install` / `uninstall` wire up (or tear down) the hub's own service and
@@ -80,6 +122,16 @@ async fn main() {
             print_usage();
             return;
         }
+        // Hand-provision a multi-tenant account (proposal 0001 Phase 1 — no public
+        // signup yet). DB via CCHUB_DATABASE_URL. Only in a multi-tenant build.
+        #[cfg(feature = "multi-tenant")]
+        Some("user") => {
+            if let Err(e) = user_admin(&argv[2..]).await {
+                eprintln!("user: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {}
     }
 
@@ -91,6 +143,43 @@ async fn main() {
 
     let cfg = config::load();
     let auth = Auth::load(&cfg.config_dir, cfg.password.clone(), cfg.api_token.clone());
+
+    // Tenancy (proposal 0001): multi-tenant only in a `--features multi-tenant`
+    // build AND with CCHUB_DATABASE_URL set; otherwise single-tenant — today's
+    // behavior. A default build ignores the URL entirely.
+    let tenancy: Tenancy;
+    let multi_tenant: bool;
+    #[cfg(feature = "multi-tenant")]
+    {
+        match cfg.database_url.as_deref() {
+            Some(url) => match cc_screen_hub::db::SqliteStore::connect(url).await {
+                Ok(store) => {
+                    tracing::info!("cc-screen-hub: MULTI-TENANT mode (db={url})");
+                    tenancy = Tenancy::Multi(std::sync::Arc::new(store));
+                    multi_tenant = true;
+                }
+                Err(e) => {
+                    eprintln!("cc-screen-hub: failed to open database {url}: {e}");
+                    std::process::exit(1);
+                }
+            },
+            None => {
+                tenancy = Tenancy::Single;
+                multi_tenant = false;
+            }
+        }
+    }
+    #[cfg(not(feature = "multi-tenant"))]
+    {
+        if cfg.database_url.is_some() {
+            tracing::warn!(
+                "cc-screen-hub: CCHUB_DATABASE_URL is set but this binary was built without \
+                 the `multi-tenant` feature — running single-tenant, ignoring it"
+            );
+        }
+        tenancy = Tenancy::Single;
+        multi_tenant = false;
+    }
     tracing::info!(
         "cc-screen-hub: config={} client-auth {} per-agent-tokens={} ({})",
         cfg.config_dir.display(),
@@ -121,7 +210,9 @@ async fn main() {
     }
     if let Err(msg) = cc_screen_auth::require_gated_uplink(
         &cfg.addr,
-        !cfg.agent_tokens.is_empty(),
+        // Multi-tenant gates every uplink on a per-agent DB token, so it counts as
+        // gated even with an empty static CCHUB_AGENT_TOKENS map.
+        !cfg.agent_tokens.is_empty() || multi_tenant,
         cfg.allow_open_uplink,
     ) {
         eprintln!("cc-screen-hub: {msg}");
@@ -152,6 +243,7 @@ async fn main() {
         config_dir: cfg.config_dir,
         bulk: Default::default(),
         summary: Arc::new(summarizer),
+        tenancy,
     };
 
     let app = build_router(hub);

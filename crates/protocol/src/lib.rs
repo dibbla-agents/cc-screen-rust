@@ -169,10 +169,16 @@ pub struct Favorite {
 
 // ── Auth (opt-in password / API-token gate) ──────────────────────────────────
 /// `POST /api/login` body. `secret` is the password *or* the API token — the
-/// web login accepts either; a match mints the 2-week session cookie.
+/// single-tenant web login accepts either; a match mints the 2-week session
+/// cookie. `email` is **additive** (proposal 0001): a multi-tenant hub reads it
+/// to look up the account and verifies `secret` as that user's argon2 password.
+/// Omitted/empty `email` ⇒ the single-tenant shared-secret path, unchanged — an
+/// older client that only sends `secret` keeps working against either build.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoginReq {
     pub secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 /// `GET /api/auth` reply. The frontend gates itself on this at boot:

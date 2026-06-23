@@ -34,6 +34,11 @@ pub struct HubConfig {
     /// Optional spend cap in USD (CCHUB_SUMMARY_BUDGET) since process start; the
     /// gate of §4. `None` = uncapped.
     pub summary_budget_usd: Option<f64>,
+    /// Multi-tenant database URL (CCHUB_DATABASE_URL), e.g.
+    /// `sqlite:///var/lib/cc-screen-hub/hub.db`. Set ⇒ the hub runs multi-tenant
+    /// (proposal 0001), but only in a `--features multi-tenant` build; a default
+    /// build ignores it and stays single-tenant. `None` = single-tenant.
+    pub database_url: Option<String>,
 }
 
 /// Read a `--flag value` or `--flag=value` CLI argument.
@@ -114,6 +119,7 @@ pub fn load() -> HubConfig {
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|&b| b > 0.0);
+    let database_url = std::env::var("CCHUB_DATABASE_URL").ok().filter(|s| !s.trim().is_empty());
     HubConfig {
         addr,
         config_dir,
@@ -127,6 +133,7 @@ pub fn load() -> HubConfig {
         summary_enabled,
         summary_model,
         summary_budget_usd,
+        database_url,
     }
 }
 

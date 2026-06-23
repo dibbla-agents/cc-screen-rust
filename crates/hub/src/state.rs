@@ -47,6 +47,23 @@ impl AgentTokens for StaticMap {
     }
 }
 
+/// Which tenancy mode the hub runs in (proposal 0001 §9). Selected once at
+/// startup and held in [`HubState`]. `Single` is the default and the *only* mode
+/// a build without the `multi-tenant` feature can express, so the single-tenant
+/// hub behaves byte-for-byte as before.
+#[derive(Clone, Default)]
+pub enum Tenancy {
+    /// Today's behavior: no per-user isolation, the static token map (or open
+    /// mode) gates the uplink, and every authed client may reach every agent.
+    #[default]
+    Single,
+    /// Multi-tenant: the backing [`crate::db::Store`] resolves uplink tokens to a
+    /// `(user_id, agent_id)` and the relay enforces the §4.1 tenant match. Only a
+    /// `multi-tenant` build with a database URL configured ever constructs this.
+    #[cfg(feature = "multi-tenant")]
+    Multi(std::sync::Arc<dyn crate::db::Store>),
+}
+
 #[derive(Clone)]
 pub struct HubState {
     pub registry: Registry,
@@ -77,6 +94,9 @@ pub struct HubState {
     /// answers agents' `SummaryRequest`s by calling Haiku. Shared so the running
     /// budget tally is one place.
     pub summary: Arc<crate::summarizer::Summarizer>,
+    /// Tenancy mode (proposal 0001). `Single` (the default) = today's behavior;
+    /// `Multi` carries the backing store. Selected once at startup.
+    pub tenancy: Tenancy,
 }
 
 impl HubState {
@@ -104,13 +124,47 @@ impl HubState {
     }
 
     /// Resolve an authorized `(machine_id, token)` to its `(user_id, agent_id)`
-    /// through the [`AgentTokens`] seam (proposal 0001 §9.1) — the point a future
-    /// multi-tenant build swaps the static map for a Postgres-backed resolver.
-    /// Equivalent today to [`HubState::uplink_token_ok_for`] returning true, but it
-    /// also yields the tenant identity the relay match (§4.1) will gate on. Returns
-    /// `None` on rejection.
-    pub fn resolve_agent(&self, machine_id: &str, token: Option<&str>) -> Option<(UserId, AgentId)> {
-        StaticMap { tokens: self.agent_tokens.clone() }.resolve(machine_id, token)
+    /// (proposal 0001 §9.1) — the seam the relay match (§4.1) gates on. In
+    /// [`Tenancy::Single`] this is the static-map resolver returning
+    /// `(OWNER, machine_id)` (equivalent to [`HubState::uplink_token_ok_for`]
+    /// returning true); in `Multi` it awaits the backing store. Returns `None` on
+    /// rejection. Async so the multi-tenant DB lookup fits; the single-tenant arm
+    /// does no I/O.
+    pub async fn resolve_agent(&self, machine_id: &str, token: Option<&str>) -> Option<(UserId, AgentId)> {
+        match &self.tenancy {
+            Tenancy::Single => StaticMap { tokens: self.agent_tokens.clone() }.resolve(machine_id, token),
+            #[cfg(feature = "multi-tenant")]
+            Tenancy::Multi(store) => store.resolve_agent(machine_id, token).await,
+        }
+    }
+
+    /// Multi-tenant: is this `(email, password)` a valid login? `Some(user_id)` on
+    /// success. Always `None` in single-tenant (which has no user database — the
+    /// shared-secret `client_auth` path handles its login).
+    pub async fn verify_login(&self, _email: &str, _password: &str) -> Option<UserId> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            #[cfg(feature = "multi-tenant")]
+            Tenancy::Multi(store) => store.verify_login(_email, _password).await,
+        }
+    }
+
+    /// Multi-tenant: the account email for a `user_id` (for `GET /api/me`).
+    pub async fn user_email(&self, _user_id: &str) -> Option<String> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            #[cfg(feature = "multi-tenant")]
+            Tenancy::Multi(store) => store.user_email(_user_id).await,
+        }
+    }
+
+    /// True when the hub is running multi-tenant (a store is configured).
+    pub fn multi_tenant(&self) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            #[cfg(feature = "multi-tenant")]
+            Tenancy::Multi(_) => true,
+        }
     }
 
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
@@ -119,7 +173,9 @@ impl HubState {
     /// backstop (proposal 0010, Part 3) refuses a registration that arrived through
     /// a reverse proxy (forwarded headers present ⇒ not local).
     pub fn open_uplink_unguarded(&self) -> bool {
-        self.agent_tokens.is_empty() && !self.allow_open_uplink
+        // Multi-tenant gates every uplink on a per-agent DB token, so it is never
+        // "open" even with an empty static map.
+        !self.multi_tenant() && self.agent_tokens.is_empty() && !self.allow_open_uplink
     }
 }
 
@@ -141,6 +197,7 @@ mod tests {
             push: Arc::new(cc_screen_push::Push::new(&std::env::temp_dir())),
             bulk: crate::bulk::BulkRegistry::default(),
             summary: Arc::new(crate::summarizer::Summarizer::disabled()),
+            tenancy: Tenancy::Single,
         }
     }
 
@@ -171,25 +228,20 @@ mod tests {
     // The §9.1 `AgentTokens` seam must agree with the existing bool check in BOTH
     // modes, and yield OWNER as the tenant + the machine_id as the agent id — so
     // single-tenant gets tenant identity "for free" with no behavior change.
-    #[test]
-    fn resolve_agent_matches_token_check_and_yields_owner() {
+    #[tokio::test]
+    async fn resolve_agent_matches_token_check_and_yields_owner() {
+        let owner = cc_screen_auth::OWNER.to_string();
         let open = state(&[]);
-        assert_eq!(
-            open.resolve_agent("any", Some("whatever")),
-            Some((cc_screen_auth::OWNER.to_string(), "any".to_string()))
-        );
-        assert_eq!(open.resolve_agent("any", None), Some((cc_screen_auth::OWNER.to_string(), "any".to_string())));
+        assert_eq!(open.resolve_agent("any", Some("whatever")).await, Some((owner.clone(), "any".to_string())));
+        assert_eq!(open.resolve_agent("any", None).await, Some((owner.clone(), "any".to_string())));
 
         let cfg = state(&[("alpha", "secretA"), ("beta", "secretB")]);
         // Authorized pair ⇒ Some((OWNER, machine)); mirrors uplink_token_ok_for.
-        assert_eq!(
-            cfg.resolve_agent("alpha", Some("secretA")),
-            Some((cc_screen_auth::OWNER.to_string(), "alpha".to_string()))
-        );
+        assert_eq!(cfg.resolve_agent("alpha", Some("secretA")).await, Some((owner, "alpha".to_string())));
         // Every rejection the bool check makes, the resolver also rejects.
         for (m, t) in [("alpha", Some("secretB")), ("alpha", None), ("ghost", Some("secretA"))] {
-            assert_eq!(cfg.uplink_token_ok_for(m, t), cfg.resolve_agent(m, t).is_some());
-            assert!(cfg.resolve_agent(m, t).is_none());
+            assert_eq!(cfg.uplink_token_ok_for(m, t), cfg.resolve_agent(m, t).await.is_some());
+            assert!(cfg.resolve_agent(m, t).await.is_none());
         }
     }
 }

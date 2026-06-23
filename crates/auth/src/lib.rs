@@ -240,6 +240,18 @@ pub fn generate_token() -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// Lowercase hex SHA-256 of `s`. Used by the multi-tenant hub (proposal 0001) to
+/// store only the *hash* of an agent's uplink token at rest, never the plaintext.
+pub fn sha256_hex(s: &str) -> String {
+    use sha2::Digest;
+    let digest = Sha256::digest(s.as_bytes());
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// Whether the *browser* is on https (so a `Secure` cookie is appropriate),
 /// inferred from the `X-Forwarded-Proto` set by `tailscale serve` / a TLS proxy.
 /// The server itself always speaks plain http on the tailnet.

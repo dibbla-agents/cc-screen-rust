@@ -54,6 +54,23 @@ pub async fn login(
     if hub.login_throttle.locked_for(&source, now).is_some() {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "ok": false, "error": "too many attempts" }))).into_response();
     }
+    // Multi-tenant (proposal 0001 §3.2): look the account up by email and verify
+    // `secret` as that user's argon2 password, minting an identity-carrying cookie.
+    // The single-tenant shared-secret path below is untouched.
+    if hub.multi_tenant() {
+        let email = req.email.as_deref().unwrap_or("");
+        if !email.trim().is_empty() {
+            if let Some(user_id) = hub.verify_login(email, &req.secret).await {
+                hub.login_throttle.record_success(&source);
+                let cookie = auth.issue_cookie_for(&user_id, cc_screen_auth::is_https(&headers));
+                return (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(json!({ "ok": true })))
+                    .into_response();
+            }
+        }
+        hub.login_throttle.record_failure(&source, now);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "ok": false }))).into_response();
+    }
     if auth.verify_login(&req.secret) {
         hub.login_throttle.record_success(&source);
         let cookie = auth.issue_cookie(cc_screen_auth::is_https(&headers));
@@ -80,6 +97,23 @@ pub async fn auth_status(
 
 pub async fn logout(State(hub): State<HubState>) -> Response {
     (StatusCode::OK, [(header::SET_COOKIE, hub.client_auth.clear_cookie())]).into_response()
+}
+
+/// `GET /api/me` — the BFF identity read (proposal 0001 §5). Multi-tenant: report
+/// the logged-in account from the session cookie. Single-tenant: there is no user
+/// identity, so it always reports unauthenticated (the frontend uses `/api/auth`
+/// for the shared-secret gate instead). Exempt from the auth gate so it can
+/// answer "who am I?" even when no session is present.
+pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
+    if hub.multi_tenant() {
+        if let Some(user_id) = hub.client_auth.user_from_cookie(&headers) {
+            if let Some(email) = hub.user_email(&user_id).await {
+                return Json(json!({ "authenticated": true, "userId": user_id, "email": email }))
+                    .into_response();
+            }
+        }
+    }
+    (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response()
 }
 
 // ── Lifecycle + control, routed to the owning agent ──────────────────────────
@@ -537,7 +571,7 @@ pub async fn require_client_auth(State(hub): State<HubState>, req: Request, next
         return next.run(req).await;
     }
     let exempt = !path.starts_with("/api/")
-        || matches!(path, "/api/login" | "/api/auth" | "/api/logout");
+        || matches!(path, "/api/login" | "/api/auth" | "/api/me" | "/api/logout");
     if exempt || auth.is_authed(req.headers(), req.uri().query()) {
         next.run(req).await
     } else {

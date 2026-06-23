@@ -87,6 +87,7 @@ pub fn build_router(hub: HubState) -> Router {
         // Auth (exempt inside the middleware).
         .route("/api/login", post(handlers::login))
         .route("/api/auth", get(handlers::auth_status))
+        .route("/api/me", get(handlers::me))
         .route("/api/logout", post(handlers::logout))
         // The embedded PWA (exempt from auth — it's the app shell).
         .fallback(assets::static_handler)
