@@ -158,7 +158,7 @@ impl Auth {
         let exp_str = exp.to_string();
         let sig = URL_SAFE_NO_PAD.encode(self.sign(exp_str.as_bytes()));
         let mut c = format!(
-            "{COOKIE_NAME}={exp_str}.{sig}; Max-Age={SESSION_TTL}; Path=/; HttpOnly; SameSite=Strict"
+            "{COOKIE_NAME}={exp_str}.{sig}; Max-Age={SESSION_TTL}; Path=/; HttpOnly; SameSite=Lax"
         );
         if secure {
             c.push_str("; Secure");
@@ -176,7 +176,7 @@ impl Auth {
         let signed = format!("{user_id}.{exp}");
         let sig = URL_SAFE_NO_PAD.encode(self.sign(signed.as_bytes()));
         let mut c = format!(
-            "{COOKIE_NAME}={signed}.{sig}; Max-Age={SESSION_TTL}; Path=/; HttpOnly; SameSite=Strict"
+            "{COOKIE_NAME}={signed}.{sig}; Max-Age={SESSION_TTL}; Path=/; HttpOnly; SameSite=Lax"
         );
         if secure {
             c.push_str("; Secure");
@@ -186,7 +186,7 @@ impl Auth {
 
     /// A `Set-Cookie` value that immediately clears the session (logout).
     pub fn clear_cookie(&self) -> String {
-        format!("{COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict")
+        format!("{COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax")
     }
 
     /// Validate a session cookie value and return the tenant identity it carries.
@@ -423,7 +423,7 @@ mod tests {
         let exp: u64 = value.split_once('.').unwrap().0.parse().unwrap();
         let dt = exp - now_secs();
         assert!(dt > SESSION_TTL - 5 && dt <= SESSION_TTL, "exp ~2 weeks: {dt}");
-        assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"));
+        assert!(set.contains("HttpOnly") && set.contains("SameSite=Lax"));
         assert!(!set.contains("Secure"));
         assert!(a.issue_cookie(true).contains("; Secure"));
     }

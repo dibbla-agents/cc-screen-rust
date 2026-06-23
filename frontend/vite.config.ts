@@ -42,6 +42,13 @@ export default defineConfig({
         // Pull in the Web Push handlers (push / notificationclick) — a plain-JS
         // static asset, so the generated SW keeps doing precaching as before.
         importScripts: ["push-sw.js"],
+        // A new deploy takes over on the next load instead of lingering behind the
+        // old precached bundle (the "PWA serves the stale bundle for one session"
+        // trap): activate the fresh SW immediately and claim open clients, and
+        // drop the previous precache.
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
       },
     }),
   ],
