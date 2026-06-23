@@ -416,7 +416,12 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
 export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: () => void; onLoggedOut: () => void }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
-  const enrollCmd = "cc-screen-rust --hub <hub-url> --machine-id <name> --enroll";
+  const [machineName, setMachineName] = useState("");
+  // The hub serves its own installer at /install.sh with the hub URL baked in;
+  // the user only supplies a machine name. Same origin the browser is on.
+  const origin = window.location.origin;
+  const safeName = (machineName.trim() || "my-machine").replace(/[^A-Za-z0-9._-]/g, "-");
+  const installCmd = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}`;
   const reload = () => listAgents().then(setAgents).catch(() => setAgents([]));
   const firstLoad = useRef(true);
   useEffect(() => {
@@ -479,24 +484,37 @@ export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: (
         <Window path="~/add-machine">
           <h3 className="mb-1 font-mono text-sm font-semibold text-slate-100">Add a machine</h3>
           <p className="mb-3 text-xs text-slate-400">
-            Install cc-screen-rust on the box, then run this and approve the code it prints from{" "}
+            Name the machine, then paste the generated command on that box (macOS or Linux). It
+            installs cc-screen-rust and connects it — a code will appear that you approve from{" "}
             <a href="/activate" className="text-accent hover:underline">/activate</a>.
           </p>
+          <label className="mb-1.5 block text-[11px] uppercase tracking-wider text-slate-500">Machine name</label>
+          <input
+            value={machineName}
+            onChange={(e) => setMachineName(e.target.value)}
+            placeholder="my-laptop"
+            spellCheck={false}
+            autoCapitalize="none"
+            className="mb-3 w-full rounded-lg border border-edge bg-bar px-3.5 py-2.5 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-accent focus:ring-2 focus:ring-accent/25"
+          />
           <div className="flex items-stretch gap-2">
-            <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-xs text-slate-300">
-              {enrollCmd}
+            <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-xs text-accent">
+              {installCmd}
             </code>
             <button
               onClick={() => {
-                navigator.clipboard?.writeText(enrollCmd);
+                navigator.clipboard?.writeText(installCmd);
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
-              className="shrink-0 rounded-lg border border-edge px-3 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
+              className="shrink-0 rounded-lg border border-edge px-3 text-xs font-semibold text-slate-200 transition hover:border-accent hover:text-accent"
             >
-              {copied ? "Copied" : "Copy"}
+              {copied ? "Copied!" : "Copy"}
             </button>
           </div>
+          <p className="mt-2 text-[11px] text-slate-600">
+            Runs the device-flow enrollment, then installs a background service that reconnects on boot.
+          </p>
         </Window>
       </div>
     </Backdrop>

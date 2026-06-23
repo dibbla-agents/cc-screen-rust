@@ -48,6 +48,9 @@ or the `ccs` TUI. Tailnet-only by design.
 USAGE
   cc-screen-rust [--addr HOST:PORT] [--no-restore] [slave flags]
   cc-screen-rust install [--help]    set it up as an auto-starting service (usual way)
+  cc-screen-rust enroll --hub URL --machine-id NAME
+                                     connect to a multi-tenant hub: print a code to
+                                     approve in the dashboard, save the token, exit
   cc-screen-rust update              fetch the latest release + restart the service
   cc-screen-rust uninstall           remove that service
   cc-screen-rust install-shim        (re)install the clipboard image-paste shim only
@@ -101,6 +104,28 @@ async fn main() {
             if let Err(e) = service::uninstall() {
                 eprintln!("uninstall failed: {e}");
                 std::process::exit(1);
+            }
+            return;
+        }
+        // Device-flow enrollment (proposal 0001): print a code, wait for the user
+        // to approve it in the hub dashboard, persist the uplink token, and EXIT —
+        // so a subsequent `install` brings up a service that connects with that
+        // saved token. Used by the hub-served `/install.sh`.
+        Some("enroll") => {
+            let cfg = config::load();
+            let Some(hub) = cfg.hub_url.clone() else {
+                eprintln!("enroll: --hub <url> is required (e.g. --hub https://hub.example)");
+                std::process::exit(1);
+            };
+            match enroll::ensure_token(&hub, &cfg.machine_id, &cfg.config_dir).await {
+                Ok(_) => println!(
+                    "Enrolled '{}'. Run `cc-screen-rust install --hub {hub} --machine-id {}` to keep it connected.",
+                    cfg.machine_id, cfg.machine_id
+                ),
+                Err(e) => {
+                    eprintln!("enroll failed: {e}");
+                    std::process::exit(1);
+                }
             }
             return;
         }

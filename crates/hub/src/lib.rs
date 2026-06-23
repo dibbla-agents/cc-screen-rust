@@ -5,6 +5,8 @@
 
 pub mod assets;
 pub mod bulk;
+/// `GET /install.sh` — the hub-served machine installer (proposal 0001 Phase 3).
+pub mod install;
 pub mod client_ws;
 pub mod config;
 /// Multi-tenant store (proposal 0001) — compiled only with `--features
@@ -120,6 +122,8 @@ pub fn build_router(hub: HubState) -> Router {
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router
+        // The machine installer one-liner (`curl <hub>/install.sh | sh`); public.
+        .route("/install.sh", get(install::install_sh))
         .fallback(assets::static_handler)
         .layer(axum::middleware::from_fn_with_state(hub.clone(), handlers::require_client_auth))
         .with_state(hub)

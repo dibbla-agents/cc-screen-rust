@@ -109,10 +109,19 @@ pub async fn google_callback(
     let Some(cfg) = OAuthConfig::from_env() else {
         return (StatusCode::NOT_IMPLEMENTED, "google oauth not configured").into_response();
     };
+    tracing::info!(
+        "oauth-cb: enter error={:?} code={} state={} have_cookie={}",
+        q.error,
+        q.code.is_some(),
+        q.state.is_some(),
+        cookie_value(&headers, OAUTH_COOKIE).is_some()
+    );
     if let Some(err) = q.error.as_deref() {
+        tracing::warn!("oauth-cb: google denied: {err}");
         return (StatusCode::UNAUTHORIZED, format!("google denied: {err}")).into_response();
     }
     let (Some(code), Some(state)) = (q.code.as_deref(), q.state.as_deref()) else {
+        tracing::warn!("oauth-cb: missing code/state");
         return (StatusCode::BAD_REQUEST, "missing code/state").into_response();
     };
     // Recover the parked state+verifier; the state must match (CSRF defense).
@@ -120,9 +129,11 @@ pub async fn google_callback(
         let (s, v) = c.split_once('.')?;
         Some((s.to_string(), v.to_string()))
     }) else {
+        tracing::warn!("oauth-cb: missing/blank oauth state cookie");
         return (StatusCode::BAD_REQUEST, "missing oauth state cookie").into_response();
     };
     if c_state != state {
+        tracing::warn!("oauth-cb: state mismatch cookie={c_state} query={state}");
         return (StatusCode::BAD_REQUEST, "oauth state mismatch").into_response();
     }
 
@@ -142,10 +153,21 @@ pub async fn google_callback(
     let token: TokenResp = match resp {
         Ok(r) if r.status().is_success() => match r.json().await {
             Ok(t) => t,
-            Err(e) => return (StatusCode::BAD_GATEWAY, format!("token parse: {e}")).into_response(),
+            Err(e) => {
+                tracing::warn!("oauth-cb: token parse failed: {e}");
+                return (StatusCode::BAD_GATEWAY, format!("token parse: {e}")).into_response();
+            }
         },
-        Ok(r) => return (StatusCode::UNAUTHORIZED, format!("token exchange failed ({})", r.status())).into_response(),
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("token exchange: {e}")).into_response(),
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            tracing::warn!("oauth-cb: token exchange HTTP {status}: {}", body.chars().take(300).collect::<String>());
+            return (StatusCode::UNAUTHORIZED, format!("token exchange failed ({status})")).into_response();
+        }
+        Err(e) => {
+            tracing::warn!("oauth-cb: token exchange transport error: {e}");
+            return (StatusCode::BAD_GATEWAY, format!("token exchange: {e}")).into_response();
+        }
     };
 
     // The id_token came straight from Google's token endpoint over an
@@ -162,20 +184,23 @@ pub async fn google_callback(
         return (StatusCode::BAD_GATEWAY, "id_token missing sub/email").into_response();
     };
 
+    tracing::info!("oauth-cb: claims email={email:?} verified={:?} sub_len={}", claims.email_verified, sub.len());
     let Some(user_id) = hub.upsert_google_user(sub, email).await else {
+        tracing::warn!("oauth-cb: upsert_google_user returned None for {email}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not provision user").into_response();
     };
 
-    let session = hub.client_auth.issue_cookie_for(&user_id, cc_screen_auth::is_https(&headers));
-    let clear = format!("{OAUTH_COOKIE}=; Max-Age=0; Path=/api/auth/google; HttpOnly; SameSite=Lax");
-    // Same-origin app root; the freshly-set session cookie rides subsequent loads.
+    let secure = cc_screen_auth::is_https(&headers);
+    tracing::info!("oauth-cb: SUCCESS user_id={user_id} secure={secure} → redirect / (cookie set)");
+    let session = hub.client_auth.issue_cookie_for(&user_id, secure);
+    // Single Set-Cookie: emit ONLY the session cookie. We deliberately do NOT also
+    // clear the short-lived ccs_oauth state cookie here — a second Set-Cookie on
+    // this 302 can get mangled by intermediaries (Cloudflare), dropping the
+    // session cookie. ccs_oauth is path-scoped + Max-Age 600, so it expires on its
+    // own and is overwritten on the next attempt; not worth risking the login.
     (
         StatusCode::FOUND,
-        [
-            (header::LOCATION, "/".to_string()),
-            (header::SET_COOKIE, session),
-            (header::SET_COOKIE, clear),
-        ],
+        [(header::LOCATION, "/".to_string()), (header::SET_COOKIE, session)],
     )
         .into_response()
 }
