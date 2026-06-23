@@ -82,6 +82,10 @@ pub async fn approve(State(hub): State<HubState>, headers: HeaderMap, Json(req):
     };
     match hub.device_approve(&user_id, &req.user_code).await {
         Ok(machine_id) => Json(json!({ "machine_id": machine_id })).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "unknown or expired code").into_response(),
+        Err(e) => match e.to_string().strip_prefix("LIMIT:") {
+            // Plan cap hit → 402 with the human message (the dashboard shows it).
+            Some(msg) => (StatusCode::PAYMENT_REQUIRED, msg.to_string()).into_response(),
+            None => (StatusCode::NOT_FOUND, "unknown or expired code").into_response(),
+        },
     }
 }

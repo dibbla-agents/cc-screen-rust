@@ -34,6 +34,10 @@ pub struct HubConfig {
     /// Optional spend cap in USD (CCHUB_SUMMARY_BUDGET) since process start; the
     /// gate of §4. `None` = uncapped.
     pub summary_budget_usd: Option<f64>,
+    /// Optional **per-user** summary spend cap in USD (CCHUB_SUMMARY_USER_BUDGET)
+    /// since process start (proposal 0001 §10.6.2) — so one tenant can't drain the
+    /// shared key. `None` = no per-user cap. Only meaningful multi-tenant.
+    pub summary_user_budget_usd: Option<f64>,
     /// Multi-tenant database URL (CCHUB_DATABASE_URL), e.g.
     /// `sqlite:///var/lib/cc-screen-hub/hub.db`. Set ⇒ the hub runs multi-tenant
     /// (proposal 0001), but only in a `--features multi-tenant` build; a default
@@ -119,6 +123,10 @@ pub fn load() -> HubConfig {
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|&b| b > 0.0);
+    let summary_user_budget_usd = std::env::var("CCHUB_SUMMARY_USER_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&b| b > 0.0);
     let database_url = std::env::var("CCHUB_DATABASE_URL").ok().filter(|s| !s.trim().is_empty());
     HubConfig {
         addr,
@@ -133,6 +141,7 @@ pub fn load() -> HubConfig {
         summary_enabled,
         summary_model,
         summary_budget_usd,
+        summary_user_budget_usd,
         database_url,
     }
 }

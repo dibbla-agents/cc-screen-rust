@@ -90,6 +90,18 @@ pub trait Store: Send + Sync {
     /// token instantly stops resolving; a live uplink keeps working until it drops,
     /// then can't reconnect (and self-re-enrolls if configured).
     async fn delete_agent(&self, user_id: &str, agent_id: &str) -> bool;
+
+    // ── plan limits (proposal 0001 Phase 4) ────────────────────────────────────
+    /// The caps for a user's plan (defaulting conservatively if unknown).
+    async fn limits_for(&self, user_id: &str) -> PlanLimits;
+    /// How many agents a user currently has registered.
+    async fn agent_count(&self, user_id: &str) -> i64;
+    /// Whether the user already has an agent labelled `machine_id` (so a re-enroll
+    /// / rotate doesn't count against the cap).
+    async fn has_machine(&self, user_id: &str, machine_id: &str) -> bool;
+    /// Assign a plan to a user by email (admin CLI). Errors if no such user, or the
+    /// plan isn't one of the `plan_limits` rows.
+    async fn set_plan(&self, email: &str, plan: &str) -> anyhow::Result<()>;
 }
 
 /// What a host's poll of `/api/device/token` resolves to (RFC 8628). Mirrors the
@@ -102,6 +114,22 @@ pub enum DevicePoll {
     Expired,
     Denied,
     Approved { token: String, agent_id: String },
+}
+
+/// A plan's enforced caps (proposal 0001 Phase 4). Resolved from `plan_limits`
+/// joined on `users.plan`; falls back to [`PlanLimits::default`] if the plan row
+/// is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanLimits {
+    pub max_agents: i64,
+    pub max_concurrent_sessions: i64,
+}
+impl Default for PlanLimits {
+    fn default() -> Self {
+        // Mirrors the seeded 'free' row, so an unknown/missing plan is merely
+        // conservative, never unbounded.
+        PlanLimits { max_agents: 10, max_concurrent_sessions: 50 }
+    }
 }
 
 /// One of a user's registered agents, for the dashboard (proposal 0001 Phase 3).
@@ -373,6 +401,19 @@ impl Store for SqliteStore {
         let device_code: String = row.try_get("device_code")?;
         let machine_id: String = row.try_get("machine_id")?;
 
+        // Plan gate (§8.3): a genuinely NEW machine past the cap is refused; a
+        // re-enroll of an existing label reuses its row and doesn't count. The
+        // "LIMIT:" prefix lets the handler answer 402 (not 404).
+        if !self.has_machine(user_id, &machine_id).await {
+            let limits = self.limits_for(user_id).await;
+            if self.agent_count(user_id).await >= limits.max_agents {
+                anyhow::bail!(
+                    "LIMIT:Machine limit reached for your plan ({}). Unlink one or ask for an upgrade.",
+                    limits.max_agents
+                );
+            }
+        }
+
         // Mint (or rotate) the agent + its token, then park the plaintext for the
         // host's next poll to claim exactly once.
         let (token, agent_id) = self.upsert_agent(user_id, &machine_id).await?;
@@ -416,6 +457,65 @@ impl Store for SqliteStore {
             .await
             .map(|r| r.rows_affected() > 0)
             .unwrap_or(false)
+    }
+
+    async fn limits_for(&self, user_id: &str) -> PlanLimits {
+        sqlx::query(
+            "SELECT pl.max_agents, pl.max_concurrent_sessions
+               FROM users u JOIN plan_limits pl ON pl.plan = u.plan
+              WHERE u.id = ?1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| {
+            Some(PlanLimits {
+                max_agents: r.try_get("max_agents").ok()?,
+                max_concurrent_sessions: r.try_get("max_concurrent_sessions").ok()?,
+            })
+        })
+        .unwrap_or_default()
+    }
+
+    async fn agent_count(&self, user_id: &str) -> i64 {
+        sqlx::query("SELECT count(*) AS n FROM agents WHERE user_id = ?1")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .and_then(|r| r.try_get::<i64, _>("n").ok())
+            .unwrap_or(0)
+    }
+
+    async fn has_machine(&self, user_id: &str, machine_id: &str) -> bool {
+        sqlx::query("SELECT 1 AS x FROM agents WHERE user_id = ?1 AND machine_id = ?2")
+            .bind(user_id)
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    async fn set_plan(&self, email: &str, plan: &str) -> anyhow::Result<()> {
+        // Guard the plan exists, so a typo can't strand a user on an unknown plan
+        // (which would silently fall back to the conservative default).
+        let known = sqlx::query("SELECT 1 AS x FROM plan_limits WHERE plan = ?1")
+            .bind(plan)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
+        anyhow::ensure!(known, "unknown plan '{plan}'");
+        let res = sqlx::query("UPDATE users SET plan = ?1 WHERE email = ?2")
+            .bind(plan)
+            .bind(normalize_email(email))
+            .execute(&self.pool)
+            .await?;
+        anyhow::ensure!(res.rows_affected() > 0, "no such user: {email}");
+        Ok(())
     }
 
     async fn device_sweep(&self) {
@@ -540,6 +640,35 @@ mod tests {
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
         // Subsequent sign-in matches on the subject.
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
+    }
+
+    #[tokio::test]
+    async fn plan_limits_gate_new_machines() {
+        let s = SqliteStore::in_memory().await;
+        let u = s.create_user("u@x.com", "password1").await.unwrap();
+        // Default 'free' plan = 10 agents; confirm + then squeeze to 1 via 'pro'?
+        // Simpler: set a tiny custom plan to test the gate deterministically.
+        sqlx::query("INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions) VALUES ('tiny', 1, 1)")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        s.set_plan("u@x.com", "tiny").await.unwrap();
+        assert_eq!(s.limits_for(&u).await.max_agents, 1);
+
+        // First machine via the device flow: approved.
+        let c1 = s.device_create("d1", "laptop").await.unwrap();
+        assert!(s.device_approve(&u, &c1.user_code_display).await.is_ok());
+        // A second, NEW machine is over the cap → LIMIT error.
+        let c2 = s.device_create("d2", "server").await.unwrap();
+        let err = s.device_approve(&u, &c2.user_code_display).await.unwrap_err().to_string();
+        assert!(err.starts_with("LIMIT:"), "got: {err}");
+        // Re-enrolling the EXISTING machine is fine (rotate, not a new count).
+        let c3 = s.device_create("d3", "laptop").await.unwrap();
+        assert!(s.device_approve(&u, &c3.user_code_display).await.is_ok());
+
+        // set_plan rejects an unknown plan and an unknown user.
+        assert!(s.set_plan("u@x.com", "nope").await.is_err());
+        assert!(s.set_plan("ghost@x.com", "pro").await.is_err());
     }
 
     #[tokio::test]

@@ -252,6 +252,16 @@ impl HubState {
         }
     }
 
+    /// A user's plan caps (proposal 0001 Phase 4). The conservative default in
+    /// single-tenant (never consulted there).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn limits_for(&self, user_id: &str) -> crate::db::PlanLimits {
+        match &self.tenancy {
+            Tenancy::Single => crate::db::PlanLimits::default(),
+            Tenancy::Multi(store) => store.limits_for(user_id).await,
+        }
+    }
+
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
     /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
     /// who reaches `/agent/ws` could impersonate any machine, so the runtime

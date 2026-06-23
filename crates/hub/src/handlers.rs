@@ -215,6 +215,20 @@ pub async fn create(
     Query(q): Query<MachineQ>,
     Json(req): Json<CreateReq>,
 ) -> Response {
+    // Plan gate (proposal 0001 Phase 4): cap concurrent sessions per tenant.
+    // Multi-tenant only; single-tenant has no per-user limits.
+    #[cfg(feature = "multi-tenant")]
+    if let UserScope::User(uid) = &scope {
+        let limits = hub.limits_for(uid).await;
+        let current = hub.registry.all_sessions_for(&scope).len() as i64;
+        if current >= limits.max_concurrent_sessions {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                format!("Session limit reached for your plan ({}).", limits.max_concurrent_sessions),
+            )
+                .into_response();
+        }
+    }
     // A create has no existing session to disambiguate by — route to the chosen
     // (or single online) machine.
     match route(&hub, &scope, &q.machine, None, Cmd::Create(req)).await {

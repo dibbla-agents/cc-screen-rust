@@ -182,8 +182,11 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     Ok((AgentMsg::SummaryRequest { session, content_hash, inputs, tail, .. }, _)) => {
                         let summary = hub.summary.clone();
                         let to_agent = conn.to_agent().clone();
+                        // Charge this tenant's per-user metering ceiling (§10.6.2);
+                        // single-tenant (owner OWNER) only hits the fleet budget.
+                        let owner = hub.multi_tenant().then(|| user_id.clone());
                         tokio::spawn(async move {
-                            let (headline, detail) = match summary.summarize(&inputs, &tail).await {
+                            let (headline, detail) = match summary.summarize_for(owner.as_deref(), &inputs, &tail).await {
                                 crate::summarizer::Outcome::Ok(s) => (Some(s.headline), Some(s.detail)),
                                 _ => (None, None),
                             };

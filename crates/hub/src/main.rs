@@ -58,7 +58,8 @@ Off-tailnet: front the hub with a TLS reverse proxy and always set CCHUB_AGENT_T
 async fn user_admin(args: &[String]) -> anyhow::Result<()> {
     use cc_screen_hub::db::{SqliteStore, Store};
     let usage = "usage: cc-screen-hub user add <email> <password>\n       \
-                 cc-screen-hub user agent <email> <machine_id>   (mints an uplink token)\n\
+                 cc-screen-hub user agent <email> <machine_id>   (mints an uplink token)\n       \
+                 cc-screen-hub user plan <email> <plan>          (free | pro | unlimited | …)\n\
                  (database via CCHUB_DATABASE_URL, e.g. sqlite:///path/hub.db)";
     let url = std::env::var("CCHUB_DATABASE_URL")
         .ok()
@@ -85,6 +86,13 @@ async fn user_admin(args: &[String]) -> anyhow::Result<()> {
             let (token, agent_id) = store.upsert_agent(&user_id, machine).await?;
             println!("agent '{machine}' bound to {email}  (id {agent_id})");
             println!("uplink token (shown once — store it now):\n  {token}");
+        }
+        Some("plan") => {
+            let (Some(email), Some(plan)) = (args.get(1), args.get(2)) else {
+                anyhow::bail!("missing email/plan\n{usage}");
+            };
+            store.set_plan(email, plan).await?;
+            println!("set {email} → plan '{plan}'");
         }
         _ => anyhow::bail!("{usage}"),
     }
@@ -224,6 +232,7 @@ async fn main() {
         cfg.anthropic_api_key,
         cfg.summary_model.clone(),
         cfg.summary_budget_usd,
+        cfg.summary_user_budget_usd,
     );
     tracing::info!(
         "cc-screen-hub: session summaries {} (model={}, budget={})",
