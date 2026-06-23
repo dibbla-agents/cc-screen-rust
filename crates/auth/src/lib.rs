@@ -252,6 +252,19 @@ pub fn sha256_hex(s: &str) -> String {
     out
 }
 
+/// base64url (no pad) of the raw SHA-256 of `s` — an OAuth PKCE **S256** code
+/// challenge (proposal 0001 §3.3).
+pub fn sha256_b64url(s: &str) -> String {
+    use sha2::Digest;
+    URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()))
+}
+
+/// Decode a base64url (no-pad) string — e.g. a JWT segment. Trailing `=` padding
+/// (some encoders add it) is tolerated. `None` on malformed input.
+pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    URL_SAFE_NO_PAD.decode(s.trim_end_matches('=')).ok()
+}
+
 /// Whether the *browser* is on https (so a `Secure` cookie is appropriate),
 /// inferred from the `X-Forwarded-Proto` set by `tailscale serve` / a TLS proxy.
 /// The server itself always speaks plain http on the tailnet.

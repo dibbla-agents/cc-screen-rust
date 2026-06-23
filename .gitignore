@@ -7,6 +7,8 @@ scripts/hubctl.env
 
 # local env files (tokens) — keep .env.example tracked, not .env
 docker/*/.env
+# root .env for local multi-tenant dev (OAuth client secret, DB url) — never commit
+/.env
 
 # transient scheduled-task lock (runtime pid/session state)
 .claude/scheduled_tasks.lock

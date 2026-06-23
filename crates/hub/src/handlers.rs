@@ -592,7 +592,10 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     let exempt = !path.starts_with("/api/")
-        || matches!(path.as_str(), "/api/login" | "/api/auth" | "/api/me" | "/api/logout");
+        || matches!(path.as_str(), "/api/login" | "/api/auth" | "/api/me" | "/api/logout")
+        // The Google OAuth login flow (start/callback) must be reachable without a
+        // session — it IS the login.
+        || path.starts_with("/api/auth/google/");
 
     // Multi-tenant (proposal 0001 §4.1): identity comes from the session cookie,
     // not the shared secret. A gated request without a valid session is refused

@@ -158,6 +158,16 @@ impl HubState {
         }
     }
 
+    /// Multi-tenant: resolve a Google sign-in to a local `user_id` (§3.3). `None`
+    /// in single-tenant (OAuth is multi-tenant-only).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn upsert_google_user(&self, google_sub: &str, email: &str) -> Option<String> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.upsert_google_user(google_sub, email).await.ok(),
+        }
+    }
+
     /// True when the hub is running multi-tenant (a store is configured).
     pub fn multi_tenant(&self) -> bool {
         match &self.tenancy {

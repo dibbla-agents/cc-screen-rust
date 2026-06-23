@@ -51,6 +51,12 @@ pub trait Store: Send + Sync {
     /// `user_id`. Errors on a duplicate email or a too-short password.
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String>;
 
+    /// Resolve a Google sign-in to a local `user_id` (proposal 0001 §3.3), creating
+    /// or linking as needed. Matches first on the stable `google_sub`; failing that
+    /// links the (verified) `email` to an existing password account; otherwise
+    /// creates a new OAuth-only user (`password_hash` NULL).
+    async fn upsert_google_user(&self, google_sub: &str, email: &str) -> anyhow::Result<String>;
+
     /// Bind a new agent to a user, or rotate an existing `(user_id, machine_id)`'s
     /// token in place. Returns `(plaintext_token, agent_id)` — the plaintext is
     /// shown once; only its hash is stored. Used by tests now and the Phase 2
@@ -149,6 +155,45 @@ impl Store for SqliteStore {
         Ok(id)
     }
 
+    async fn upsert_google_user(&self, google_sub: &str, email: &str) -> anyhow::Result<String> {
+        let email = normalize_email(email);
+        anyhow::ensure!(!google_sub.is_empty() && !email.is_empty(), "google_sub + email required");
+        // 1) Returning user — authoritative match on the stable subject.
+        if let Some(row) = sqlx::query("SELECT id FROM users WHERE google_sub = ?1")
+            .bind(google_sub)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            return Ok(row.try_get("id")?);
+        }
+        // 2) First Google sign-in for a known email → link the accounts (only if
+        // that row isn't already bound to a different subject).
+        if let Some(row) = sqlx::query("SELECT id FROM users WHERE email = ?1 AND google_sub IS NULL")
+            .bind(&email)
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let id: String = row.try_get("id")?;
+            sqlx::query("UPDATE users SET google_sub = ?1 WHERE id = ?2")
+                .bind(google_sub)
+                .bind(&id)
+                .execute(&self.pool)
+                .await?;
+            return Ok(id);
+        }
+        // 3) Brand-new OAuth-only account (no password).
+        let id = cc_screen_auth::generate_token();
+        sqlx::query("INSERT INTO users (id, email, google_sub, created_at) VALUES (?1, ?2, ?3, ?4)")
+            .bind(&id)
+            .bind(&email)
+            .bind(google_sub)
+            .bind(now_secs() as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("upsert_google_user: {e}"))?;
+        Ok(id)
+    }
+
     async fn upsert_agent(&self, user_id: &str, machine_id: &str) -> anyhow::Result<(String, String)> {
         let token = cc_screen_auth::generate_token();
         let token_hash = cc_screen_auth::sha256_hex(&token);
@@ -239,6 +284,25 @@ mod tests {
         assert_eq!(s.resolve_agent("laptop", None).await, None);
         assert_eq!(s.resolve_agent("laptop", Some("garbage")).await, None);
         assert_eq!(s.resolve_agent("server", Some(&alice_tok)).await, None);
+    }
+
+    #[tokio::test]
+    async fn google_upsert_creates_links_and_returns() {
+        let s = SqliteStore::in_memory().await;
+        // New OAuth-only user.
+        let id = s.upsert_google_user("sub-123", "Gmail@Example.com").await.unwrap();
+        // Returning sign-in → same id (and email normalized).
+        assert_eq!(s.upsert_google_user("sub-123", "gmail@example.com").await.unwrap(), id);
+        assert_eq!(s.user_email(&id).await.as_deref(), Some("gmail@example.com"));
+        // OAuth-only account has no password, so the password path never matches.
+        assert_eq!(s.verify_login("gmail@example.com", "anything").await, None);
+
+        // Linking: a pre-existing password account adopts the google_sub on first
+        // Google sign-in, keeping the same id.
+        let pw_id = s.create_user("link@example.com", "password1").await.unwrap();
+        assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
+        // Subsequent sign-in matches on the subject.
+        assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
     }
 
     #[tokio::test]

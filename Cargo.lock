@@ -416,6 +416,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "cc-screen-auth",
  "cc-screen-protocol",

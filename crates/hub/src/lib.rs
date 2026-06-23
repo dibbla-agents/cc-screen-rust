@@ -7,10 +7,13 @@ pub mod assets;
 pub mod bulk;
 pub mod client_ws;
 pub mod config;
-/// Multi-tenant Postgres store (proposal 0001) — compiled only with `--features
+/// Multi-tenant store (proposal 0001) — compiled only with `--features
 /// multi-tenant`; absent from the single-tenant build.
 #[cfg(feature = "multi-tenant")]
 pub mod db;
+/// Google "Sign in with Google" backend (proposal 0001 §3.3) — multi-tenant only.
+#[cfg(feature = "multi-tenant")]
+pub mod oauth;
 pub mod handlers;
 pub mod registry;
 pub mod service;
@@ -34,7 +37,7 @@ const CLIP_MAX: usize = 32 << 20; // 32 MiB
 /// per-agent token check and is exempt from client auth (it isn't under `/api/`).
 /// Everything under `/api/` rides the client-auth middleware.
 pub fn build_router(hub: HubState) -> Router {
-    Router::new()
+    let router = Router::new()
         // The agent uplink + the dedicated bulk dial-back.
         .route("/agent/ws", get(uplink_server::agent_ws))
         .route("/agent/bulk", get(bulk::agent_bulk))
@@ -88,8 +91,18 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/login", post(handlers::login))
         .route("/api/auth", get(handlers::auth_status))
         .route("/api/me", get(handlers::me))
-        .route("/api/logout", post(handlers::logout))
-        // The embedded PWA (exempt from auth — it's the app shell).
+        .route("/api/logout", post(handlers::logout));
+
+    // Google "Sign in with Google" (proposal 0001 §3.3) — multi-tenant only, so
+    // the routes only exist in that build. Exempt from the auth gate (they ARE the
+    // login) via the `/api/auth/google/` prefix in `require_client_auth`.
+    #[cfg(feature = "multi-tenant")]
+    let router = router
+        .route("/api/auth/google/start", get(oauth::google_start))
+        .route("/api/auth/google/callback", get(oauth::google_callback));
+
+    // The embedded PWA (exempt from auth — it's the app shell).
+    router
         .fallback(assets::static_handler)
         .layer(axum::middleware::from_fn_with_state(hub.clone(), handlers::require_client_auth))
         .with_state(hub)
