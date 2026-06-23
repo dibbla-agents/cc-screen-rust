@@ -215,6 +215,43 @@ impl HubState {
         }
     }
 
+    /// Public signup → a new `users` row; returns the user_id. Multi-tenant only.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => store.create_user(email, password).await,
+        }
+    }
+
+    /// A user's agents (dashboard). Empty in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn list_agents(&self, user_id: &str) -> Vec<crate::db::AgentRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.list_agents(user_id).await,
+        }
+    }
+
+    /// Unlink one of a user's agents (owner-scoped). `false` in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn delete_agent(&self, user_id: &str, agent_id: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.delete_agent(user_id, agent_id).await,
+        }
+    }
+
+    /// Rotate (or create) a user's agent token for `machine_id`; returns the new
+    /// plaintext token (shown once). Multi-tenant only.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn rotate_agent(&self, user_id: &str, machine_id: &str) -> anyhow::Result<String> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => store.upsert_agent(user_id, machine_id).await.map(|(token, _)| token),
+        }
+    }
+
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
     /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
     /// who reaches `/agent/ws` could impersonate any machine, so the runtime

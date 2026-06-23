@@ -51,6 +51,12 @@ impl OAuthConfig {
     }
 }
 
+/// Whether Google sign-in is configured (client id + secret in env), so the UI
+/// knows to show the "Sign in with Google" button.
+pub fn is_configured() -> bool {
+    OAuthConfig::from_env().is_some()
+}
+
 /// `GET /api/auth/google/start` — 302 to Google's consent screen with a fresh
 /// `state` (CSRF) and PKCE `code_challenge`, parking the matching `state.verifier`
 /// in a 10-minute HttpOnly cookie.

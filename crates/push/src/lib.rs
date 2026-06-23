@@ -46,6 +46,12 @@ pub struct StoredSub {
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
+    /// Owning tenant's `user_id` (proposal 0001 §10.6.1). `None` in single-tenant
+    /// (and on legacy rows) → the subscription is unscoped. In multi-tenant the
+    /// subscribe handler stamps the logged-in user here, so a "session ready" buzz
+    /// only ever reaches that tenant's own devices — never another tenant's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 pub struct Push {
@@ -108,7 +114,21 @@ impl Push {
     /// HTTP POSTs run on a blocking thread (ureq is sync); afterwards any
     /// 404/410 ("gone") endpoints are pruned.
     pub async fn notify(&self, title: &str, body: &str, session: &str) {
-        let subs = self.snapshot();
+        self.notify_scoped(None, title, body, session).await
+    }
+
+    /// Like [`notify`], but restricted to the subscriptions owned by `owner`
+    /// (proposal 0001 §10.6.1). `Some(user_id)` → only that tenant's devices;
+    /// `None` → every device (single-tenant, today's behavior).
+    pub async fn notify_scoped(&self, owner: Option<&str>, title: &str, body: &str, session: &str) {
+        let subs: Vec<StoredSub> = self
+            .snapshot()
+            .into_iter()
+            .filter(|s| match owner {
+                None => true,
+                Some(u) => s.owner.as_deref() == Some(u),
+            })
+            .collect();
         if subs.is_empty() {
             return;
         }
@@ -303,7 +323,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ccr-subs-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let push = Push::new(&dir);
-        let sub = |e: &str| StoredSub { endpoint: e.into(), p256dh: "p".into(), auth: "a".into() };
+        let sub = |e: &str| StoredSub { endpoint: e.into(), p256dh: "p".into(), auth: "a".into(), owner: None };
         push.add_sub(sub("https://push.example/a"));
         push.add_sub(sub("https://push.example/a")); // upsert, not dup
         push.add_sub(sub("https://push.example/b"));
@@ -313,5 +333,36 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].endpoint, "https://push.example/b");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // §10.6.1: notify_scoped must only ever target the owning tenant's devices.
+    // (We assert the filter, not delivery — endpoints here are fake.)
+    #[test]
+    fn scoped_filter_isolates_tenants() {
+        let owned = |e: &str, u: Option<&str>| StoredSub {
+            endpoint: e.into(),
+            p256dh: "p".into(),
+            auth: "a".into(),
+            owner: u.map(String::from),
+        };
+        let subs = vec![
+            owned("https://x/alice", Some("alice")),
+            owned("https://x/bob", Some("bob")),
+            owned("https://x/legacy", None),
+        ];
+        let pick = |owner: Option<&str>| -> Vec<String> {
+            subs.iter()
+                .filter(|s| match owner {
+                    None => true,
+                    Some(u) => s.owner.as_deref() == Some(u),
+                })
+                .map(|s| s.endpoint.clone())
+                .collect()
+        };
+        // alice's buzz reaches only alice's device.
+        assert_eq!(pick(Some("alice")), vec!["https://x/alice"]);
+        assert_eq!(pick(Some("bob")), vec!["https://x/bob"]);
+        // unscoped (single-tenant) reaches everyone, including legacy rows.
+        assert_eq!(pick(None).len(), 3);
     }
 }

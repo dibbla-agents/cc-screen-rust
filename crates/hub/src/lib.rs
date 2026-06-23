@@ -17,6 +17,9 @@ pub mod oauth;
 /// RFC-8628 headless device-enrollment endpoints (proposal 0001 §6–8) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod device;
+/// Account + dashboard endpoints (signup, agent list/unlink/rotate) — multi-tenant only.
+#[cfg(feature = "multi-tenant")]
+pub mod account;
 pub mod handlers;
 pub mod registry;
 pub mod service;
@@ -107,7 +110,13 @@ pub fn build_router(hub: HubState) -> Router {
         // the device_code is the bearer); /approve is cookie-authed.
         .route("/api/device/code", post(device::code))
         .route("/api/device/token", post(device::token))
-        .route("/api/device/approve", post(device::approve));
+        .route("/api/device/approve", post(device::approve))
+        // Account + dashboard. /signup is unauthenticated (it mints the session);
+        // the agent-management routes are cookie-authed.
+        .route("/api/signup", post(account::signup))
+        .route("/api/agents", get(account::list))
+        .route("/api/agents/unlink", post(account::unlink))
+        .route("/api/agents/rotate", post(account::rotate));
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router

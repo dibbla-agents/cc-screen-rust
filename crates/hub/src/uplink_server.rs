@@ -168,7 +168,12 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                             .filter(|d| !d.is_empty())
                             .or_else(|| Some(preview).filter(|p| !p.is_empty()))
                             .unwrap_or_else(|| "finished — tap to open".to_string());
-                        tokio::spawn(async move { push.notify(&title, &body, &session).await });
+                        // §10.6.1: in multi-tenant, buzz only the owning tenant's
+                        // devices; single-tenant keeps notifying every device.
+                        let owner = hub.multi_tenant().then(|| user_id.clone());
+                        tokio::spawn(async move {
+                            push.notify_scoped(owner.as_deref(), &title, &body, &session).await
+                        });
                     }
                     // Agent asks for a session summary (proposal 0022). Gate + call
                     // Haiku off the read loop, then send the result back over the

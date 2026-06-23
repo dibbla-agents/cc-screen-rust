@@ -109,21 +109,37 @@ pub async fn logout(State(hub): State<HubState>) -> Response {
     (StatusCode::OK, [(header::SET_COOKIE, hub.client_auth.clear_cookie())]).into_response()
 }
 
-/// `GET /api/me` — the BFF identity read (proposal 0001 §5). Multi-tenant: report
-/// the logged-in account from the session cookie. Single-tenant: there is no user
-/// identity, so it always reports unauthenticated (the frontend uses `/api/auth`
-/// for the shared-secret gate instead). Exempt from the auth gate so it can
-/// answer "who am I?" even when no session is present.
+/// `GET /api/me` — the boot/identity read for the web UI (proposal 0001 §5).
+/// Always 200. `multiTenant` tells the frontend which login model to render;
+/// `googleEnabled` whether to show the Google button; when multi-tenant and the
+/// session cookie is valid, the logged-in account. Single-tenant reports
+/// `multiTenant:false` and the frontend falls back to the `/api/auth` gate.
+/// Exempt from the auth gate so it can answer "who am I?" with no session.
 pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
-    if hub.multi_tenant() {
+    let multi = hub.multi_tenant();
+    let google = multi && google_enabled();
+    if multi {
         if let Some(user_id) = hub.client_auth.user_from_cookie(&headers) {
             if let Some(email) = hub.user_email(&user_id).await {
-                return Json(json!({ "authenticated": true, "userId": user_id, "email": email }))
-                    .into_response();
+                return Json(json!({
+                    "multiTenant": true, "googleEnabled": google,
+                    "authenticated": true, "userId": user_id, "email": email,
+                }))
+                .into_response();
             }
         }
     }
-    (StatusCode::UNAUTHORIZED, Json(json!({ "authenticated": false }))).into_response()
+    Json(json!({ "multiTenant": multi, "googleEnabled": google, "authenticated": false }))
+        .into_response()
+}
+
+#[cfg(feature = "multi-tenant")]
+fn google_enabled() -> bool {
+    crate::oauth::is_configured()
+}
+#[cfg(not(feature = "multi-tenant"))]
+fn google_enabled() -> bool {
+    false
 }
 
 // ── Lifecycle + control, routed to the owning agent ──────────────────────────
@@ -551,14 +567,26 @@ pub struct SubKeys {
     auth: String,
 }
 
-pub async fn push_subscribe(State(hub): State<HubState>, Json(req): Json<SubscribeReq>) -> Response {
+pub async fn push_subscribe(
+    State(hub): State<HubState>,
+    headers: HeaderMap,
+    Json(req): Json<SubscribeReq>,
+) -> Response {
     if req.endpoint.is_empty() || req.keys.p256dh.is_empty() || req.keys.auth.is_empty() {
         return (StatusCode::BAD_REQUEST, "incomplete subscription").into_response();
     }
+    // Stamp the owning tenant (§10.6.1) so this device only ever receives this
+    // user's notifications. `None` in single-tenant → unscoped, as before.
+    let owner = if hub.multi_tenant() {
+        hub.client_auth.user_from_cookie(&headers)
+    } else {
+        None
+    };
     hub.push.add_sub(cc_screen_push::StoredSub {
         endpoint: req.endpoint,
         p256dh: req.keys.p256dh,
         auth: req.keys.auth,
+        owner,
     });
     StatusCode::NO_CONTENT.into_response()
 }
@@ -576,8 +604,12 @@ pub async fn push_unsubscribe(
     StatusCode::NO_CONTENT.into_response()
 }
 
-pub async fn push_test(State(hub): State<HubState>) -> Response {
-    hub.push.notify("cc-screen", "🔔 Test buzz — notifications are on", "").await;
+pub async fn push_test(State(hub): State<HubState>, headers: HeaderMap) -> Response {
+    // Buzz only the caller's own devices in multi-tenant (§10.6.1).
+    let owner = if hub.multi_tenant() { hub.client_auth.user_from_cookie(&headers) } else { None };
+    hub.push
+        .notify_scoped(owner.as_deref(), "cc-screen", "🔔 Test buzz — notifications are on", "")
+        .await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -592,7 +624,7 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
     let exempt = !path.starts_with("/api/")
-        || matches!(path.as_str(), "/api/login" | "/api/auth" | "/api/me" | "/api/logout")
+        || matches!(path.as_str(), "/api/login" | "/api/signup" | "/api/auth" | "/api/me" | "/api/logout")
         // The Google OAuth login flow (start/callback) must be reachable without a
         // session — it IS the login.
         || path.starts_with("/api/auth/google/")

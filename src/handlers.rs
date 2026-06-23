@@ -494,6 +494,7 @@ pub async fn push_subscribe(
         endpoint: req.endpoint,
         p256dh: req.keys.p256dh,
         auth: req.keys.auth,
+        owner: None, // the standalone agent is single-tenant
     });
     Ok(StatusCode::NO_CONTENT.into_response())
 }

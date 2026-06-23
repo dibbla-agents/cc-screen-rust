@@ -80,6 +80,16 @@ pub trait Store: Send + Sync {
     /// Reap expired (and approved-but-never-claimed) enrollments. Cheap; run on a
     /// timer.
     async fn device_sweep(&self);
+
+    // ── dashboard (proposal 0001 Phase 3) ──────────────────────────────────────
+    /// A user's registered agents, newest first.
+    async fn list_agents(&self, user_id: &str) -> Vec<AgentRow>;
+
+    /// Unlink (delete) one of a user's agents — scoped to the owner so a user can
+    /// only ever remove their own. Returns true if a row was deleted. The agent's
+    /// token instantly stops resolving; a live uplink keeps working until it drops,
+    /// then can't reconnect (and self-re-enrolls if configured).
+    async fn delete_agent(&self, user_id: &str, agent_id: &str) -> bool;
 }
 
 /// What a host's poll of `/api/device/token` resolves to (RFC 8628). Mirrors the
@@ -92,6 +102,15 @@ pub enum DevicePoll {
     Expired,
     Denied,
     Approved { token: String, agent_id: String },
+}
+
+/// One of a user's registered agents, for the dashboard (proposal 0001 Phase 3).
+/// Live online status is annotated by the hub from its registry, not stored here.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentRow {
+    pub agent_id: String,
+    pub machine_id: String,
+    pub created_at: i64,
 }
 
 /// The minted codes a host receives from `/api/device/code`.
@@ -372,6 +391,33 @@ impl Store for SqliteStore {
         Ok(machine_id)
     }
 
+    async fn list_agents(&self, user_id: &str) -> Vec<AgentRow> {
+        let rows = sqlx::query("SELECT id, machine_id, created_at FROM agents WHERE user_id = ?1 ORDER BY created_at DESC")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(AgentRow {
+                    agent_id: r.try_get("id").ok()?,
+                    machine_id: r.try_get("machine_id").ok()?,
+                    created_at: r.try_get("created_at").ok()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_agent(&self, user_id: &str, agent_id: &str) -> bool {
+        sqlx::query("DELETE FROM agents WHERE id = ?1 AND user_id = ?2")
+            .bind(agent_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
     async fn device_sweep(&self) {
         let now = now_secs() as i64;
         let _ = sqlx::query(
@@ -494,6 +540,25 @@ mod tests {
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
         // Subsequent sign-in matches on the subject.
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
+    }
+
+    #[tokio::test]
+    async fn list_and_delete_agents_are_owner_scoped() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let (_t, alice_agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        s.upsert_agent(&alice, "server").await.unwrap();
+        s.upsert_agent(&bob, "laptop").await.unwrap();
+
+        assert_eq!(s.list_agents(&alice).await.len(), 2, "alice sees only her two");
+        assert_eq!(s.list_agents(&bob).await.len(), 1);
+        // Bob cannot delete alice's agent (owner-scoped) — no row removed.
+        assert!(!s.delete_agent(&bob, &alice_agent).await);
+        assert_eq!(s.list_agents(&alice).await.len(), 2, "still there");
+        // Alice can delete her own.
+        assert!(s.delete_agent(&alice, &alice_agent).await);
+        assert_eq!(s.list_agents(&alice).await.len(), 1);
     }
 
     #[tokio::test]
