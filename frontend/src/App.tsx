@@ -25,6 +25,7 @@ import {
   type UploadResult,
 } from "./api";
 import { fetchMachines } from "./api";
+import { getMe, type MeInfo } from "./api";
 import {
   cycleSessionInPane,
   LAST_KEY,
@@ -44,6 +45,7 @@ import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
 import UploadSheet from "./components/UploadSheet";
 import LoginScreen from "./components/LoginScreen";
+import { AuthScreen, ActivatePage, Dashboard } from "./components/MultiTenant";
 import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
 import { detectReadyEdges, sessionKey } from "./readyEdges";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
@@ -138,6 +140,11 @@ export default function App() {
   // login screen; true = authed (or auth is off). The session cookie rides all
   // requests automatically, so the rest of the app is unchanged.
   const [authed, setAuthed] = useState<boolean | null>(null);
+  // Multi-tenant boot info (proposal 0001). null on a single-tenant agent/hub or
+  // before the first /api/me. Drives the email/Google login, /activate, and the
+  // machines dashboard; single-tenant keeps the shared-secret LoginScreen.
+  const [me, setMe] = useState<MeInfo | null>(null);
+  const [showDash, setShowDash] = useState(false);
   // Sessions a reboot/tmux restart took down that we can bring back. Fetched
   // lazily when the drawer opens (it's the only place the offer is shown), so
   // the session-list poll stays a single request.
@@ -594,10 +601,31 @@ export default function App() {
   // unprotected box — treat it as "no gate".
   useEffect(() => {
     setUnauthorizedHandler(() => setAuthed(false));
-    getAuthStatus()
-      .then((s) => setAuthed(!s.authRequired || s.authed))
-      .catch(() => setAuthed(true));
+    // Prefer /api/me (multi-tenant boot read). On a multi-tenant hub it drives the
+    // identity gate; otherwise (single-tenant hub, or an older agent with no
+    // /api/me) fall back to the shared-secret /api/auth gate — unchanged behavior.
+    const singleTenantGate = () =>
+      getAuthStatus()
+        .then((s) => setAuthed(!s.authRequired || s.authed))
+        .catch(() => setAuthed(true));
+    getMe()
+      .then((m) => {
+        setMe(m);
+        if (m.multiTenant) setAuthed(m.authenticated);
+        else return singleTenantGate();
+      })
+      .catch(singleTenantGate);
     return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // After a multi-tenant login/signup, re-read identity (email/userId) and reveal.
+  const refetchMe = useCallback(() => {
+    getMe()
+      .then((m) => {
+        setMe(m);
+        setAuthed(m.authenticated);
+      })
+      .catch(() => setAuthed(true));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -1806,7 +1834,43 @@ export default function App() {
   if (authed === null) {
     return <div className="fixed inset-0 bg-bar" />;
   }
-  if (!authed) {
+  // Multi-tenant gate (proposal 0001): email/Google login, the /activate device-
+  // approval page, and the machines dashboard. Single-tenant keeps LoginScreen.
+  if (me?.multiTenant) {
+    const onActivate = typeof window !== "undefined" && window.location.pathname === "/activate";
+    if (!authed) {
+      return (
+        <AuthScreen
+          google={me.googleEnabled}
+          hint={onActivate ? "Sign in to approve a device." : undefined}
+          onAuthed={refetchMe}
+        />
+      );
+    }
+    if (onActivate) {
+      return (
+        <ActivatePage
+          email={me.email}
+          onDone={() => {
+            window.history.replaceState({}, "", "/");
+            setShowDash(true);
+          }}
+        />
+      );
+    }
+    if (showDash) {
+      return (
+        <Dashboard
+          me={me}
+          onClose={() => setShowDash(false)}
+          onLoggedOut={() => {
+            setShowDash(false);
+            setAuthed(false);
+          }}
+        />
+      );
+    }
+  } else if (!authed) {
     return <LoginScreen onSuccess={() => setAuthed(true)} />;
   }
 
@@ -1815,6 +1879,19 @@ export default function App() {
       className="relative flex flex-col bg-bar text-slate-200"
       style={{ height: appH ? `${appH}px` : "100%" }}
     >
+      {/* Multi-tenant account entry: a small floating control to open the machines
+          dashboard (proposal 0001). Hidden on single-tenant. */}
+      {me?.multiTenant && (
+        <button
+          onClick={() => setShowDash(true)}
+          title="Your machines & account"
+          className="fixed bottom-3 left-3 z-[60] flex items-center gap-1.5 rounded-full border border-edge bg-panel/90 px-3 py-1.5 font-mono text-xs text-slate-300 shadow-lg backdrop-blur transition hover:border-accent hover:text-accent"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-amber" />
+          machines
+        </button>
+      )}
+
       {/* Hover sensor: invisible strip at the very top that summons the
           collapsed header on desktop. Phone never collapses, so no sensor. */}
       {isDesktop && (

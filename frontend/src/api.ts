@@ -120,6 +120,99 @@ export async function logout(): Promise<void> {
   await fetch("/api/logout", { method: "POST" });
 }
 
+// ── Multi-tenant (proposal 0001) ─────────────────────────────────────────────
+// The web-UI boot read. `multiTenant` decides which login model to render;
+// `googleEnabled` whether to show the Google button; the rest is the logged-in
+// account when authenticated. Single-tenant returns multiTenant=false and the app
+// falls back to the shared-secret /api/auth gate.
+export interface MeInfo {
+  multiTenant: boolean;
+  googleEnabled: boolean;
+  authenticated: boolean;
+  userId?: string;
+  email?: string;
+}
+
+export async function getMe(): Promise<MeInfo> {
+  const r = await fetch("/api/me");
+  if (!r.ok) throw new Error(`me: ${r.status}`);
+  return r.json();
+}
+
+// Multi-tenant login: email + password (verified as the user's argon2 password).
+export async function loginEmail(email: string, password: string): Promise<boolean> {
+  const r = await fetch("/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, secret: password }),
+  });
+  return r.ok;
+}
+
+export async function signup(
+  email: string,
+  password: string
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await fetch("/api/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (r.ok) return { ok: true };
+  const j = await r.json().catch(() => ({}) as { error?: string });
+  return { ok: false, error: j.error || `Sign-up failed (${r.status})` };
+}
+
+export interface AgentInfo {
+  agentId: string;
+  machine: string;
+  online: boolean;
+  createdAt: number;
+}
+
+export async function listAgents(): Promise<AgentInfo[]> {
+  const r = await fetch("/api/agents");
+  if (!r.ok) throw new Error(`agents: ${r.status}`);
+  return r.json();
+}
+
+export async function unlinkAgent(agentId: string): Promise<boolean> {
+  const r = await fetch("/api/agents/unlink", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  return r.ok;
+}
+
+export async function rotateAgent(machine: string): Promise<string | null> {
+  const r = await fetch("/api/agents/rotate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine }),
+  });
+  if (!r.ok) return null;
+  const j = await r.json().catch(() => ({}) as { token?: string });
+  return j.token ?? null;
+}
+
+// Approve a headless box's device code (the /activate flow). The browser is the
+// logged-in side; the server binds the pending enrollment to this tenant.
+export async function approveDevice(
+  userCode: string
+): Promise<{ ok: boolean; machine?: string; error?: string }> {
+  const r = await fetch("/api/device/approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_code: userCode }),
+  });
+  if (r.ok) {
+    const j = await r.json().catch(() => ({}) as { machine_id?: string });
+    return { ok: true, machine: j.machine_id };
+  }
+  return { ok: false, error: r.status === 404 ? "Unknown or expired code" : `Error ${r.status}` };
+}
+
 let unauthorizedHandler: (() => void) | null = null;
 // Register a callback fired when the heartbeat sees a 401 (cookie expired /
 // logged out elsewhere). The app uses it to show the login screen again.
