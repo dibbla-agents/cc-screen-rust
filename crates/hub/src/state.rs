@@ -177,6 +177,44 @@ impl HubState {
         }
     }
 
+    /// The backing store, for out-of-request work like the device-flow expiry
+    /// sweep. `None` in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub fn store(&self) -> Option<std::sync::Arc<dyn crate::db::Store>> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => Some(store.clone()),
+        }
+    }
+
+    // ── RFC-8628 device flow delegation (proposal 0001 §6–8) ───────────────────
+    /// Mint a pending enrollment; `None` in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn device_create(&self, device_id: &str, machine_id: &str) -> Option<crate::db::DeviceCode> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.device_create(device_id, machine_id).await.ok(),
+        }
+    }
+
+    /// Poll a device code; single-tenant resolves to `Expired` (no flow).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn device_poll(&self, device_code: &str) -> crate::db::DevicePoll {
+        match &self.tenancy {
+            Tenancy::Single => crate::db::DevicePoll::Expired,
+            Tenancy::Multi(store) => store.device_poll(device_code).await,
+        }
+    }
+
+    /// Approve a pending code for `user_id`; returns the bound `machine_id`.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => store.device_approve(user_id, user_code).await,
+        }
+    }
+
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
     /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
     /// who reaches `/agent/ws` could impersonate any machine, so the runtime

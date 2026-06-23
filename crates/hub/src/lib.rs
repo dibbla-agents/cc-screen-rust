@@ -14,6 +14,9 @@ pub mod db;
 /// Google "Sign in with Google" backend (proposal 0001 §3.3) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod oauth;
+/// RFC-8628 headless device-enrollment endpoints (proposal 0001 §6–8) — multi-tenant only.
+#[cfg(feature = "multi-tenant")]
+pub mod device;
 pub mod handlers;
 pub mod registry;
 pub mod service;
@@ -99,7 +102,12 @@ pub fn build_router(hub: HubState) -> Router {
     #[cfg(feature = "multi-tenant")]
     let router = router
         .route("/api/auth/google/start", get(oauth::google_start))
-        .route("/api/auth/google/callback", get(oauth::google_callback));
+        .route("/api/auth/google/callback", get(oauth::google_callback))
+        // Device enrollment (§8): /code + /token are host-facing (unauthenticated —
+        // the device_code is the bearer); /approve is cookie-authed.
+        .route("/api/device/code", post(device::code))
+        .route("/api/device/token", post(device::token))
+        .route("/api/device/approve", post(device::approve));
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router

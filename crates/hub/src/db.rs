@@ -62,6 +62,49 @@ pub trait Store: Send + Sync {
     /// shown once; only its hash is stored. Used by tests now and the Phase 2
     /// device-approve handler later.
     async fn upsert_agent(&self, user_id: &str, machine_id: &str) -> anyhow::Result<(String, String)>;
+
+    // ── RFC-8628 device flow (proposal 0001 §6–8) ──────────────────────────────
+    /// Mint + store a pending enrollment for a headless host (`/api/device/code`).
+    async fn device_create(&self, device_id: &str, machine_id: &str) -> anyhow::Result<DeviceCode>;
+
+    /// A host's poll (`/api/device/token`). Handles lazy expiry, `slow_down`
+    /// throttling, and single-use delivery of the approved token.
+    async fn device_poll(&self, device_code: &str) -> DevicePoll;
+
+    /// A logged-in browser approves a pending code (`/api/device/approve`), binding
+    /// it to `user_id`, minting the agent's token, and parking the plaintext for the
+    /// host's next poll. Returns the bound `machine_id`. Errors if the code is
+    /// unknown/expired/already used.
+    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String>;
+
+    /// Reap expired (and approved-but-never-claimed) enrollments. Cheap; run on a
+    /// timer.
+    async fn device_sweep(&self);
+}
+
+/// What a host's poll of `/api/device/token` resolves to (RFC 8628). Mirrors the
+/// `authorization_pending` / `slow_down` / `expired_token` / `access_denied` /
+/// success outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevicePoll {
+    Pending,
+    SlowDown,
+    Expired,
+    Denied,
+    Approved { token: String, agent_id: String },
+}
+
+/// The minted codes a host receives from `/api/device/code`.
+#[derive(Debug, Clone)]
+pub struct DeviceCode {
+    /// Opaque secret the host polls with.
+    pub device_code: String,
+    /// Short human code shown on the host, grouped `WXYZ-MJHT` for display.
+    pub user_code_display: String,
+    /// Seconds the host must wait between polls.
+    pub interval: i64,
+    /// Seconds until the code expires.
+    pub expires_in: i64,
 }
 
 /// The SQLite-backed [`Store`].
@@ -215,10 +258,158 @@ impl Store for SqliteStore {
         let agent_id: String = row.try_get("id")?;
         Ok((token, agent_id))
     }
+
+    async fn device_create(&self, device_id: &str, machine_id: &str) -> anyhow::Result<DeviceCode> {
+        let device_code = cc_screen_auth::generate_token();
+        let display = gen_user_code();
+        let stored = normalize_user_code(&display);
+        let expires_at = now_secs() as i64 + DEVICE_CODE_TTL;
+        sqlx::query(
+            "INSERT INTO device_enrollments
+               (device_code, user_code, device_id, machine_id, status, interval, expires_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+        )
+        .bind(&device_code)
+        .bind(&stored)
+        .bind(device_id)
+        .bind(machine_id)
+        .bind(DEVICE_POLL_INTERVAL)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("device_create: {e}"))?;
+        Ok(DeviceCode {
+            device_code,
+            user_code_display: display,
+            interval: DEVICE_POLL_INTERVAL,
+            expires_in: DEVICE_CODE_TTL,
+        })
+    }
+
+    async fn device_poll(&self, device_code: &str) -> DevicePoll {
+        let now = now_secs() as i64;
+        let Ok(Some(row)) = sqlx::query(
+            "SELECT status, agent_id, uplink_token, expires_at, last_polled_at, interval
+               FROM device_enrollments WHERE device_code = ?1",
+        )
+        .bind(device_code)
+        .fetch_optional(&self.pool)
+        .await
+        else {
+            return DevicePoll::Expired; // unknown ⇒ treat as expired
+        };
+        let expires_at: i64 = row.try_get("expires_at").unwrap_or(0);
+        if expires_at < now {
+            let _ = sqlx::query("DELETE FROM device_enrollments WHERE device_code = ?1")
+                .bind(device_code)
+                .execute(&self.pool)
+                .await;
+            return DevicePoll::Expired;
+        }
+        // slow_down: polled faster than `interval` since the last poll. Decide off
+        // the OLD timestamp, then always stamp now so a tight loop stays throttled.
+        let last: Option<i64> = row.try_get("last_polled_at").ok();
+        let interval: i64 = row.try_get("interval").unwrap_or(DEVICE_POLL_INTERVAL);
+        let too_fast = last.is_some_and(|l| now - l < interval);
+        let _ = sqlx::query("UPDATE device_enrollments SET last_polled_at = ?1 WHERE device_code = ?2")
+            .bind(now)
+            .bind(device_code)
+            .execute(&self.pool)
+            .await;
+        if too_fast {
+            return DevicePoll::SlowDown;
+        }
+        match row.try_get::<String, _>("status").as_deref() {
+            Ok("pending") => DevicePoll::Pending,
+            Ok("denied") => DevicePoll::Denied,
+            Ok("approved") => {
+                let token: Option<String> = row.try_get("uplink_token").ok();
+                let agent_id: Option<String> = row.try_get("agent_id").ok();
+                // Single-use: hand the parked token over exactly once, then delete.
+                let _ = sqlx::query("DELETE FROM device_enrollments WHERE device_code = ?1")
+                    .bind(device_code)
+                    .execute(&self.pool)
+                    .await;
+                match (token, agent_id) {
+                    (Some(token), Some(agent_id)) => DevicePoll::Approved { token, agent_id },
+                    _ => DevicePoll::Expired,
+                }
+            }
+            _ => DevicePoll::Expired,
+        }
+    }
+
+    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String> {
+        let now = now_secs() as i64;
+        let code = normalize_user_code(user_code);
+        let row = sqlx::query(
+            "SELECT device_code, machine_id FROM device_enrollments
+              WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2",
+        )
+        .bind(&code)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("unknown or expired code"))?;
+        let device_code: String = row.try_get("device_code")?;
+        let machine_id: String = row.try_get("machine_id")?;
+
+        // Mint (or rotate) the agent + its token, then park the plaintext for the
+        // host's next poll to claim exactly once.
+        let (token, agent_id) = self.upsert_agent(user_id, &machine_id).await?;
+        sqlx::query(
+            "UPDATE device_enrollments
+                SET status = 'approved', user_id = ?1, agent_id = ?2, uplink_token = ?3
+              WHERE device_code = ?4",
+        )
+        .bind(user_id)
+        .bind(&agent_id)
+        .bind(&token)
+        .bind(&device_code)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("device_approve: {e}"))?;
+        Ok(machine_id)
+    }
+
+    async fn device_sweep(&self) {
+        let now = now_secs() as i64;
+        let _ = sqlx::query(
+            "DELETE FROM device_enrollments
+              WHERE expires_at < ?1
+                 OR (status = 'approved' AND last_polled_at IS NOT NULL AND last_polled_at < ?2)",
+        )
+        .bind(now)
+        .bind(now - 3600) // approved-but-never-claimed ages out after an hour
+        .execute(&self.pool)
+        .await;
+    }
 }
+
+/// Per RFC 8628 §3.5: ~10-minute code lifetime, and the host waits this long
+/// between polls.
+const DEVICE_CODE_TTL: i64 = 600;
+const DEVICE_POLL_INTERVAL: i64 = 5;
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// A user code as typed/stored: uppercased with separators stripped, so "wdjb-mjht"
+/// and "WDJB MJHT" both match the stored "WDJBMJHT".
+fn normalize_user_code(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).flat_map(|c| c.to_uppercase()).collect()
+}
+
+/// A fresh 8-char user code in Crockford base32 with ambiguous glyphs
+/// (I/L/O/U/0/1) removed, returned grouped for display ("WDJB-MJHT").
+fn gen_user_code() -> String {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut buf = [0u8; 8];
+    OsRng.fill_bytes(&mut buf);
+    let c: Vec<char> = buf.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
+    format!("{}{}{}{}-{}{}{}{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
 }
 
 fn now_secs() -> u64 {
@@ -303,6 +494,44 @@ mod tests {
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
         // Subsequent sign-in matches on the subject.
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
+    }
+
+    #[tokio::test]
+    async fn device_flow_throttle_and_pending() {
+        let s = SqliteStore::in_memory().await;
+        let code = s.device_create("dev-1", "laptop").await.unwrap();
+        assert!(code.user_code_display.contains('-'), "display is grouped");
+        // First poll (no prior poll) is Pending; an immediate second is throttled.
+        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::Pending);
+        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::SlowDown);
+        // Unknown code ⇒ treated as expired.
+        assert_eq!(s.device_poll("nope").await, DevicePoll::Expired);
+    }
+
+    // The headline: approve binds the code to the tenant and the host claims the
+    // minted token exactly once (approve before the first poll, so the claim poll
+    // isn't throttled).
+    #[tokio::test]
+    async fn device_flow_approve_and_single_use_claim() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let code = s.device_create("dev-1", "laptop").await.unwrap();
+
+        // Approve case/dash-insensitively → binds to alice's "laptop".
+        let machine = s.device_approve(&alice, &code.user_code_display.to_lowercase()).await.unwrap();
+        assert_eq!(machine, "laptop");
+
+        // First poll (last_polled NULL ⇒ not throttled) yields the token once.
+        let (token, agent_id) = match s.device_poll(&code.device_code).await {
+            DevicePoll::Approved { token, agent_id } => (token, agent_id),
+            other => panic!("expected Approved, got {other:?}"),
+        };
+        assert_eq!(s.resolve_agent("laptop", Some(&token)).await, Some((alice, agent_id)));
+        // Single-use: the row is gone, so a repeat poll is Expired.
+        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::Expired);
+
+        // A bad/unknown code can't be approved.
+        assert!(s.device_approve("someone", "ZZZZ-ZZZZ").await.is_err());
     }
 
     #[tokio::test]

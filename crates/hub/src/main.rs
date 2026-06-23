@@ -246,6 +246,20 @@ async fn main() {
         tenancy,
     };
 
+    // Reap expired device enrollments on a timer (proposal 0001 §8.4). Multi-tenant
+    // only; cheap indexed DELETE on a small table.
+    #[cfg(feature = "multi-tenant")]
+    if let Some(store) = hub.store() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                store.device_sweep().await;
+            }
+        });
+    }
+
     let app = build_router(hub);
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr)
