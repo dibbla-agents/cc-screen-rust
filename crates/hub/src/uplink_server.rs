@@ -68,8 +68,9 @@ fn proxied(headers: &HeaderMap) -> bool {
 async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
     let (mut ws_write, mut ws_read) = socket.split();
 
-    // The first frame must be Register; it gates the (machine, token) pairing.
-    let (machine_id, hostname, tools) = match ws_read.next().await {
+    // The first frame must be Register; it gates the (machine, token) pairing and
+    // resolves the owning tenant.
+    let (machine_id, user_id, agent_id, hostname, tools) = match ws_read.next().await {
         Some(Ok(Message::Binary(buf))) => match decode_frame::<AgentMsg>(&buf) {
             Ok((AgentMsg::Register { proto, machine_id, hostname, tools, .. }, _)) => {
                 // Negotiate a version *range* instead of demanding exact equality
@@ -86,24 +87,28 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     return;
                 }
                 let _negotiated = proto.min(HUB_PROTO_VERSION);
-                if !hub.uplink_token_ok_for(&machine_id, token.as_deref()) {
+                // Resolve (machine, token) to its owning (user_id, agent_id) via the
+                // §9.1 seam: single-tenant → (OWNER, machine_id); multi-tenant → the
+                // DB row. `None` ⇒ reject (bad/absent token).
+                let Some((user_id, agent_id)) = hub.resolve_agent(&machine_id, token.as_deref()).await
+                else {
                     tracing::warn!("agent {machine_id}: rejected (bad uplink token)");
                     let _ = ws_write.send(Message::Close(None)).await;
                     return;
-                }
+                };
                 // Fix 4: in OPEN uplink mode (no per-agent tokens) any peer could
                 // register as an existing machine_id and silently displace the live
                 // agent — a stealthy MITM of all its terminal/file traffic. Refuse a
-                // duplicate while the original is still online. (Configured mode is
-                // already gated: only the real agent holds the matching token, so a
-                // genuine reconnect is allowed to replace.) A dropped agent is marked
-                // offline, so a real reconnect after the drop still succeeds.
-                if hub.agent_tokens.is_empty() && hub.registry.is_online(&machine_id) {
+                // duplicate while the original is still online. This applies only to
+                // single-tenant open mode; configured single-tenant AND multi-tenant
+                // are token-gated, so a genuine reconnect (same token) may replace. A
+                // dropped agent is marked offline, so a real reconnect still succeeds.
+                if !hub.multi_tenant() && hub.agent_tokens.is_empty() && hub.registry.is_online(&agent_id) {
                     tracing::warn!("agent {machine_id}: rejected — already online (open-uplink takeover blocked)");
                     let _ = ws_write.send(Message::Close(None)).await;
                     return;
                 }
-                (machine_id, hostname, tools)
+                (machine_id, user_id, agent_id, hostname, tools)
             }
             _ => {
                 tracing::warn!("agent uplink: first frame was not Register; closing");
@@ -116,8 +121,8 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
     // Channel for everything the hub sends to this agent; a writer task owns the
     // WS sink and drains it.
     let (to_agent_tx, mut to_agent_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let conn = hub.registry.register(&machine_id, &hostname, tools, to_agent_tx);
-    tracing::info!("agent {machine_id} registered ({hostname})");
+    let conn = hub.registry.register_agent(&agent_id, &user_id, &machine_id, &hostname, tools, to_agent_tx);
+    tracing::info!("agent {machine_id} registered ({hostname}) [agent_id={agent_id} user={user_id}]");
 
     let writer = tokio::spawn(async move {
         while let Some(frame) = to_agent_rx.recv().await {

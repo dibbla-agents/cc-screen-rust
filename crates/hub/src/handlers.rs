@@ -9,23 +9,29 @@ use axum::extract::{Query, RawQuery, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use cc_screen_protocol::hub::{Cmd, CmdResult};
 use cc_screen_protocol::{AuthStatus, CreateReq, DeleteReq, Favorite, LoginReq, SessionInfo, ToolInfo};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::registry::{MachineInfo, RequestErr};
+use crate::registry::{MachineInfo, RequestErr, UserScope};
 use crate::state::HubState;
 
-// ── GET /api/sessions — union across all agents, machine-tagged ────────────────
-pub async fn sessions(State(hub): State<HubState>) -> Json<Vec<SessionInfo>> {
-    Json(hub.registry.all_sessions())
+// ── GET /api/sessions — union across the caller's agents, machine-tagged ───────
+pub async fn sessions(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
+) -> Json<Vec<SessionInfo>> {
+    Json(hub.registry.all_sessions_for(&scope))
 }
 
-// ── GET /api/machines — for the picker + offline greying ───────────────────────
-pub async fn machines(State(hub): State<HubState>) -> Json<Vec<MachineInfo>> {
-    Json(hub.registry.machines())
+// ── GET /api/machines — for the picker + offline greying (caller's agents) ─────
+pub async fn machines(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
+) -> Json<Vec<MachineInfo>> {
+    Json(hub.registry.machines_for(&scope))
 }
 
 // ── GET /api/tools — the chosen agent's tool list (used by New Session) ─────────
@@ -33,10 +39,14 @@ pub async fn machines(State(hub): State<HubState>) -> Json<Vec<MachineInfo>> {
 // no round-trip to the agent needed. Resolves the explicit `?machine=`, else the
 // single online agent; `[]` when unknown/offline (which leaves New Session's
 // Create disabled, same as a tool-less agent).
-pub async fn tools(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Json<Vec<ToolInfo>> {
+pub async fn tools(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
+    Query(q): Query<MachineQ>,
+) -> Json<Vec<ToolInfo>> {
     let tools = hub
         .registry
-        .resolve(&q.machine, None)
+        .resolve_scoped(&scope, &q.machine, None)
         .map(|a| a.tools.clone())
         .unwrap_or_default();
     Json(tools)
@@ -158,11 +168,12 @@ pub struct SessionBody {
 /// await the reply. The `Err` arm is a ready-made HTTP error response.
 async fn route(
     hub: &HubState,
+    scope: &UserScope,
     machine: &str,
     session: Option<&str>,
     cmd: Cmd,
 ) -> Result<CmdResult, Response> {
-    let agent = hub.registry.resolve(machine, session).ok_or_else(|| {
+    let agent = hub.registry.resolve_scoped(scope, machine, session).ok_or_else(|| {
         (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
     })?;
     agent.request(cmd).await.map_err(|e| match e {
@@ -184,12 +195,13 @@ fn ok_or_err(result: CmdResult, ok: StatusCode) -> Response {
 
 pub async fn create(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(req): Json<CreateReq>,
 ) -> Response {
     // A create has no existing session to disambiguate by — route to the chosen
     // (or single online) machine.
-    match route(&hub, &q.machine, None, Cmd::Create(req)).await {
+    match route(&hub, &scope, &q.machine, None, Cmd::Create(req)).await {
         Ok(CmdResult::Created(name)) => (StatusCode::OK, Json(json!({ "name": name }))).into_response(),
         Ok(CmdResult::Error { code, msg }) => {
             (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
@@ -201,11 +213,12 @@ pub async fn create(
 
 pub async fn delete(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(req): Json<DeleteReq>,
 ) -> Response {
     let session = req.session.clone();
-    match route(&hub, &q.machine, Some(&session), Cmd::Delete(req)).await {
+    match route(&hub, &scope, &q.machine, Some(&session), Cmd::Delete(req)).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -213,11 +226,12 @@ pub async fn delete(
 
 pub async fn key(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(b): Json<KeyBody>,
 ) -> Response {
     let session = b.session.clone();
-    match route(&hub, &q.machine, Some(&session), Cmd::Key { session: b.session, key: b.key }).await {
+    match route(&hub, &scope, &q.machine, Some(&session), Cmd::Key { session: b.session, key: b.key }).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -225,12 +239,13 @@ pub async fn key(
 
 pub async fn paste(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(b): Json<PasteBody>,
 ) -> Response {
     let session = b.session.clone();
     let cmd = Cmd::Paste { session: b.session, text: b.text, enter: b.enter };
-    match route(&hub, &q.machine, Some(&session), cmd).await {
+    match route(&hub, &scope, &q.machine, Some(&session), cmd).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -238,11 +253,12 @@ pub async fn paste(
 
 pub async fn clear_history(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(b): Json<SessionBody>,
 ) -> Response {
     let session = b.session.clone();
-    match route(&hub, &q.machine, Some(&session), Cmd::ClearHistory { session: b.session }).await {
+    match route(&hub, &scope, &q.machine, Some(&session), Cmd::ClearHistory { session: b.session }).await {
         Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
         Err(resp) => resp,
     }
@@ -259,12 +275,13 @@ pub struct ColorBody {
 // the agent replies with the updated SessionInfo as JSON.
 pub async fn set_color(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(b): Json<ColorBody>,
 ) -> Response {
     let session = b.session.clone();
     let cmd = Cmd::SetColor { session: b.session, color: b.color };
-    match route(&hub, &q.machine, Some(&session), cmd).await {
+    match route(&hub, &scope, &q.machine, Some(&session), cmd).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Error { code, msg }) => {
             (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
@@ -285,12 +302,13 @@ pub struct LabelBody {
 // the agent replies with the updated SessionInfo as JSON.
 pub async fn set_label(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(b): Json<LabelBody>,
 ) -> Response {
     let session = b.session.clone();
     let cmd = Cmd::SetLabel { session: b.session, label: b.label };
-    match route(&hub, &q.machine, Some(&session), cmd).await {
+    match route(&hub, &scope, &q.machine, Some(&session), cmd).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Error { code, msg }) => {
             (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
@@ -300,9 +318,9 @@ pub async fn set_label(
     }
 }
 
-pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -> Response {
+pub async fn session_root(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<RootQ>) -> Response {
     let session = q.session.clone();
-    match route(&hub, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {
+    match route(&hub, &scope, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {
         Ok(CmdResult::SessionRoot { root, home }) => {
             Json(json!({ "root": root, "home": home })).into_response()
         }
@@ -311,16 +329,16 @@ pub async fn session_root(State(hub): State<HubState>, Query(q): Query<RootQ>) -
     }
 }
 
-pub async fn restorable(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Response {
-    match route(&hub, &q.machine, None, Cmd::Restorable).await {
+pub async fn restorable(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<MachineQ>) -> Response {
+    match route(&hub, &scope, &q.machine, None, Cmd::Restorable).await {
         Ok(CmdResult::Restorable(list)) => Json(list).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
         Err(resp) => resp,
     }
 }
 
-pub async fn restore(State(hub): State<HubState>, Query(q): Query<MachineQ>) -> Response {
-    match route(&hub, &q.machine, None, Cmd::Restore).await {
+pub async fn restore(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<MachineQ>) -> Response {
+    match route(&hub, &scope, &q.machine, None, Cmd::Restore).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
         Err(resp) => resp,
@@ -388,12 +406,13 @@ pub struct FileGetQ {
 /// when the PWA omits it) and map its `CmdResult` to JSON / 204 / error.
 async fn file_route(
     hub: &HubState,
+    scope: &UserScope,
     machine: &str,
     session: Option<&str>,
     op: &str,
     args: Value,
 ) -> Response {
-    match route(hub, machine, session, Cmd::File { op: op.to_string(), args }).await {
+    match route(hub, scope, machine, session, Cmd::File { op: op.to_string(), args }).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Ok) => StatusCode::NO_CONTENT.into_response(),
         Ok(CmdResult::Error { code, msg }) => {
@@ -414,12 +433,12 @@ fn opt(s: &str) -> Option<&str> {
     }
 }
 
-pub async fn dirs(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, opt(&q.session), "dirs", json!({ "path": q.path, "session": q.session })).await
+pub async fn dirs(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+    file_route(&hub, &scope, &q.machine, opt(&q.session), "dirs", json!({ "path": q.path, "session": q.session })).await
 }
 
-pub async fn files(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, opt(&q.session), "files", json!({ "path": q.path, "session": q.session })).await
+pub async fn files(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+    file_route(&hub, &scope, &q.machine, opt(&q.session), "files", json!({ "path": q.path, "session": q.session })).await
 }
 
 // Recursive fuzzy dir search (proposal 0016), per-agent like `dirs`: the chosen
@@ -437,16 +456,17 @@ pub struct DirSearchQ {
     machine: String,
 }
 
-pub async fn dirs_search(State(hub): State<HubState>, Query(qy): Query<DirSearchQ>) -> Response {
-    file_route(&hub, &qy.machine, opt(&qy.session), "dirs_search", json!({ "q": qy.q, "root": qy.root })).await
+pub async fn dirs_search(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(qy): Query<DirSearchQ>) -> Response {
+    file_route(&hub, &scope, &qy.machine, opt(&qy.session), "dirs_search", json!({ "q": qy.q, "root": qy.root })).await
 }
 
 // Recursive fuzzy *file* search (proposal 0027), per-agent like `dirs_search`:
 // the chosen machine searches its own $HOME. `?session=` both disambiguates the
 // owning agent and lets that agent default the root to the session's project.
-pub async fn files_search(State(hub): State<HubState>, Query(qy): Query<DirSearchQ>) -> Response {
+pub async fn files_search(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(qy): Query<DirSearchQ>) -> Response {
     file_route(
         &hub,
+        &scope,
         &qy.machine,
         opt(&qy.session),
         "files_search",
@@ -455,58 +475,64 @@ pub async fn files_search(State(hub): State<HubState>, Query(qy): Query<DirSearc
     .await
 }
 
-pub async fn file_read(State(hub): State<HubState>, Query(q): Query<FileGetQ>) -> Response {
-    file_route(&hub, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
+pub async fn file_read(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+    file_route(&hub, &scope, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
 }
 
 // POST handlers forward the client's JSON body straight through as the op args;
 // path-only, so they route to the explicit (or single online) machine.
 pub async fn file_write(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "write", body).await
+    file_route(&hub, &scope, &q.machine, None, "write", body).await
 }
 
 pub async fn file_delete(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "delete", body).await
+    file_route(&hub, &scope, &q.machine, None, "delete", body).await
 }
 
 pub async fn mkdir(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "mkdir", body).await
+    file_route(&hub, &scope, &q.machine, None, "mkdir", body).await
 }
 
 pub async fn rmdir(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "rmdir", body).await
+    file_route(&hub, &scope, &q.machine, None, "rmdir", body).await
 }
 
 pub async fn rename(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "rename", body).await
+    file_route(&hub, &scope, &q.machine, None, "rename", body).await
 }
 
 pub async fn move_path(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
-    file_route(&hub, &q.machine, None, "move", body).await
+    file_route(&hub, &scope, &q.machine, None, "move", body).await
 }
 
 // ── Web Push (hub-local: one VAPID key + sub store for the whole fleet) ───────
@@ -558,20 +584,38 @@ pub async fn push_test(State(hub): State<HubState>) -> Response {
 /// Gate every `/api/*` route except the auth endpoints; non-`/api/` paths
 /// (notably `/agent/ws`, which has its own per-agent token check) are exempt. A
 /// no-op when no client credential is configured.
-pub async fn require_client_auth(State(hub): State<HubState>, req: Request, next: Next) -> Response {
-    let path = req.uri().path();
+pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
     // Browser trust boundary — runs regardless of the auth gate. The `/agent/*`
     // uplink + bulk dial-backs are not browser-facing (non-`/api/`), so skip them.
     if path.starts_with("/api/") && !hub.origin.check(req.headers()) {
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
+    let exempt = !path.starts_with("/api/")
+        || matches!(path.as_str(), "/api/login" | "/api/auth" | "/api/me" | "/api/logout");
 
+    // Multi-tenant (proposal 0001 §4.1): identity comes from the session cookie,
+    // not the shared secret. A gated request without a valid session is refused
+    // here; the resolved tenant scope is stashed for the handlers so every relay
+    // lookup is filtered to the caller's own agents.
+    if hub.multi_tenant() {
+        let user = hub.client_auth.user_from_cookie(req.headers());
+        if !exempt && user.is_none() {
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+        // Exempt paths with no session get a scope that matches no agent (harmless
+        // — they don't consult it); gated paths always have a real user here.
+        let scope = user.map(UserScope::User).unwrap_or_else(|| UserScope::User(String::new()));
+        req.extensions_mut().insert(scope);
+        return next.run(req).await;
+    }
+
+    // Single-tenant: every authed client sees every agent (today's behavior).
+    req.extensions_mut().insert(UserScope::All);
     let auth = &hub.client_auth;
     if !auth.enabled() {
         return next.run(req).await;
     }
-    let exempt = !path.starts_with("/api/")
-        || matches!(path, "/api/login" | "/api/auth" | "/api/me" | "/api/logout");
     if exempt || auth.is_authed(req.headers(), req.uri().query()) {
         next.run(req).await
     } else {

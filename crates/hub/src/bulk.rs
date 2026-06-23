@@ -105,7 +105,14 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
     let query = req.uri().query().unwrap_or("").to_string();
     let machine = qparam(&query, "machine").unwrap_or_default();
     let session = qparam(&query, "session");
-    let Some(agent) = hub.registry.resolve(&machine, session.as_deref()) else {
+    // Tenant scope was resolved + stashed by the auth middleware; bulk transfers
+    // are confined to the caller's own agents (§4.1).
+    let scope = req
+        .extensions()
+        .get::<crate::registry::UserScope>()
+        .cloned()
+        .unwrap_or(crate::registry::UserScope::All);
+    let Some(agent) = hub.registry.resolve_scoped(&scope, &machine, session.as_deref()) else {
         return (StatusCode::NOT_FOUND, "no online machine for that request").into_response();
     };
     let target_machine = agent.machine_id.clone();

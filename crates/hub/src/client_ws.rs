@@ -20,8 +20,9 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use crate::registry::{AgentConn, ToBrowser};
+use crate::registry::{AgentConn, ToBrowser, UserScope};
 use crate::state::HubState;
+use axum::Extension;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -34,6 +35,7 @@ pub struct WsQuery {
 
 pub async fn ws(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<WsQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -41,7 +43,8 @@ pub async fn ws(
     if !hub.origin.check(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
-    let Some(agent) = hub.registry.resolve(&q.machine, Some(&q.session)) else {
+    // Tenant-scoped (§4.1): a client can only attach to its own agents.
+    let Some(agent) = hub.registry.resolve_scoped(&scope, &q.machine, Some(&q.session)) else {
         return (StatusCode::NOT_FOUND, "no online machine for that session").into_response();
     };
     ws.on_upgrade(move |socket| bridge(agent, q.session, socket))

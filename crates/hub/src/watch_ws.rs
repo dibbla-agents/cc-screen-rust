@@ -16,8 +16,9 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use crate::registry::{AgentConn, ToBrowser};
+use crate::registry::{AgentConn, ToBrowser, UserScope};
 use crate::state::HubState;
+use axum::Extension;
 
 #[derive(Deserialize)]
 pub struct WatchQuery {
@@ -34,6 +35,7 @@ struct WatchFrame {
 
 pub async fn ws(
     State(hub): State<HubState>,
+    Extension(scope): Extension<UserScope>,
     Query(q): Query<WatchQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -41,9 +43,9 @@ pub async fn ws(
     if !hub.origin.check(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
     }
-    // Watch has no session to disambiguate by; resolve to the single online
-    // machine when the client (the PWA) omits `machine`.
-    let Some(agent) = hub.registry.resolve(&q.machine, None) else {
+    // Watch has no session to disambiguate by; resolve (within the caller's tenant)
+    // to the single online machine when the client (the PWA) omits `machine`.
+    let Some(agent) = hub.registry.resolve_scoped(&scope, &q.machine, None) else {
         return (StatusCode::NOT_FOUND, "specify ?machine= (more than one is online)").into_response();
     };
     ws.on_upgrade(move |socket| bridge(agent, socket))
