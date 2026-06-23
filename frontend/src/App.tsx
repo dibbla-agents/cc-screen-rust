@@ -716,11 +716,12 @@ export default function App() {
   // this to ~1×/min in a backgrounded tab, which is fine for an at-a-glance
   // signal; `focus` (below) also forces an immediate refresh on return.
   useEffect(() => {
+    if (authed !== true) return;
     const id = setInterval(() => {
       fetchSessions().then(applySessionList).catch(() => {});
     }, 4000);
     return () => clearInterval(id);
-  }, [applySessionList]);
+  }, [applySessionList, authed]);
 
   // Ambient "are my agents still running?" signal: the tab title and (installed
   // PWA) app-icon badge show how many sessions are actively producing output.
@@ -763,20 +764,23 @@ export default function App() {
     if (edges.length) toastHostRef.current?.push(edges);
   }, [sessions]);
 
-  // Initial load.
+  // Initial load — only once authenticated, so a multi-tenant login screen
+  // doesn't fire authed-only API calls (which would 401 noisily). With auth off
+  // `authed` flips true immediately, so this is unchanged for single-tenant.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    if (authed === true) refresh();
+  }, [refresh, authed]);
 
   // Poll the hub's machine roster (empty [] on a standalone agent, which has no
   // /api/machines). Drives the per-machine grouping + pickers; polled slowly
   // since the roster changes rarely (an agent joining/leaving the fleet).
   useEffect(() => {
+    if (authed !== true) return;
     const load = () => fetchMachines().then(setMachines).catch(() => {});
     load();
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
-  }, []);
+  }, [authed]);
 
   // Refresh the restore offer whenever the drawer opens — cheap, and the only
   // surface that shows it. Errors are non-fatal (just hides the offer).
@@ -785,9 +789,9 @@ export default function App() {
   // hub. Single-machine passes "" (unchanged, machine-less) behaviour.
   const restoreMachine = multiMachine ? currentSession?.machine || firstOnlineMachine : "";
   useEffect(() => {
-    if (!drawerOpen) return;
+    if (authed !== true || !drawerOpen) return;
     fetchRestorable(restoreMachine).then(setRestorable).catch(() => setRestorable([]));
-  }, [drawerOpen, restoreMachine]);
+  }, [authed, drawerOpen, restoreMachine]);
 
   // Bring back every recorded-but-dead session (resuming each tool's
   // conversation), then re-list and re-check what's still restorable.
@@ -812,10 +816,11 @@ export default function App() {
 
   // Re-list when returning to the app (PWA resume / tab focus).
   useEffect(() => {
+    if (authed !== true) return;
     const onFocus = () => refresh();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [refresh]);
+  }, [refresh, authed]);
 
   // Keyboard:
   //  Phone: Ctrl+B toggles the drawer immediately (existing behaviour).
@@ -1603,8 +1608,9 @@ export default function App() {
   // keep an optimistic local copy and PUT the whole list on every change,
   // adopting the server's sanitised result.
   useEffect(() => {
+    if (authed !== true) return;
     fetchFavorites().then(setFavorites).catch(() => {});
-  }, []);
+  }, [authed]);
   const persistFavorites = useCallback((next: Favorite[]) => {
     setFavorites(next);
     saveFavorites(next).then(setFavorites).catch(() => {});
