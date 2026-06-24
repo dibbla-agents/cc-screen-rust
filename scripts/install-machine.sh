@@ -33,15 +33,10 @@ echo
 echo "==> Connecting '$MACHINE' to $HUB_URL"
 echo "    A code will print below — approve it at $HUB_URL/activate (you must be logged in)."
 echo
-# Device flow: prints a code, waits for you to approve it in the dashboard,
-# persists the uplink token, then exits.
-"$BIN" enroll --hub "$HUB_URL" --machine-id "$MACHINE"
-
-echo
-echo "==> Installing the background service (reconnects on boot)…"
-# Uses the token just persisted by `enroll`; --hub-only means it's reachable only
-# through the hub (binds no local port).
-"$BIN" install --hub "$HUB_URL" --machine-id "$MACHINE" --hub-only
+# One command: device flow (prints a code, waits for dashboard approval, saves the
+# token), then installs the background service (--hub-only = reachable only via the
+# hub, binds no local port). Reconnects on boot.
+"$BIN" install --hub "$HUB_URL" --machine-id "$MACHINE" --hub-only --enroll
 
 echo
 echo "✓ Done — '$MACHINE' is connected and will reconnect automatically."

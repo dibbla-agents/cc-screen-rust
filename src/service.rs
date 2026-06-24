@@ -49,6 +49,11 @@ struct Opts {
     /// With --hub, bind no inbound socket — reachable ONLY through the hub
     /// (CCWEB_HUB_ONLY).
     hub_only: bool,
+    /// Run the RFC-8628 device-flow enrollment before setting up the service
+    /// (multi-tenant hub): print a code to approve in the dashboard, persist the
+    /// token, and use that token (so any stale CCWEB_HUB_TOKEN is cleared). `main`
+    /// runs the actual device flow; `install` consumes this to drop the old token.
+    enroll: bool,
 }
 
 fn home() -> PathBuf {
@@ -81,6 +86,9 @@ SLAVE MODE (also dial out to a hub — see `cc-screen-hub install`)
   --hub URL           the hub to register with, e.g. https://hub.example:8840
   --hub-token TOK     this machine's per-agent uplink token (the hub authorizes
                       it; ask whoever runs the hub). Distinct from --token below.
+  --enroll            multi-tenant hub: instead of a token, print a code you
+                      approve in the hub dashboard, then save + use that token
+                      (clears any stale --hub-token). One-command add/repoint.
   --machine-id NAME   how this box appears in the hub's list (default: hostname)
   --hub-only          bind NO local port — reachable ONLY through the hub
                       (the strictest posture for a YOLO box). Without it the agent
@@ -118,6 +126,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         hub_token: None,
         machine_id: None,
         hub_only: false,
+        enroll: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -162,6 +171,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             o.machine_id = Some(v.to_string());
         } else if a == "--hub-only" {
             o.hub_only = true;
+        } else if a == "--enroll" {
+            o.enroll = true;
         } else {
             return Err(format!("unknown option: {a}"));
         }
@@ -424,6 +435,12 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
     if let Some(t) = &opts.hub_token {
         env.insert("CCWEB_HUB_TOKEN".to_string(), t.clone());
+    } else if opts.enroll {
+        // Enrolled (device flow): the uplink token lives in enroll.json, not here.
+        // Drop any stale static token so it doesn't shadow the enrolled one
+        // (token precedence is explicit CCWEB_HUB_TOKEN > persisted enroll.json).
+        // This is what makes repointing an existing agent to a new hub clean.
+        env.remove("CCWEB_HUB_TOKEN");
     }
     if let Some(m) = &opts.machine_id {
         env.insert("CCWEB_MACHINE_ID".to_string(), m.clone());
@@ -459,7 +476,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if let Some(hub) = env.get("CCWEB_HUB_URL") {
         let m = env.get("CCWEB_MACHINE_ID").cloned().unwrap_or_else(|| "<hostname>".into());
         println!("🛰  Uplinking to hub {hub} as machine '{m}' — it'll appear in the hub's session list.");
-        if !env.contains_key("CCWEB_HUB_TOKEN") {
+        if !env.contains_key("CCWEB_HUB_TOKEN") && !opts.enroll {
             println!("   (no --hub-token set: only works if the hub runs an open uplink.)");
         }
     }

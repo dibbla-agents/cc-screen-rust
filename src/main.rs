@@ -84,6 +84,25 @@ async fn main() {
     let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(String::as_str) {
         Some("install") => {
+            // `--enroll`: run the device flow FIRST (print a code, wait for the
+            // user to approve it in the hub dashboard, persist the token), so the
+            // service `install` sets up then starts is already connected. One
+            // command for adding/repointing a machine — no web.env editing.
+            if argv.iter().any(|a| a == "--enroll") {
+                let cfg = config::load();
+                match cfg.hub_url.clone() {
+                    Some(hub) => {
+                        if let Err(e) = enroll::ensure_token(&hub, &cfg.machine_id, &cfg.config_dir).await {
+                            eprintln!("install: enrollment failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                    None => {
+                        eprintln!("install --enroll needs --hub <url>");
+                        std::process::exit(1);
+                    }
+                }
+            }
             if let Err(e) = service::install(&argv[2..]) {
                 eprintln!("install failed: {e}");
                 std::process::exit(1);
