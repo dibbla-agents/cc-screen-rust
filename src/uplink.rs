@@ -44,6 +44,14 @@ const HUB_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the watchdog re-checks the idle deadline above.
 const HEARTBEAT_CHECK: Duration = Duration::from_secs(15);
 
+/// Cap on a single connect attempt (TCP + TLS + WS upgrade). Without it,
+/// `connect_async` can block forever when a handshake stalls half-open (seen
+/// through Cloudflare after a `Connection reset`): the reconnect loop then hangs
+/// silently and the agent vanishes from the hub until restarted. With it, a
+/// stalled connect becomes an error → the run loop logs it and retries with
+/// backoff. Comfortably above a normal connect, well under the 60s idle watchdog.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A frame to write on the uplink WS: an encoded `AgentMsg`, or a WS-level Pong.
 enum WsOut {
     Bin(Vec<u8>),
@@ -121,7 +129,11 @@ async fn connect_and_serve(
         val.set_sensitive(true);
         req.headers_mut().insert(AUTHORIZATION, val);
     }
-    let (ws, _resp) = tokio_tungstenite::connect_async(req).await?;
+    // Bounded connect: a stalled handshake must not wedge the reconnect loop.
+    let (ws, _resp) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(req)).await {
+        Ok(r) => r?,
+        Err(_) => anyhow::bail!("connect timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+    };
     let (mut ws_write, mut ws_read) = ws.split();
 
     // One writer task owns the WS sink; the poller, control replies, and every

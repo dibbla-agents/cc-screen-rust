@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /tmp/rel-0351)",
+      "Read(//tmp/**)",
+      "Bash(rm -f *)",
+      "Bash(rtk gh *)"
+    ]
+  }
+}
