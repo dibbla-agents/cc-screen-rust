@@ -109,9 +109,9 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
     // are confined to the caller's own agents (§4.1).
     let scope = req
         .extensions()
-        .get::<crate::registry::UserScope>()
+        .get::<crate::registry::Visibility>()
         .cloned()
-        .unwrap_or(crate::registry::UserScope::All);
+        .unwrap_or(crate::registry::Visibility::All);
     let Some(agent) = hub.registry.resolve_scoped(&scope, &machine, session.as_deref()) else {
         return (StatusCode::NOT_FOUND, "no online machine for that request").into_response();
     };

@@ -7,7 +7,7 @@
 //! drops its uplink is *greyed* (kept, marked offline, its last session list
 //! retained) rather than vanishing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,24 +29,182 @@ pub enum RequestErr {
     Timeout,
 }
 
-/// Which agents a client request is allowed to see/reach (proposal 0001 §4.1).
-/// Derived once per request from the session cookie by the auth middleware and
-/// passed to every registry lookup, so tenant isolation is enforced uniformly.
+/// What a client request is allowed to see/reach — ownership (proposal 0001 §4.1)
+/// **plus** sharing grants (proposal 0039). Derived once per request from the
+/// session cookie + the caller's `shares` rows by the auth middleware and passed
+/// to every registry lookup, so tenant isolation *and* sharing are enforced in
+/// one place.
+///
+/// Single-tenant is always [`Visibility::All`] — an unconditional yes that never
+/// consults a grant. Multi-tenant is [`Visibility::User`], carrying the resolved
+/// union of that user's grants ([`UserVis`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UserScope {
-    /// Single-tenant: every agent (today's behavior). The only scope a
-    /// non-multi-tenant build ever produces.
+pub enum Visibility {
+    /// Single-tenant (or an admin): every agent, every session.
     All,
-    /// Multi-tenant: only agents owned by this `user_id`.
-    User(String),
+    /// Multi-tenant: this user owns some agents and may have grants on others.
+    User(UserVis),
 }
 
-impl UserScope {
-    /// Does an agent owned by `agent_user_id` fall in this scope?
-    pub fn matches(&self, agent_user_id: &str) -> bool {
+/// One non-owner's access to an agent they do **not** own — the resolved union of
+/// that user's `shares` rows for it (proposal 0039 §2.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Grant {
+    /// `kind='agent'`: use the whole agent (list/create/attach). The owner-peek
+    /// flag is the OWNER's concern, not the grantee's, so it isn't carried here.
+    Agent,
+    /// `kind='session'`: view only these session names; agent-scope is denied.
+    Sessions(HashSet<String>),
+}
+
+/// A multi-tenant caller's resolved visibility: the agents they own (by
+/// `user_id`) plus the grants they hold on others, and — for agents they *own* —
+/// the owner-peek and session-share-back overrides that widen their own list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserVis {
+    /// The caller.
+    pub user_id: String,
+    /// `agent_id` → the grant this user holds on an agent they do NOT own.
+    grants: HashMap<String, Grant>,
+    /// For agents this user OWNS: the grantee `user_id`s whose created sessions the
+    /// owner opted to keep sight of (owner-peek, §4.3), keyed by `agent_id`.
+    peek: HashMap<String, HashSet<String>>,
+    /// For agents this user OWNS: specific session names surfaced back to the owner
+    /// by a session-share-back (§3.1 rule 3), keyed by `agent_id`.
+    shared_back: HashMap<String, HashSet<String>>,
+}
+
+/// One `shares` row joined to its agent's owner — the plain data the multi-tenant
+/// [`crate::db::Store`] returns and [`Visibility::from_rows`] folds into a
+/// [`UserVis`]. Defined here (not in the feature-gated `db`) so the predicate that
+/// consumes it stays in one place and compiles in every build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareRow {
+    pub id: String,
+    pub agent_id: String,
+    /// `agents.user_id` — the owner, resolved by the join.
+    pub owner_user_id: String,
+    pub grantee_user_id: String,
+    /// `"agent"` or `"session"`.
+    pub kind: String,
+    pub session: Option<String>,
+    pub owner_peek: bool,
+    pub created_at: i64,
+}
+
+impl Visibility {
+    /// An empty multi-tenant visibility for `user_id` (owns whatever agents carry
+    /// that `user_id`, holds no grants). Used for tests and for the exempt
+    /// no-session request (empty id matches no agent).
+    pub fn user(user_id: impl Into<String>) -> Self {
+        Visibility::User(UserVis { user_id: user_id.into(), ..Default::default() })
+    }
+
+    /// Build a caller's visibility from their loaded `shares` rows (those granting
+    /// INTO them, and those they issued OUT of agents they own). The row set is the
+    /// union `grantee_user_id = user_id OR owner_user_id = user_id`.
+    pub fn from_rows(user_id: String, rows: Vec<ShareRow>) -> Self {
+        let mut v = UserVis { user_id: user_id.clone(), ..Default::default() };
+        for r in rows {
+            // Grants INTO this user (on agents someone else owns).
+            if r.grantee_user_id == user_id && r.owner_user_id != user_id {
+                match r.kind.as_str() {
+                    "agent" => {
+                        v.grants.insert(r.agent_id.clone(), Grant::Agent);
+                    }
+                    "session" => {
+                        if let Some(s) = r.session.clone() {
+                            match v.grants.entry(r.agent_id.clone()).or_insert_with(|| Grant::Sessions(HashSet::new())) {
+                                // An agent grant supersedes a session grant — leave it.
+                                Grant::Agent => {}
+                                Grant::Sessions(set) => {
+                                    set.insert(s);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // A session shared BACK to this user on an agent they own (§3.1 rule 3).
+            if r.grantee_user_id == user_id && r.owner_user_id == user_id && r.kind == "session" {
+                if let Some(s) = r.session.clone() {
+                    v.shared_back.entry(r.agent_id.clone()).or_default().insert(s);
+                }
+            }
+            // Owner-peek this user issued on an agent they own (§4.3).
+            if r.owner_user_id == user_id && r.kind == "agent" && r.owner_peek {
+                v.peek.entry(r.agent_id.clone()).or_default().insert(r.grantee_user_id.clone());
+            }
+        }
+        Visibility::User(v)
+    }
+
+    /// May the caller USE this agent as a whole — list its sessions, create new
+    /// ones, attach to any? True iff they own it or hold an agent-grant.
+    pub fn may_use_agent(&self, agent: &AgentConn) -> bool {
         match self {
-            UserScope::All => true,
-            UserScope::User(u) => u == agent_user_id,
+            Visibility::All => true,
+            Visibility::User(v) => {
+                agent.user_id == v.user_id
+                    || matches!(v.grants.get(&agent.agent_id), Some(Grant::Agent))
+            }
+        }
+    }
+
+    /// May the caller VIEW/attach this specific session on this agent? True if they
+    /// may use the agent, OR a session-grant (or a session-share-back) names exactly
+    /// this session.
+    pub fn may_see_session(&self, agent: &AgentConn, session: &str) -> bool {
+        if self.may_use_agent(agent) {
+            return true;
+        }
+        match self {
+            Visibility::All => true,
+            Visibility::User(v) => {
+                matches!(v.grants.get(&agent.agent_id), Some(Grant::Sessions(set)) if set.contains(session))
+                    || v.shared_back.get(&agent.agent_id).is_some_and(|s| s.contains(session))
+            }
+        }
+    }
+
+    /// Does the caller have *any* visibility on this agent — enough to list the
+    /// machine? True if they may use it, or hold at least one session grant on it.
+    pub fn has_any_visibility(&self, agent: &AgentConn) -> bool {
+        match self {
+            Visibility::All => true,
+            Visibility::User(v) => {
+                agent.user_id == v.user_id || v.grants.contains_key(&agent.agent_id)
+            }
+        }
+    }
+
+    /// Should `session` (created by `creator`) appear in the caller's session list
+    /// for `agent`? This is the attribution-aware rule the owner/grantee asymmetry
+    /// (§3.1) and owner-peek (§4.3) live in — distinct from `may_see_session`
+    /// (which governs *attach* and treats any owner/agent-grantee as all-seeing).
+    pub fn lists_session(&self, agent: &AgentConn, session: &str, creator: &str) -> bool {
+        match self {
+            Visibility::All => true,
+            Visibility::User(v) => {
+                let aid = &agent.agent_id;
+                if agent.user_id == v.user_id {
+                    // Owner: their own sessions always; a grantee's only under peek
+                    // for that grantee, or if the grantee shared the session back.
+                    creator == v.user_id
+                        || v.peek.get(aid).is_some_and(|s| s.contains(creator))
+                        || v.shared_back.get(aid).is_some_and(|s| s.contains(session))
+                } else if matches!(v.grants.get(aid), Some(Grant::Agent)) {
+                    // Agent-grantee: the owner's sessions + their own (not a third
+                    // grantee's).
+                    creator == agent.user_id || creator == v.user_id
+                } else if let Some(Grant::Sessions(set)) = v.grants.get(aid) {
+                    // Session-grantee: only the named session(s).
+                    set.contains(session)
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -86,6 +244,12 @@ pub struct AgentConn {
     next_req: AtomicU32,
     /// In-flight control ops awaiting an `AgentMsg::Reply`, keyed by request id.
     pending: Mutex<HashMap<ReqId, oneshot::Sender<CmdResult>>>,
+    /// Creator attribution (proposal 0039 §4.1): `session_name → creator user_id`
+    /// for sessions the hub relayed a non-owner's `Create` for. Ephemeral and
+    /// hub-side — a visibility hint, not a security boundary (the boundary is the
+    /// agent grant that let the non-owner create at all). A session not present here
+    /// is the owner's; lost on hub restart (sessions then fall back to owner).
+    creators: Mutex<HashMap<String, String>>,
 }
 
 impl AgentConn {
@@ -235,6 +399,7 @@ impl Registry {
             channels: Mutex::new(HashMap::new()),
             next_req: AtomicU32::new(0),
             pending: Mutex::new(HashMap::new()),
+            creators: Mutex::new(HashMap::new()),
         });
         g.insert(agent_id.to_string(), conn.clone());
         conn
@@ -255,26 +420,36 @@ impl Registry {
     /// ambiguous (more than one machine could match). A client that DOES send
     /// `machine` is always unambiguous; this only kicks in for machine-less ones.
     pub fn resolve(&self, machine: &str, session: Option<&str>) -> Option<Arc<AgentConn>> {
-        self.resolve_scoped(&UserScope::All, machine, session)
+        self.resolve_scoped(&Visibility::All, machine, session)
     }
 
-    /// Tenant-scoped resolve — the §4.1 keystone. Only agents `scope` allows are
-    /// considered; `machine` matches the user-facing `machine_id` label (NOT the
-    /// registry key), so a multi-tenant client naming "laptop" reaches *its own*
-    /// laptop and can never reach another tenant's identically-named machine.
-    /// Single-tenant (`UserScope::All`) reproduces the prior behavior exactly:
-    /// `agent_id == machine_id`, so a machine match is the same agent the old
-    /// key lookup returned.
+    /// Visibility-scoped resolve — the §4.1 keystone, widened by sharing (0039).
+    /// Only agents `vis` allows are considered; `machine` matches the user-facing
+    /// `machine_id` label (NOT the registry key), so a multi-tenant client naming
+    /// "laptop" reaches *its own* laptop and can never reach another tenant's
+    /// identically-named machine. When a `session` is given the filter is
+    /// `may_see_session` (so a session-grantee resolves to the owning agent for
+    /// that session only); without one it is `may_use_agent` (so a session-grantee
+    /// has no usable agent for a machine-less create/restore). Single-tenant
+    /// (`Visibility::All`) reproduces the prior behavior exactly.
     pub fn resolve_scoped(
         &self,
-        scope: &UserScope,
+        vis: &Visibility,
         machine: &str,
         session: Option<&str>,
     ) -> Option<Arc<AgentConn>> {
         let g = self.inner.lock().unwrap();
-        let visible = |a: &&Arc<AgentConn>| a.online() && scope.matches(&a.user_id);
+        // The per-request visibility filter: a session pins to `may_see_session`,
+        // otherwise the agent must be usable as a whole.
+        let allowed = |a: &&Arc<AgentConn>| {
+            a.online()
+                && match session {
+                    Some(s) => vis.may_see_session(a, s),
+                    None => vis.may_use_agent(a),
+                }
+        };
         if !machine.is_empty() {
-            let mut it = g.values().filter(visible).filter(|a| a.machine_id == machine);
+            let mut it = g.values().filter(allowed).filter(|a| a.machine_id == machine);
             let first = it.next()?;
             // Unique per tenant; a second match (only possible cross-tenant, which
             // scope already excludes) is treated as ambiguous → refuse.
@@ -283,7 +458,7 @@ impl Registry {
             }
             return Some(first.clone());
         }
-        let online: Vec<&Arc<AgentConn>> = g.values().filter(visible).collect();
+        let online: Vec<&Arc<AgentConn>> = g.values().filter(allowed).collect();
         match session {
             Some(name) => {
                 let mut owners = online.into_iter().filter(|a| a.owns(name));
@@ -308,17 +483,26 @@ impl Registry {
 
     /// Union of every agent's sessions (single-tenant). See [`all_sessions_for`].
     pub fn all_sessions(&self) -> Vec<SessionInfo> {
-        self.all_sessions_for(&UserScope::All)
+        self.all_sessions_for(&Visibility::All)
     }
 
-    /// Union of the in-scope agents' sessions, each machine-tagged, sorted by
+    /// The sessions the caller may list, each machine-tagged, sorted by
     /// `(machine, name)` so identical names on different machines never collide.
-    pub fn all_sessions_for(&self, scope: &UserScope) -> Vec<SessionInfo> {
+    /// Per-session (not just per-agent): a session-only grantee sees exactly their
+    /// shared session(s); an owner sees their own plus any a grantee created under
+    /// owner-peek or shared back; an agent-grantee sees the owner's plus their own
+    /// (proposal 0039 §3.2 / §4.1 attribution).
+    pub fn all_sessions_for(&self, vis: &Visibility) -> Vec<SessionInfo> {
         let g = self.inner.lock().unwrap();
         let mut out: Vec<SessionInfo> = g
             .values()
-            .filter(|c| scope.matches(&c.user_id))
-            .flat_map(|c| c.sessions_tagged())
+            .filter(|c| vis.has_any_visibility(c))
+            .flat_map(|c| {
+                c.sessions_tagged().into_iter().filter(|s| {
+                    let creator = c.creator_of(&s.name).unwrap_or_else(|| c.user_id.clone());
+                    vis.lists_session(c, &s.name, &creator)
+                })
+            })
             .collect();
         out.sort_by(|a, b| (&a.machine, &a.name).cmp(&(&b.machine, &b.name)));
         out
@@ -326,15 +510,17 @@ impl Registry {
 
     /// The machine list for the picker / offline greying (single-tenant).
     pub fn machines(&self) -> Vec<MachineInfo> {
-        self.machines_for(&UserScope::All)
+        self.machines_for(&Visibility::All)
     }
 
-    /// The in-scope machine list, sorted by label.
-    pub fn machines_for(&self, scope: &UserScope) -> Vec<MachineInfo> {
+    /// The machines the caller has any visibility on, sorted by label. A machine is
+    /// listed if the caller may use it OR holds at least one session grant on it (so
+    /// a session-only grantee still sees the box its shared session lives on).
+    pub fn machines_for(&self, vis: &Visibility) -> Vec<MachineInfo> {
         let g = self.inner.lock().unwrap();
         let mut v: Vec<MachineInfo> = g
             .values()
-            .filter(|c| scope.matches(&c.user_id))
+            .filter(|c| vis.has_any_visibility(c))
             .map(|c| MachineInfo {
                 machine: c.machine_id.clone(),
                 hostname: c.hostname.clone(),
@@ -357,6 +543,27 @@ impl AgentConn {
     /// `Registry::resolve` to route a machine-less request to its owner.)
     fn owns(&self, name: &str) -> bool {
         self.last_sessions.lock().unwrap().iter().any(|s| s.name == name)
+    }
+}
+
+impl AgentConn {
+    /// Attribute a session to its creating (non-owner) user — proposal 0039 §4.1.
+    /// Stamped when the hub relays a grantee's `Create` so the owner's list can
+    /// honour the share asymmetry (and owner-peek can override it).
+    pub fn set_creator(&self, session: &str, user_id: &str) {
+        self.creators.lock().unwrap().insert(session.to_string(), user_id.to_string());
+    }
+
+    /// The attributed creator of a session, if the hub saw a non-owner create it.
+    /// `None` ⇒ attribute to the owner (pre-existing or owner-created).
+    pub fn creator_of(&self, session: &str) -> Option<String> {
+        self.creators.lock().unwrap().get(session).cloned()
+    }
+
+    /// Drop a session's attribution (on delete), so a later identically-named
+    /// session isn't mis-attributed to the deleted one's creator.
+    pub fn forget_creator(&self, session: &str) {
+        self.creators.lock().unwrap().remove(session);
     }
 }
 
@@ -504,8 +711,8 @@ mod tests {
         let b = r.register_agent("agent-b", "bob", "laptop", "b.local", vec![], dummy_agent());
         a.set_sessions(vec![sess("claude-a")]);
         b.set_sessions(vec![sess("claude-b")]);
-        let alice = UserScope::User("alice".into());
-        let bob = UserScope::User("bob".into());
+        let alice = Visibility::user("alice");
+        let bob = Visibility::user("bob");
         let id = |c: Option<Arc<AgentConn>>| c.map(|x| x.agent_id.clone());
 
         // Each tenant's "laptop" resolves to their own agent — never the other's.
@@ -521,6 +728,104 @@ mod tests {
         // The unscoped (single-tenant) views still see everything.
         assert_eq!(r.all_sessions().len(), 2);
         assert_eq!(r.machines().len(), 2);
+    }
+
+    // ── Proposal 0039: sharing visibility ─────────────────────────────────────
+    fn row(id: &str, agent: &str, owner: &str, grantee: &str, kind: &str, session: Option<&str>, peek: bool) -> ShareRow {
+        ShareRow {
+            id: id.into(),
+            agent_id: agent.into(),
+            owner_user_id: owner.into(),
+            grantee_user_id: grantee.into(),
+            kind: kind.into(),
+            session: session.map(Into::into),
+            owner_peek: peek,
+            created_at: 0,
+        }
+    }
+
+    // A agent-shares to B: B sees A's machine + sessions, may create + attach;
+    // and B's created sessions stay hidden from A unless owner-peek is on.
+    #[test]
+    fn agent_share_visibility_and_asymmetry() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        a.set_sessions(vec![sess("claude-a"), sess("claude-bee")]);
+        a.set_creator("claude-bee", "bob"); // bob created this on alice's agent
+
+        // No shares: bob sees nothing of alice's.
+        let bob0 = Visibility::user("bob");
+        assert_eq!(r.all_sessions_for(&bob0).len(), 0);
+        assert!(r.machines_for(&bob0).is_empty());
+        assert!(r.resolve_scoped(&bob0, "laptop", None).is_none());
+
+        // Alice agent-shares to bob (peek off).
+        let bob = Visibility::from_rows("bob".into(), vec![row("s1", "agent-a", "alice", "bob", "agent", None, false)]);
+        assert_eq!(r.machines_for(&bob).len(), 1, "bob sees alice's machine");
+        // Bob, an agent-grantee, sees alice's session AND his own — both.
+        let names: HashSet<String> = r.all_sessions_for(&bob).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, HashSet::from(["claude-a".into(), "claude-bee".into()]));
+        // Bob can create (machine-less resolve passes may_use_agent) and attach.
+        assert!(r.resolve_scoped(&bob, "laptop", None).is_some());
+        assert!(r.resolve_scoped(&bob, "", Some("claude-a")).is_some());
+
+        // Alice (owner, peek off): her own session yes, bob's hidden.
+        let alice = Visibility::user("alice");
+        let anames: HashSet<String> = r.all_sessions_for(&alice).into_iter().map(|s| s.name).collect();
+        assert_eq!(anames, HashSet::from(["claude-a".into()]), "bob's session hidden from alice");
+
+        // With owner-peek on, alice regains sight of bob's session.
+        let alice_peek = Visibility::from_rows("alice".into(), vec![row("s1", "agent-a", "alice", "bob", "agent", None, true)]);
+        let pnames: HashSet<String> = r.all_sessions_for(&alice_peek).into_iter().map(|s| s.name).collect();
+        assert_eq!(pnames, HashSet::from(["claude-a".into(), "claude-bee".into()]));
+    }
+
+    // A session-shares only S to B: B sees exactly S, cannot use the agent, cannot
+    // attach to other sessions; a third user with no grant sees nothing.
+    #[test]
+    fn session_share_is_view_only_and_scoped() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        a.set_sessions(vec![sess("shared"), sess("secret")]);
+
+        let bob = Visibility::from_rows("bob".into(), vec![row("s2", "agent-a", "alice", "bob", "session", Some("shared"), false)]);
+        // The list is exactly [shared].
+        let names: Vec<String> = r.all_sessions_for(&bob).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["shared".to_string()]);
+        // Bob can attach to `shared`, but not `secret`.
+        assert!(r.resolve_scoped(&bob, "", Some("shared")).is_some());
+        assert!(r.resolve_scoped(&bob, "", Some("secret")).is_none());
+        // Bob cannot use the agent (machine-less create/restore can't land).
+        assert!(r.resolve_scoped(&bob, "laptop", None).is_none());
+        assert!(r.resolve_scoped(&bob, "", None).is_none());
+        // But the machine is listed so the UI can render where `shared` lives.
+        assert_eq!(r.machines_for(&bob).len(), 1);
+
+        // A third user with no grant sees nothing.
+        let carol = Visibility::user("carol");
+        assert!(r.all_sessions_for(&carol).is_empty());
+        assert!(r.machines_for(&carol).is_empty());
+    }
+
+    // Sharing-back: an agent-grantee (bob) shares one of his sessions back to the
+    // owner (alice); alice then sees exactly that one even with peek off.
+    #[test]
+    fn session_share_back_to_owner() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        a.set_sessions(vec![sess("claude-a"), sess("bee-1"), sess("bee-2")]);
+        a.set_creator("bee-1", "bob");
+        a.set_creator("bee-2", "bob");
+
+        // Peek off, bob shares bee-1 back to alice.
+        let alice = Visibility::from_rows(
+            "alice".into(),
+            vec![row("s3", "agent-a", "alice", "alice", "session", Some("bee-1"), false)],
+        );
+        let names: HashSet<String> = r.all_sessions_for(&alice).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, HashSet::from(["claude-a".into(), "bee-1".into()]), "owner sees own + shared-back, not bee-2");
+        // Alice (owner) can attach to the shared-back session.
+        assert!(r.resolve_scoped(&alice, "", Some("bee-1")).is_some());
     }
 
     #[tokio::test]

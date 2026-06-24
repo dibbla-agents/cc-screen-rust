@@ -106,7 +106,109 @@ pub trait Store: Send + Sync {
     /// Assign a plan to a user by email (admin CLI). Errors if no such user, or the
     /// plan isn't one of the `plan_limits` rows.
     async fn set_plan(&self, email: &str, plan: &str) -> anyhow::Result<()>;
+
+    // ── sharing grants (proposal 0039) ─────────────────────────────────────────
+    /// Every `shares` row relevant to building `user_id`'s [`Visibility`]: those
+    /// granting INTO them (`grantee_user_id = user_id`) and those they issued OUT of
+    /// agents they own (`agents.user_id = user_id`), each joined to its owner. The
+    /// hot path — one load per gated request.
+    async fn visibility_rows(&self, user_id: &str) -> Vec<ShareRow>;
+
+    /// Grant the whole agent to a grantee (idempotent on the agent share row;
+    /// re-issuing flips `owner_peek`). Owner-scoped: errors unless `owner_user_id`
+    /// owns `agent_id`; rejects a self-share. Returns the share id.
+    async fn share_agent(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str, owner_peek: bool) -> anyhow::Result<String>;
+
+    /// Grant view of a single session to a grantee (idempotent). Owner-scoped;
+    /// rejects a self-share. Returns the share id.
+    async fn share_session(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str, session: &str) -> anyhow::Result<String>;
+
+    /// Every grant OUT of an owner's agents (for their "shared by me" view).
+    async fn shares_by_owner(&self, owner_user_id: &str) -> Vec<ShareRow>;
+
+    /// Revoke one grant. Owner-scoped: the DELETE joins agents so a user can only
+    /// revoke a share on an agent they own. Returns true if a row went away.
+    async fn revoke_share(&self, owner_user_id: &str, share_id: &str) -> bool;
+
+    // ── share invites (proposal 0040) ──────────────────────────────────────────
+    /// Create or re-invite (upsert on `(grantee, resource)`): refresh a
+    /// pending/terminal row back to `pending` with a fresh TTL, or no-op an already
+    /// `accepted` one. Owner-scoped (the caller must own `agent_id`); rejects a
+    /// self-invite. Returns `(invite_id, status)`.
+    async fn share_create(
+        &self,
+        inviter: &str,
+        grantee: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+    ) -> anyhow::Result<(String, String)>;
+
+    /// A grantee's pending, unexpired invites (the inbox feed), newest first.
+    async fn share_inbox(&self, grantee: &str) -> Vec<ShareInviteRow>;
+
+    /// An inviter's sent invites across all statuses (the manage/cancel view).
+    async fn share_outbox(&self, inviter: &str) -> Vec<ShareInviteRow>;
+
+    /// The grantee accepts (`accept=true`) or declines a pending invite. Accepting
+    /// also **materialises** the 0039 grant; the transition is idempotent (§4).
+    async fn share_respond(&self, grantee: &str, id: &str, accept: bool) -> ShareOutcome;
+
+    /// The inviter revokes an invite (cancel, pre- or post-accept). Removes any
+    /// materialised grant. Idempotent and forgiving (§4).
+    async fn share_revoke(&self, inviter: &str, id: &str) -> ShareOutcome;
+
+    /// Background reap (§7): flip overdue `pending` rows to `expired` and
+    /// hard-delete long-dead terminal rows. Cheap; runs on the device-sweep timer.
+    async fn share_sweep(&self);
+
+    /// Look up one invite by id (for the handler to render/notify after a mutation).
+    async fn share_get(&self, id: &str) -> Option<ShareInviteRow>;
+
+    /// The active grants *to* this user — accepted shares others have made to them
+    /// (proposal 0041's "shared with you" + the shared-vs-owned badge feed). Reads
+    /// the 0039 `shares` table joined to its agents' owners.
+    async fn shares_to_me(&self, grantee: &str) -> Vec<ShareRow>;
+
+    /// The grantee gives back a share they hold (the "Leave" action). Grantee-
+    /// scoped by the `shares` row id; removes the grant and settles the matching
+    /// invite to `declined`. Returns true if a grant went away.
+    async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool;
 }
+
+/// One `share_invites` row (proposal 0040).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareInviteRow {
+    pub id: String,
+    pub inviter_user_id: String,
+    pub grantee_user_id: String,
+    pub resource_kind: String,
+    pub agent_id: String,
+    pub session_name: Option<String>,
+    pub owner_peek: bool,
+    pub status: String,
+    pub created_at: i64,
+    pub responded_at: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
+/// The result of an invite transition — mirrors [`DevicePoll`]'s shape so handlers
+/// map it to `200`/`409`/`404` without re-deriving the state-machine rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareOutcome {
+    /// The transition succeeded (or was a no-op); the row is in this status.
+    Ok(String),
+    /// The target row is in a terminal state that forbids this transition.
+    Conflict,
+    /// No such invite, or it isn't the caller's to act on (don't leak existence).
+    NotFound,
+}
+
+/// One `shares` row joined to its agent's owner — re-exported from `registry` so
+/// the (feature-gated) store and the (always-compiled) visibility predicate share
+/// one type.
+pub use crate::registry::ShareRow;
 
 /// What a host's poll of `/api/device/token` resolves to (RFC 8628). Mirrors the
 /// `authorization_pending` / `slow_down` / `expired_token` / `access_denied` /
@@ -170,6 +272,45 @@ impl SqliteStore {
         let pool = SqlitePoolOptions::new().max_connections(5).connect_with(opts).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(Self { pool })
+    }
+
+    /// Materialise an accepted invite into a 0039 `shares` grant — the row the
+    /// visibility predicate reads. Reuses the owner-scoped grant inserts, so this
+    /// re-validates ownership and the no-self-share rule.
+    async fn materialise_grant(&self, inv: &ShareInviteRow) -> anyhow::Result<()> {
+        match inv.session_name.as_deref() {
+            Some(s) => self.share_session(&inv.inviter_user_id, &inv.agent_id, &inv.grantee_user_id, s).await.map(|_| ()),
+            None => self.share_agent(&inv.inviter_user_id, &inv.agent_id, &inv.grantee_user_id, inv.owner_peek).await.map(|_| ()),
+        }
+    }
+
+    /// Remove the 0039 grant an invite materialised (on revoke). Natural-keyed, so
+    /// it's idempotent and needs no stored grant id; a no-op if none exists.
+    async fn strip_grant(&self, inv: &ShareInviteRow) {
+        let _ = sqlx::query(
+            "DELETE FROM shares
+              WHERE agent_id = ?1 AND grantee_user_id = ?2 AND kind = ?3
+                AND ((?4 IS NULL AND session IS NULL) OR session = ?4)",
+        )
+        .bind(&inv.agent_id)
+        .bind(&inv.grantee_user_id)
+        .bind(&inv.resource_kind)
+        .bind(inv.session_name.as_deref())
+        .execute(&self.pool)
+        .await;
+    }
+
+    /// Guard a share insert: the agent must exist and be owned by `owner_user_id`,
+    /// and a share to oneself is rejected (a no-op — the owner already sees all).
+    async fn assert_owns(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(owner_user_id != grantee_user_id, "cannot share with yourself");
+        let owner: Option<String> = sqlx::query("SELECT user_id FROM agents WHERE id = ?1")
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .and_then(|r| r.try_get("user_id").ok());
+        anyhow::ensure!(owner.as_deref() == Some(owner_user_id), "not your agent");
+        Ok(())
     }
 
     #[cfg(test)]
@@ -531,6 +672,388 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn visibility_rows(&self, user_id: &str) -> Vec<ShareRow> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
+                    s.kind, s.session, s.owner_peek, s.created_at
+               FROM shares s JOIN agents a ON a.id = s.agent_id
+              WHERE s.grantee_user_id = ?1 OR a.user_id = ?1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(share_row).collect()
+    }
+
+    async fn share_agent(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str, owner_peek: bool) -> anyhow::Result<String> {
+        self.assert_owns(owner_user_id, agent_id, grantee_user_id).await?;
+        // Upsert by (agent, grantee, kind='agent') explicitly: an agent share has
+        // session NULL, and SQLite treats NULLs as DISTINCT in the UNIQUE key, so
+        // ON CONFLICT never fires for it. Re-issuing keeps the row id and just flips
+        // owner_peek (proposal 0039 §2).
+        let existing: Option<String> = sqlx::query(
+            "SELECT id FROM shares WHERE agent_id = ?1 AND grantee_user_id = ?2 AND kind = 'agent'",
+        )
+        .bind(agent_id)
+        .bind(grantee_user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .and_then(|r| r.try_get("id").ok());
+        if let Some(id) = existing {
+            sqlx::query("UPDATE shares SET owner_peek = ?1 WHERE id = ?2")
+                .bind(owner_peek as i64)
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("share_agent (update peek): {e}"))?;
+            return Ok(id);
+        }
+        let id = cc_screen_auth::generate_token();
+        sqlx::query(
+            "INSERT INTO shares (id, agent_id, grantee_user_id, kind, session, owner_peek, created_at)
+             VALUES (?1, ?2, ?3, 'agent', NULL, ?4, ?5)",
+        )
+        .bind(&id)
+        .bind(agent_id)
+        .bind(grantee_user_id)
+        .bind(owner_peek as i64)
+        .bind(now_secs() as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("share_agent: {e}"))?;
+        Ok(id)
+    }
+
+    async fn share_session(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str, session: &str) -> anyhow::Result<String> {
+        self.assert_owns(owner_user_id, agent_id, grantee_user_id).await?;
+        anyhow::ensure!(!session.trim().is_empty(), "session is required for a session share");
+        let id = cc_screen_auth::generate_token();
+        let row = sqlx::query(
+            "INSERT INTO shares (id, agent_id, grantee_user_id, kind, session, owner_peek, created_at)
+             VALUES (?1, ?2, ?3, 'session', ?4, 0, ?5)
+             ON CONFLICT(agent_id, grantee_user_id, kind, session) DO UPDATE SET id = id
+             RETURNING id",
+        )
+        .bind(&id)
+        .bind(agent_id)
+        .bind(grantee_user_id)
+        .bind(session)
+        .bind(now_secs() as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("share_session: {e}"))?;
+        Ok(row.try_get("id")?)
+    }
+
+    async fn shares_by_owner(&self, owner_user_id: &str) -> Vec<ShareRow> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
+                    s.kind, s.session, s.owner_peek, s.created_at
+               FROM shares s JOIN agents a ON a.id = s.agent_id
+              WHERE a.user_id = ?1
+              ORDER BY s.created_at DESC",
+        )
+        .bind(owner_user_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(share_row).collect()
+    }
+
+    async fn revoke_share(&self, owner_user_id: &str, share_id: &str) -> bool {
+        sqlx::query(
+            "DELETE FROM shares
+              WHERE id = ?1
+                AND agent_id IN (SELECT id FROM agents WHERE user_id = ?2)",
+        )
+        .bind(share_id)
+        .bind(owner_user_id)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+    }
+
+    async fn share_create(
+        &self,
+        inviter: &str,
+        grantee: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+    ) -> anyhow::Result<(String, String)> {
+        // Owner-scoped + no self-invite (same guard the 0039 grant insert uses).
+        self.assert_owns(inviter, agent_id, grantee).await?;
+        anyhow::ensure!(kind == "agent" || kind == "session", "bad resource_kind");
+        anyhow::ensure!((kind == "session") == session.is_some(), "session iff session-kind");
+        let now = now_secs() as i64;
+        let expires = now + SHARE_INVITE_TTL;
+
+        // Upsert by (grantee, agent, kind, session) explicitly — a NULL session for
+        // an agent invite is DISTINCT under the UNIQUE index, so ON CONFLICT can't
+        // be relied on (proposal 0040 §2 / §4).
+        let existing = sqlx::query(
+            "SELECT id, status FROM share_invites
+              WHERE grantee_user_id = ?1 AND agent_id = ?2 AND resource_kind = ?3
+                AND ((?4 IS NULL AND session_name IS NULL) OR session_name = ?4)",
+        )
+        .bind(grantee)
+        .bind(agent_id)
+        .bind(kind)
+        .bind(session)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = existing {
+            let id: String = row.try_get("id")?;
+            let status: String = row.try_get("status")?;
+            // Already shared → no-op success; the owner can't silently re-offer over
+            // a live grant (§4).
+            if status == "accepted" {
+                return Ok((id, status));
+            }
+            // pending/declined/revoked/expired → (re)offer: refresh to pending.
+            sqlx::query(
+                "UPDATE share_invites
+                    SET status = 'pending', owner_peek = ?1, created_at = ?2,
+                        expires_at = ?3, responded_at = NULL
+                  WHERE id = ?4",
+            )
+            .bind(owner_peek as i64)
+            .bind(now)
+            .bind(expires)
+            .bind(&id)
+            .execute(&self.pool)
+            .await?;
+            return Ok((id, "pending".into()));
+        }
+
+        let id = cc_screen_auth::generate_token();
+        sqlx::query(
+            "INSERT INTO share_invites
+                (id, inviter_user_id, grantee_user_id, resource_kind, agent_id,
+                 session_name, owner_peek, status, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9)",
+        )
+        .bind(&id)
+        .bind(inviter)
+        .bind(grantee)
+        .bind(kind)
+        .bind(agent_id)
+        .bind(session)
+        .bind(owner_peek as i64)
+        .bind(now)
+        .bind(expires)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("share_create: {e}"))?;
+        Ok((id, "pending".into()))
+    }
+
+    async fn share_inbox(&self, grantee: &str) -> Vec<ShareInviteRow> {
+        let now = now_secs() as i64;
+        // Lazy expiry: flip overdue pending rows first, then list only live pending.
+        let _ = sqlx::query(
+            "UPDATE share_invites SET status = 'expired'
+              WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+        let rows = sqlx::query(
+            "SELECT * FROM share_invites
+              WHERE grantee_user_id = ?1 AND status = 'pending'
+              ORDER BY created_at DESC",
+        )
+        .bind(grantee)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(share_invite_row).collect()
+    }
+
+    async fn share_outbox(&self, inviter: &str) -> Vec<ShareInviteRow> {
+        let now = now_secs() as i64;
+        let _ = sqlx::query(
+            "UPDATE share_invites SET status = 'expired'
+              WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+        let rows = sqlx::query(
+            "SELECT * FROM share_invites WHERE inviter_user_id = ?1 ORDER BY created_at DESC",
+        )
+        .bind(inviter)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(share_invite_row).collect()
+    }
+
+    async fn share_get(&self, id: &str) -> Option<ShareInviteRow> {
+        let row = sqlx::query("SELECT * FROM share_invites WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        share_invite_row(&row)
+    }
+
+    async fn share_respond(&self, grantee: &str, id: &str, accept: bool) -> ShareOutcome {
+        let Some(inv) = self.share_get(id).await else { return ShareOutcome::NotFound };
+        // Not yours ⇒ 404 (don't leak existence).
+        if inv.grantee_user_id != grantee {
+            return ShareOutcome::NotFound;
+        }
+        let now = now_secs() as i64;
+        // Lazy expiry of an overdue pending row.
+        let status = if inv.status == "pending" && inv.expires_at.is_some_and(|e| e < now) {
+            let _ = sqlx::query("UPDATE share_invites SET status = 'expired' WHERE id = ?1")
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+            "expired".to_string()
+        } else {
+            inv.status.clone()
+        };
+
+        let target = if accept { "accepted" } else { "declined" };
+        // Idempotent no-op if already in the target state.
+        if status == target {
+            return ShareOutcome::Ok(status);
+        }
+        // Only a live pending row may transition.
+        if status != "pending" {
+            return ShareOutcome::Conflict;
+        }
+        if sqlx::query("UPDATE share_invites SET status = ?1, responded_at = ?2 WHERE id = ?3 AND status = 'pending'")
+            .bind(target)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() == 0)
+            .unwrap_or(true)
+        {
+            // Lost a race (another writer moved it out of pending) ⇒ conflict.
+            return ShareOutcome::Conflict;
+        }
+        // Accept materialises the 0039 grant the visibility predicate reads.
+        if accept {
+            if let Err(e) = self.materialise_grant(&inv).await {
+                tracing::warn!("share_respond: failed to materialise grant for {id}: {e}");
+            }
+        }
+        ShareOutcome::Ok(target.into())
+    }
+
+    async fn share_revoke(&self, inviter: &str, id: &str) -> ShareOutcome {
+        let Some(inv) = self.share_get(id).await else { return ShareOutcome::NotFound };
+        if inv.inviter_user_id != inviter {
+            return ShareOutcome::NotFound;
+        }
+        // Forgiving: revoke is the cancel path — any already-not-granting state is a
+        // no-op success (§4). Only pending/accepted actually transition.
+        if matches!(inv.status.as_str(), "revoked" | "declined" | "expired") {
+            return ShareOutcome::Ok(inv.status);
+        }
+        let now = now_secs() as i64;
+        let _ = sqlx::query("UPDATE share_invites SET status = 'revoked', responded_at = ?1 WHERE id = ?2")
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+        // Strip any materialised grant (no-op if it was only pending).
+        self.strip_grant(&inv).await;
+        ShareOutcome::Ok("revoked".into())
+    }
+
+    async fn shares_to_me(&self, grantee: &str) -> Vec<ShareRow> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
+                    s.kind, s.session, s.owner_peek, s.created_at
+               FROM shares s JOIN agents a ON a.id = s.agent_id
+              WHERE s.grantee_user_id = ?1
+              ORDER BY s.created_at DESC",
+        )
+        .bind(grantee)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(share_row).collect()
+    }
+
+    async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool {
+        // Resolve the grant (grantee-scoped) so we can settle its invite too.
+        let Some(row) = sqlx::query(
+            "SELECT agent_id, kind, session FROM shares WHERE id = ?1 AND grantee_user_id = ?2",
+        )
+        .bind(share_id)
+        .bind(grantee)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten() else {
+            return false;
+        };
+        let agent_id: String = match row.try_get("agent_id") {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let kind: String = row.try_get("kind").unwrap_or_default();
+        let session: Option<String> =
+            row.try_get::<Option<String>, _>("session").ok().flatten().filter(|s| !s.is_empty());
+
+        let gone = sqlx::query("DELETE FROM shares WHERE id = ?1 AND grantee_user_id = ?2")
+            .bind(share_id)
+            .bind(grantee)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false);
+        if gone {
+            // Settle the matching invite so it doesn't re-grant or read as active.
+            let _ = sqlx::query(
+                "UPDATE share_invites SET status = 'declined', responded_at = ?1
+                  WHERE grantee_user_id = ?2 AND agent_id = ?3 AND resource_kind = ?4
+                    AND ((?5 IS NULL AND session_name IS NULL) OR session_name = ?5)",
+            )
+            .bind(now_secs() as i64)
+            .bind(grantee)
+            .bind(&agent_id)
+            .bind(&kind)
+            .bind(session.as_deref())
+            .execute(&self.pool)
+            .await;
+        }
+        gone
+    }
+
+    async fn share_sweep(&self) {
+        let now = now_secs() as i64;
+        // Flip overdue pending rows.
+        let _ = sqlx::query(
+            "UPDATE share_invites SET status = 'expired'
+              WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+        // Hard-delete long-dead terminal rows (keep accepted ones — they are the
+        // live grant's lifecycle record).
+        let _ = sqlx::query(
+            "DELETE FROM share_invites
+              WHERE status IN ('declined','revoked','expired')
+                AND COALESCE(responded_at, created_at) < ?1",
+        )
+        .bind(now - SHARE_INVITE_REAP_AFTER)
+        .execute(&self.pool)
+        .await;
+    }
+
     async fn device_sweep(&self) {
         let now = now_secs() as i64;
         let _ = sqlx::query(
@@ -549,6 +1072,12 @@ impl Store for SqliteStore {
 /// between polls.
 const DEVICE_CODE_TTL: i64 = 600;
 const DEVICE_POLL_INTERVAL: i64 = 5;
+
+/// A pending share invite lives 14 days before it lazily expires (proposal 0040 §7).
+const SHARE_INVITE_TTL: i64 = 14 * 86_400;
+/// Dead terminal invite rows are hard-deleted by the sweep this long after they
+/// settled, bounding table growth without yanking a just-declined row from a view.
+const SHARE_INVITE_REAP_AFTER: i64 = 7 * 86_400;
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -569,6 +1098,38 @@ fn gen_user_code() -> String {
     OsRng.fill_bytes(&mut buf);
     let c: Vec<char> = buf.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
     format!("{}{}{}{}-{}{}{}{}", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7])
+}
+
+/// Map a `shares ⋈ agents` result row to a [`ShareRow`]; `None` if a column is
+/// missing/typed wrong (skipped rather than failing the whole query).
+fn share_row(r: &sqlx::sqlite::SqliteRow) -> Option<ShareRow> {
+    Some(ShareRow {
+        id: r.try_get("id").ok()?,
+        agent_id: r.try_get("agent_id").ok()?,
+        owner_user_id: r.try_get("owner_user_id").ok()?,
+        grantee_user_id: r.try_get("grantee_user_id").ok()?,
+        kind: r.try_get("kind").ok()?,
+        session: r.try_get::<Option<String>, _>("session").ok().flatten().filter(|s| !s.is_empty()),
+        owner_peek: r.try_get::<i64, _>("owner_peek").ok()? != 0,
+        created_at: r.try_get("created_at").ok()?,
+    })
+}
+
+/// Map a `share_invites` result row to a [`ShareInviteRow`].
+fn share_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<ShareInviteRow> {
+    Some(ShareInviteRow {
+        id: r.try_get("id").ok()?,
+        inviter_user_id: r.try_get("inviter_user_id").ok()?,
+        grantee_user_id: r.try_get("grantee_user_id").ok()?,
+        resource_kind: r.try_get("resource_kind").ok()?,
+        agent_id: r.try_get("agent_id").ok()?,
+        session_name: r.try_get::<Option<String>, _>("session_name").ok().flatten().filter(|s| !s.is_empty()),
+        owner_peek: r.try_get::<i64, _>("owner_peek").ok()? != 0,
+        status: r.try_get("status").ok()?,
+        created_at: r.try_get("created_at").ok()?,
+        responded_at: r.try_get::<Option<i64>, _>("responded_at").ok().flatten(),
+        expires_at: r.try_get::<Option<i64>, _>("expires_at").ok().flatten(),
+    })
 }
 
 fn now_secs() -> u64 {
@@ -739,6 +1300,127 @@ mod tests {
 
         // A bad/unknown code can't be approved.
         assert!(s.device_approve("someone", "ZZZZ-ZZZZ").await.is_err());
+    }
+
+    // Proposal 0039: share inserts are owner-scoped + idempotent; visibility_rows
+    // returns the union (granted-in + issued-out); revoke is owner-scoped; agent
+    // delete cascades the grant away.
+    #[tokio::test]
+    async fn shares_owner_scoped_idempotent_and_cascade() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+
+        // Self-share and not-your-agent are rejected.
+        assert!(s.share_agent(&alice, &agent, &alice, false).await.is_err(), "self-share");
+        assert!(s.share_agent(&bob, &agent, &alice, false).await.is_err(), "not bob's agent");
+
+        // Alice agent-shares to bob; idempotent re-issue flips peek, same row id.
+        let id1 = s.share_agent(&alice, &agent, &bob, false).await.unwrap();
+        let id2 = s.share_agent(&alice, &agent, &bob, true).await.unwrap();
+        assert_eq!(id1, id2, "agent share is idempotent on (agent, grantee, kind)");
+
+        // A session share to bob coexists with the agent share (distinct key).
+        let sid = s.share_session(&alice, &agent, &bob, "claude-x").await.unwrap();
+        assert_ne!(sid, id1);
+
+        // visibility_rows(bob): both grants, owner is alice, agent share now peeked.
+        let bob_rows = s.visibility_rows(&bob).await;
+        assert_eq!(bob_rows.len(), 2);
+        assert!(bob_rows.iter().all(|r| r.owner_user_id == alice && r.grantee_user_id == bob));
+        assert!(bob_rows.iter().any(|r| r.kind == "agent" && r.owner_peek));
+        assert!(bob_rows.iter().any(|r| r.kind == "session" && r.session.as_deref() == Some("claude-x")));
+
+        // shares_by_owner(alice) sees both; bob (a grantee, not owner) sees none out.
+        assert_eq!(s.shares_by_owner(&alice).await.len(), 2);
+        assert_eq!(s.shares_by_owner(&bob).await.len(), 0);
+
+        // Revoke is owner-scoped: bob cannot revoke alice's share; alice can.
+        assert!(!s.revoke_share(&bob, &sid).await, "grantee can't revoke");
+        assert!(s.revoke_share(&alice, &sid).await);
+        assert_eq!(s.visibility_rows(&bob).await.len(), 1, "session share gone");
+
+        // Deleting the agent cascades the remaining grant away.
+        assert!(s.delete_agent(&alice, &agent).await);
+        assert!(s.visibility_rows(&bob).await.is_empty(), "cascade reaped the agent share");
+    }
+
+    // Proposal 0040: the invite lifecycle + idempotency + materialisation into the
+    // 0039 grant the visibility predicate reads.
+    #[tokio::test]
+    async fn share_invite_lifecycle_and_materialisation() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+
+        // Self-invite + not-your-agent are rejected.
+        assert!(s.share_create(&alice, &alice, "agent", &agent, None, false).await.is_err());
+        assert!(s.share_create(&bob, &agent, "agent", &agent, None, false).await.is_err());
+
+        // Alice invites bob to the agent (with owner-peek). Re-invite is idempotent.
+        let (id, st) = s.share_create(&alice, &bob, "agent", &agent, None, true).await.unwrap();
+        assert_eq!(st, "pending");
+        let (id2, _) = s.share_create(&alice, &bob, "agent", &agent, None, true).await.unwrap();
+        assert_eq!(id, id2, "re-invite upserts the one row");
+
+        // Inbox shows it for bob, not alice; outbox shows it for alice.
+        assert_eq!(s.share_inbox(&bob).await.len(), 1);
+        assert_eq!(s.share_inbox(&alice).await.len(), 0);
+        assert_eq!(s.share_outbox(&alice).await.len(), 1);
+
+        // No grant exists yet — pending confers nothing (0039 query empty for bob).
+        assert!(s.visibility_rows(&bob).await.is_empty(), "pending ≠ grant");
+
+        // Wrong actor can't drive an edge.
+        assert_eq!(s.share_respond(&alice, &id, true).await, ShareOutcome::NotFound, "inviter can't accept");
+        assert_eq!(s.share_revoke(&bob, &id).await, ShareOutcome::NotFound, "grantee can't revoke");
+
+        // Bob accepts → grant materialises with owner_peek carried over.
+        assert_eq!(s.share_respond(&bob, &id, true).await, ShareOutcome::Ok("accepted".into()));
+        let rows = s.visibility_rows(&bob).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].kind == "agent" && rows[0].owner_peek, "peek carried onto the grant");
+        // Double-accept is an idempotent no-op; it leaves the inbox empty (accepted).
+        assert_eq!(s.share_respond(&bob, &id, true).await, ShareOutcome::Ok("accepted".into()));
+        assert_eq!(s.share_inbox(&bob).await.len(), 0);
+
+        // Alice revokes (post-accept) → grant stripped, idempotent thereafter.
+        assert_eq!(s.share_revoke(&alice, &id).await, ShareOutcome::Ok("revoked".into()));
+        assert!(s.visibility_rows(&bob).await.is_empty(), "revoke removes the grant");
+        assert_eq!(s.share_revoke(&alice, &id).await, ShareOutcome::Ok("revoked".into()), "re-revoke no-op");
+        // Accepting a revoked invite is a conflict, not a resurrection.
+        assert_eq!(s.share_respond(&bob, &id, true).await, ShareOutcome::Conflict);
+
+        // Re-invite after a terminal state resets to pending (the only revival path).
+        let (id3, st3) = s.share_create(&alice, &bob, "agent", &agent, None, false).await.unwrap();
+        assert_eq!((id3.as_str(), st3.as_str()), (id.as_str(), "pending"));
+        // Decline path.
+        assert_eq!(s.share_respond(&bob, &id, false).await, ShareOutcome::Ok("declined".into()));
+        assert!(s.visibility_rows(&bob).await.is_empty());
+    }
+
+    // Accepting an agent invite then unlinking the agent reaps both the invite and
+    // the materialised grant via FK cascade.
+    #[tokio::test]
+    async fn unlink_agent_reaps_invites_and_grants() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        let (id, _) = s.share_create(&alice, &bob, "agent", &agent, None, false).await.unwrap();
+        s.share_respond(&bob, &id, true).await;
+        assert_eq!(s.visibility_rows(&bob).await.len(), 1);
+
+        // shares_to_me sees the accepted grant before the unlink.
+        assert_eq!(s.shares_to_me(&bob).await.len(), 1, "received grant visible");
+        assert!(s.shares_to_me(&alice).await.is_empty(), "owner isn't a grantee of their own");
+
+        assert!(s.delete_agent(&alice, &agent).await);
+        assert!(s.share_outbox(&alice).await.is_empty(), "invite cascaded");
+        assert!(s.visibility_rows(&bob).await.is_empty(), "grant cascaded");
+        assert!(s.shares_to_me(&bob).await.is_empty(), "received grant cascaded");
     }
 
     #[tokio::test]

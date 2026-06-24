@@ -215,6 +215,106 @@ export async function approveDevice(
   return { ok: false, error: r.status === 404 ? "Unknown or expired code" : `Error ${r.status}` };
 }
 
+// ── Sharing (proposals 0039 permission model / 0040 invite lifecycle) ─────────
+// An owner invites another user to a whole machine (agent) or a single session;
+// the recipient accepts before any access takes effect. The client renders these
+// shapes; the hub owns the lifecycle.
+
+// One invite, as the inbox (received) and outbox (sent) endpoints return it.
+export interface ShareInvite {
+  id: string;
+  inviterEmail?: string;
+  granteeEmail?: string;
+  resourceKind: "agent" | "session";
+  agentId: string;
+  machine?: string;
+  session?: string | null;
+  // [0039]'s grant level rendered as a friendly verb: "use" (agent) / "view" (session).
+  permission: "use" | "view";
+  ownerPeek: boolean;
+  status: "pending" | "accepted" | "declined" | "revoked" | "expired";
+  createdAt: number;
+  expiresAt?: number | null;
+}
+
+// One active grant TO me (GET /api/shares/received) — drives the "shared with
+// you" list and the shared-vs-owned badge.
+export interface ReceivedShare {
+  id: string;
+  agentId: string;
+  machine?: string;
+  session?: string | null;
+  kind: "agent" | "session";
+  permission: "use" | "view";
+  ownerEmail?: string;
+  createdAt: number;
+}
+
+// createShare offers an agent (no session) or a single session to a user by
+// email. Resolves nothing until the recipient accepts. Throws with the server's
+// message on a bad request (unknown email, not your resource, self-share).
+export async function createShare(args: {
+  granteeEmail: string;
+  machine: string;
+  session?: string;
+  ownerPeek?: boolean;
+}): Promise<{ id: string; status: string }> {
+  const r = await fetch("/api/shares", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grantee_email: args.granteeEmail,
+      machine: args.machine,
+      session: args.session,
+      owner_peek: args.ownerPeek ?? false,
+    }),
+  });
+  if (!r.ok) throw new Error((await r.text()).trim() || `share: ${r.status}`);
+  return r.json();
+}
+
+// listInbox — my pending, unexpired invitations (the things to accept/decline).
+export async function listInbox(): Promise<ShareInvite[]> {
+  const r = await fetch("/api/shares/inbox");
+  if (!r.ok) throw new Error(`inbox: ${r.status}`);
+  return r.json();
+}
+
+// listOutbox — invitations I've sent, across all statuses (the manage view).
+export async function listOutbox(): Promise<ShareInvite[]> {
+  const r = await fetch("/api/shares/outbox");
+  if (!r.ok) throw new Error(`outbox: ${r.status}`);
+  return r.json();
+}
+
+// listReceivedShares — the active shares granted to me ("shared with you").
+export async function listReceivedShares(): Promise<ReceivedShare[]> {
+  const r = await fetch("/api/shares/received");
+  if (!r.ok) throw new Error(`received: ${r.status}`);
+  return r.json();
+}
+
+// respondInvite — accept/decline a pending invite (idempotent server-side). A
+// 409 means it's no longer pending (revoked/expired); the message is surfaced.
+async function postShare(path: string): Promise<{ status: string }> {
+  const r = await fetch(path, { method: "POST" });
+  if (!r.ok) throw new Error((await r.text()).trim() || `share: ${r.status}`);
+  return r.json().catch(() => ({ status: "ok" }));
+}
+
+export const acceptInvite = (id: string) => postShare(`/api/shares/${encodeURIComponent(id)}/accept`);
+export const declineInvite = (id: string) => postShare(`/api/shares/${encodeURIComponent(id)}/decline`);
+// revokeShare cancels an invite the caller sent (pre- or post-accept), removing
+// any granted access. Forgiving server-side (double-revoke is success).
+export const revokeShare = (id: string) => postShare(`/api/shares/${encodeURIComponent(id)}/revoke`);
+
+// leaveShare gives back a share I hold (the "Leave" action); `id` is the
+// received grant's id from listReceivedShares().
+export async function leaveShare(id: string): Promise<void> {
+  const r = await fetch(`/api/shares/received/${encodeURIComponent(id)}/leave`, { method: "POST" });
+  if (!r.ok && r.status !== 204) throw new Error((await r.text()).trim() || `leave: ${r.status}`);
+}
+
 let unauthorizedHandler: (() => void) | null = null;
 // Register a callback fired when the heartbeat sees a 401 (cookie expired /
 // logged out elsewhere). The app uses it to show the login screen again.

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use cc_screen_auth::Auth;
 
-use crate::registry::Registry;
+use crate::registry::{Registry, Visibility};
 
 /// A tenant identity. Single-tenant installs resolve every agent to
 /// [`cc_screen_auth::OWNER`]; a multi-tenant build resolves a real `users.id`.
@@ -259,6 +259,143 @@ impl HubState {
         match &self.tenancy {
             Tenancy::Single => crate::db::PlanLimits::default(),
             Tenancy::Multi(store) => store.limits_for(user_id).await,
+        }
+    }
+
+    // ── sharing grants (proposal 0039) ─────────────────────────────────────────
+    /// The caller's full visibility for a request — ownership plus their sharing
+    /// grants. Single-tenant never reaches the `Multi` arm (it inserts
+    /// `Visibility::All` directly); the empty-user case short-circuits the DB.
+    pub async fn visibility_for(&self, user_id: &str) -> Visibility {
+        match &self.tenancy {
+            Tenancy::Single => Visibility::user(user_id),
+            #[cfg(feature = "multi-tenant")]
+            Tenancy::Multi(store) => {
+                if user_id.is_empty() {
+                    Visibility::user(String::new())
+                } else {
+                    Visibility::from_rows(user_id.to_string(), store.visibility_rows(user_id).await)
+                }
+            }
+        }
+    }
+
+    /// Resolve an account email to its `user_id` (to name a share's grantee).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn user_id_by_email(&self, email: &str) -> Option<String> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.user_id_by_email(email).await,
+        }
+    }
+
+    /// Grant an agent (or, with `session`, one session) to a grantee. Owner-scoped.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn create_share(
+        &self,
+        owner_user_id: &str,
+        agent_id: &str,
+        grantee_user_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+    ) -> anyhow::Result<String> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => match session {
+                Some(s) => store.share_session(owner_user_id, agent_id, grantee_user_id, s).await,
+                None => store.share_agent(owner_user_id, agent_id, grantee_user_id, owner_peek).await,
+            },
+        }
+    }
+
+    /// The grants a user has issued out of agents they own (their "shared by me").
+    #[cfg(feature = "multi-tenant")]
+    pub async fn shares_by_owner(&self, owner_user_id: &str) -> Vec<crate::registry::ShareRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.shares_by_owner(owner_user_id).await,
+        }
+    }
+
+    /// Revoke one of a user's issued grants (owner-scoped). `false` in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn revoke_share(&self, owner_user_id: &str, share_id: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.revoke_share(owner_user_id, share_id).await,
+        }
+    }
+
+    // ── share invites (proposal 0040) ──────────────────────────────────────────
+    /// Create / re-invite (owner-scoped upsert). Returns `(invite_id, status)`.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn share_create(
+        &self,
+        inviter: &str,
+        grantee: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+    ) -> anyhow::Result<(String, String)> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => store.share_create(inviter, grantee, kind, agent_id, session, owner_peek).await,
+        }
+    }
+
+    /// A grantee's pending, unexpired invites (the inbox feed).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn share_inbox(&self, grantee: &str) -> Vec<crate::db::ShareInviteRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.share_inbox(grantee).await,
+        }
+    }
+
+    /// An inviter's sent invites across all statuses (the manage/cancel view).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn share_outbox(&self, inviter: &str) -> Vec<crate::db::ShareInviteRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.share_outbox(inviter).await,
+        }
+    }
+
+    /// The grantee accepts/declines a pending invite (accept also materialises the
+    /// 0039 grant).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn share_respond(&self, grantee: &str, id: &str, accept: bool) -> crate::db::ShareOutcome {
+        match &self.tenancy {
+            Tenancy::Single => crate::db::ShareOutcome::NotFound,
+            Tenancy::Multi(store) => store.share_respond(grantee, id, accept).await,
+        }
+    }
+
+    /// The inviter revokes (cancels) an invite, stripping any materialised grant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn share_revoke(&self, inviter: &str, id: &str) -> crate::db::ShareOutcome {
+        match &self.tenancy {
+            Tenancy::Single => crate::db::ShareOutcome::NotFound,
+            Tenancy::Multi(store) => store.share_revoke(inviter, id).await,
+        }
+    }
+
+    /// The active grants *to* this user (proposal 0041 "shared with you").
+    #[cfg(feature = "multi-tenant")]
+    pub async fn shares_to_me(&self, grantee: &str) -> Vec<crate::registry::ShareRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.shares_to_me(grantee).await,
+        }
+    }
+
+    /// The grantee gives back a share they hold ("Leave"). Grantee-scoped.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.leave_grant(grantee, share_id).await,
         }
     }
 

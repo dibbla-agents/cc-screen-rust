@@ -102,3 +102,7 @@ pub async fn rotate(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "rotate failed").into_response(),
     }
 }
+
+// The owner-scoped sharing surface moved to `share.rs` (proposal 0040): an invite
+// must be accepted before it grants, so creation no longer lands a grant directly.
+// The 0039 grant store (`shares`) is now written only by an accepted invite.

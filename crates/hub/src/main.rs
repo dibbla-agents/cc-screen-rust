@@ -274,6 +274,8 @@ async fn main() {
             loop {
                 tick.tick().await;
                 store.device_sweep().await;
+                // Reap expired pending invites + long-dead terminal rows (0040 §7).
+                store.share_sweep().await;
             }
         });
     }

@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
-import { PlusIcon, RefreshIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
+import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedOwner, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
+import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 import ToastsButton from "./ToastsButton";
@@ -72,6 +72,12 @@ interface Props {
   // right-click (desktop) / long-press (touch) → Rename… inline input. `label`
   // null/empty clears it (falls back to the slug). Identity is never touched.
   onRename: (s: Session, label: string | null) => void;
+  // Share a session with another user (proposal 0041). Opens App's ShareForm
+  // overlay for the row's session. Absent on single-tenant → no Share affordance.
+  onShare?: (s: Session) => void;
+  // The shared-with-me lookup (proposal 0041): drives the quiet "shared" badge on
+  // a row whose session/machine was shared *to* me. Null/absent → no badges.
+  sharedMap?: SharedMap | null;
   // Sessions a reboot/tmux restart took down that can be resumed; the button
   // appears only when non-empty. onRestore brings them all back.
   restorable: RestorableSession[];
@@ -104,6 +110,8 @@ export type PaneSwitcherProps = Pick<
   | "deleting"
   | "onDelete"
   | "onRename"
+  | "onShare"
+  | "sharedMap"
   | "restorable"
   | "onRestore"
   | "toastsOn"
@@ -170,6 +178,8 @@ export default function SessionDrawer({
   deleting,
   onDelete,
   onRename,
+  onShare,
+  sharedMap,
   restorable,
   onRestore,
   toastsOn,
@@ -706,6 +716,17 @@ export default function SessionDrawer({
                   className={`h-2 w-2 shrink-0 rounded-full ${statusDot(status)}`}
                   title={statusTitle(status)}
                 />
+                {(() => {
+                  const owner = sharedOwner(sharedMap ?? null, s.machine, s.name);
+                  return owner ? (
+                    <span
+                      className="shrink-0 rounded border border-accent/25 bg-accent/5 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-accent/80"
+                      title={`shared with you by ${owner}`}
+                    >
+                      shared
+                    </span>
+                  ) : null;
+                })()}
                 {s.skip_permissions === false && (
                   <span
                     className="shrink-0 rounded bg-emerald-500/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-emerald-300"
@@ -809,13 +830,25 @@ export default function SessionDrawer({
                 </button>
               </div>
             ) : (
-              <button
-                onClick={() => setConfirmDel(s.name)}
-                aria-label={`Delete session ${s.short}`}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-80 transition-colors hover:bg-edge hover:text-red-400 hover:opacity-100"
-              >
-                <TrashIcon className="h-4 w-4" />
-              </button>
+              <>
+                {onShare && (
+                  <button
+                    onClick={() => onShare(s)}
+                    aria-label={`Share session ${s.short}`}
+                    title="Share this session with another user"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-80 transition-colors hover:bg-edge hover:text-accent hover:opacity-100"
+                  >
+                    <ShareIcon className="h-4 w-4" />
+                  </button>
+                )}
+                <button
+                  onClick={() => setConfirmDel(s.name)}
+                  aria-label={`Delete session ${s.short}`}
+                  className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-80 transition-colors hover:bg-edge hover:text-red-400 hover:opacity-100"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                </button>
+              </>
             )}
           </div>
         </div>

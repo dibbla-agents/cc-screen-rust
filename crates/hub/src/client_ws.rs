@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use crate::registry::{AgentConn, ToBrowser, UserScope};
+use crate::registry::{AgentConn, ToBrowser, Visibility};
 use crate::state::HubState;
 use axum::Extension;
 
@@ -35,7 +35,7 @@ pub struct WsQuery {
 
 pub async fn ws(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<WsQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,

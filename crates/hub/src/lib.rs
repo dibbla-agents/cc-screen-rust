@@ -22,6 +22,9 @@ pub mod device;
 /// Account + dashboard endpoints (signup, agent list/unlink/rotate) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod account;
+/// Share-invite lifecycle endpoints (proposal 0040) — multi-tenant only.
+#[cfg(feature = "multi-tenant")]
+pub mod share;
 pub mod handlers;
 pub mod registry;
 pub mod service;
@@ -118,7 +121,18 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/signup", post(account::signup))
         .route("/api/agents", get(account::list))
         .route("/api/agents/unlink", post(account::unlink))
-        .route("/api/agents/rotate", post(account::rotate));
+        .route("/api/agents/rotate", post(account::rotate))
+        // Sharing (proposal 0040): the invite lifecycle that produces the 0039
+        // grant. Create/re-invite, the grantee's inbox + the inviter's outbox, and
+        // accept/decline/revoke (owner/grantee-scoped, idempotent).
+        .route("/api/shares", post(share::create))
+        .route("/api/shares/inbox", get(share::inbox))
+        .route("/api/shares/outbox", get(share::outbox))
+        .route("/api/shares/received", get(share::received))
+        .route("/api/shares/received/:id/leave", post(share::leave))
+        .route("/api/shares/:id/accept", post(share::accept))
+        .route("/api/shares/:id/decline", post(share::decline))
+        .route("/api/shares/:id/revoke", post(share::revoke));
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router

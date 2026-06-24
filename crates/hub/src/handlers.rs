@@ -15,13 +15,13 @@ use cc_screen_protocol::{AuthStatus, CreateReq, DeleteReq, Favorite, LoginReq, S
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::registry::{MachineInfo, RequestErr, UserScope};
+use crate::registry::{MachineInfo, RequestErr, Visibility};
 use crate::state::HubState;
 
 // ── GET /api/sessions — union across the caller's agents, machine-tagged ───────
 pub async fn sessions(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
 ) -> Json<Vec<SessionInfo>> {
     Json(hub.registry.all_sessions_for(&scope))
 }
@@ -29,7 +29,7 @@ pub async fn sessions(
 // ── GET /api/machines — for the picker + offline greying (caller's agents) ─────
 pub async fn machines(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
 ) -> Json<Vec<MachineInfo>> {
     Json(hub.registry.machines_for(&scope))
 }
@@ -41,7 +41,7 @@ pub async fn machines(
 // Create disabled, same as a tool-less agent).
 pub async fn tools(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
 ) -> Json<Vec<ToolInfo>> {
     let tools = hub
@@ -197,7 +197,7 @@ pub struct SessionBody {
 /// await the reply. The `Err` arm is a ready-made HTTP error response.
 async fn route(
     hub: &HubState,
-    scope: &UserScope,
+    scope: &Visibility,
     machine: &str,
     session: Option<&str>,
     cmd: Cmd,
@@ -224,14 +224,15 @@ fn ok_or_err(result: CmdResult, ok: StatusCode) -> Response {
 
 pub async fn create(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(req): Json<CreateReq>,
 ) -> Response {
     // Plan gate (proposal 0001 Phase 4): cap concurrent sessions per tenant.
     // Multi-tenant only; single-tenant has no per-user limits.
     #[cfg(feature = "multi-tenant")]
-    if let UserScope::User(uid) = &scope {
+    if let Visibility::User(v) = &scope {
+        let uid = &v.user_id;
         let limits = hub.limits_for(uid).await;
         let current = hub.registry.all_sessions_for(&scope).len() as i64;
         if current >= limits.max_concurrent_sessions {
@@ -245,7 +246,20 @@ pub async fn create(
     // A create has no existing session to disambiguate by — route to the chosen
     // (or single online) machine.
     match route(&hub, &scope, &q.machine, None, Cmd::Create(req)).await {
-        Ok(CmdResult::Created(name)) => (StatusCode::OK, Json(json!({ "name": name }))).into_response(),
+        Ok(CmdResult::Created(name)) => {
+            // Creator attribution (proposal 0039 §4.1): if a non-owner (an
+            // agent-grantee) created this, stamp it so the owner's list honours the
+            // share asymmetry (owner sees it only under owner-peek).
+            #[cfg(feature = "multi-tenant")]
+            if let Visibility::User(v) = &scope {
+                if let Some(agent) = hub.registry.resolve_scoped(&scope, &q.machine, None) {
+                    if agent.user_id != v.user_id {
+                        agent.set_creator(&name, &v.user_id);
+                    }
+                }
+            }
+            (StatusCode::OK, Json(json!({ "name": name }))).into_response()
+        }
         Ok(CmdResult::Error { code, msg }) => {
             (StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST), msg).into_response()
         }
@@ -256,20 +270,28 @@ pub async fn create(
 
 pub async fn delete(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(req): Json<DeleteReq>,
 ) -> Response {
     let session = req.session.clone();
     match route(&hub, &scope, &q.machine, Some(&session), Cmd::Delete(req)).await {
-        Ok(r) => ok_or_err(r, StatusCode::NO_CONTENT),
+        Ok(r) => {
+            // Drop any creator attribution so a later same-named session isn't
+            // mis-attributed to the deleted one's creator (proposal 0039 §4.1).
+            #[cfg(feature = "multi-tenant")]
+            if let Some(agent) = hub.registry.resolve_scoped(&scope, &q.machine, Some(&session)) {
+                agent.forget_creator(&session);
+            }
+            ok_or_err(r, StatusCode::NO_CONTENT)
+        }
         Err(resp) => resp,
     }
 }
 
 pub async fn key(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(b): Json<KeyBody>,
 ) -> Response {
@@ -282,7 +304,7 @@ pub async fn key(
 
 pub async fn paste(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(b): Json<PasteBody>,
 ) -> Response {
@@ -296,7 +318,7 @@ pub async fn paste(
 
 pub async fn clear_history(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(b): Json<SessionBody>,
 ) -> Response {
@@ -318,7 +340,7 @@ pub struct ColorBody {
 // the agent replies with the updated SessionInfo as JSON.
 pub async fn set_color(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(b): Json<ColorBody>,
 ) -> Response {
@@ -345,7 +367,7 @@ pub struct LabelBody {
 // the agent replies with the updated SessionInfo as JSON.
 pub async fn set_label(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(b): Json<LabelBody>,
 ) -> Response {
@@ -361,7 +383,7 @@ pub async fn set_label(
     }
 }
 
-pub async fn session_root(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<RootQ>) -> Response {
+pub async fn session_root(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<RootQ>) -> Response {
     let session = q.session.clone();
     match route(&hub, &scope, &q.machine, session.as_deref(), Cmd::SessionRoot { session: q.session }).await {
         Ok(CmdResult::SessionRoot { root, home }) => {
@@ -372,7 +394,7 @@ pub async fn session_root(State(hub): State<HubState>, Extension(scope): Extensi
     }
 }
 
-pub async fn restorable(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<MachineQ>) -> Response {
+pub async fn restorable(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<MachineQ>) -> Response {
     match route(&hub, &scope, &q.machine, None, Cmd::Restorable).await {
         Ok(CmdResult::Restorable(list)) => Json(list).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
@@ -380,7 +402,7 @@ pub async fn restorable(State(hub): State<HubState>, Extension(scope): Extension
     }
 }
 
-pub async fn restore(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<MachineQ>) -> Response {
+pub async fn restore(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<MachineQ>) -> Response {
     match route(&hub, &scope, &q.machine, None, Cmd::Restore).await {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
@@ -449,7 +471,7 @@ pub struct FileGetQ {
 /// when the PWA omits it) and map its `CmdResult` to JSON / 204 / error.
 async fn file_route(
     hub: &HubState,
-    scope: &UserScope,
+    scope: &Visibility,
     machine: &str,
     session: Option<&str>,
     op: &str,
@@ -476,11 +498,11 @@ fn opt(s: &str) -> Option<&str> {
     }
 }
 
-pub async fn dirs(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+pub async fn dirs(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<FileGetQ>) -> Response {
     file_route(&hub, &scope, &q.machine, opt(&q.session), "dirs", json!({ "path": q.path, "session": q.session })).await
 }
 
-pub async fn files(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+pub async fn files(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<FileGetQ>) -> Response {
     file_route(&hub, &scope, &q.machine, opt(&q.session), "files", json!({ "path": q.path, "session": q.session })).await
 }
 
@@ -499,14 +521,14 @@ pub struct DirSearchQ {
     machine: String,
 }
 
-pub async fn dirs_search(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(qy): Query<DirSearchQ>) -> Response {
+pub async fn dirs_search(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(qy): Query<DirSearchQ>) -> Response {
     file_route(&hub, &scope, &qy.machine, opt(&qy.session), "dirs_search", json!({ "q": qy.q, "root": qy.root })).await
 }
 
 // Recursive fuzzy *file* search (proposal 0027), per-agent like `dirs_search`:
 // the chosen machine searches its own $HOME. `?session=` both disambiguates the
 // owning agent and lets that agent default the root to the session's project.
-pub async fn files_search(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(qy): Query<DirSearchQ>) -> Response {
+pub async fn files_search(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(qy): Query<DirSearchQ>) -> Response {
     file_route(
         &hub,
         &scope,
@@ -518,7 +540,7 @@ pub async fn files_search(State(hub): State<HubState>, Extension(scope): Extensi
     .await
 }
 
-pub async fn file_read(State(hub): State<HubState>, Extension(scope): Extension<UserScope>, Query(q): Query<FileGetQ>) -> Response {
+pub async fn file_read(State(hub): State<HubState>, Extension(scope): Extension<Visibility>, Query(q): Query<FileGetQ>) -> Response {
     file_route(&hub, &scope, &q.machine, opt(&q.session), "read", json!({ "path": q.path })).await
 }
 
@@ -526,7 +548,7 @@ pub async fn file_read(State(hub): State<HubState>, Extension(scope): Extension<
 // path-only, so they route to the explicit (or single online) machine.
 pub async fn file_write(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -535,7 +557,7 @@ pub async fn file_write(
 
 pub async fn file_delete(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -544,7 +566,7 @@ pub async fn file_delete(
 
 pub async fn mkdir(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -553,7 +575,7 @@ pub async fn mkdir(
 
 pub async fn rmdir(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -562,7 +584,7 @@ pub async fn rmdir(
 
 pub async fn rename(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -571,7 +593,7 @@ pub async fn rename(
 
 pub async fn move_path(
     State(hub): State<HubState>,
-    Extension(scope): Extension<UserScope>,
+    Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
     Json(body): Json<Value>,
 ) -> Response {
@@ -669,15 +691,20 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         if !exempt && user.is_none() {
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
-        // Exempt paths with no session get a scope that matches no agent (harmless
-        // — they don't consult it); gated paths always have a real user here.
-        let scope = user.map(UserScope::User).unwrap_or_else(|| UserScope::User(String::new()));
+        // Resolve the caller's full visibility — ownership + sharing grants
+        // (proposal 0039) — in one DB load, here next to where identity is derived.
+        // Exempt paths with no session get an empty-user scope that matches no agent
+        // (harmless — they don't consult it); gated paths always have a real user.
+        let scope = match user {
+            Some(uid) => hub.visibility_for(&uid).await,
+            None => Visibility::user(String::new()),
+        };
         req.extensions_mut().insert(scope);
         return next.run(req).await;
     }
 
     // Single-tenant: every authed client sees every agent (today's behavior).
-    req.extensions_mut().insert(UserScope::All);
+    req.extensions_mut().insert(Visibility::All);
     let auth = &hub.client_auth;
     if !auth.enabled() {
         return next.run(req).await;

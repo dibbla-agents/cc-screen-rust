@@ -47,12 +47,15 @@ import UploadSheet from "./components/UploadSheet";
 import LoginScreen from "./components/LoginScreen";
 import { AuthScreen, ActivatePage, Dashboard } from "./components/MultiTenant";
 import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
+import InboxButton from "./components/InboxButton";
+import ShareForm, { type ShareSubject } from "./components/ShareForm";
 import { detectReadyEdges, sessionKey } from "./readyEdges";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { agentStatus, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, buildSharedMap, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { listReceivedShares, type ReceivedShare } from "./api";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
@@ -145,6 +148,12 @@ export default function App() {
   // machines dashboard; single-tenant keeps the shared-secret LoginScreen.
   const [me, setMe] = useState<MeInfo | null>(null);
   const [showDash, setShowDash] = useState(false);
+  // Sharing (proposal 0041). The active shares granted TO me drive the
+  // shared-vs-owned badges; `shareTarget` (when set) opens the ShareForm overlay
+  // for one session. Multi-tenant only — empty/idle otherwise.
+  const [receivedShares, setReceivedShares] = useState<ReceivedShare[]>([]);
+  const [shareTarget, setShareTarget] = useState<ShareSubject | null>(null);
+  const sharedMap = useMemo(() => buildSharedMap(receivedShares), [receivedShares]);
   // Sessions a reboot/tmux restart took down that we can bring back. Fetched
   // lazily when the drawer opens (it's the only place the offer is shown), so
   // the session-list poll stays a single request.
@@ -177,6 +186,9 @@ export default function App() {
   const activeRef = useRef(active);
   const sessionsRef = useRef<Session[]>([]);
   const panesRef = useRef<(PaneRef | null)[]>(panes);
+  // Live `me` for the keydown handler (proposal 0041 ⌃B S gate) — a ref so the
+  // stable handler reads the current multi-tenant flag without re-registering.
+  const meRef = useRef<MeInfo | null>(null);
   // paneRefFor builds a pane identity for a session *name*, resolving its owning
   // machine from the current session list (machine "" when unknown / single
   // agent). Used by call sites that only have a name (keyboard cycle).
@@ -226,6 +238,7 @@ export default function App() {
   useEffect(() => { layoutRef.current = layout; }, [layout]);
   useEffect(() => { activeRef.current = active; }, [active]);
   useEffect(() => { panesRef.current = panes; }, [panes]);
+  useEffect(() => { meRef.current = me; }, [me]);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Bumped by the `⌃B r` chord (proposal 0035) to put the active pane's
@@ -782,6 +795,30 @@ export default function App() {
     return () => clearInterval(id);
   }, [authed]);
 
+  // Poll the shares granted TO me (proposal 0041) so the shared-vs-owned badges
+  // reflect accepts/leaves/revokes. Multi-tenant only; a no-op endpoint on a
+  // single agent, so we gate on me.multiTenant to avoid a needless 404 loop.
+  const refreshReceivedShares = useCallback(() => {
+    if (!me?.multiTenant) return;
+    listReceivedShares().then(setReceivedShares).catch(() => {});
+  }, [me?.multiTenant]);
+  useEffect(() => {
+    if (authed !== true || !me?.multiTenant) return;
+    refreshReceivedShares();
+    const id = setInterval(refreshReceivedShares, 20000);
+    return () => clearInterval(id);
+  }, [authed, me?.multiTenant, refreshReceivedShares]);
+
+  // Open the ShareForm overlay for a session (proposal 0041), titling it by the
+  // session's display name. Reached from the switcher row, the identity bar, and
+  // the ⌃B S chord.
+  const openShareFor = useCallback((ref: PaneRef) => {
+    // Read the live list via the ref so this stays a stable callback safe to use
+    // from the (re-registered-rarely) keydown handler.
+    const meta = sessionsRef.current.find((s) => s.name === ref.name && (s.machine ?? "") === ref.machine);
+    setShareTarget({ title: meta ? displayName(meta) : ref.name, machine: ref.machine, session: ref.name });
+  }, []);
+
   // Refresh the restore offer whenever the drawer opens — cheap, and the only
   // surface that shows it. Errors are non-fatal (just hides the offer).
   // With multiple machines, the restore offer is scoped to the focused machine
@@ -1137,6 +1174,17 @@ export default function App() {
           setRenameSeq((n) => n + 1);
           return;
         }
+        if (k === "S") {
+          // Share the focused pane's session (proposal 0041). Shift-S, since
+          // lowercase `s` already opens the drawer. Multi-tenant only.
+          stop();
+          clearArm();
+          if (meRef.current?.multiTenant) {
+            const ref = panesRef.current[activeRef.current];
+            if (ref) openShareFor(ref);
+          }
+          return;
+        }
         if (k === "Escape") {
           stop();
           clearArm();
@@ -1170,7 +1218,7 @@ export default function App() {
       clearArm();
       clearRepeat();
     };
-  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, focusTreeFilter, markColor]);
+  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, focusTreeFilter, markColor, openShareFor]);
 
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //
@@ -1809,6 +1857,10 @@ export default function App() {
     // Rename via the switcher (proposal 0035): build the ref from the row's
     // session (carrying its machine) and reuse the optimistic renameSession.
     onRename: (s, label) => renameSession({ name: s.name, machine: s.machine ?? "" }, label),
+    // Share a session (proposal 0041) — multi-tenant only. Opens the ShareForm
+    // overlay; the shared-with-me map drives the row badges.
+    onShare: me?.multiTenant ? (s) => openShareFor({ name: s.name, machine: s.machine ?? "" }) : undefined,
+    sharedMap: me?.multiTenant ? sharedMap : null,
     restorable,
     onRestore,
     toastsOn: toastsEnabled,
@@ -1984,6 +2036,21 @@ export default function App() {
         >
           <StatusListIcon className="h-5 w-5" />
         </button>
+
+        {/* Share-invite inbox (proposal 0041) — multi-tenant only. Accepting an
+            invite refreshes the roster + shared-with-me feed so the shared
+            machine/session shows up with its badge. */}
+        {me?.multiTenant && (
+          <InboxButton
+            isDesktop={isDesktop}
+            className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 active:bg-edge"
+            onAccepted={() => {
+              refresh();
+              fetchMachines().then(setMachines).catch(() => {});
+              refreshReceivedShares();
+            }}
+          />
+        )}
 
         {isDesktop && (
           <div className="relative">
@@ -2275,6 +2342,24 @@ export default function App() {
         onUpdate={updateFavorite}
         onDelete={deleteFavorite}
       />
+
+      {/* Share a session (proposal 0041): a centered ShareForm overlay opened from
+          the switcher row, the pane identity bar, or ⌃B S. One overlay, every
+          entry point. */}
+      {shareTarget && (
+        <div
+          className="fixed inset-0 z-[70] flex items-start justify-center bg-black/50 p-4 pt-[18vh] backdrop-blur-sm"
+          onClick={() => setShareTarget(null)}
+        >
+          <div className="w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <ShareForm
+              subject={shareTarget}
+              onClose={() => setShareTarget(null)}
+              onShared={refreshReceivedShares}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Searchable Session × Status overview (proposal 0022). Reads off the same
           /api/sessions poll; picking a row mounts that session. */}

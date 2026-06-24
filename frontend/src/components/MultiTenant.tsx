@@ -7,15 +7,23 @@
 import { useEffect, useRef, useState } from "react";
 import {
   approveDevice,
+  leaveShare,
   listAgents,
+  listOutbox,
+  listReceivedShares,
   loginEmail,
   logout,
+  revokeShare,
   rotateAgent,
   signup,
   unlinkAgent,
   type AgentInfo,
   type MeInfo,
+  type ReceivedShare,
+  type ShareInvite,
 } from "../api";
+import ShareForm from "./ShareForm";
+import { ShareIcon } from "../icons";
 
 // One-time injected keyframes/texture (kept out of tailwind.config to avoid a
 // build-config change). Rendered once by <Backdrop/>.
@@ -345,6 +353,7 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   return (
     <li className="mt-rise rounded-xl border border-edge bg-bar/50 p-4">
@@ -362,6 +371,16 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            onClick={() => setSharing((v) => !v)}
+            className={`flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition ${
+              sharing ? "border-accent text-accent" : "border-edge text-slate-300 hover:border-accent hover:text-accent"
+            }`}
+            title="Invite another user to this machine"
+          >
+            <ShareIcon className="h-3.5 w-3.5" />
+            Share
+          </button>
           <button
             onClick={async () => {
               setBusy(true);
@@ -382,6 +401,12 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
           </button>
         </div>
       </div>
+
+      {sharing && (
+        <div className="mt-3">
+          <ShareForm subject={{ title: a.machine, machine: a.machine }} onClose={() => setSharing(false)} onShared={onChanged} />
+        </div>
+      )}
 
       {token && (
         <div className="mt-3 rounded-lg border border-amber/30 bg-amber/10 p-3">
@@ -422,6 +447,173 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
         </div>
       )}
     </li>
+  );
+}
+
+// One row in the access list: a status dot, the subject + counterpart, and an
+// always-visible destructive action that expands the same inline-confirm strip
+// MachineRow's Unlink uses (no modal).
+function GrantRow({
+  dot,
+  title,
+  sub,
+  badge,
+  actionLabel,
+  confirmText,
+  onConfirm,
+}: {
+  dot: string;
+  title: string;
+  sub: React.ReactNode;
+  badge?: string;
+  actionLabel: string;
+  confirmText: string;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  return (
+    <li className="mt-rise rounded-xl border border-edge bg-bar/50 p-3.5">
+      <div className="flex items-center gap-3">
+        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-mono text-sm text-slate-100">{title}</div>
+          <div className="truncate text-[11px] text-slate-500">{sub}</div>
+        </div>
+        {badge && (
+          <span className="shrink-0 rounded border border-edge px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">
+            {badge}
+          </span>
+        )}
+        <button
+          onClick={() => setConfirming(true)}
+          className="shrink-0 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+        >
+          {actionLabel}
+        </button>
+      </div>
+      {confirming && (
+        <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-claude/30 bg-claude/10 px-3 py-2.5">
+          <span className="text-xs text-slate-300">{confirmText}</span>
+          <div className="flex shrink-0 gap-2">
+            <button onClick={() => setConfirming(false)} className="rounded-md px-2 py-1 text-xs text-slate-400 hover:text-slate-200">
+              Cancel
+            </button>
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await onConfirm();
+                } finally {
+                  setBusy(false);
+                  setConfirming(false);
+                }
+              }}
+              className="rounded-md bg-claude px-2.5 py-1 text-xs font-semibold text-bar hover:brightness-110 disabled:opacity-40"
+            >
+              {actionLabel}
+            </button>
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function subjectTitle(machine: string | undefined | null, session?: string | null): string {
+  const m = machine || "machine";
+  return session ? `${m} / ${session}` : m;
+}
+
+// The ~/shared dashboard card: "Shared by you" (revoke/cancel) and "Shared with
+// you" (leave). Polls on the dashboard cadence so accepted/declined invites flip
+// without a manual reload.
+function SharedCard() {
+  const [outbox, setOutbox] = useState<ShareInvite[] | null>(null);
+  const [received, setReceived] = useState<ReceivedShare[] | null>(null);
+
+  const reload = () => {
+    listOutbox().then(setOutbox).catch(() => setOutbox([]));
+    listReceivedShares().then(setReceived).catch(() => setReceived([]));
+  };
+  useEffect(() => {
+    reload();
+    const t = setInterval(reload, 8000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Only the live offers/grants are actionable; terminal rows are dropped.
+  const active = (outbox ?? []).filter((i) => i.status === "pending" || i.status === "accepted");
+  const loading = outbox === null || received === null;
+
+  return (
+    <Window path="~/shared" className="mb-4">
+      <h2 className="mb-4 font-mono text-base font-semibold text-slate-100">Sharing</h2>
+
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-xs uppercase tracking-wider text-slate-500">Shared by you</h3>
+        {active.length > 0 && <span className="text-[11px] text-slate-500">{active.length}</span>}
+      </div>
+      {loading ? (
+        <div className="py-6 text-center font-mono text-sm text-slate-500">loading…</div>
+      ) : active.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-edge px-4 py-6 text-center text-xs text-slate-500">
+          Nothing shared yet — share a machine from its row, or a session from its menu.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {active.map((i) => (
+            <GrantRow
+              key={i.id}
+              dot={i.status === "accepted" ? "bg-amber mt-dot-on" : "bg-slate-600"}
+              title={subjectTitle(i.machine, i.session)}
+              sub={
+                <>
+                  → {i.granteeEmail || "—"} · {i.permission === "view" ? "can view" : "can use"}
+                </>
+              }
+              badge={i.status}
+              actionLabel={i.status === "pending" ? "Cancel" : "Revoke"}
+              confirmText={`Stop sharing ${subjectTitle(i.machine, i.session)} with ${i.granteeEmail || "them"}? They lose access immediately.`}
+              onConfirm={async () => {
+                await revokeShare(i.id);
+                reload();
+              }}
+            />
+          ))}
+        </ul>
+      )}
+
+      {received && received.length > 0 && (
+        <>
+          <div className="mb-2 mt-5 flex items-center justify-between">
+            <h3 className="text-xs uppercase tracking-wider text-slate-500">Shared with you</h3>
+            <span className="text-[11px] text-slate-500">{received.length}</span>
+          </div>
+          <ul className="space-y-2">
+            {received.map((r) => (
+              <GrantRow
+                key={r.id}
+                dot="bg-accent"
+                title={subjectTitle(r.machine, r.session)}
+                sub={
+                  <>
+                    from {r.ownerEmail || "—"} · {r.permission === "view" ? "can view" : "can use"}
+                  </>
+                }
+                actionLabel="Leave"
+                confirmText={`Leave ${subjectTitle(r.machine, r.session)}? You'll lose access until re-invited.`}
+                onConfirm={async () => {
+                  await leaveShare(r.id);
+                  reload();
+                }}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+    </Window>
   );
 }
 
@@ -491,6 +683,9 @@ export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: (
             </ul>
           )}
         </Window>
+
+        {/* Sharing — who has access to what, and take it back */}
+        <SharedCard />
 
         {/* Add a machine */}
         <Window path="~/add-machine">
