@@ -56,7 +56,7 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
 import { agentStatus, buildSharedMap, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { listReceivedShares, type ReceivedShare } from "./api";
-import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
+import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
@@ -167,6 +167,9 @@ export default function App() {
   // Default machine for session-less surfaces (New Session, standalone editor
   // browse) when no pane gives one: the first online agent, else "".
   const firstOnlineMachine = machines.find((m) => m.online)?.machine ?? "";
+  // The machines-dashboard button's status dot (proposal 0043): amber when ≥1
+  // machine is online, hollow otherwise. Preserves the old floating pill's cue.
+  const anyMachineOnline = machines.some((m) => m.online);
 
   // The whole multi-pane state lives in one object; persisted as one blob.
   const [paneState, setPaneState] = useState<PaneState>(loadPaneState);
@@ -1938,18 +1941,9 @@ export default function App() {
       className="relative flex flex-col bg-bar text-slate-200"
       style={{ height: appH ? `${appH}px` : "100%" }}
     >
-      {/* Multi-tenant account entry: a small floating control to open the machines
-          dashboard (proposal 0001). Hidden on single-tenant. */}
-      {me?.multiTenant && (
-        <button
-          onClick={() => setShowDash(true)}
-          title="Your machines & account"
-          className="fixed bottom-3 left-3 z-[60] flex items-center gap-1.5 rounded-full border border-edge bg-panel/90 px-3 py-1.5 font-mono text-xs text-slate-300 shadow-lg backdrop-blur transition hover:border-accent hover:text-accent"
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-amber" />
-          machines
-        </button>
-      )}
+      {/* Multi-tenant account entry (the machines dashboard, proposal 0001) lives
+          as an in-flow chrome button — desktop header + phone footer below
+          (proposal 0043) — not a floating pill that overlapped the canvas/footer. */}
 
       {/* Hover sensor: invisible strip at the very top that summons the
           collapsed header on desktop. Phone never collapses, so no sensor. */}
@@ -2111,6 +2105,26 @@ export default function App() {
           </button>
         )}
 
+        {/* Machines & account (proposal 0043): the old floating pill's role, now a
+            desktop header peer of Status/Files/Favourites. Phone routes it to the
+            footer instead. Multi-tenant only — single-tenant header unchanged. */}
+        {isDesktop && me?.multiTenant && (
+          <button
+            onClick={() => setShowDash(true)}
+            aria-label="Your machines & account"
+            title="Machines & account"
+            className="relative flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 hover:text-accent active:bg-edge"
+          >
+            <ServerIcon className="h-5 w-5" />
+            <span
+              aria-hidden
+              className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
+                anyMachineOnline ? "bg-amber" : "border border-edge"
+              }`}
+            />
+          </button>
+        )}
+
         <button
           onClick={onClearHistory}
           disabled={!currentSession}
@@ -2229,6 +2243,24 @@ export default function App() {
             onChange={onPickUpload}
           />
           <div className="flex gap-2 border-t border-edge bg-bar px-2 py-2 pb-safe">
+            {/* Machines & account (proposal 0043): on phones the dashboard entry is
+                a footer sibling — in the row, flowing with pb-safe — not a pill
+                floating over it. First (left) for thumb reach. Multi-tenant only. */}
+            {me?.multiTenant && (
+              <button
+                onClick={() => setShowDash(true)}
+                className="relative flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge"
+                aria-label="Your machines & account"
+              >
+                <ServerIcon className="h-5 w-5" />
+                <span
+                  aria-hidden
+                  className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
+                    anyMachineOnline ? "bg-amber" : "border border-edge"
+                  }`}
+                />
+              </button>
+            )}
             <button
               onClick={() => openEditor(null)}
               className="flex items-center justify-center rounded-lg bg-panel px-3 py-3 text-slate-300 active:bg-edge"

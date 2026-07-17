@@ -180,6 +180,28 @@ export function EraserIcon({ className }: IconProps) {
   );
 }
 
+// Two stacked rack units — "machines / boxes" (the machines-dashboard entry,
+// proposal 0043). A pilot-light dot in each unit echoes the amber "connected" cue.
+export function ServerIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="3" y="4" width="18" height="7" rx="1.5" />
+      <rect x="3" y="13" width="18" height="7" rx="1.5" />
+      <path d="M7 7.5h.01" />
+      <path d="M7 16.5h.01" />
+    </svg>
+  );
+}
+
 // A down-arrow into a tray — the "browse files to download" action.
 export function DownloadIcon({ className }: IconProps) {
   return (
