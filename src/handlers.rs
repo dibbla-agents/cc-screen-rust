@@ -148,8 +148,10 @@ pub async fn sessions(State(app): State<AppState>) -> Json<Vec<SessionInfo>> {
 
 // ── GET /api/tools ───────────────────────────────────────────────────────────
 pub async fn tools(State(app): State<AppState>) -> Json<Vec<ToolInfo>> {
-    let list: Vec<ToolInfo> = app.inner.tools.iter().map(crate::tools::tool_info).collect();
-    Json(list)
+    // Live-probed per request (0046): `unavailable` marks a tool whose CLI isn't
+    // on the session PATH, so the picker can grey it out. Installing a CLI is
+    // picked up on the next fetch — no restart needed.
+    Json(app.tool_infos())
 }
 
 // ── POST /api/session ────────────────────────────────────────────────────────
@@ -160,6 +162,21 @@ pub fn create_core(app: &AppState, req: &CreateReq) -> Result<String, (StatusCod
     let tool = app
         .find_tool(&req.tool)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("unknown tool: {}", req.tool)))?;
+    // The tool's CLI must exist before we spawn (proposal 0046): without this,
+    // `/bin/sh` exits 127 after the session is registered AND recorded, so the
+    // user sees a session flash and vanish — and the non-clean exit keeps the
+    // manifest entry, re-launching the doomed session on every restart. Failing
+    // here reaches nothing persistent and the message is actionable. 424 =
+    // well-formed request, missing dependency (distinct from 400 unknown tool).
+    if let Some(bin) = app.tool_binary_missing(&tool) {
+        let hint = crate::tools::install_hint(&tool)
+            .map(|c| format!(" — install it with: {c}"))
+            .unwrap_or_default();
+        return Err(err(
+            StatusCode::FAILED_DEPENDENCY,
+            format!("{bin} is not installed on this machine{hint}"),
+        ));
+    }
     // Confine the working dir to $HOME (the agents run YOLO — never let a client
     // anchor a session at /etc), and confirm it's a real directory.
     let home = app.inner.home.clone();
@@ -658,4 +675,91 @@ fn app_response(content_type: String, body: Vec<u8>) -> Response {
 #[cfg(not(feature = "frontend"))]
 pub async fn static_handler(_uri: Uri) -> Response {
     (StatusCode::NOT_FOUND, "frontend not embedded (headless agent build)").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    fn tool(cmd: &str, prefix: &str, tmpl: &str) -> Tool {
+        Tool {
+            cmd: cmd.into(),
+            prefix: prefix.into(),
+            tmpl: tmpl.into(),
+            extra_flag: None,
+            extra_max: 0,
+            resume_suffix: None,
+            resume_keep_extra: false,
+            yolo_flag: None,
+            install_hint: None,
+        }
+    }
+
+    fn state(tools: Vec<Tool>, env_path: &str, tmp: &std::path::Path) -> AppState {
+        AppState::new(
+            tools,
+            env_path.to_string(),
+            String::new(),
+            tmp.to_path_buf(),
+            tmp.to_path_buf(),
+            "test-agent".into(),
+            crate::auth::Auth::load(tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        )
+    }
+
+    fn req(tool: &str, dir: &str) -> CreateReq {
+        CreateReq { tool: tool.into(), name: "t".into(), dir: dir.into(), ..CreateReq::default() }
+    }
+
+    // The 0046 runtime guard: a create for a tool whose CLI is absent fails as an
+    // actionable 424 BEFORE anything is registered or recorded — never a session
+    // that spawns, dies on `sh: not found`, and re-launches on every restart.
+    #[test]
+    fn create_missing_binary_is_424_and_leaves_no_trace() {
+        let tmp = std::env::temp_dir().join(format!("ccr-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // env_path = just the (empty) tmp dir → the probe can't find anything.
+        let app = state(
+            vec![tool("gh", "ghost", "ghost-cli --serve"), tool("coc", "codex", "codex")],
+            tmp.to_str().unwrap(),
+            &tmp,
+        );
+        let dir = tmp.to_string_lossy().to_string();
+
+        let (code, msg) = create_core(&app, &req("ghost", &dir)).unwrap_err();
+        assert_eq!(code, StatusCode::FAILED_DEPENDENCY);
+        assert!(msg.contains("ghost-cli is not installed"), "{msg}");
+        // A custom tool with no cc_tool_install: detected, no hint — graceful.
+        assert!(!msg.contains("install it with"), "{msg}");
+
+        // A known assistant carries its install one-liner from the registry.
+        let (code, msg) = create_core(&app, &req("codex", &dir)).unwrap_err();
+        assert_eq!(code, StatusCode::FAILED_DEPENDENCY);
+        assert!(msg.contains("codex is not installed"), "{msg}");
+        assert!(msg.contains("install it with:"), "{msg}");
+
+        // Nothing was registered and nothing recorded → no restore loop.
+        assert!(app.list().is_empty(), "no session may be registered");
+        assert!(crate::manifest::entries(&tmp).is_empty(), "no manifest entry may be written");
+
+        // And /api/tools advertises the same verdict additively.
+        let infos = app.tool_infos();
+        assert!(infos.iter().all(|i| i.unavailable), "both probes miss on an empty PATH");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The shell tool has no probe (its head is a shell expansion) — never blocked,
+    // even on an empty PATH: present tools/today's behavior stay untouched.
+    #[test]
+    fn create_shell_tool_is_never_blocked() {
+        let tmp = std::env::temp_dir().join(format!("ccr-guard-sh-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let app = state(vec![tool("tt", "shell", "sleep 2")], &std::env::var("PATH").unwrap_or_default(), &tmp);
+        let name = create_core(&app, &req("tt", &tmp.to_string_lossy())).unwrap();
+        assert_eq!(name, "shell-t");
+        app.get(&name).unwrap().kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

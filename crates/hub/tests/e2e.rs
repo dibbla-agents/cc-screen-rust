@@ -409,7 +409,7 @@ async fn hub_serves_resolved_agent_tools() {
             machine_id: "boxA".into(),
             hostname: "boxA".into(),
             agent_version: "test".into(),
-            tools: vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None }],
+            tools: vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None, unavailable: false }],
         },
         b"",
     )

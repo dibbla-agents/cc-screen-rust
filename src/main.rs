@@ -12,6 +12,7 @@ mod clip;
 mod config;
 mod confine;
 mod dirsearch;
+mod doctor;
 mod engine;
 mod enroll;
 mod fileops;
@@ -54,6 +55,9 @@ USAGE
   cc-screen-rust update              fetch the latest release + restart the service
   cc-screen-rust uninstall           remove that service
   cc-screen-rust install-shim        (re)install the clipboard image-paste shim only
+  cc-screen-rust doctor              check which assistant CLIs (claude, codex, gemini,
+                                     kimi) are on the session PATH; --install offers to
+                                     install missing ones, --strict exits 1 on any miss
 
 RUN-DIRECTLY FLAGS (for one-off / foreground runs)
   --addr HOST:PORT    bind address (default 127.0.0.1:8839; env CCWEB_ADDR)
@@ -118,6 +122,12 @@ async fn main() {
                 std::process::exit(1);
             }
             return;
+        }
+        // Preflight for the assistant CLIs (proposal 0046): report ✓/✗ over the
+        // session PATH; `--install` offers each missing one's installer on a TTY;
+        // `--strict` exits non-zero on any miss. The install scripts call this.
+        Some("doctor") => {
+            std::process::exit(doctor::run(&argv[2..]));
         }
         Some("uninstall") => {
             if let Err(e) = service::uninstall() {

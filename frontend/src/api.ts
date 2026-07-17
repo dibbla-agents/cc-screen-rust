@@ -466,6 +466,9 @@ export interface Tool {
   extraDirs?: {
     max?: number;
   };
+  // This tool's CLI isn't installed on the machine (proposal 0046) — the picker
+  // greys it out. Omitted (= falsy) by older agents and for available tools.
+  unavailable?: boolean;
 }
 
 export interface DirEntry {

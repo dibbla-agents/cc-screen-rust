@@ -172,6 +172,22 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   `cc_tool cc claude "claude --rc 'claude-{name}'"`. Restore rebuilds from the
   current template, so the change applies uniformly with no migration. See
   proposal 0015.
+- **Assistant-CLI preflight & runtime guard (0046).** cc-screen *drives* external
+  CLIs, so a missing binary is handled explicitly, all fed by one registry: the
+  `Assistant` descriptors in `src/tools.rs` (name → label → per-OS install
+  command; the probe binary is the first bare token of the launch template, so a
+  `tools.conf` rename probes correctly; the `shell` tool is exempt). Enforcement:
+  `cc-screen-rust doctor` (✓/✗ over the **session** PATH; `--install` offers each
+  missing CLI's installer on a TTY, `--strict` for CI) is called best-effort by
+  `install.sh`, `scripts/install-machine.sh`, and `cc-screen-rust install` — a
+  missing assistant never aborts an install. At runtime `create_core` returns
+  **424** + the install one-liner instead of spawning a doomed session (nothing
+  registered, nothing recorded → no restore loop), `restore_all` skips (into
+  `failed`, entry kept) a recorded session whose CLI vanished, and `GET
+  /api/tools` sets the additive `unavailable` flag so both pickers grey the tool
+  out. Custom tools declare a hint with `cc_tool_install <cmd|prefix> "<cmd>"`;
+  adding an assistant = one `ASSISTANTS` entry + one `defaults()` line. See
+  proposal 0046.
 - **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
   staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
   Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The

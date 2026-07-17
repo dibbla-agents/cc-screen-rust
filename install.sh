@@ -65,6 +65,18 @@ fi
 BIN="$(pwd)/target/release/cc-screen-rust"
 [ -x "$BIN" ] || { echo "binary not found: $BIN — run without --no-build first." >&2; exit 1; }
 
+# Preflight the assistant CLIs the agent drives (claude/codex/gemini/kimi).
+# Best-effort: unlike the npm/cargo guards above (build deps, hard exit), a
+# missing assistant only limits which session types work — never abort over it.
+# Interactive runs get an offer to install each missing one; piped runs just get
+# the report + install one-liners. The list lives in the binary (single source
+# of truth), so this script stays thin.
+if [ -t 0 ]; then
+  "$BIN" doctor --install || true
+else
+  "$BIN" doctor || true
+fi
+
 # Service setup now lives in the binary itself (`cc-screen-rust install`), so the
 # systemd-unit / launchd-plist logic has a single source of truth and works on
 # macOS too. The subcommand writes ~/.config/cc-screen-rust/web.env, (re)starts

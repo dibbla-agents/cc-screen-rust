@@ -24,6 +24,11 @@ pub struct Tool {
     /// pre-0005 user template that still inlines it — either way nothing is
     /// appended, and a `false` skip can't strip an inlined flag.
     pub yolo_flag: Option<String>,
+    /// A user-declared install one-liner (`cc_tool_install`, proposal 0046) shown
+    /// when the tool's binary is missing. `None` falls back to the built-in
+    /// assistant registry (`install_hint`), or to a plain "not installed" message
+    /// for a custom tool with no hint — the guard still detects the miss.
+    pub install_hint: Option<String>,
 }
 
 impl Tool {
@@ -37,13 +42,16 @@ impl Tool {
             resume_suffix: None,
             resume_keep_extra: false,
             yolo_flag: None,
+            install_hint: None,
         }
     }
 }
 
 /// The wire DTO for a tool. Shared by `GET /api/tools` and the hub uplink's
-/// `Register` so both advertise the registry identically.
-pub fn tool_info(t: &Tool) -> ToolInfo {
+/// `Register` so both advertise the registry identically. `unavailable` is the
+/// live probe result (proposal 0046): true when the tool's CLI isn't on the
+/// session PATH, so a picker can grey it out before a doomed create.
+pub fn tool_info(t: &Tool, unavailable: bool) -> ToolInfo {
     ToolInfo {
         cmd: t.cmd.clone(),
         prefix: t.prefix.clone(),
@@ -51,6 +59,131 @@ pub fn tool_info(t: &Tool) -> ToolInfo {
             .extra_flag
             .is_some()
             .then(|| ExtraDirs { max: (t.extra_max > 0).then_some(t.extra_max) }),
+        unavailable,
+    }
+}
+
+// ── The supported-assistants registry (proposal 0046) ────────────────────────
+// The single source of truth for "which coding assistants, and how to install
+// them". Consumed by the runtime guard (`create_core`'s 424), `restore_all`'s
+// skip, `GET /api/tools`' `unavailable`, and the `doctor` subcommand the shell
+// installers call — so the installer and the runtime can never disagree.
+// Adding a fifth assistant is one entry here (plus its `defaults()` tool line).
+
+pub struct Assistant {
+    /// The tool registry key this describes (`Tool.prefix`).
+    pub prefix: &'static str,
+    /// Human name for messages ("Claude Code").
+    pub label: &'static str,
+    /// Install one-liner per platform — each CLI's official installer. Kept
+    /// data-only so a stale vendor command is a one-line fix here.
+    pub install_macos: &'static str,
+    pub install_linux: &'static str,
+    /// Fallback URL for platforms with no one-liner (or for humans who want it).
+    pub docs: &'static str,
+}
+
+pub const ASSISTANTS: &[Assistant] = &[
+    Assistant {
+        prefix: "claude",
+        label: "Claude Code",
+        install_macos: "curl -fsSL https://claude.ai/install.sh | bash",
+        install_linux: "curl -fsSL https://claude.ai/install.sh | bash",
+        docs: "https://docs.claude.com/en/docs/claude-code/setup",
+    },
+    Assistant {
+        prefix: "codex",
+        label: "Codex CLI",
+        install_macos: "npm install -g @openai/codex",
+        install_linux: "npm install -g @openai/codex",
+        docs: "https://github.com/openai/codex",
+    },
+    Assistant {
+        prefix: "gemini",
+        label: "Gemini CLI",
+        install_macos: "npm install -g @google/gemini-cli",
+        install_linux: "npm install -g @google/gemini-cli",
+        docs: "https://github.com/google-gemini/gemini-cli",
+    },
+    Assistant {
+        prefix: "kimi",
+        label: "Kimi CLI",
+        install_macos: "uv tool install --python 3.13 kimi-cli",
+        install_linux: "uv tool install --python 3.13 kimi-cli",
+        docs: "https://github.com/MoonshotAI/kimi-cli",
+    },
+];
+
+/// The descriptor for a tool, if it's one of the known assistants.
+pub fn assistant_for(t: &Tool) -> Option<&'static Assistant> {
+    ASSISTANTS.iter().find(|a| a.prefix == t.prefix)
+}
+
+/// The binary a tool needs on PATH: the first bare token of its launch template
+/// (`claude`, `codex`, …). `None` = nothing to probe — a head that's a shell
+/// expansion (the `shell` tool's `${SHELL:-/bin/bash}`) always resolves. A
+/// `tools.conf` override that renames the binary is probed correctly with no
+/// extra config, because the template head IS what `/bin/sh -c` will exec.
+pub fn probe_binary(t: &Tool) -> Option<&str> {
+    let head = t.tmpl.split_whitespace().next()?;
+    if head.starts_with('$') {
+        return None;
+    }
+    Some(head)
+}
+
+/// The install one-liner to suggest when a tool's binary is missing, for the
+/// *host* OS: an explicit `cc_tool_install` wins, else the built-in assistant
+/// registry, else `None` (the guard still reports the miss, just without a
+/// command). Data lives in one place; this only selects.
+pub fn install_hint(t: &Tool) -> Option<String> {
+    if let Some(h) = &t.install_hint {
+        return Some(h.clone());
+    }
+    let a = assistant_for(t)?;
+    let cmd = if cfg!(target_os = "macos") { a.install_macos } else if cfg!(target_os = "linux") { a.install_linux } else { "" };
+    if cmd.is_empty() {
+        Some(format!("see {}", a.docs))
+    } else {
+        Some(cmd.to_string())
+    }
+}
+
+/// Whether `bin` resolves to an executable on `env_path` — the same lookup
+/// `/bin/sh` performs for the launch (`engine.rs` spawns with this exact PATH),
+/// so the guard's verdict and the spawn agree. A head containing `/` is checked
+/// as a path directly, mirroring the shell.
+pub fn binary_on_path(bin: &str, env_path: &str) -> bool {
+    fn is_executable(p: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            p.is_file()
+        }
+    }
+    if bin.contains('/') {
+        return is_executable(std::path::Path::new(bin));
+    }
+    env_path
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .any(|d| is_executable(&std::path::Path::new(d).join(bin)))
+}
+
+/// `Some(binary)` iff the tool needs a binary that is NOT on `env_path` —
+/// the one predicate behind the create-time 424, the restore skip, and the
+/// `unavailable` DTO field. `None` = fine to launch (present, or nothing to
+/// probe, like the shell tool).
+pub fn missing_binary(t: &Tool, env_path: &str) -> Option<String> {
+    let bin = probe_binary(t)?;
+    if binary_on_path(bin, env_path) {
+        None
+    } else {
+        Some(bin.to_string())
     }
 }
 
@@ -146,6 +279,7 @@ fn parse(text: &str) -> Vec<Tool> {
     let mut extra: Vec<(String, String, u32)> = Vec::new();
     let mut resumes: Vec<(String, String)> = Vec::new();
     let mut yolos: Vec<(String, String)> = Vec::new();
+    let mut installs: Vec<(String, String)> = Vec::new();
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -167,6 +301,16 @@ fn parse(text: &str) -> Vec<Tool> {
             let (toks, rest) = split_head(line, 2);
             if toks.len() >= 2 && !rest.is_empty() {
                 yolos.push((toks[1].clone(), unquote(&rest)));
+            }
+            continue;
+        }
+        // cc_tool_install <cmd|prefix> "<install command>" — a custom tool's
+        // install hint, shown when its binary is missing (0046). Same grammar as
+        // the other cc_tool_* metadata lines; the rest of the line is the command.
+        if line.starts_with("cc_tool_install") {
+            let (toks, rest) = split_head(line, 2);
+            if toks.len() >= 2 && !rest.is_empty() {
+                installs.push((toks[1].clone(), unquote(&rest)));
             }
             continue;
         }
@@ -212,6 +356,13 @@ fn parse(text: &str) -> Vec<Tool> {
         for t in out.iter_mut() {
             if t.cmd == key || t.prefix == key {
                 t.yolo_flag = Some(flag.clone());
+            }
+        }
+    }
+    for (key, hint) in installs {
+        for t in out.iter_mut() {
+            if t.cmd == key || t.prefix == key {
+                t.install_hint = Some(hint.clone());
             }
         }
     }
@@ -446,6 +597,95 @@ mod tests {
         assert_eq!(on.matches("--dangerously-skip-permissions").count(), 1, "{on}");
         let off = build_launch(c, "p", &[], false, false);
         assert!(off.contains("--dangerously-skip-permissions"), "can't strip inlined: {off}");
+    }
+
+    #[test]
+    fn probe_binary_is_the_template_head() {
+        // The binary a session needs is the first bare token of the launch
+        // template — for every built-in and for a renamed tools.conf override.
+        let t = load_tools(None);
+        for (prefix, bin) in [("claude", "claude"), ("kimi", "kimi"), ("gemini", "gemini"), ("codex", "codex")] {
+            let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
+            assert_eq!(probe_binary(tool), Some(bin), "{prefix}");
+        }
+        // The shell tool's head is a shell expansion — always resolves, no probe.
+        let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
+        assert_eq!(probe_binary(sh), None);
+        // A tools.conf override that renames the binary probes the new name.
+        let custom = with_defaults(parse("cc_tool cc claude \"my-claude-wrapper --fast\""));
+        let c = custom.iter().find(|x| x.prefix == "claude").unwrap();
+        assert_eq!(probe_binary(c), Some("my-claude-wrapper"));
+    }
+
+    #[test]
+    fn missing_binary_probes_the_given_path() {
+        // Synthesized PATH: one dir holding a single executable.
+        let dir = std::env::temp_dir().join(format!("cctools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("fake-cli");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = dir.to_str().unwrap();
+        let present = Tool::new("fk", "fake", "fake-cli --go");
+        assert_eq!(missing_binary(&present, path), None);
+        let absent = Tool::new("no", "nope", "nope-cli");
+        assert_eq!(missing_binary(&absent, path).as_deref(), Some("nope-cli"));
+        // Shell tool: nothing to probe even on an empty PATH.
+        let sh = Tool::new("tt", "shell", "${SHELL:-/bin/bash} -l");
+        assert_eq!(missing_binary(&sh, ""), None);
+        // A non-executable file is not a hit (mirrors the shell's lookup).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let plain = dir.join("plain-file");
+            std::fs::write(&plain, "data").unwrap();
+            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let t = Tool::new("pf", "plain", "plain-file");
+            assert!(missing_binary(&t, path).is_some());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cc_tool_install_declares_a_hint() {
+        // A custom tool can declare its own install one-liner (0046), matched by
+        // cmd or prefix like the other cc_tool_* metadata lines.
+        let cfg = "cc_tool xx myc 'myc run'\ncc_tool_install myc \"cargo install myc\"";
+        let t = with_defaults(parse(cfg));
+        let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
+        assert_eq!(tool.install_hint.as_deref(), Some("cargo install myc"));
+        // The declared hint wins over the built-in registry…
+        assert_eq!(install_hint(tool).as_deref(), Some("cargo install myc"));
+        // …the built-ins fall back to the assistant registry…
+        let builtins = load_tools(None);
+        let claude = builtins.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(install_hint(claude).is_some(), "built-in claude must carry an install hint");
+        // …and a custom tool with no declaration has none (guard still reports).
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let b = bare.iter().find(|x| x.prefix == "other").unwrap();
+        assert_eq!(install_hint(b), None);
+    }
+
+    #[test]
+    fn every_assistant_maps_to_a_default_tool() {
+        // The registry and the tool defaults must not drift: each assistant
+        // descriptor describes exactly one built-in tool, with install commands
+        // for both supported platforms.
+        let t = load_tools(None);
+        for a in ASSISTANTS {
+            let tool = t
+                .iter()
+                .find(|x| x.prefix == a.prefix)
+                .unwrap_or_else(|| panic!("assistant '{}' has no default tool", a.prefix));
+            assert!(probe_binary(tool).is_some(), "{} must be probeable", a.prefix);
+            assert!(!a.install_macos.is_empty() && !a.install_linux.is_empty() && !a.docs.is_empty());
+        }
+        // And the shell tool deliberately has no descriptor.
+        assert!(!ASSISTANTS.iter().any(|a| a.prefix == "shell"));
     }
 
     #[test]

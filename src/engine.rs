@@ -733,6 +733,25 @@ impl AppState {
         self.inner.tools.iter().find(|t| t.cmd == key || t.prefix == key).cloned()
     }
 
+    /// `Some(binary)` iff `tool` needs a CLI that isn't on the session PATH
+    /// (proposal 0046). Probes the exact `env_path` sessions spawn with, so the
+    /// verdict matches what `/bin/sh -c` would find. `None` = safe to launch
+    /// (present, or nothing to probe — the shell tool).
+    pub fn tool_binary_missing(&self, tool: &Tool) -> Option<String> {
+        tools::missing_binary(tool, &self.inner.env_path)
+    }
+
+    /// The tool list as wire DTOs with the live availability probe (0046).
+    /// Shared by `GET /api/tools` and the hub uplink's `Register`, so a direct
+    /// client and a hub-relayed one see the same `unavailable` flags.
+    pub fn tool_infos(&self) -> Vec<cc_screen_protocol::ToolInfo> {
+        self.inner
+            .tools
+            .iter()
+            .map(|t| tools::tool_info(t, self.tool_binary_missing(t).is_some()))
+            .collect()
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<Session>> {
         self.inner.registry.lock().unwrap().get(name).cloned()
     }
@@ -835,6 +854,20 @@ impl AppState {
             if !std::path::Path::new(&e.dir).is_dir() {
                 continue;
             }
+            // A recorded session whose CLI has since gone missing would spawn a
+            // shell that exits 127 — and a non-clean exit keeps the manifest
+            // entry, so it would retry on every startup (0046). Skip it, loudly:
+            // it lands in `failed` (surfaced by the restore response + the
+            // startup log) and stays in the manifest, so installing the CLI and
+            // restoring brings it back.
+            if let Some(bin) = self.tool_binary_missing(&tool) {
+                let hint = tools::install_hint(&tool)
+                    .map(|c| format!(" — install it with: {c}"))
+                    .unwrap_or_default();
+                tracing::warn!("restore: skipping {} — `{bin}` is not installed{hint}", e.session);
+                failed.insert(e.session.clone(), format!("{bin} is not installed{hint}"));
+                continue;
+            }
             match self.create(
                 &tool,
                 &e.short,
@@ -897,6 +930,7 @@ mod tests {
             resume_suffix: None,
             resume_keep_extra: false,
             yolo_flag: None,
+            install_hint: None,
         }
     }
 
@@ -1247,6 +1281,60 @@ mod tests {
         assert_eq!(sess.current_size(), (120, 50));
 
         sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Restore hygiene (0046): a recorded session whose CLI has since gone missing
+    // is skipped — reported in `failed`, entry kept — instead of spawning a shell
+    // that exits 127 and (per the reaper's non-clean-exit rule) retries forever.
+    #[test]
+    fn restore_skips_a_missing_tool_without_looping() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restore-miss-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let ghost = Tool {
+            cmd: "gh".into(),
+            prefix: "ghost".into(),
+            tmpl: "ghost-cli".into(),
+            extra_flag: None,
+            extra_max: 0,
+            resume_suffix: None,
+            resume_keep_extra: false,
+            yolo_flag: None,
+            install_hint: None,
+        };
+        // env_path = the empty tmp dir → `ghost-cli` can't resolve.
+        let state = AppState::new(
+            vec![ghost],
+            tmp.to_string_lossy().into_owned(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        manifest::record(
+            &tmp,
+            manifest::Entry {
+                session: "ghost-old".into(),
+                cmd: "gh".into(),
+                prefix: "ghost".into(),
+                short: "old".into(),
+                dir: tmp.to_string_lossy().into_owned(),
+                extra_dirs: vec![],
+                created_at: 0,
+                skip_permissions: true,
+                color: String::new(),
+                label: String::new(),
+            },
+        );
+        let (restored, failed) = state.restore_all();
+        assert!(restored.is_empty(), "must not spawn a doomed session");
+        assert!(state.list().is_empty(), "nothing may be registered");
+        let msg = failed.get("ghost-old").expect("the skip must be reported");
+        assert!(msg.contains("ghost-cli is not installed"), "{msg}");
+        // The entry survives, so installing the CLI + restoring brings it back.
+        assert_eq!(manifest::entries(&tmp).len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
