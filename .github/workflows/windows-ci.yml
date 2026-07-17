@@ -1,0 +1,53 @@
+# Windows build + test smoke (proposal 0045 Part I.1).
+#
+# The agent gained a Windows port (ConPTY launch shell, Task Scheduler service,
+# %USERPROFILE% paths, no-op clipboard shim) behind #[cfg(windows)] seams that the
+# Linux/macOS self-hosted release runners never compile. This job compiles the
+# WHOLE workspace natively on a GitHub-hosted `windows-latest` runner and runs the
+# tests, so a broken #[cfg(windows)] arm is caught on every push — long before a
+# release tag actually ships the msvc target (dist-workspace.toml). The `ccs` TUI
+# is already crossterm-based, so it's an early green check too.
+name: windows-ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The server + hub embed frontend/dist via rust-embed, so it must exist
+      # before cargo compiles them (same reason as the release build-setup).
+      - name: Set up Node (for the embedded frontend build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build the frontend (embedded into the server binary)
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # windows-latest's host target IS x86_64-pc-windows-msvc, so a plain
+      # workspace build compiles every crate for Windows natively. This is the
+      # load-bearing check: it proves all the product code — including every
+      # #[cfg(windows)] seam (launch shell, Task Scheduler service, %USERPROFILE%
+      # paths) — compiles for Windows. BLOCKING.
+      - name: Build (workspace)
+        run: cargo build --workspace
+
+      # The unit tests are NOT yet Windows-clean: a chunk of them assume a POSIX
+      # filesystem (std::os::unix symlinks, hard-coded /home/u paths) and won't
+      # compile/pass on Windows. Porting the test suite is a follow-up to this
+      # port (proposal 0045 Part I); run it here for signal but don't block on it.
+      - name: Test (workspace, non-blocking until tests are Windows-clean)
+        continue-on-error: true
+        run: cargo test --workspace

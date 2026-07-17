@@ -70,7 +70,48 @@ pub struct Config {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return PathBuf::from(h);
+    }
+    // Windows rarely sets HOME; fall back to USERPROFILE (then HOMEDRIVE+HOMEPATH).
+    #[cfg(windows)]
+    {
+        if let Some(p) = std::env::var_os("USERPROFILE").filter(|p| !p.is_empty()) {
+            return PathBuf::from(p);
+        }
+        if let (Some(d), Some(p)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+            let mut base = std::path::PathBuf::from(d);
+            base.push(p);
+            if !base.as_os_str().is_empty() {
+                return base;
+            }
+        }
+        return PathBuf::from("C:\\");
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/")
+}
+
+/// Load `web.env` (KEY=value lines) into the process environment, setting only
+/// keys not already present. On Windows this is how the service picks up its
+/// config; on Unix systemd/launchd inject the env, so this is Windows-only.
+#[cfg(windows)]
+fn load_env_file(config_dir: &std::path::Path) {
+    let path = config_dir.join("web.env");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        for line in s.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !k.is_empty() && std::env::var_os(k).is_none() {
+                    std::env::set_var(k, v);
+                }
+            }
+        }
+    }
 }
 
 /// Read a `--flag value` or `--flag=value` CLI argument.
@@ -115,12 +156,16 @@ fn default_machine_id() -> String {
 }
 
 fn build_env_path(home: &PathBuf) -> String {
+    // PATH is ':'-separated on Unix, ';'-separated on Windows.
+    let sep = if cfg!(windows) { ";" } else { ":" };
     let local = home.join(".local").join("bin");
     let local = local.to_string_lossy().to_string();
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-    let sep = ":";
+    let default = if cfg!(windows) { "" } else { "/usr/bin:/bin" };
+    let path = std::env::var("PATH").unwrap_or_else(|_| default.into());
     if path.split(sep).any(|p| p == local) {
         path
+    } else if path.is_empty() {
+        local
     } else {
         format!("{local}{sep}{path}")
     }
@@ -180,6 +225,12 @@ pub fn load() -> Config {
         .unwrap_or_else(|| real_home.clone());
     let config_dir = real_home.join(".config").join("cc-screen-rust");
     let _ = std::fs::create_dir_all(&config_dir);
+    // Windows has no systemd EnvironmentFile / launchd env-inlining, so the
+    // Task-Scheduler-launched agent gets its CCWEB_* settings from web.env, which
+    // it loads itself here (set-if-absent, so an explicitly-exported var wins).
+    // See service.rs::install_windows_service.
+    #[cfg(windows)]
+    load_env_file(&config_dir);
     let env_path = build_env_path(&home);
     let addr = arg_value("--addr")
         .or_else(|| std::env::var("CCWEB_ADDR").ok())

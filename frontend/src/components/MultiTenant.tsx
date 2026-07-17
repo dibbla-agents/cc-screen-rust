@@ -617,15 +617,31 @@ function SharedCard() {
   );
 }
 
+// Best-effort browser-OS sniff to pick the default install tab. `userAgentData`
+// is the modern signal (falls back to the legacy `platform`).
+function detectOs(): "unix" | "win" {
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  const p = nav.userAgentData?.platform ?? navigator.platform ?? "";
+  return /win/i.test(p) ? "win" : "unix";
+}
+
 export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: () => void; onLoggedOut: () => void }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [machineName, setMachineName] = useState("");
-  // The hub serves its own installer at /install.sh with the hub URL baked in;
-  // the user only supplies a machine name. Same origin the browser is on.
+  // Default the platform tab to the browser's OS, but let the user switch (they
+  // may be reading this on a phone while setting up a Windows box).
+  const [osTab, setOsTab] = useState<"unix" | "win">(detectOs());
+  // The hub serves its own installer at /install.sh (+ /install.ps1 for Windows)
+  // with the hub URL baked in; the user only supplies a machine name. Same origin
+  // the browser is on.
   const origin = window.location.origin;
   const safeName = (machineName.trim() || "my-machine").replace(/[^A-Za-z0-9._-]/g, "-");
-  const installCmd = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}`;
+  // macOS/Linux pass the name as an arg; PowerShell's `iex` can't take one as
+  // cleanly, so the hub bakes it in via ?name= (proposal 0045).
+  const installShell = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}`;
+  const installPwsh = `irm ${origin}/install.ps1?name=${encodeURIComponent(safeName)} | iex`;
+  const installCmd = osTab === "win" ? installPwsh : installShell;
   const reload = () => listAgents().then(setAgents).catch(() => setAgents([]));
   const firstLoad = useRef(true);
   useEffect(() => {
@@ -691,8 +707,9 @@ export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: (
         <Window path="~/add-machine">
           <h3 className="mb-1 font-mono text-sm font-semibold text-slate-100">Add a machine</h3>
           <p className="mb-3 text-xs text-slate-400">
-            Name the machine, then paste the generated command on that box (macOS or Linux). It
-            installs cc-screen-rust and connects it — a code will appear that you approve from{" "}
+            Name the machine, then paste the generated command on that box (macOS, Linux, or
+            Windows). It installs cc-screen-rust and connects it — a code will appear that you
+            approve from{" "}
             <a href="/activate" className="text-accent hover:underline">/activate</a>.
           </p>
           <label className="mb-1.5 block text-[11px] uppercase tracking-wider text-slate-500">Machine name</label>
@@ -704,6 +721,25 @@ export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: (
             autoCapitalize="none"
             className="mb-3 w-full rounded-lg border border-edge bg-bar px-3.5 py-2.5 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-accent focus:ring-2 focus:ring-accent/25"
           />
+          <div className="mb-2 flex gap-1.5">
+            {([
+              ["unix", "macOS / Linux"],
+              ["win", "Windows (PowerShell)"],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setOsTab(key)}
+                className={
+                  "rounded-md border px-2.5 py-1 text-[11px] font-semibold transition " +
+                  (osTab === key
+                    ? "border-accent bg-accent/10 text-accent"
+                    : "border-edge text-slate-400 hover:border-accent/60 hover:text-slate-200")
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-stretch gap-2">
             <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-xs text-accent">
               {installCmd}

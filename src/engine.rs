@@ -215,8 +215,14 @@ impl Session {
         })?;
 
         let launch = tools::build_launch(tool, short, &extra_dirs, resume, skip_permissions);
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
+        // The wrapping interpreter is platform-specific (`/bin/sh -c` on Unix,
+        // `cmd.exe /C` on Windows); `native_pty_system()` already gave us a ConPTY
+        // on Windows, so only the command wrapper differs. See tools::launch_shell.
+        let (program, pre_args) = tools::launch_shell();
+        let mut cmd = CommandBuilder::new(program);
+        for a in pre_args {
+            cmd.arg(a);
+        }
         cmd.arg(&launch);
         cmd.cwd(dir);
         cmd.env("TERM", "xterm-256color");

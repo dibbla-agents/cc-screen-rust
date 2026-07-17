@@ -52,7 +52,11 @@ DEST="dl/$VERSION"
 mkdir -p "$DEST"
 find "$TMP" -name '*.tar.xz' -exec cp {} "$DEST/" \;
 find "$TMP" -name '*.tar.xz.sha256' -exec cp {} "$DEST/" \;
-echo "  staged $(find "$DEST" -name '*.tar.xz' | wc -l | tr -d ' ') tarballs in $DEST"
+# Windows artifacts are .zip (proposal 0045); stage them too so the .ps1
+# installers (rewritten below) can fetch from our origin.
+find "$TMP" -name '*.zip' -exec cp {} "$DEST/" \;
+find "$TMP" -name '*.zip.sha256' -exec cp {} "$DEST/" \;
+echo "  staged $(find "$DEST" -name '*.tar.xz' | wc -l | tr -d ' ') tarballs + $(find "$DEST" -name '*.zip' | wc -l | tr -d ' ') zips in $DEST"
 
 # Rewrite the cargo-dist installers: GitHub download URL -> Dibbla origin. The
 # embedded checksums and OS/arch/musl detection are untouched, so they keep
@@ -70,10 +74,26 @@ if [ -f "$HUB_SRC" ]; then
 else
   echo "  (no cc-screen-hub-installer.sh in this build — skipping)"
 fi
+# Windows PowerShell installers (proposal 0045): the .ps1 twins of the shell
+# installers, same GitHub→Dibbla origin rewrite. Guarded so re-hosting a pre-0045
+# tag (no .ps1 artifacts) still works.
+rewrite_ps1() { # <cargo-dist-app-name> <dl-basename>
+  local src="$TMP/artifacts-build-global/$1-installer.ps1"
+  if [ -f "$src" ]; then
+    sed "s#$GH_BASE#$SITE_URL/dl#g" "$src" > "dl/$2.ps1"
+    echo "  + $1 PowerShell installer → dl/$2.ps1"
+  else
+    echo "  (no $1-installer.ps1 in this build — skipping)"
+  fi
+}
+rewrite_ps1 cc-screen-tui  install-ccs
+rewrite_ps1 cc-screen-rust install-cc-screen
+rewrite_ps1 cc-screen-hub  install-cc-screen-hub
+
 printf '%s\n' "$VERSION" > dl/version
 
-# Sanity: the rewritten installers must point at us, not GitHub.
-if grep -ql "github.com/$REPO/releases/download" dl/install-ccs.sh dl/install-cc-screen.sh dl/install-cc-screen-hub.sh 2>/dev/null; then
+# Sanity: the rewritten installers (shell + powershell) must point at us, not GitHub.
+if grep -ql "github.com/$REPO/releases/download" dl/install-*.sh dl/install-*.ps1 2>/dev/null; then
   echo "ERROR: a github download URL survived the rewrite" >&2; exit 1
 fi
 echo "  installers rewritten → $SITE_URL/dl"
@@ -85,7 +105,8 @@ echo "→ deploying the site…"
 cat <<EOF
 
 ✓ hosted $VERSION. Install one-liners:
-    ccs    : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-ccs.sh | sh
-    agent  : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen.sh | sh
-    hub    : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen-hub.sh | sh
+    ccs        : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-ccs.sh | sh
+    agent      : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen.sh | sh
+    hub        : curl --proto '=https' --tlsv1.2 -LsSf $SITE_URL/dl/install-cc-screen-hub.sh | sh
+    agent (win): irm $SITE_URL/dl/install-cc-screen.ps1 | iex
 EOF

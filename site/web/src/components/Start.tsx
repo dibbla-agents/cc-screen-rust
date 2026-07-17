@@ -20,6 +20,9 @@ const Prompt = () => (
 
 const RUST_INSTALL =
   "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh";
+// Windows agent installer (proposal 0045) — the PowerShell `irm | iex` twin.
+const RUST_INSTALL_WIN =
+  "irm https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.ps1 | iex";
 const TUI_INSTALL =
   "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh";
 const HUB_INSTALL =
@@ -114,6 +117,12 @@ export function Start() {
           <Cmd clip={RUST_INSTALL}>
             <Prompt />
             {RUST_INSTALL}
+          </Cmd>
+          <Cmd clip={RUST_INSTALL_WIN}>
+            <Prompt />
+            {RUST_INSTALL_WIN}
+            {"   "}
+            <span className="text-faint"># Windows (PowerShell)</span>
           </Cmd>
           <Cmd clip={HUB_SLAVE}>
             <Prompt />

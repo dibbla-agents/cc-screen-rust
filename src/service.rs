@@ -13,15 +13,23 @@ use std::process::Command;
 
 const SYSTEMD_UNIT: &str = "cc-screen-rust.service";
 const LAUNCHD_LABEL: &str = "com.dibbla.cc-screen-rust";
+/// The Task Scheduler task name on Windows (the systemd-unit / launchd-label
+/// analogue). Backslash-free so it lands at the schedule root.
+const WINDOWS_TASK_NAME: &str = "cc-screen-rust";
 
 /// The clipboard shim, embedded at build time. Written verbatim into
 /// ~/.local/bin as xclip / wl-paste / pbpaste so a Ctrl-V image paste from the
 /// web UI reaches the agent (proposal 0007). The script dispatches on its own
 /// basename, so the same bytes serve all three names. Single source of truth:
 /// `scripts/clip-shim.sh`.
+/// POSIX-only: Windows has no xclip/wl-paste/pbpaste, so the shim (and its
+/// machinery) is compiled out there; image paste is a documented Windows
+/// fast-follow (proposal 0045 Part D).
+#[cfg(not(windows))]
 const CLIP_SHIM: &str = include_str!("../scripts/clip-shim.sh");
 /// The tool names the shim is installed as. Each is the next-on-PATH real tool's
 /// shadow for agent sessions only (~/.local/bin is first on the session PATH).
+#[cfg(not(windows))]
 const SHIM_NAMES: &[&str] = &["xclip", "wl-paste", "pbpaste"];
 
 // Wait for the bound (tailnet) IP to exist before starting, so a boot where
@@ -57,9 +65,26 @@ struct Opts {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return PathBuf::from(h);
+    }
+    // Windows rarely sets HOME; fall back to USERPROFILE (then HOMEDRIVE+HOMEPATH).
+    #[cfg(windows)]
+    {
+        if let Some(p) = std::env::var_os("USERPROFILE").filter(|p| !p.is_empty()) {
+            return PathBuf::from(p);
+        }
+        if let (Some(d), Some(p)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+            let mut base = PathBuf::from(d);
+            base.push(p);
+            if !base.as_os_str().is_empty() {
+                return base;
+            }
+        }
+        return PathBuf::from("C:\\");
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/")
 }
 
 fn print_help() {
@@ -111,7 +136,7 @@ EXAMPLES
 
 All settings are written to ~/.config/cc-screen-rust/web.env (CCWEB_*) and are
 editable there; re-running install preserves what you don't override. Linux uses a
-systemd --user unit; macOS a launchd LaunchAgent."#
+systemd --user unit; macOS a launchd LaunchAgent; Windows a Task Scheduler task."#
     );
 }
 
@@ -199,13 +224,19 @@ fn detect_bind() -> String {
 /// Bake ~/.local/bin onto PATH so the engine can find the agent CLIs (claude, …);
 /// a systemd --user unit / launchd job otherwise inherits a minimal PATH.
 fn svc_path() -> String {
+    // PATH uses ':' on Unix, ';' on Windows — use the platform separator so the
+    // prepended bin dir is a valid entry.
+    let sep = if cfg!(windows) { ';' } else { ':' };
     let local = home().join(".local").join("bin");
     let local = local.to_string_lossy().to_string();
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-    if path.split(':').any(|p| p == local) {
+    let default = if cfg!(windows) { "" } else { "/usr/bin:/bin" };
+    let path = std::env::var("PATH").unwrap_or_else(|_| default.into());
+    if path.split(sep).any(|p| p == local) {
         path
+    } else if path.is_empty() {
+        local
     } else {
-        format!("{local}:{path}")
+        format!("{local}{sep}{path}")
     }
 }
 
@@ -333,10 +364,64 @@ fn launchd_plist(
     )
 }
 
+/// Task Scheduler task definition (Windows). A logon-triggered task that runs
+/// the agent with restart-on-failure — the closest analogue to systemd's
+/// `Restart=always`. `ExecutionTimeLimit=PT0S` means "no time limit" (the agent
+/// is long-lived); `MultipleInstancesPolicy=IgnoreNew` avoids stacking copies.
+/// Env comes from `web.env`, which the agent loads itself (config.rs), since
+/// Task Scheduler has no `EnvironmentFile`/inline-env equivalent worth wiring.
+fn windows_task_xml(bin: &str, no_restore: bool) -> String {
+    let args = if no_restore { "--no-restore" } else { "" };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>cc-screen-rust — tmux-free phone UI for AI CLIs</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{cmd}</Command>
+      <Arguments>{args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        cmd = xml_escape(bin),
+        args = xml_escape(args),
+    )
+}
+
 // ── clipboard shim (proposal 0007) ─────────────────────────────────────────
 
 /// Marker line every copy of our shim carries; lets a re-install tell its own
 /// shim apart from a user's real tool that happens to share the name.
+#[cfg(not(windows))]
 const SHIM_MARKER: &str = "cc-screen-rust clipboard shim";
 
 /// Install the clipboard shim into ~/.local/bin as xclip / wl-paste / pbpaste.
@@ -347,6 +432,14 @@ const SHIM_MARKER: &str = "cc-screen-rust clipboard shim";
 /// overwritten — and the shim defers to it for non-image clipboard ops. If a
 /// *foreign* file already occupies the name inside ~/.local/bin, it's backed up
 /// to `<name>.pre-ccshim` once rather than silently lost.
+#[cfg(windows)]
+pub fn install_shim() -> Result<(), String> {
+    // No POSIX clipboard tools on Windows — nothing to shim. Image paste is a
+    // documented fast-follow (proposal 0045 Part D); everything else works.
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn install_shim() -> Result<(), String> {
     let dir = home().join(".local").join("bin");
     let wrote = write_shims_into(&dir)?;
@@ -362,6 +455,7 @@ pub fn install_shim() -> Result<(), String> {
 /// actually (re)written (empty = all already current). A foreign occupant is
 /// moved aside to `<name>.pre-ccshim` once. The dir-parameterised core of
 /// `install_shim`, so it's testable without touching the real ~/.local/bin.
+#[cfg(not(windows))]
 fn write_shims_into(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let mut wrote = Vec::new();
@@ -454,6 +548,8 @@ pub fn install(args: &[String]) -> Result<(), String> {
         install_systemd(&bin, &env_file, opts.no_restore)?;
     } else if cfg!(target_os = "macos") {
         install_launchd(&bin, &config_dir, &env, opts.no_restore)?;
+    } else if cfg!(windows) {
+        install_windows_service(&bin, &config_dir, opts.no_restore)?;
     } else {
         return Err(format!(
             "no service manager for this OS; run it yourself:\n  {bin} --addr {addr}"
@@ -493,6 +589,25 @@ pub fn install(args: &[String]) -> Result<(), String> {
     if bind.starts_with("100.") {
         println!("From a tailnet device, open  http://{addr}  and Add to Home Screen.");
     }
+    Ok(())
+}
+
+/// Register the agent as a logon-triggered Task Scheduler task (Windows). The
+/// per-user analogue of the systemd `--user` unit / launchd LaunchAgent: it
+/// starts at logon and restarts on failure, needs no elevation, and reads its
+/// config from `web.env` (which the agent loads itself — see config.rs, since
+/// Task Scheduler has no `EnvironmentFile`). Cross-platform-compiling (just
+/// `std::fs` + `schtasks.exe`); only ever called under `cfg!(windows)`.
+fn install_windows_service(bin: &str, config_dir: &Path, no_restore: bool) -> Result<(), String> {
+    let xml = windows_task_xml(bin, no_restore);
+    let xml_path = config_dir.join("task.xml");
+    std::fs::write(&xml_path, xml).map_err(|e| format!("writing {}: {e}", xml_path.display()))?;
+    let xml_arg = xml_path.to_string_lossy().to_string();
+    // /F overwrites any existing task, so a re-install is idempotent.
+    run("schtasks", &["/Create", "/TN", WINDOWS_TASK_NAME, "/XML", &xml_arg, "/F"], false)?;
+    // Kick it now so the agent comes up without a log-out/in (best-effort).
+    let _ = run("schtasks", &["/Run", "/TN", WINDOWS_TASK_NAME], true);
+    println!("→ Task Scheduler task '{WINDOWS_TASK_NAME}' registered (starts at logon, auto-restart)");
     Ok(())
 }
 
@@ -562,6 +677,10 @@ pub fn uninstall() -> Result<(), String> {
         let _ = run("launchctl", &["unload", "-w", &plist_path.to_string_lossy()], true);
         let _ = std::fs::remove_file(&plist_path);
         println!("→ removed launchd LaunchAgent '{LAUNCHD_LABEL}'");
+    } else if cfg!(windows) {
+        let _ = run("schtasks", &["/End", "/TN", WINDOWS_TASK_NAME], true);
+        let _ = run("schtasks", &["/Delete", "/TN", WINDOWS_TASK_NAME, "/F"], true);
+        println!("→ removed Task Scheduler task '{WINDOWS_TASK_NAME}'");
     } else {
         return Err("no service manager for this OS".into());
     }
@@ -600,6 +719,9 @@ fn restart_service() {
     } else if cfg!(target_os = "macos") {
         let kick = format!("launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}");
         let _ = run("sh", &["-c", &kick], true);
+    } else if cfg!(windows) {
+        let _ = run("schtasks", &["/End", "/TN", WINDOWS_TASK_NAME], true);
+        let _ = run("schtasks", &["/Run", "/TN", WINDOWS_TASK_NAME], true);
     }
 }
 
@@ -731,11 +853,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_task_xml_has_essentials() {
+        let x = windows_task_xml(r"C:\Users\me\.local\bin\cc-screen-rust.exe", false);
+        assert!(x.contains("<LogonTrigger>"), "logon-triggered");
+        assert!(x.contains("<RestartOnFailure>"), "auto-restart parity with systemd Restart=always");
+        assert!(x.contains("<Command>C:\\Users\\me\\.local\\bin\\cc-screen-rust.exe</Command>"));
+        // No extra args unless asked.
+        assert!(x.contains("<Arguments></Arguments>"));
+
+        let x2 = windows_task_xml("cc-screen-rust.exe", true);
+        assert!(x2.contains("<Arguments>--no-restore</Arguments>"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn shim_carries_its_marker() {
         // install_shim relies on this marker to tell our shim from a real tool.
         assert!(CLIP_SHIM.contains(SHIM_MARKER));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn install_shim_is_idempotent_and_preserves_foreign() {
         let dir = std::env::temp_dir().join(format!("ccr-shim-{}", std::process::id()));

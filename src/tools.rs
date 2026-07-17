@@ -115,8 +115,29 @@ fn defaults() -> Vec<Tool> {
         Tool::new("kc", "kimi", "kimi"),
         Tool::new("gc", "gemini", "gemini --skip-trust"),
         Tool::new("coc", "codex", "codex"),
-        Tool::new("tt", "shell", "${SHELL:-/bin/bash} -l"),
+        Tool::new("tt", "shell", SHELL_TMPL),
     ]
+}
+
+/// The bare-shell tool's launch template. POSIX default; on Windows there's no
+/// `$SHELL`/`-l`, so fall back to PowerShell (present on every Win10+/11 box).
+#[cfg(windows)]
+const SHELL_TMPL: &str = "powershell -NoLogo";
+#[cfg(not(windows))]
+const SHELL_TMPL: &str = "${SHELL:-/bin/bash} -l";
+
+/// The interpreter that wraps a session's launch command line: `/bin/sh -c` on
+/// Unix, `cmd.exe /C` on Windows (present everywhere, and it transparently runs
+/// the `.cmd`/`.ps1` shims npm-installed CLIs like `claude`/`codex` ship as).
+/// Returns `(program, prefix_args)`; the assembled launch string is appended as
+/// the final argument. See `engine.rs`.
+#[cfg(windows)]
+pub fn launch_shell() -> (&'static str, &'static [&'static str]) {
+    ("cmd.exe", &["/C"])
+}
+#[cfg(not(windows))]
+pub fn launch_shell() -> (&'static str, &'static [&'static str]) {
+    ("/bin/sh", &["-c"])
 }
 
 fn parse(text: &str) -> Vec<Tool> {
@@ -252,8 +273,17 @@ fn with_defaults(mut tools: Vec<Tool>) -> Vec<Tool> {
     tools
 }
 
+/// Quote a single argument for the launch shell (`launch_shell`). POSIX
+/// single-quote on Unix; on Windows (`cmd.exe /C`) wrap in double quotes and
+/// double any embedded double-quote, which is enough for the directory paths we
+/// pass through `--add-dir`.
+#[cfg(not(windows))]
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+#[cfg(windows)]
+pub fn shell_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn append_extra_dirs(mut cmd: String, t: &Tool, extra_dirs: &[String]) -> String {

@@ -136,8 +136,10 @@ pub fn build_router(hub: HubState) -> Router {
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router
-        // The machine installer one-liner (`curl <hub>/install.sh | sh`); public.
+        // The machine installer one-liners (public): POSIX `curl <hub>/install.sh | sh`
+        // and the Windows `irm <hub>/install.ps1 | iex` twin (proposal 0045).
         .route("/install.sh", get(install::install_sh))
+        .route("/install.ps1", get(install::install_ps1))
         .fallback(assets::static_handler)
         .layer(axum::middleware::from_fn_with_state(hub.clone(), handlers::require_client_auth))
         .with_state(hub)

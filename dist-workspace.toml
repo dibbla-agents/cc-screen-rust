@@ -17,15 +17,16 @@ ci = "github"
 # Path is relative to .github/workflows/; the leading ../ keeps the fragment in
 # .github/ so GitHub doesn't try to run it as a (malformed) standalone workflow.
 github-build-setup = "../build-setup.yml"
-# The installers to generate for each app (curl | sh). Produces one per app:
-# cc-screen-tui-installer.sh (the ccs client) and cc-screen-rust-installer.sh
-# (the server binary; run `cc-screen-rust install` after to wire the service).
-installers = ["shell"]
+# The installers to generate for each app. `shell` emits the POSIX `curl | sh`
+# scripts (cc-screen-tui-installer.sh + cc-screen-rust-installer.sh); `powershell`
+# emits the Windows `irm … | iex` counterparts (…-installer.ps1) — run
+# `cc-screen-rust install` after either to wire up the service (proposal 0045).
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax).
 # mac (both arches) + Linux as static musl so the binary runs on any distro
-# regardless of glibc version. No Windows: ccs needs a real TTY and we only ship
-# a POSIX shell installer.
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
+# regardless of glibc version + Windows x64 (proposal 0045: ConPTY via portable-pty,
+# crossterm ccs, rustls — all cross-platform; the OS-specific seams are #[cfg(windows)]).
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in. ~/.local/bin matches the repo
 # convention for ccs and works for users without a Rust toolchain (~/.cargo/bin
 # may not exist); the installer adds it to PATH if missing.
@@ -42,6 +43,10 @@ install-updater = false
 #   ccs-mac    -> mac-studio   (macOS arm64; builds both Apple targets natively)
 #   ccs-studio -> studio       (Linux aarch64; native aarch64 musl)
 #   ccs-pine   -> pine         (Linux x86_64; native x86_64 musl)
+# x86_64-pc-windows-msvc is deliberately UNMAPPED: there's no Windows box on the
+# tailnet, so cargo-dist falls back to a GitHub-hosted `windows-latest` runner for
+# that leg (proposal 0045 Part F — the zero-hardware start; register a self-hosted
+# `ccs-win` label here later if volume warrants).
 # The light plan/global/host jobs stay on GitHub-hosted ubuntu (they keep `gh`
 # + publishing off our boxes and barely cost time). Runners dial OUT to GitHub
 # (no inbound); the heavy build job is tag-gated so forked PRs never reach them.
