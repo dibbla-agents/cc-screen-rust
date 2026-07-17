@@ -30,6 +30,19 @@ curl -fsSL "$INSTALLER_URL" | sh
 [ -x "$BIN" ] || BIN="$(command -v cc-screen-rust 2>/dev/null || echo "$HOME/.local/bin/cc-screen-rust")"
 
 echo
+echo "==> Checking which coding assistants are installed…"
+# Best-effort preflight (the binary owns the list — see `cc-screen-rust doctor`):
+# report which of claude/codex/gemini/kimi this machine has and print the install
+# command for each missing one. A `curl | sh` run can't prompt, so this only
+# reports; a missing assistant never aborts the machine install — the agent is
+# still useful for the CLIs that are present.
+if [ -t 0 ]; then
+  "$BIN" doctor --install || true
+else
+  "$BIN" doctor || true
+fi
+
+echo
 echo "==> Connecting '$MACHINE' to $HUB_URL"
 echo "    A code will print below — approve it at $HUB_URL/activate (you must be logged in)."
 echo

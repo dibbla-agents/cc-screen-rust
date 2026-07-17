@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn roundtrips_every_agent_frame() {
-        let tools = vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None }];
+        let tools = vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None, unavailable: false }];
         let sess = SessionInfo {
             name: "claude-x".into(),
             tool: "claude".into(),

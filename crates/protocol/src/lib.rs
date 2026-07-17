@@ -142,6 +142,11 @@ pub struct ToolInfo {
     /// Present only for tools that accept extra workspace dirs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_dirs: Option<ExtraDirs>,
+    /// True when this tool's CLI binary isn't installed on the machine (proposal
+    /// 0046): the picker can grey it out before a doomed create. Additive:
+    /// omitted when false, so older clients and the hub relay are unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -366,14 +371,16 @@ mod tests {
 
     #[test]
     fn tool_info_json_parity() {
-        // No extra-dir support → no extraDirs key.
-        let t = ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None };
+        // No extra-dir support → no extraDirs key; available → no unavailable key
+        // (the 0046 field is omitted when false, so older clients see the same wire).
+        let t = ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None, unavailable: false };
         assert_eq!(serde_json::to_string(&t).unwrap(), r#"{"cmd":"cc","prefix":"claude"}"#);
         // Supports extra dirs, unlimited → empty object.
         let t = ToolInfo {
             cmd: "gm".into(),
             prefix: "gemini".into(),
             extra_dirs: Some(ExtraDirs { max: None }),
+            unavailable: false,
         };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
@@ -384,11 +391,21 @@ mod tests {
             cmd: "cx".into(),
             prefix: "codex".into(),
             extra_dirs: Some(ExtraDirs { max: Some(8) }),
+            unavailable: false,
         };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
             r#"{"cmd":"cx","prefix":"codex","extraDirs":{"max":8}}"#
         );
+        // Missing CLI (0046) → unavailable:true on the wire; and a payload
+        // *without* the key still parses (older agent → newer client).
+        let t = ToolInfo { cmd: "cx".into(), prefix: "codex".into(), extra_dirs: None, unavailable: true };
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"cmd":"cx","prefix":"codex","unavailable":true}"#
+        );
+        let parsed: ToolInfo = serde_json::from_str(r#"{"cmd":"cc","prefix":"claude"}"#).unwrap();
+        assert!(!parsed.unavailable);
     }
 
     #[test]

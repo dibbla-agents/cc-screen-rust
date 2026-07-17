@@ -120,10 +120,14 @@ export default function CreateSession({
       .then((ts) => {
         setTools(ts);
         const last = localStorage.getItem(LAST_TOOL_KEY) || "";
+        // Never default onto a tool whose CLI is missing on this machine (0046)
+        // — an explicit click still selects it (the pill explains why it can't
+        // launch), but the panel shouldn't open pre-aimed at a doomed create.
+        const usable = (cmd: string) => ts.some((t) => t.cmd === cmd && !t.unavailable);
         setTool((cur) => {
-          if (cur && ts.some((t) => t.cmd === cur)) return cur;
-          if (last && ts.some((t) => t.cmd === last)) return last;
-          return ts[0]?.cmd || "";
+          if (cur && usable(cur)) return cur;
+          if (last && usable(last)) return last;
+          return ts.find((t) => !t.unavailable)?.cmd || ts[0]?.cmd || "";
         });
       })
       .catch(() => {});
@@ -526,7 +530,8 @@ export default function CreateSession({
               onClick={() => setTool(t.cmd)}
               className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${
                 tool === t.cmd ? `${toolColor(t.prefix)} text-bar` : "bg-bar text-slate-400"
-              }`}
+              } ${t.unavailable ? "line-through opacity-40" : ""}`}
+              title={t.unavailable ? `${t.prefix} is not installed on this machine` : undefined}
             >
               {t.prefix}
             </button>

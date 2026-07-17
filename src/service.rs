@@ -466,6 +466,11 @@ pub fn install(args: &[String]) -> Result<(), String> {
         eprintln!("→ warning: clipboard shim not installed: {e}");
     }
 
+    // Report which assistant CLIs the sessions can actually launch (0046).
+    // Report-only here — a service install must not block on a missing optional
+    // CLI; `doctor --install` is the interactive path.
+    crate::doctor::install_report();
+
     println!();
     let hub_only = env.contains_key("CCWEB_HUB_ONLY");
     if hub_only {

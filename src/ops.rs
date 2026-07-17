@@ -131,6 +131,7 @@ mod tests {
             resume_suffix: None,
             resume_keep_extra: false,
             yolo_flag: None,
+            install_hint: None,
         }
     }
 
