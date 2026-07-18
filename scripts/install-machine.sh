@@ -49,7 +49,10 @@ echo
 # One command: device flow (prints a code, waits for dashboard approval, saves the
 # token), then installs the background service (--hub-only = reachable only via the
 # hub, binds no local port). Reconnects on boot.
-"$BIN" install --hub "$HUB_URL" --machine-id "$MACHINE" --hub-only --enroll
+if ! "$BIN" install --hub "$HUB_URL" --machine-id "$MACHINE" --hub-only --enroll; then
+    echo "install failed: '$MACHINE' enrolled but the reconnect service was not registered." >&2
+    exit 1
+fi
 
 echo
 echo "✓ Done — '$MACHINE' is connected and will reconnect automatically."

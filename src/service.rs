@@ -373,13 +373,18 @@ fn launchd_plist(
 fn windows_task_xml(bin: &str, no_restore: bool) -> String {
     let args = if no_restore { "--no-restore" } else { "" };
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        // `schtasks /XML` reads task files as UTF-16LE and validates this
+        // declaration against the actual encoding, so it MUST say UTF-16 and the
+        // bytes MUST be written UTF-16LE-with-BOM (see `write_utf16le_bom`) — the
+        // two halves are load-bearing together (proposal 0047 bug 1).
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>cc-screen-rust — tmux-free phone UI for AI CLIs</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
+      <UserId>{user}</UserId>
       <Enabled>true</Enabled>
     </LogonTrigger>
   </Triggers>
@@ -414,7 +419,35 @@ fn windows_task_xml(bin: &str, no_restore: bool) -> String {
 "#,
         cmd = xml_escape(bin),
         args = xml_escape(args),
+        user = xml_escape(&current_user()),
     )
+}
+
+/// The user the logon task should be scoped to. A `<LogonTrigger>` with no
+/// `<UserId>` means "when *any* user logs on" — a machine-wide trigger that
+/// requires an elevated token, which the machine's UAC-filtered Administrator
+/// doesn't have, so `schtasks /Create` is denied. Scoping to the current user
+/// keeps registration unelevated (proposal 0047 bug 2). Prefer the qualified
+/// `DOMAIN\user`, fall back to a bare username.
+fn current_user() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() && !user.is_empty() => format!("{d}\\{user}"),
+        _ => user,
+    }
+}
+
+/// `schtasks /XML` only accepts UTF-16LE-with-BOM. `std::fs::write` would emit
+/// UTF-8 and the parser dies at the encoding declaration, so encode explicitly.
+/// (Both the UTF-16 *declaration* in `windows_task_xml` and these bytes are
+/// required — either alone still fails at (1,40). See proposal 0047.)
+#[cfg_attr(not(windows), allow(dead_code))]
+fn write_utf16le_bom(path: &Path, s: &str) -> std::io::Result<()> {
+    let mut bytes = vec![0xFF, 0xFE]; // UTF-16LE BOM
+    for unit in s.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    std::fs::write(path, bytes)
 }
 
 // ── clipboard shim (proposal 0007) ─────────────────────────────────────────
@@ -606,7 +639,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
 fn install_windows_service(bin: &str, config_dir: &Path, no_restore: bool) -> Result<(), String> {
     let xml = windows_task_xml(bin, no_restore);
     let xml_path = config_dir.join("task.xml");
-    std::fs::write(&xml_path, xml).map_err(|e| format!("writing {}: {e}", xml_path.display()))?;
+    write_utf16le_bom(&xml_path, &xml).map_err(|e| format!("writing {}: {e}", xml_path.display()))?;
     let xml_arg = xml_path.to_string_lossy().to_string();
     // /F overwrites any existing task, so a re-install is idempotent.
     run("schtasks", &["/Create", "/TN", WINDOWS_TASK_NAME, "/XML", &xml_arg, "/F"], false)?;
@@ -865,9 +898,25 @@ mod tests {
         assert!(x.contains("<Command>C:\\Users\\me\\.local\\bin\\cc-screen-rust.exe</Command>"));
         // No extra args unless asked.
         assert!(x.contains("<Arguments></Arguments>"));
+        // schtasks /XML validates the declaration against the UTF-16LE bytes (0047 bug 1).
+        assert!(x.contains(r#"encoding="UTF-16""#), "schtasks requires UTF-16");
+        // A user-scoped logon trigger registers unelevated; a machine-wide one is denied (0047 bug 2).
+        assert!(x.contains("<UserId>"), "logon trigger must be user-scoped or it needs admin");
 
         let x2 = windows_task_xml("cc-screen-rust.exe", true);
         assert!(x2.contains("<Arguments>--no-restore</Arguments>"));
+    }
+
+    #[test]
+    fn write_utf16le_bom_is_utf16le_with_bom() {
+        let dir = std::env::temp_dir().join(format!("ccr-utf16-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.xml");
+        write_utf16le_bom(&path, "AB").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // BOM followed by each ASCII char as a little-endian UTF-16 unit.
+        assert_eq!(bytes, vec![0xFF, 0xFE, b'A', 0x00, b'B', 0x00]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(not(windows))]

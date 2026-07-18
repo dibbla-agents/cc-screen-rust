@@ -44,6 +44,10 @@ Write-Host ""
 # token), then registers the background service (--hub-only = reachable only via
 # the hub, binds no local port). Reconnects at logon.
 & $Bin install --hub $HubUrl --machine-id $Machine --hub-only --enroll
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "install failed (exit $LASTEXITCODE): '$Machine' enrolled but the reconnect task was not registered."
+    exit $LASTEXITCODE
+}
 
 Write-Host ""
 Write-Host "OK — '$Machine' is connected and will reconnect automatically."
