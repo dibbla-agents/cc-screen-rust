@@ -24,6 +24,15 @@ $Machine = if ($args.Count -ge 1 -and $args[0]) { $args[0] }
            else { $env:COMPUTERNAME }
 
 Write-Host "==> Installing the cc-screen-rust binary..."
+# Re-running this one-liner is also the UPDATE path, so a previous install may have
+# the agent already running — and Windows locks a running .exe, so the installer
+# can't overwrite it ("being used by another process"). Stop the task instance and
+# any lingering process first; all best-effort (fine if nothing's there on a first
+# install). The `install ... --enroll` step below re-registers the task and starts
+# it again, so the agent comes right back on the new binary.
+try { schtasks /End /TN cc-screen-rust 2>$null | Out-Null } catch {}
+Get-Process cc-screen-rust -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 400   # let Windows release the file handle before the overwrite
 # The cargo-dist PowerShell installer drops the binary into ~\.local\bin and adds
 # it to the user PATH (matches install-path in dist-workspace.toml).
 Invoke-RestMethod $InstallerUrl | Invoke-Expression
