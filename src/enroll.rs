@@ -82,16 +82,58 @@ struct ErrResp {
     error: String,
 }
 
+/// Whether a persisted uplink token is still accepted by the hub.
+enum TokenState {
+    Valid,
+    /// The hub rejected it — the machine was unlinked / the token revoked.
+    Revoked,
+    /// Couldn't tell: an older hub without the validate route (404), or a
+    /// transient network/hub error. Treated as valid so a hiccup never forces a
+    /// needless re-enrollment of a working machine.
+    Unknown,
+}
+
+/// Ask the hub whether `token` is still valid for `machine_id`
+/// (`POST /api/device/validate`, authed by the token itself). Only an explicit
+/// `401` means "revoked"; everything else is `Unknown` (proposal 0048).
+async fn validate_token(http: &reqwest::Client, base: &str, machine_id: &str, token: &str) -> TokenState {
+    let resp = http
+        .post(format!("{base}/api/device/validate"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "machine_id": machine_id }))
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => TokenState::Valid,
+        Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => TokenState::Revoked,
+        _ => TokenState::Unknown,
+    }
+}
+
 /// Run the device flow against `hub_url` and return the minted uplink token,
 /// persisting it (with `agent_id`) so future restarts skip enrollment entirely.
 /// Loops back to a fresh code if the user lets one expire; aborts on denial.
 pub async fn ensure_token(hub_url: &str, machine_id: &str, config_dir: &Path) -> anyhow::Result<String> {
     let mut id = load_identity(config_dir);
-    if let Some(tok) = id.token.clone().filter(|t| !t.is_empty()) {
-        return Ok(tok); // already enrolled
-    }
     let base = hub_url.trim_end_matches('/').to_string();
     let http = reqwest::Client::new();
+
+    // A persisted token means "already enrolled" — but only if the hub still
+    // honors it. If this machine was unlinked from the dashboard the token is dead,
+    // and reusing it just flaps the uplink forever (the hub closes every reconnect
+    // with UPLINK_CLOSE_UNAUTHORIZED). Validate first; re-enroll only on an explicit
+    // rejection — an older/unreachable hub keeps today's reuse-the-token behavior.
+    if let Some(tok) = id.token.clone().filter(|t| !t.is_empty()) {
+        match validate_token(&http, &base, machine_id, &tok).await {
+            TokenState::Valid | TokenState::Unknown => return Ok(tok),
+            TokenState::Revoked => {
+                println!("\n  This machine was unlinked from the hub — re-enrolling.");
+                id.token = None;
+                id.agent_id = None;
+                let _ = save_identity(config_dir, &id);
+            }
+        }
+    }
 
     loop {
         // ── request a code ──────────────────────────────────────────────────

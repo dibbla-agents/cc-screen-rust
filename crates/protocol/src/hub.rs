@@ -58,6 +58,13 @@ pub const MIN_SUPPORTED_PROTO: u16 = 1;
 /// The control channel id (`0`). Terminal/watch channels are `>= 1`.
 pub const CONTROL_CHANNEL: ChannelId = 0;
 
+/// WebSocket close code the hub uses to reject an agent uplink whose token is
+/// **unauthorized** — unknown, or revoked because the machine was unlinked from
+/// the dashboard. In the private-use range (4000–4999); echoes HTTP 401. The
+/// agent distinguishes this from an ordinary disconnect so it stops hot-looping a
+/// dead credential and tells the user to re-enroll (proposal 0048).
+pub const UPLINK_CLOSE_UNAUTHORIZED: u16 = 4401;
+
 // ── agent → hub ────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentMsg {
@@ -405,5 +412,12 @@ mod tests {
         let mut buf = (header.len() as u32).to_be_bytes().to_vec();
         buf.extend_from_slice(header);
         assert_eq!(decode_frame::<AgentMsg>(&buf), Err(FrameError::BadHeader));
+    }
+
+    #[test]
+    fn unauthorized_close_code_is_private_use() {
+        // Must sit in the WebSocket application/private-use range (4000–4999) so it
+        // never collides with a protocol-defined close code (proposal 0048).
+        assert!((4000..=4999).contains(&UPLINK_CLOSE_UNAUTHORIZED));
     }
 }

@@ -6,12 +6,13 @@
 
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cc_screen_protocol::hub::{
     decode_frame, encode_frame, AgentMsg, HubMsg, HUB_PROTO_VERSION, MIN_SUPPORTED_PROTO,
+    UPLINK_CLOSE_UNAUTHORIZED,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -93,7 +94,15 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                 let Some((user_id, agent_id)) = hub.resolve_agent(&machine_id, token.as_deref()).await
                 else {
                     tracing::warn!("agent {machine_id}: rejected (bad uplink token)");
-                    let _ = ws_write.send(Message::Close(None)).await;
+                    // A distinguishable close code (not a bare Close) so the agent
+                    // knows its token was revoked/unlinked and stops hot-looping —
+                    // see proposal 0048.
+                    let _ = ws_write
+                        .send(Message::Close(Some(CloseFrame {
+                            code: UPLINK_CLOSE_UNAUTHORIZED,
+                            reason: "unauthorized: machine unlinked or token revoked — re-enroll".into(),
+                        })))
+                        .await;
                     return;
                 };
                 // Fix 4: in OPEN uplink mode (no per-agent tokens) any peer could

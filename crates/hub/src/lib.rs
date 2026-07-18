@@ -115,6 +115,7 @@ pub fn build_router(hub: HubState) -> Router {
         // the device_code is the bearer); /approve is cookie-authed.
         .route("/api/device/code", post(device::code))
         .route("/api/device/token", post(device::token))
+        .route("/api/device/validate", post(device::validate))
         .route("/api/device/approve", post(device::approve))
         // Account + dashboard. /signup is unauthenticated (it mints the session);
         // the agent-management routes are cookie-authed.

@@ -677,10 +677,12 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         // The Google OAuth login flow (start/callback) must be reachable without a
         // session — it IS the login.
         || path.starts_with("/api/auth/google/")
-        // Device-flow host endpoints are unauthenticated (the device_code is the
-        // bearer); /api/device/approve is intentionally NOT exempt — it needs the
-        // user's session to bind the enrollment to their tenant.
-        || matches!(path.as_str(), "/api/device/code" | "/api/device/token");
+        // Device-flow host endpoints are unauthenticated at the cookie gate (the
+        // device_code / uplink token IS the bearer); /api/device/validate authns
+        // via the uplink token in its own handler (proposal 0048). /api/device/approve
+        // is intentionally NOT exempt — it needs the user's session to bind the
+        // enrollment to their tenant.
+        || matches!(path.as_str(), "/api/device/code" | "/api/device/token" | "/api/device/validate");
 
     // Multi-tenant (proposal 0001 §4.1): identity comes from the session cookie,
     // not the shared secret. A gated request without a valid session is refused

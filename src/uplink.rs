@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use cc_screen_protocol::hub::{
     decode_frame, encode_frame, AgentMsg, ChannelId, HubMsg, HUB_PROTO_VERSION,
+    UPLINK_CLOSE_UNAUTHORIZED,
 };
 use cc_screen_protocol::SessionInfo;
 use futures_util::{SinkExt, StreamExt};
@@ -58,6 +59,16 @@ enum WsOut {
     Pong(Vec<u8>),
 }
 
+/// How a connected uplink ended — so the reconnect loop can tell an ordinary drop
+/// (retry fast) from the hub rejecting our token (don't hot-loop; re-enroll).
+enum Disconnect {
+    /// Normal disconnect (network drop, hub restart, idle watchdog) — reconnect fast.
+    Normal,
+    /// The hub closed with `UPLINK_CLOSE_UNAUTHORIZED`: this machine was unlinked or
+    /// the token revoked. Retrying the same token is futile (proposal 0048).
+    AuthRejected,
+}
+
 /// Reconnect backoff: 0.5s, 1s, 2s, 4s, 8s, then capped at 15s. Pure (no clock)
 /// so it's unit-testable; the run loop resets `attempt` to 0 once connected, so a
 /// healthy session that drops reconnects fast.
@@ -98,15 +109,32 @@ pub async fn run(
     let url = agent_ws_url(&hub_url);
     tracing::info!("uplink: hub={url} machine_id={machine_id}");
     let mut attempt = 0u32;
+    let mut warned_auth = false;
     loop {
         match connect_and_serve(&state, &url, &hub_url, token.as_deref(), &machine_id, summary).await {
             Err(e) => {
                 tracing::warn!("uplink: connect failed: {e}");
                 attempt = attempt.saturating_add(1);
             }
-            Ok(()) => {
+            Ok(Disconnect::Normal) => {
                 tracing::info!("uplink: disconnected; reconnecting");
                 attempt = 0;
+                warned_auth = false;
+            }
+            Ok(Disconnect::AuthRejected) => {
+                // The hub rejected our token — the machine was unlinked or the token
+                // revoked. Retrying it is futile, so don't hot-loop: warn once with a
+                // fix, then pin the backoff to its 15s cap (a re-enroll writes a new
+                // token and restarts this agent). See proposal 0048.
+                if !warned_auth {
+                    tracing::error!(
+                        "uplink: hub rejected this machine's token — it was unlinked or revoked. \
+                         Re-enroll to reconnect: re-run the install one-liner, or \
+                         `cc-screen-rust enroll --hub {hub_url} --machine-id {machine_id}`."
+                    );
+                    warned_auth = true;
+                }
+                attempt = 5; // backoff() caps at 15s for attempt >= 5
             }
         }
         sleep(backoff(attempt)).await;
@@ -114,7 +142,8 @@ pub async fn run(
 }
 
 /// Returns `Err` only if the handshake never completed (caller escalates backoff);
-/// once connected it returns `Ok(())` on any disconnect.
+/// once connected it returns `Ok(Disconnect::…)` on any disconnect — `AuthRejected`
+/// when the hub closed with `UPLINK_CLOSE_UNAUTHORIZED`, else `Normal`.
 async fn connect_and_serve(
     state: &AppState,
     url: &str,
@@ -122,7 +151,7 @@ async fn connect_and_serve(
     token: Option<&str>,
     machine_id: &str,
     summary: SummaryParams,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Disconnect> {
     let mut req = url.into_client_request()?;
     if let Some(t) = token {
         let mut val = HeaderValue::from_str(&format!("Bearer {t}"))?;
@@ -177,6 +206,7 @@ async fn connect_and_serve(
     // path is dead and we reconnect. Registration just happened, so seed it now.
     let mut heartbeat = interval(HEARTBEAT_CHECK);
     let mut last_recv = Instant::now();
+    let mut disconnect = Disconnect::Normal;
 
     loop {
         tokio::select! {
@@ -256,7 +286,17 @@ async fn connect_and_serve(
                             break;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        // A close carrying UPLINK_CLOSE_UNAUTHORIZED means the hub
+                        // rejected our token (machine unlinked / revoked). Flag it so
+                        // the reconnect loop stops hot-looping a dead credential
+                        // (proposal 0048); any other close is an ordinary disconnect.
+                        if frame.map(|f| u16::from(f.code)) == Some(UPLINK_CLOSE_UNAUTHORIZED) {
+                            disconnect = Disconnect::AuthRejected;
+                        }
+                        break;
+                    }
+                    None => break,
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
                         tracing::warn!("uplink: read error: {e}");
@@ -276,7 +316,7 @@ async fn connect_and_serve(
         w.forwarder.abort();
     }
     writer.abort();
-    Ok(())
+    Ok(disconnect)
 }
 
 /// A relayed filesystem-watch channel: the `Watcher` client id plus the forwarder

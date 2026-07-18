@@ -70,6 +70,29 @@ fn err(code: &str) -> Response {
 }
 
 #[derive(Deserialize)]
+pub struct ValidateReq {
+    machine_id: String,
+}
+
+/// `POST /api/device/validate` — a headless host asks whether its persisted uplink
+/// token is still accepted (i.e. the machine hasn't been unlinked). Authed by the
+/// token itself (Bearer), exactly like the uplink; no cookie. `200` = valid,
+/// `401` = revoked/unknown. This lets `--enroll` re-run the device flow instead of
+/// reusing a dead token and flapping the uplink forever (proposal 0048).
+pub async fn validate(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<ValidateReq>) -> Response {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    if hub.resolve_agent(req.machine_id.trim(), token).await.is_some() {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, "revoked").into_response()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct ApproveReq {
     user_code: String,
 }
