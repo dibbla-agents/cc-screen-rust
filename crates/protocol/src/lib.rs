@@ -13,11 +13,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "hub")]
 pub mod hub;
 
-/// Where the `curl | sh` installers are hosted (the Dibbla docs site, off our own
-/// domain — see README "Install"). The `update` subcommand on each binary re-runs
-/// its installer from here: `<RELEASE_BASE_URL>/install-<name>.sh`. Single source
-/// of truth shared by the agent, the hub, and the TUI.
-pub const RELEASE_BASE_URL: &str = "https://cc-screen-b4687da9.dibbla.app/dl";
+/// Where the `curl | sh` installers are hosted: the GitHub Release, always the
+/// latest tag. The `update` subcommand on each binary re-runs its cargo-dist
+/// installer from here — `<RELEASE_BASE_URL>/<pkg>-installer.sh` (e.g.
+/// `cc-screen-rust-installer.sh`; the pkg name differs per binary, so the exact
+/// asset is spelled out at each call site). Single source of truth shared by the
+/// agent, the hub, and the TUI. (The repo is public, so these download
+/// anonymously — no Dibbla `/dl` mirror in the path.)
+pub const RELEASE_BASE_URL: &str =
+    "https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download";
 
 // ── GET /api/sessions ────────────────────────────────────────────────────────
 /// One entry in the session list. (Named `SessionInfo`, not `Session`, so it

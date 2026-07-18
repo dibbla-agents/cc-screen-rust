@@ -18,15 +18,19 @@ const Prompt = () => (
   <span className="mr-[0.6ch] select-none text-green">$</span>
 );
 
+// Installers are served straight from the GitHub Release (latest tag); the repo
+// is public, so these download anonymously. No Dibbla /dl mirror in the path.
+const GH_DL =
+  "https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download";
 const RUST_INSTALL =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh";
+  `curl --proto '=https' --tlsv1.2 -LsSf ${GH_DL}/cc-screen-rust-installer.sh | sh`;
 // Windows agent installer (proposal 0045) — the PowerShell `irm | iex` twin.
 const RUST_INSTALL_WIN =
-  "irm https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.ps1 | iex";
+  `irm ${GH_DL}/cc-screen-rust-installer.ps1 | iex`;
 const TUI_INSTALL =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh";
+  `curl --proto '=https' --tlsv1.2 -LsSf ${GH_DL}/cc-screen-tui-installer.sh | sh`;
 const HUB_INSTALL =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen-hub.sh | sh";
+  `curl --proto '=https' --tlsv1.2 -LsSf ${GH_DL}/cc-screen-hub-installer.sh | sh`;
 const HUB_SLAVE =
   "cc-screen-rust install --hub https://<hub>:8840 --machine-id <name> --hub-only";
 

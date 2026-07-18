@@ -6,7 +6,7 @@
 # vX.Y.Z tag). This edits every workspace [package] version line, refreshes
 # Cargo.lock, and stages them. It does NOT commit, tag, or push — review, then:
 #     git commit -m "Release X.Y.Z" && git push
-#     ./release.sh && site/release-host.sh
+#     ./release.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
@@ -39,4 +39,4 @@ cargo check --workspace >/dev/null
 git add $FILES Cargo.lock
 echo "✓ bumped to $NEW and staged. Next:"
 echo "    git commit -m \"Release $NEW\" && git push"
-echo "    ./release.sh && site/release-host.sh"
+echo "    ./release.sh"

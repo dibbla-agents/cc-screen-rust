@@ -10,7 +10,7 @@ description = "Aggregator hub for cc-screen-rust: one endpoint over many agents"
 
 # Cross-built + shipped by `dist` like the server: embeds frontend/dist (built
 # first by the github-build-setup step). Produces cc-screen-hub-installer.sh,
-# re-hosted on the site as /dl/install-cc-screen-hub.sh.
+# served straight from the GitHub Release (`cc-screen-hub update` re-runs it).
 [package.metadata.dist]
 dist = true
 

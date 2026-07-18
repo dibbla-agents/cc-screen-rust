@@ -728,10 +728,10 @@ pub fn uninstall() -> Result<(), String> {
 // ── update (re-run the hosted installer, then restart the service) ──────────
 
 /// Fetch + install the latest released binary (the same `curl | sh` installer the
-/// docs site serves), then restart the service so it takes over. Used by
+/// GitHub Release serves), then restart the service so it takes over. Used by
 /// `cc-screen-rust update`.
 pub fn update() -> Result<(), String> {
-    let url = format!("{}/install-cc-screen.sh", cc_screen_protocol::RELEASE_BASE_URL);
+    let url = format!("{}/cc-screen-rust-installer.sh", cc_screen_protocol::RELEASE_BASE_URL);
     println!("→ downloading the latest cc-screen-rust from {url}");
     let cmd = format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh");
     let status = Command::new("sh")

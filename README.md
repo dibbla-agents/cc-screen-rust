@@ -34,9 +34,10 @@ Requires the Rust toolchain (`rustup`) and Node (for the Vite build).
 ## Install
 
 Both binaries ship as prebuilt artifacts (macOS arm64/x86_64, Linux arm64/x86_64
-static musl), cross-built by `dist` (`.github/workflows/release.yml`, config in
-`dist-workspace.toml`) and **hosted on the cc-screen site itself** (under `/dl`),
-so install runs off our own domain — no GitHub account in the path. Each installer
+static musl, Windows x86_64), cross-built by `dist`
+(`.github/workflows/release.yml`, config in `dist-workspace.toml`) and served
+straight from the **GitHub Release** (always the latest tag). The repo is public,
+so the one-liners download anonymously — no GitHub account needed. Each installer
 detects OS/arch, verifies the embedded SHA-256 checksum, and drops the binary into
 `~/.local/bin`.
 
@@ -48,7 +49,7 @@ it's the address you open and the clients connect to:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen-hub.sh | sh
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-hub-installer.sh | sh
 cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
 # cc-screen-hub uninstall          # tear the service back down
 ```
@@ -59,7 +60,7 @@ it runs the agents and dials out, with no inbound and nothing to open directly.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://cc-screen-b4687da9.dibbla.app/dl/install-cc-screen.sh | sh
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh
 cc-screen-rust install --hub https://hub:8840 --hub-token T1 --machine-id laptop --hub-only
 # cc-screen-rust uninstall         # tear the service back down
 # cc-screen-rust install --help    # all flags
@@ -72,7 +73,7 @@ it and Add to Home Screen); `ccs` is the native terminal client:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://cc-screen-b4687da9.dibbla.app/dl/install-ccs.sh | sh
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
 #   browser → https://hub:8840
 #   ccs --server https://hub:8840 --token <client-token>
 ```
@@ -138,11 +139,11 @@ same `--password`/`--token` via `cc-screen-rust install`; secrets live in each
 tool's `web.env` and survive re-running `install`. See [HUB.md](HUB.md).
 
 **Cutting a release.** Bump the version with `./bump.sh X.Y.Z` (lockstep across the
-three crates + `Cargo.lock`) and commit it; then `./release.sh` tags + waits for
-the CI cross-build (which also publishes a GitHub Release as a mirror); then
-`site/release-host.sh` re-hosts those CI artifacts on the site under `/dl` —
-exactly what the one-liners above serve. (The `/release` skill walks an agent
-through the whole thing, including updating the running server vs. the docs site.)
+crates + `Cargo.lock`) and commit it; then `./release.sh` tags + waits for the CI
+cross-build and publishes the GitHub Release. The one-liners above serve straight
+from `releases/latest`, so a published release is installable immediately — nothing
+else to host. (The `/release` skill walks an agent through the whole thing,
+including updating the running server vs. the docs site.)
 
 ## Docs site
 

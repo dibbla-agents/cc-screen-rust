@@ -340,9 +340,9 @@ pub fn uninstall() -> Result<(), String> {
 // ── update (re-run the hosted installer, then restart the service) ──────────
 
 /// Fetch + install the latest released hub binary (the same `curl | sh` installer
-/// the docs site serves), then restart the service. Used by `cc-screen-hub update`.
+/// the GitHub Release serves), then restart the service. Used by `cc-screen-hub update`.
 pub fn update() -> Result<(), String> {
-    let url = format!("{}/install-cc-screen-hub.sh", cc_screen_protocol::RELEASE_BASE_URL);
+    let url = format!("{}/cc-screen-hub-installer.sh", cc_screen_protocol::RELEASE_BASE_URL);
     println!("→ downloading the latest cc-screen-hub from {url}");
     let cmd = format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh");
     let status = Command::new("sh")

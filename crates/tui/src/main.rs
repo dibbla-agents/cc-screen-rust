@@ -46,10 +46,12 @@ async fn main() -> Result<()> {
     res
 }
 
-/// `ccs update` — re-run the hosted installer (same `curl | sh` the docs site
-/// serves) to fetch the latest `ccs` binary. The TUI has no service to restart.
+/// `ccs update` — re-run the hosted installer (same `curl | sh` the GitHub
+/// Release serves) to fetch the latest `ccs` binary. The TUI has no service to
+/// restart. `ccs` ships from the `cc-screen-tui` package, so its installer asset
+/// is `cc-screen-tui-installer.sh`.
 fn run_update() -> Result<()> {
-    let url = format!("{}/install-ccs.sh", cc_screen_protocol::RELEASE_BASE_URL);
+    let url = format!("{}/cc-screen-tui-installer.sh", cc_screen_protocol::RELEASE_BASE_URL);
     println!("→ downloading the latest ccs from {url}");
     let cmd = format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh");
     let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status()?;
@@ -77,7 +79,7 @@ fn run_uninstall() -> Result<()> {
     std::fs::remove_file(&exe).with_context(|| format!("couldn't remove {}", exe.display()))?;
     println!("✓ removed ccs ({})", exe.display());
     println!(
-        "  Re-install: curl --proto '=https' --tlsv1.2 -LsSf {}/install-ccs.sh | sh",
+        "  Re-install: curl --proto '=https' --tlsv1.2 -LsSf {}/cc-screen-tui-installer.sh | sh",
         cc_screen_protocol::RELEASE_BASE_URL
     );
     Ok(())
