@@ -376,6 +376,79 @@ export async function restoreSessions(machine?: string): Promise<RestoreResult> 
   return r.json();
 }
 
+// ── Coding-assistant updates (proposal 0049) ────────────────────────────────
+// Updating the CLIs and restarting the sessions that use them is a *job*, not a
+// request: it can take minutes, so the agent owns it and we read snapshots. The
+// job lives on the agent, which is why closing the panel — or reloading the page
+// — loses nothing.
+
+export interface UpdateToolStatus {
+  tool: string;
+  label: string;
+  // pending | updating | updated | current | failed | skipped
+  state: string;
+  from?: string;
+  to?: string;
+  message?: string;
+}
+
+export interface SessionRestartStatus {
+  session: string;
+  tool: string;
+  // pending | stopping | starting | resumed | failed | skipped
+  state: string;
+  message?: string;
+}
+
+export interface UpdateJob {
+  id?: string;
+  // idle | updating | restarting | done
+  phase: string;
+  startedAt?: number;
+  finishedAt?: number;
+  tools?: UpdateToolStatus[];
+  sessions?: SessionRestartStatus[];
+  error?: string;
+}
+
+export const jobRunning = (j?: UpdateJob | null): boolean =>
+  !!j && (j.phase === "updating" || j.phase === "restarting");
+
+// fetchUpdateJob reads the current-or-last job on one machine. A hub answers
+// 403 for a machine you don't own and 501 for an agent too old to self-update —
+// both are surfaced as the row's reason, so the caller gets the message text.
+export async function fetchUpdateJob(machine?: string): Promise<UpdateJob> {
+  const r = await fetch(withMachine("/api/assistants/update", machine));
+  if (!r.ok) throw new Error((await r.text()).trim() || `update status: ${r.status}`);
+  return r.json();
+}
+
+// startAssistantUpdate kicks off the job. `restart` picks which sessions come
+// back: "updated" (only those whose CLI actually changed — the default), "all",
+// or "none". A 409 means one is already running; we return that job so the
+// caller just watches it instead of racing a second one.
+export async function startAssistantUpdate(
+  machine?: string,
+  opts?: { tools?: string[]; restart?: "updated" | "all" | "none" }
+): Promise<UpdateJob> {
+  const r = await fetch(withMachine("/api/assistants/update", machine), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tools: opts?.tools ?? [], restart: opts?.restart ?? "updated" }),
+  });
+  const text = (await r.text()).trim();
+  if (r.status === 409) {
+    // The body is the running job's snapshot.
+    try {
+      return JSON.parse(text) as UpdateJob;
+    } catch {
+      throw new Error("an update is already running on this machine");
+    }
+  }
+  if (!r.ok) throw new Error(text || `update: ${r.status}`);
+  return JSON.parse(text) as UpdateJob;
+}
+
 // sendKey injects one named key (out-of-band; no focus needed). Names match
 // the backend allow-list: up/down/left/right/enter/escape/tab/btab/space/
 // backspace/home/end/pageup/pagedown/c-c/c-d/c-z/c-l/c-r.

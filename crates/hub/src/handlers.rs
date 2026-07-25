@@ -410,6 +410,98 @@ pub async fn restore(State(hub): State<HubState>, Extension(scope): Extension<Vi
     }
 }
 
+// ── Assistant updates, routed to the owning agent (proposal 0049) ────────────
+// Two ops with a stricter gate than the rest of the relay: updating CLIs and
+// restarting terminals is an administrative act on someone's host, and under
+// 0039 a share grants *use*, not administration. So these require OWNERSHIP —
+// `may_use_agent` (which an agent-grantee satisfies) is deliberately not enough.
+// The other half of the gate is the agent's advertised capability: an older
+// agent can't deserialize these `Cmd`s, so routing one would hang until the
+// relay timed out into a 504. We answer 501 with something actionable instead.
+
+/// Resolve + authorize the target agent for an update op. `Err` is the ready-made
+/// HTTP response (404 unknown/offline, 403 not the owner, 501 agent too old).
+fn update_target(
+    hub: &HubState,
+    scope: &Visibility,
+    machine: &str,
+) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
+    let agent = hub.registry.resolve_scoped(scope, machine, None).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
+    })?;
+    if !scope.owns_agent(&agent) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "only the machine's owner can update its coding assistants",
+        )
+            .into_response());
+    }
+    if !agent.caps.iter().any(|c| c == cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE) {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "this machine's agent is too old to self-update — run `cc-screen-rust update` on it",
+        )
+            .into_response());
+    }
+    Ok(agent)
+}
+
+/// Send an update op to an authorized agent and map its reply. A `409` carries
+/// the *running* job as its body (the agent JSON-encodes it into `msg`), so the
+/// client can switch to watching that job instead of racing a second one.
+async fn update_send(agent: std::sync::Arc<crate::registry::AgentConn>, cmd: Cmd) -> Response {
+    match agent.request(cmd).await {
+        Ok(CmdResult::Json(v)) => Json(v).into_response(),
+        Ok(CmdResult::Error { code, msg }) => {
+            let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);
+            match serde_json::from_str::<Value>(&msg) {
+                Ok(v) => (status, Json(v)).into_response(),
+                Err(_) => (status, msg).into_response(),
+            }
+        }
+        Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected agent reply").into_response(),
+        Err(RequestErr::Offline) => (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response(),
+        Err(RequestErr::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "agent did not respond").into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateBody {
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    restart: Option<String>,
+}
+
+pub async fn update_assistants(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+    Query(q): Query<MachineQ>,
+    body: Option<Json<UpdateBody>>,
+) -> Response {
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    let agent = match update_target(&hub, &scope, &q.machine) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    let cmd = Cmd::UpdateAssistants {
+        tools: b.tools,
+        restart: b.restart.unwrap_or_else(|| "updated".into()),
+    };
+    update_send(agent, cmd).await
+}
+
+pub async fn update_status(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+    Query(q): Query<MachineQ>,
+) -> Response {
+    match update_target(&hub, &scope, &q.machine) {
+        Ok(agent) => update_send(agent, Cmd::UpdateStatus).await,
+        Err(resp) => resp,
+    }
+}
+
 // ── Favorites (hub-local: one list for the whole fleet) ───────────────────────
 fn favorites_path(hub: &HubState) -> std::path::PathBuf {
     hub.config_dir.join("favorites.json")

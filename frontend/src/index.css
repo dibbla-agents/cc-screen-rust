@@ -330,3 +330,13 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .cc-find::before, .cc-find-btn, .cc-find-toggle { transition: none; }
 }
+
+/* A slow, unhurried spin for the "update coding assistants" header button while
+   its job runs (proposal 0049) — a live indicator, not the urgent spinner of a
+   request in flight. Suppressed under reduced motion, where the amber dot and
+   the panel's text carry the state on their own. */
+@keyframes cc-spin-slow { to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: cc-spin-slow 2.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-slow { animation: none; }
+}

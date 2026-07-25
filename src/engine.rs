@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use cc_screen_protocol::SessionRestartStatus;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::{broadcast, watch};
 
@@ -25,6 +26,13 @@ use crate::tools::{self, Tool};
 const BROADCAST_CAP: usize = 2048;
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
+
+/// How long a restarted session (proposal 0049) gets to quit after `/exit`
+/// before we escalate to SIGKILL, and how long the kill itself gets. Generous
+/// enough for a CLI to flush its transcript, short enough that a stuck session
+/// doesn't stall the rest of the job.
+const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(10);
+const FORCED_STOP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Input-gated busy model (proposal 0024). "Working" is **armed by a user submit**
 /// (Enter) and **sustained by output**, not armed by output. A submit opens a work
@@ -671,6 +679,19 @@ fn pump(sess: Arc<Session>, mut reader: Box<dyn Read + Send>) {
 pub struct Inner {
     pub tools: Vec<Tool>,
     pub registry: Mutex<HashMap<String, Arc<Session>>>,
+    /// Sessions currently being restarted by the assistant-update job (proposal
+    /// 0049). A stop is normally a goodbye — the reaper forgets a cleanly-exited
+    /// session's manifest entry on purpose — so a restart needs to say so
+    /// explicitly rather than rely on SIGKILL's side effects. The reaper
+    /// *consumes* the marker (see `create`), which is what makes the graceful
+    /// `/exit` stop safe: the CLI flushes the transcript `--continue` will read,
+    /// and the entry survives.
+    pub restarting: Mutex<std::collections::HashSet<String>>,
+    /// The current-or-last assistant-update job (proposal 0049). One at a time
+    /// per agent; retained after `done` so a client that reloads (or a phone that
+    /// was asleep) still sees the result — which is why this lives here and not
+    /// in React state.
+    pub update_job: Mutex<cc_screen_protocol::UpdateJob>,
     pub env_path: String,
     /// Loopback base URL exported to each session as `CCWEB_CLIP_URL` so the
     /// clipboard shim fetches staged images from THIS agent (see clip.rs). Empty
@@ -714,6 +735,8 @@ impl AppState {
             inner: Arc::new(Inner {
                 tools,
                 registry: Mutex::new(HashMap::new()),
+                restarting: Mutex::new(std::collections::HashSet::new()),
+                update_job: Mutex::new(cc_screen_protocol::UpdateJob::idle()),
                 env_path,
                 clip_url,
                 push: crate::push::Push::new(&config_dir),
@@ -830,7 +853,15 @@ impl AppState {
             // backend redeploy, where this thread never even runs — leaves the
             // entry in place, so auto-restore brings it back. (A web delete has
             // already forgotten it via the handler; forget is idempotent.)
-            if matches!(status, Ok(s) if s.success()) {
+            //
+            // …unless this stop is a RESTART (proposal 0049): the assistant-update
+            // job marked the session before typing `/exit`, and a restart is not a
+            // goodbye. Consuming the marker here (rather than having the restarter
+            // clear it) closes the race — the forget decision and the un-marking
+            // are the same atomic step, so the relaunched session's own later exit
+            // behaves normally.
+            let restarting = inner.restarting.lock().unwrap().remove(&key);
+            if matches!(status, Ok(s) if s.success()) && !restarting {
                 manifest::forget(&inner.config_dir, &key);
             }
         });
@@ -903,6 +934,192 @@ impl AppState {
         (restored, failed)
     }
 
+    // ── Assistant-update job: restarting sessions (proposal 0049) ─────────────
+    /// The live sessions an update of `prefixes` would restart: `(name, tool)`,
+    /// sorted. Used to seed the job's session rows as `pending` before phase 2
+    /// starts, so the UI shows what's coming rather than growing a list. The
+    /// bare `shell` tool is excluded structurally — it isn't an assistant, has
+    /// nothing to update and no resume, so restarting it would silently discard
+    /// the user's shell state.
+    pub fn restart_targets(&self, prefixes: &[String]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .list()
+            .into_iter()
+            .filter(|s| prefixes.iter().any(|p| p == &s.tool))
+            .map(|s| (s.name.clone(), s.tool.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Stop each live session whose tool is in `prefixes` **without letting the
+    /// manifest forget it**, then relaunch it with `resume = true` and re-apply
+    /// its colour + label — the same recipe `restore_all` runs per entry, driven
+    /// from the live registry instead of the manifest.
+    ///
+    /// `progress` is called on every state transition (`stopping` → `starting` →
+    /// terminal) so a watching client sees per-session movement, not a spinner.
+    ///
+    /// Nothing here removes a manifest entry: a session that won't stop is left
+    /// running and reported; one that won't relaunch keeps its entry so the
+    /// standing Restore can retry it.
+    pub fn restart_sessions(
+        &self,
+        prefixes: &[String],
+        mut progress: impl FnMut(&SessionRestartStatus),
+    ) -> Vec<SessionRestartStatus> {
+        let mut out = Vec::new();
+        for (name, tool_prefix) in self.restart_targets(prefixes) {
+            let mut row = SessionRestartStatus {
+                session: name.clone(),
+                tool: tool_prefix.clone(),
+                state: "stopping".into(),
+                message: None,
+            };
+            progress(&row);
+
+            let Some(sess) = self.get(&name) else {
+                // It ended between the seed and now — nothing to restart.
+                row.state = "skipped".into();
+                row.message = Some("session already gone".into());
+                progress(&row);
+                out.push(row);
+                continue;
+            };
+            // Snapshot the launch spec BEFORE stopping, so the relaunch never
+            // depends on the manifest surviving the stop. The manifest entry is
+            // authoritative (it carries colour/label/extra dirs); the live
+            // session is the fallback for a session recorded before those.
+            let entry = manifest::entries(&self.inner.config_dir)
+                .into_iter()
+                .find(|e| e.session == name);
+            let (short, dir, extra_dirs, skip_permissions, color, label) = match &entry {
+                Some(e) => (
+                    e.short.clone(),
+                    e.dir.clone(),
+                    e.extra_dirs.clone(),
+                    e.skip_permissions,
+                    e.color.clone(),
+                    e.label.clone(),
+                ),
+                None => (
+                    sess.short.clone(),
+                    sess.launch_dir.clone(),
+                    sess.extra_dirs.clone(),
+                    sess.skip_permissions,
+                    sess.color().unwrap_or_default(),
+                    sess.label().unwrap_or_default(),
+                ),
+            };
+            let Some(tool) = self
+                .find_tool(&tool_prefix)
+                .or_else(|| entry.as_ref().and_then(|e| self.find_tool(&e.cmd)))
+            else {
+                row.state = "skipped".into();
+                row.message = Some(format!("no tool registered for {tool_prefix}"));
+                progress(&row);
+                out.push(row);
+                continue;
+            };
+
+            // Mark first, then stop gracefully: `/exit` lets the CLI flush its own
+            // transcript, which is exactly what `--continue` reads back.
+            self.inner.restarting.lock().unwrap().insert(name.clone());
+            sess.graceful_exit();
+            if !self.wait_gone(&name, GRACEFUL_STOP) {
+                sess.kill();
+                if !self.wait_gone(&name, FORCED_STOP) {
+                    // Leave it running and untouched — a stuck session must not
+                    // abort the rest of the job.
+                    self.inner.restarting.lock().unwrap().remove(&name);
+                    row.state = "failed".into();
+                    row.message = Some("session did not stop; left running".into());
+                    progress(&row);
+                    out.push(row);
+                    continue;
+                }
+            }
+
+            row.state = "starting".into();
+            row.message = None;
+            progress(&row);
+            match self.create(&tool, &short, &dir, extra_dirs, true, skip_permissions) {
+                Ok(new_name) => {
+                    // `create` re-records the entry blank — re-apply the saved
+                    // mark + label exactly as `restore_all` does.
+                    if !color.is_empty() {
+                        if let Some(s) = self.get(&new_name) {
+                            s.set_color(Some(color.clone()));
+                        }
+                        manifest::set_color(&self.inner.config_dir, &new_name, Some(color.clone()));
+                    }
+                    if !label.is_empty() {
+                        if let Some(s) = self.get(&new_name) {
+                            s.set_label(Some(label.clone()));
+                        }
+                        manifest::set_label(&self.inner.config_dir, &new_name, Some(label.clone()));
+                    }
+                    row.state = "resumed".into();
+                }
+                Err(e) => {
+                    // Keep it restorable rather than lost: re-record what we
+                    // snapshotted so the standing Restore path can retry it.
+                    if let Some(e0) = entry.clone() {
+                        manifest::record(&self.inner.config_dir, e0);
+                    }
+                    row.state = "failed".into();
+                    row.message = Some(e.to_string());
+                }
+            }
+            progress(&row);
+            out.push(row);
+        }
+        out
+    }
+
+    /// Block until `name` leaves the live registry (the reaper drops it the
+    /// instant the child exits), or `budget` elapses. Returns whether it went.
+    fn wait_gone(&self, name: &str, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if self.get(name).is_none() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The current-or-last update job snapshot (proposal 0049).
+    pub fn update_job(&self) -> cc_screen_protocol::UpdateJob {
+        self.inner.update_job.lock().unwrap().clone()
+    }
+
+    /// Mutate the live job under its lock — the single write path the worker uses
+    /// for every row transition, so a concurrent `GET` always reads a consistent
+    /// snapshot.
+    pub fn with_update_job(&self, f: impl FnOnce(&mut cc_screen_protocol::UpdateJob)) {
+        let mut j = self.inner.update_job.lock().unwrap();
+        f(&mut j);
+    }
+
+    /// Install a fresh job iff none is running. `Err` carries the running job's
+    /// snapshot, which the caller turns into a `409` — the client then just
+    /// switches to watching it instead of starting a second one.
+    pub fn begin_update_job(
+        &self,
+        job: cc_screen_protocol::UpdateJob,
+    ) -> Result<cc_screen_protocol::UpdateJob, cc_screen_protocol::UpdateJob> {
+        let mut cur = self.inner.update_job.lock().unwrap();
+        if cur.running() {
+            return Err(cur.clone());
+        }
+        *cur = job;
+        Ok(cur.clone())
+    }
+
     /// Manifest entries not currently live whose tool + dir still exist.
     pub fn restorable(&self) -> Vec<manifest::Entry> {
         let live: std::collections::HashSet<String> =
@@ -931,6 +1148,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 
@@ -1284,6 +1502,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// A tool whose session ends cleanly (status 0) the moment `/exit` is typed:
+    /// `read` consumes the line and the shell exits. That's the exact shape the
+    /// restart path relies on — a graceful stop that the reaper would normally
+    /// treat as a deliberate goodbye.
+    fn exits_on_input(prefix: &str) -> Tool {
+        let mut t = shell_tool("read x");
+        t.prefix = prefix.into();
+        t
+    }
+
+    fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    // The load-bearing rule of proposal 0049: a CLEAN exit is normally a
+    // deliberate goodbye and the reaper forgets the manifest entry — but not when
+    // the session is marked as restarting. Without this, the only non-destructive
+    // stop is SIGKILL and "restart" would depend on a side effect of the
+    // exit-status rule rather than on stated intent.
+    #[test]
+    fn a_clean_exit_while_restarting_keeps_the_manifest_entry() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restartmark-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = exits_on_input("shell");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+
+        // Control: an unmarked clean exit still forgets (today's behavior).
+        let plain = state.create(&tool, "plain", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        state.get(&plain).unwrap().graceful_exit();
+        assert!(wait_until(|| state.get(&plain).is_none()), "the child should exit on /exit");
+        assert!(
+            wait_until(|| !manifest::entries(&tmp).iter().any(|e| e.session == plain)),
+            "an unmarked clean exit is a goodbye → forgotten"
+        );
+
+        // Marked as restarting: the same clean exit must NOT forget it.
+        let kept = state.create(&tool, "kept", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        state.inner.restarting.lock().unwrap().insert(kept.clone());
+        state.get(&kept).unwrap().graceful_exit();
+        assert!(wait_until(|| state.get(&kept).is_none()));
+        std::thread::sleep(std::time::Duration::from_millis(300)); // let the reaper finish
+        assert!(
+            manifest::entries(&tmp).iter().any(|e| e.session == kept),
+            "a restart is not a goodbye — the entry must survive"
+        );
+        // …and the marker is consumed, so the relaunched session's own later exit
+        // behaves normally again.
+        assert!(!state.inner.restarting.lock().unwrap().contains(&kept));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // End-to-end restart (0049 Part D): the session comes back under the SAME
+    // name — so an attached pane re-attaches with no user action — with its mark,
+    // label and manifest entry intact, and the job reports it `resumed`.
+    #[test]
+    fn restart_sessions_brings_them_back_named_and_marked() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = exits_on_input("claude");
+        let other = {
+            let mut t = exits_on_input("codex");
+            t.cmd = "coc".into();
+            t
+        };
+        let state = AppState::new(
+            vec![tool.clone(), other.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "proj", &tmp.to_string_lossy(), vec![], false, false).unwrap();
+        let untouched = state.create(&other, "infra", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let before_pid = state.get(&name).unwrap().pid;
+        crate::handlers::set_color_core(&state, &name, Some("teal".into())).unwrap();
+        crate::handlers::set_label_core(&state, &name, Some("My project".into())).unwrap();
+
+        let mut seen: Vec<String> = Vec::new();
+        let rows = state.restart_sessions(&["claude".to_string()], |r| seen.push(r.state.clone()));
+
+        assert_eq!(rows.len(), 1, "only the named tool's sessions restart: {rows:?}");
+        assert_eq!(rows[0].session, name);
+        assert_eq!(rows[0].state, "resumed", "{:?}", rows[0]);
+        assert_eq!(seen, vec!["stopping", "starting", "resumed"], "per-session progress is reported");
+
+        // Same name, new process, marks preserved on both the live session and
+        // the manifest (so a later restore keeps them too).
+        let back = state.get(&name).expect("the session is live again under the same name");
+        assert_ne!(back.pid, before_pid, "it really is a new process");
+        assert_eq!(back.color().as_deref(), Some("teal"));
+        assert_eq!(back.label().as_deref(), Some("My project"));
+        assert_eq!(back.skip_permissions, false, "the launch policy is preserved");
+        let entry = manifest::entries(&tmp).into_iter().find(|e| e.session == name).expect("entry kept");
+        assert_eq!(entry.color, "teal");
+        assert_eq!(entry.label, "My project");
+
+        // The other tool's session was never touched.
+        assert!(state.get(&untouched).is_some(), "a codex session isn't churned because claude moved");
+
+        for s in state.list() {
+            s.kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // Restore hygiene (0046): a recorded session whose CLI has since gone missing
     // is skipped — reported in `failed`, entry kept — instead of spawning a shell
     // that exits 127 and (per the reaper's non-clean-exit rule) retries forever.
@@ -1301,6 +1643,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         };
         // env_path = the empty tmp dir → `ghost-cli` can't resolve.
         let state = AppState::new(

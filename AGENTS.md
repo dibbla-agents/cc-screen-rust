@@ -188,6 +188,27 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   out. Custom tools declare a hint with `cc_tool_install <cmd|prefix> "<cmd>"`;
   adding an assistant = one `ASSISTANTS` entry + one `defaults()` line. See
   proposal 0046.
+- **Update the assistants, then restart their sessions (0049).** The 0046
+  registry gained an **update column** (`Assistant.self_update` /
+  `update_macos|linux` / `version_arg`, overridable per machine with
+  `cc_tool_update <cmd|prefix> "<cmd>"`), and `src/assistants.rs` runs it: ordered
+  candidates (override → the CLI's own `update` → the package manager), each with
+  a timeout and **no TTY**, and the verdict is a **before/after `--version`
+  compare**, never an exit code (all four exit 0 with nothing to do). It's a
+  **two-phase job**, not a request (`POST`/`GET /api/assistants/update` →
+  `UpdateJob`): phase 1 `updating` the CLIs, phase 2 `restarting` the sessions
+  that use them. Update-first is deliberate — a failed update leaves the machine
+  untouched. The load-bearing bit is `Inner.restarting`: a clean `/exit` normally
+  makes the reaper **forget** the manifest entry, so the restart marks the session
+  and the reaper *consumes* the marker instead of forgetting — that's what makes a
+  graceful stop safe (the CLI flushes the transcript `--continue` reads). Relaunch
+  is `create(.., resume = true, ..)` + the colour/label re-apply `restore_all`
+  does, under the **same name**, so panes re-attach by themselves. **No path here
+  removes a manifest entry.** Over the hub the two `Cmd`s are gated on an additive
+  `Register.caps` token (`assistant-update` → a pre-0049 agent gets a clean `501`,
+  not a `504`) and on **ownership** — a 0039 share grants *use*, not
+  administration. CLI parity is `doctor --update` (binaries only): `cc-screen-rust
+  update` still means "update the agent itself". See proposal 0049.
 - **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
   staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
   Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The

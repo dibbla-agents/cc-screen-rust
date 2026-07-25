@@ -5,6 +5,7 @@
 // repaint, and serves the existing React PWA embedded in the binary. See
 // PLAN.md for the design and milestones.
 
+mod assistants;
 mod attach;
 mod auth;
 mod bulk;
@@ -57,7 +58,12 @@ USAGE
   cc-screen-rust install-shim        (re)install the clipboard image-paste shim only
   cc-screen-rust doctor              check which assistant CLIs (claude, codex, gemini,
                                      kimi) are on the session PATH; --install offers to
-                                     install missing ones, --strict exits 1 on any miss
+                                     install missing ones, --update updates the installed
+                                     ones (prints from → to), --strict exits 1 on any miss
+
+NOTE `update` updates cc-screen-rust ITSELF; `doctor --update` updates the assistant
+CLIs it drives. Only the web UI's "Update coding assistants" action (or
+POST /api/assistants/update) also restarts sessions, resuming each conversation.
 
 RUN-DIRECTLY FLAGS (for one-off / foreground runs)
   --addr HOST:PORT    bind address (default 127.0.0.1:8839; env CCWEB_ADDR)
@@ -307,6 +313,11 @@ async fn main() {
         .route("/api/session/color", post(handlers::set_color))
         .route("/api/session/label", post(handlers::set_label))
         .route("/api/session/root", get(handlers::session_root))
+        // assistant CLIs: update them, then restart their sessions (0049)
+        .route(
+            "/api/assistants/update",
+            get(handlers::update_status).post(handlers::update_start),
+        )
         .route(
             "/api/favorites",
             get(handlers::get_favorites).put(handlers::put_favorites),

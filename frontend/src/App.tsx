@@ -48,6 +48,7 @@ import LoginScreen from "./components/LoginScreen";
 import { AuthScreen, ActivatePage, Dashboard } from "./components/MultiTenant";
 import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
 import InboxButton from "./components/InboxButton";
+import UpdateAssistants from "./components/UpdateAssistants";
 import ShareForm, { type ShareSubject } from "./components/ShareForm";
 import { detectReadyEdges, sessionKey } from "./readyEdges";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
@@ -56,7 +57,7 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
 import { agentStatus, buildSharedMap, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { listReceivedShares, type ReceivedShare } from "./api";
-import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
+import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, RefreshIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
@@ -253,6 +254,14 @@ export default function App() {
   const [favOpen, setFavOpen] = useState(false);
   // The searchable session-status overview (proposal 0022).
   const [statusOpen, setStatusOpen] = useState(false);
+  // "Update coding assistants" (proposal 0049): the confirm-then-progress
+  // overlay, and whether a job is currently moving (the header button keeps a
+  // live indicator while the panel is closed — the job runs on the agent).
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  // Non-empty when the flow was opened from a machine row (the dashboard's
+  // per-machine entry point) rather than from the top bar's fleet action.
+  const [updateScope, setUpdateScope] = useState("");
   // The file editor is a SINGLETON, app-wide overlay — not per-pane (desktop can
   // show up to 4 terminals, but only ever one editor, covering the whole
   // screen). `path` is the file to open; null means "let the user pick from the
@@ -1924,6 +1933,14 @@ export default function App() {
       return (
         <Dashboard
           me={me}
+          // Per-machine entry into the assistant update (0049): the dashboard is
+          // a full-screen view, so hand back to the terminal with the flow open
+          // and scoped to that machine.
+          onUpdateAssistants={(m) => {
+            setUpdateScope(m);
+            setShowDash(false);
+            setUpdateOpen(true);
+          }}
           onClose={() => setShowDash(false)}
           onLoggedOut={() => {
             setShowDash(false);
@@ -2124,6 +2141,22 @@ export default function App() {
             />
           </button>
         )}
+
+        {/* Update the coding assistants, then restart their sessions (proposal
+            0049). A plain action at rest — the dot + spin appear only while a
+            job is running, so it never reads as an unread badge. Shown on phone
+            too: that's the surface with no terminal to SSH from. */}
+        <button
+          onClick={() => setUpdateOpen(true)}
+          aria-label="Update coding assistants"
+          title="Update coding assistants & restart sessions"
+          className="relative flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 hover:text-accent active:bg-edge"
+        >
+          <RefreshIcon className={`h-5 w-5 ${updateBusy ? "animate-spin-slow" : ""}`} />
+          {updateBusy && (
+            <span aria-hidden className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-amber" />
+          )}
+        </button>
 
         <button
           onClick={onClearHistory}
@@ -2404,6 +2437,28 @@ export default function App() {
         onPick={(s) => {
           pick(s);
           setStatusOpen(false);
+        }}
+      />
+
+      {/* Update coding assistants → restart their sessions (proposal 0049).
+          One surface, two states: the confirmation dialog becomes the live
+          progress panel. The job is server state, so closing this only stops
+          watching. */}
+      <UpdateAssistants
+        open={updateOpen}
+        machines={machines}
+        scopeMachine={updateScope || undefined}
+        sessions={sessions}
+        onClose={() => {
+          setUpdateOpen(false);
+          setUpdateScope("");
+        }}
+        onBusyChange={setUpdateBusy}
+        onDone={() => {
+          // Panes re-attach to the restarted sessions (names are unchanged) on
+          // the next list; pull it now rather than waiting out the interval.
+          refresh();
+          fetchMachines().then(setMachines).catch(() => {});
         }}
       />
 

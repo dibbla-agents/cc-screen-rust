@@ -13,8 +13,11 @@ use std::time::Duration;
 
 use cc_screen_auth::Auth;
 use cc_screen_hub::{build_router, registry::Registry, state::HubState};
-use cc_screen_protocol::hub::{decode_frame, encode_frame, AgentMsg, HubMsg, HUB_PROTO_VERSION};
-use cc_screen_protocol::{SessionInfo, ToolInfo};
+use cc_screen_protocol::hub::{
+    decode_frame, encode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_ASSISTANT_UPDATE,
+    HUB_PROTO_VERSION,
+};
+use cc_screen_protocol::{SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -101,6 +104,7 @@ async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, sess
             hostname: machine_id.into(),
             agent_version: "test".into(),
             tools: vec![],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
         },
         b"",
     )
@@ -120,6 +124,18 @@ async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, sess
                     // Echo the client's input back as output.
                     let bytes = payload.to_vec();
                     send(&mut ws, &AgentMsg::Output { ch }, &bytes).await;
+                }
+                // Control ops: answer the two assistant-update ops (0049) with a
+                // canned job snapshot so the relay + gating can be asserted
+                // without a real updater; everything else is a bare Ok.
+                HubMsg::Command { req, cmd } => {
+                    let result = match cmd {
+                        Cmd::UpdateStatus | Cmd::UpdateAssistants { .. } => CmdResult::Json(
+                            serde_json::to_value(UpdateJob { phase: "done".into(), ..Default::default() }).unwrap(),
+                        ),
+                        _ => CmdResult::Ok,
+                    };
+                    send(&mut ws, &AgentMsg::Reply { req, result }, b"").await;
                 }
                 HubMsg::Ping => send(&mut ws, &AgentMsg::Pong, b"").await,
                 _ => {}
@@ -254,6 +270,7 @@ async fn spawn_fake_agent_marked(hub: &str, machine_id: &str, session: &str) {
             hostname: mid.clone(),
             agent_version: "test".into(),
             tools: vec![],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
         },
         b"",
     )
@@ -356,6 +373,7 @@ async fn open_mode_rejects_duplicate_online_machine() {
             hostname: "boxA".into(),
             agent_version: "evil".into(),
             tools: vec![],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
         },
         b"",
     )
@@ -410,6 +428,7 @@ async fn hub_serves_resolved_agent_tools() {
             hostname: "boxA".into(),
             agent_version: "test".into(),
             tools: vec![ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None, unavailable: false }],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
         },
         b"",
     )
@@ -431,4 +450,79 @@ async fn hub_serves_resolved_agent_tools() {
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
     assert!(got, "hub /api/tools returns the resolved agent's registered tools");
+}
+
+// The assistant-update relay (proposal 0049): an agent that advertised the
+// capability gets the op routed and its job snapshot returned verbatim.
+#[tokio::test]
+async fn assistant_update_routes_to_a_capable_agent() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    spawn_fake_agent(&hub, "boxA", None, "shell-x").await;
+    // Wait for the uplink to register before routing.
+    for _ in 0..50 {
+        let m: Vec<serde_json::Value> =
+            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+        if !m.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .json(&serde_json::json!({ "tools": [], "restart": "updated" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let job: UpdateJob = resp.json().await.unwrap();
+    assert_eq!(job.phase, "done", "the agent's snapshot reaches the client unchanged");
+
+    // The status read routes the same way.
+    let status = reqwest::get(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .await
+        .unwrap();
+    assert_eq!(status.status(), reqwest::StatusCode::OK);
+}
+
+// A pre-0049 agent advertises no `caps`. Routing the op would be a `Cmd` it
+// can't deserialize — no reply, and the client waits out a 504. The hub refuses
+// it up front with an actionable 501 instead.
+#[tokio::test]
+async fn assistant_update_on_an_old_agent_is_501() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut ws = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "oldbox".into(),
+            hostname: "oldbox".into(),
+            agent_version: "0.3.40".into(),
+            tools: vec![],
+            caps: vec![], // pre-0049
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![] }, b"").await;
+    for _ in 0..50 {
+        let m: Vec<serde_json::Value> =
+            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+        if !m.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{hub}/api/assistants/update?machine=oldbox"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("too old"), "the message says what to do: {body}");
 }

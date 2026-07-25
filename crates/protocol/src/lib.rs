@@ -260,6 +260,104 @@ pub struct DeleteReq {
     pub mode: String,
 }
 
+// ── Assistant update job (GET/POST /api/assistants/update) ───────────────────
+// Proposal 0049. Updating the coding-assistant CLIs then restarting the sessions
+// that use them is a *job*, not a request: an `npm install -g` on a cold cache
+// takes minutes, longer than a hub relay's reply timeout and longer than a phone
+// keeps its screen awake. So the agent owns the job and the client reads this
+// snapshot; it survives a page reload because it lives on the agent.
+
+/// One run of the update-then-restart job (proposal 0049). `phase` is the state
+/// machine the UI renders as its two steps: `updating` → `restarting` → `done`
+/// (`idle` when no job has ever run on this agent).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJob {
+    /// Opaque per-run id, so a client can tell a fresh job from the last one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// "idle" | "updating" | "restarting" | "done".
+    pub phase: String,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default)]
+    pub tools: Vec<UpdateToolStatus>,
+    #[serde(default)]
+    pub sessions: Vec<SessionRestartStatus>,
+    /// Set when the job could not start at all (e.g. another one is running).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl UpdateJob {
+    /// The "nothing has run here yet" snapshot `GET` returns before a first job.
+    pub fn idle() -> Self {
+        Self { phase: "idle".into(), ..Default::default() }
+    }
+    /// Whether this job is still running (so a client should keep polling).
+    pub fn running(&self) -> bool {
+        matches!(self.phase.as_str(), "updating" | "restarting")
+    }
+}
+
+/// One assistant CLI's row in the update phase. `from`/`to` are the raw
+/// `--version` output lines, compared as opaque strings — "changed" is the only
+/// question, so no semver parser can be broken by a vendor's reformat.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateToolStatus {
+    /// `Tool.prefix` — "claude" | "codex" | …
+    pub tool: String,
+    /// Human name ("Claude Code") for the row.
+    pub label: String,
+    /// "pending" | "updating" | "updated" | "current" | "failed" | "skipped".
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// One session's row in the restart phase.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRestartStatus {
+    /// The full session name, e.g. "claude-myproj" — unchanged by the restart.
+    pub session: String,
+    pub tool: String,
+    /// "pending" | "stopping" | "starting" | "resumed" | "failed" | "skipped".
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `POST /api/assistants/update` body. Carries **no command** — only tool names,
+/// resolved against the machine's own registry — so a client can never inject one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateReq {
+    /// Restrict the run to these tool prefixes; empty = every assistant.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// "updated" (default — only sessions whose CLI actually changed) | "all" | "none".
+    #[serde(default = "default_restart")]
+    pub restart: String,
+}
+
+fn default_restart() -> String {
+    "updated".to_string()
+}
+
+impl Default for UpdateReq {
+    fn default() -> Self {
+        Self { tools: Vec::new(), restart: default_restart() }
+    }
+}
+
 // ── WebSocket client → server frame (GET /api/ws) ────────────────────────────
 /// The `{t,d,c,r}` frame the client sends over the terminal WebSocket. `t="i"`
 /// carries input bytes in `d`; `t="r"` carries a resize in `c`/`r`. (Input can

@@ -110,6 +110,32 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             CmdResult::Error { code: 400, msg: "favorites are hub-local".into() }
         }
         Cmd::File { op, args } => crate::fileops::run(app, &op, args),
+        // The assistant-update job (proposal 0049), same core the REST handler
+        // calls. `Err` = one is already running → 409 carrying its snapshot, so
+        // the client watches that job instead of racing a second one. The frame
+        // carries only tool NAMES; the commands come from this machine's registry.
+        Cmd::UpdateAssistants { tools, restart } => {
+            let req = cc_screen_protocol::UpdateReq { tools, restart };
+            match crate::handlers::update_start_core(app, &req) {
+                Ok(job) => json_reply(&job),
+                Err(running) => match serde_json::to_string(&running) {
+                    // 409's body is the running job, so the hub can hand the
+                    // client something to watch rather than a bare conflict.
+                    Ok(s) => CmdResult::Error { code: 409, msg: s },
+                    Err(e) => CmdResult::Error { code: 500, msg: e.to_string() },
+                },
+            }
+        }
+        Cmd::UpdateStatus => json_reply(&app.update_job()),
+    }
+}
+
+/// Serialize a reply body into `CmdResult::Json` (500 on the impossible
+/// serialization failure), the shape the hub forwards to the client verbatim.
+fn json_reply<T: serde::Serialize>(v: &T) -> CmdResult {
+    match serde_json::to_value(v) {
+        Ok(v) => CmdResult::Json(v),
+        Err(e) => CmdResult::Error { code: 500, msg: e.to_string() },
     }
 }
 
@@ -132,6 +158,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 

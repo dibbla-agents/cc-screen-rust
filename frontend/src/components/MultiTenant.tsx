@@ -23,7 +23,7 @@ import {
   type ShareInvite,
 } from "../api";
 import ShareForm from "./ShareForm";
-import { ShareIcon } from "../icons";
+import { RefreshIcon, ShareIcon } from "../icons";
 
 // One-time injected keyframes/texture (kept out of tailwind.config to avoid a
 // build-config change). Rendered once by <Backdrop/>.
@@ -349,7 +349,18 @@ function timeAgo(epochSecs: number): string {
   return `${Math.floor(d / 86400)}d ago`;
 }
 
-function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
+function MachineRow({
+  a,
+  onChanged,
+  onUpdate,
+}: {
+  a: AgentInfo;
+  onChanged: () => void;
+  /// Open the "Update coding assistants" flow scoped to this machine (0049).
+  /// The per-machine case belongs here, where per-machine administration
+  /// already lives; the top-bar button remains the whole-fleet action.
+  onUpdate?: (machine: string) => void;
+}) {
   const [confirming, setConfirming] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -371,6 +382,16 @@ function MachineRow({ a, onChanged }: { a: AgentInfo; onChanged: () => void }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {onUpdate && a.online && (
+            <button
+              onClick={() => onUpdate(a.machine)}
+              className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
+              title="Update this machine's coding assistants, then restart its sessions"
+            >
+              <RefreshIcon className="h-3.5 w-3.5" />
+              Update
+            </button>
+          )}
           <button
             onClick={() => setSharing((v) => !v)}
             className={`flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition ${
@@ -625,7 +646,18 @@ function detectOs(): "unix" | "win" {
   return /win/i.test(p) ? "win" : "unix";
 }
 
-export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: () => void; onLoggedOut: () => void }) {
+export function Dashboard({
+  me,
+  onClose,
+  onLoggedOut,
+  onUpdateAssistants,
+}: {
+  me: MeInfo;
+  onClose: () => void;
+  onLoggedOut: () => void;
+  /// Per-machine entry point into the assistant-update flow (proposal 0049).
+  onUpdateAssistants?: (machine: string) => void;
+}) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [machineName, setMachineName] = useState("");
@@ -694,7 +726,7 @@ export function Dashboard({ me, onClose, onLoggedOut }: { me: MeInfo; onClose: (
           ) : (
             <ul className="space-y-2.5">
               {agents.map((a) => (
-                <MachineRow key={a.agentId} a={a} onChanged={reload} />
+                <MachineRow key={a.agentId} a={a} onChanged={reload} onUpdate={onUpdateAssistants} />
               ))}
             </ul>
           )}

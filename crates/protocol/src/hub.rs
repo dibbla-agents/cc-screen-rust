@@ -58,6 +58,11 @@ pub const MIN_SUPPORTED_PROTO: u16 = 1;
 /// The control channel id (`0`). Terminal/watch channels are `>= 1`.
 pub const CONTROL_CHANNEL: ChannelId = 0;
 
+/// Capability token: this agent understands [`Cmd::UpdateAssistants`] /
+/// [`Cmd::UpdateStatus`] (proposal 0049). Advertised in [`AgentMsg::Register`]'s
+/// `caps`; the hub refuses the op with `501` for an agent that doesn't list it.
+pub const CAP_ASSISTANT_UPDATE: &str = "assistant-update";
+
 /// WebSocket close code the hub uses to reject an agent uplink whose token is
 /// **unauthorized** — unknown, or revoked because the machine was unlinked from
 /// the dashboard. In the private-use range (4000–4999); echoes HTTP 401. The
@@ -76,6 +81,12 @@ pub enum AgentMsg {
         hostname: String,
         agent_version: String,
         tools: Vec<ToolInfo>,
+        /// Optional capability tokens this agent understands (see [`CAP_ASSISTANT_UPDATE`]).
+        /// Absent on older agents — the hub then refuses the op with a clear `501`
+        /// instead of routing a `Cmd` the agent can't deserialize and timing out
+        /// into a `504`. Additive by design (proposal 0049): no proto bump.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
     },
     /// The agent's live session list (sent on register and whenever it changes).
     /// `SessionInfo` is the same type the client-facing `/api/sessions` returns.
@@ -182,6 +193,15 @@ pub enum Cmd {
     /// with `CmdResult::Json` (a body) or `CmdResult::Ok` (204). Bulk transfers
     /// (download/upload/clipboard image) use the dedicated bulk stream instead.
     File { op: String, args: serde_json::Value },
+    /// Start the update-then-restart job on this machine (proposal 0049).
+    /// `tools` names the assistant prefixes to update (empty = all); `restart` is
+    /// `"updated"` | `"all"` | `"none"`. **No command travels on the wire** — the
+    /// agent resolves each name against its own registry. Replies
+    /// [`CmdResult::Json`] with the [`crate::UpdateJob`] snapshot (or a `409` error
+    /// carrying the running job's).
+    UpdateAssistants { tools: Vec<String>, restart: String },
+    /// Read the current-or-last update job (proposal 0049) → [`CmdResult::Json`].
+    UpdateStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +333,7 @@ mod tests {
                 hostname: "box1.local".into(),
                 agent_version: "0.2.2".into(),
                 tools: tools.clone(),
+                caps: vec![CAP_ASSISTANT_UPDATE.into()],
             },
             AgentMsg::Sessions { sessions: vec![sess.clone()] },
             AgentMsg::Reply { req: 3, result: CmdResult::Created("claude-x".into()) },
@@ -351,6 +372,8 @@ mod tests {
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
             HubMsg::Command { req: 5, cmd: Cmd::SetColor { session: "claude-x".into(), color: Some("teal".into()) } },
             HubMsg::Command { req: 6, cmd: Cmd::SetColor { session: "claude-x".into(), color: None } },
+            HubMsg::Command { req: 7, cmd: Cmd::UpdateAssistants { tools: vec!["claude".into()], restart: "updated".into() } },
+            HubMsg::Command { req: 8, cmd: Cmd::UpdateStatus },
             HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::SummaryResult {
                 session: "claude-x".into(),
@@ -412,6 +435,45 @@ mod tests {
         let mut buf = (header.len() as u32).to_be_bytes().to_vec();
         buf.extend_from_slice(header);
         assert_eq!(decode_frame::<AgentMsg>(&buf), Err(FrameError::BadHeader));
+    }
+
+    // `caps` is additive (proposal 0049): a pre-0049 agent's Register carries no
+    // such field and must still decode — the hub reads the absence as "can't
+    // self-update" and answers 501, rather than failing the whole registration.
+    #[test]
+    fn register_without_caps_still_decodes() {
+        let old = serde_json::json!({
+            "Register": {
+                "proto": HUB_PROTO_VERSION,
+                "machine_id": "oldbox",
+                "hostname": "oldbox.local",
+                "agent_version": "0.3.40",
+                "tools": [],
+            }
+        });
+        let header = serde_json::to_vec(&old).unwrap();
+        let mut buf = (header.len() as u32).to_be_bytes().to_vec();
+        buf.extend_from_slice(&header);
+        let (msg, _) = decode_frame::<AgentMsg>(&buf).expect("old Register decodes");
+        match msg {
+            AgentMsg::Register { caps, machine_id, .. } => {
+                assert_eq!(machine_id, "oldbox");
+                assert!(caps.is_empty(), "absent caps ⇒ empty, not an error");
+            }
+            other => panic!("expected Register, got {other:?}"),
+        }
+        // …and a capability-less Register serializes without the field at all,
+        // so an older hub sees byte-identical JSON.
+        let fresh = AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "box".into(),
+            hostname: "box".into(),
+            agent_version: "0".into(),
+            tools: vec![],
+            caps: vec![],
+        };
+        let s = serde_json::to_string(&fresh).unwrap();
+        assert!(!s.contains("caps"), "empty caps is omitted: {s}");
     }
 
     #[test]

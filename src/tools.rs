@@ -29,6 +29,11 @@ pub struct Tool {
     /// assistant registry (`install_hint`), or to a plain "not installed" message
     /// for a custom tool with no hint — the guard still detects the miss.
     pub install_hint: Option<String>,
+    /// A user-declared update one-liner (`cc_tool_update`, proposal 0049). Wins
+    /// over the assistant registry's self-update / package-manager commands — the
+    /// escape hatch for a pinned version, a wrapper, or a distro package. `None`
+    /// falls back to the registry (`update_commands`).
+    pub update_cmd: Option<String>,
 }
 
 impl Tool {
@@ -43,6 +48,7 @@ impl Tool {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 }
@@ -81,6 +87,20 @@ pub struct Assistant {
     pub install_linux: &'static str,
     /// Fallback URL for platforms with no one-liner (or for humans who want it).
     pub docs: &'static str,
+    /// The CLI's own self-update subcommand, if it has one — the FIRST candidate,
+    /// because the CLI knows how it was installed. `""` = it has none, so the
+    /// package-manager command below is the only path (proposal 0049).
+    pub self_update: &'static str,
+    /// The package-manager route to the latest version, per platform. Used when
+    /// there is no self-update subcommand, AND as the fallback when one ran but
+    /// the version didn't move (a self-updater on a package-manager-installed
+    /// copy legitimately refuses).
+    pub update_macos: &'static str,
+    pub update_linux: &'static str,
+    /// The argument that prints the version. `--version` for all four (verified),
+    /// but kept per-descriptor so a fifth assistant that spells it differently
+    /// needs no code change.
+    pub version_arg: &'static str,
 }
 
 pub const ASSISTANTS: &[Assistant] = &[
@@ -90,6 +110,11 @@ pub const ASSISTANTS: &[Assistant] = &[
         install_macos: "curl -fsSL https://claude.ai/install.sh | bash",
         install_linux: "curl -fsSL https://claude.ai/install.sh | bash",
         docs: "https://docs.claude.com/en/docs/claude-code/setup",
+        self_update: "claude update",
+        // The official installer is idempotent — re-running upgrades in place.
+        update_macos: "curl -fsSL https://claude.ai/install.sh | bash",
+        update_linux: "curl -fsSL https://claude.ai/install.sh | bash",
+        version_arg: "--version",
     },
     Assistant {
         prefix: "codex",
@@ -97,6 +122,10 @@ pub const ASSISTANTS: &[Assistant] = &[
         install_macos: "npm install -g @openai/codex",
         install_linux: "npm install -g @openai/codex",
         docs: "https://github.com/openai/codex",
+        self_update: "codex update",
+        update_macos: "npm install -g @openai/codex@latest",
+        update_linux: "npm install -g @openai/codex@latest",
+        version_arg: "--version",
     },
     Assistant {
         prefix: "gemini",
@@ -104,6 +133,11 @@ pub const ASSISTANTS: &[Assistant] = &[
         install_macos: "npm install -g @google/gemini-cli",
         install_linux: "npm install -g @google/gemini-cli",
         docs: "https://github.com/google-gemini/gemini-cli",
+        // No self-update subcommand (verified) — npm is the only route.
+        self_update: "",
+        update_macos: "npm install -g @google/gemini-cli@latest",
+        update_linux: "npm install -g @google/gemini-cli@latest",
+        version_arg: "--version",
     },
     Assistant {
         prefix: "kimi",
@@ -111,6 +145,11 @@ pub const ASSISTANTS: &[Assistant] = &[
         install_macos: "uv tool install --python 3.13 kimi-cli",
         install_linux: "uv tool install --python 3.13 kimi-cli",
         docs: "https://github.com/MoonshotAI/kimi-cli",
+        // No self-update subcommand (verified) — uv owns the install.
+        self_update: "",
+        update_macos: "uv tool upgrade kimi-cli",
+        update_linux: "uv tool upgrade kimi-cli",
+        version_arg: "--version",
     },
 ];
 
@@ -147,6 +186,42 @@ pub fn install_hint(t: &Tool) -> Option<String> {
     } else {
         Some(cmd.to_string())
     }
+}
+
+/// The ordered candidate commands that bring a tool up to date (proposal 0049),
+/// most-authoritative first: an explicit `cc_tool_update` override, then the
+/// CLI's own self-update subcommand (it knows how it was installed), then the
+/// registry's package-manager command for this OS. Empty entries are dropped, so
+/// a custom tool with neither an override nor a descriptor yields `[]` — reported
+/// as "no known update command", never an error. Mirrors `install_hint`'s
+/// precedence; the *list* is ordered because a self-updater on a
+/// package-manager-installed copy may legitimately refuse to act, and the runner
+/// decides by re-probing the version rather than by trusting an exit code.
+pub fn update_commands(t: &Tool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(c) = t.update_cmd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        out.push(c.to_string());
+    }
+    if let Some(a) = assistant_for(t) {
+        for cand in [
+            a.self_update,
+            if cfg!(target_os = "macos") { a.update_macos } else if cfg!(target_os = "linux") { a.update_linux } else { "" },
+        ] {
+            let cand = cand.trim();
+            if !cand.is_empty() && !out.iter().any(|c| c == cand) {
+                out.push(cand.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The argument that prints a tool's version (proposal 0049). The assistant
+/// descriptor's when it's a known CLI, else `--version` — universal in practice,
+/// and a wrong guess only yields an empty version string, which the runner
+/// handles (it falls back to the command's exit code).
+pub fn version_arg(t: &Tool) -> &'static str {
+    assistant_for(t).map(|a| a.version_arg).unwrap_or("--version")
 }
 
 /// Whether `bin` resolves to an executable on `env_path` — the same lookup
@@ -280,6 +355,7 @@ fn parse(text: &str) -> Vec<Tool> {
     let mut resumes: Vec<(String, String)> = Vec::new();
     let mut yolos: Vec<(String, String)> = Vec::new();
     let mut installs: Vec<(String, String)> = Vec::new();
+    let mut updates: Vec<(String, String)> = Vec::new();
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -311,6 +387,16 @@ fn parse(text: &str) -> Vec<Tool> {
             let (toks, rest) = split_head(line, 2);
             if toks.len() >= 2 && !rest.is_empty() {
                 installs.push((toks[1].clone(), unquote(&rest)));
+            }
+            continue;
+        }
+        // cc_tool_update <cmd|prefix> "<update command>" — how to bring this tool
+        // up to date (0049). Wins over the built-in registry's self-update /
+        // package-manager commands: a pinned version, a wrapper, a distro package.
+        if line.starts_with("cc_tool_update") {
+            let (toks, rest) = split_head(line, 2);
+            if toks.len() >= 2 && !rest.is_empty() {
+                updates.push((toks[1].clone(), unquote(&rest)));
             }
             continue;
         }
@@ -363,6 +449,13 @@ fn parse(text: &str) -> Vec<Tool> {
         for t in out.iter_mut() {
             if t.cmd == key || t.prefix == key {
                 t.install_hint = Some(hint.clone());
+            }
+        }
+    }
+    for (key, cmd) in updates {
+        for t in out.iter_mut() {
+            if t.cmd == key || t.prefix == key {
+                t.update_cmd = Some(cmd.clone());
             }
         }
     }
@@ -671,6 +764,52 @@ mod tests {
     }
 
     #[test]
+    fn cc_tool_update_wins_over_the_registry() {
+        // A declared update command is the first (and for a custom tool, only)
+        // candidate — the escape hatch for a pin/wrapper/distro package (0049).
+        let cfg = "cc_tool xx myc 'myc run'\ncc_tool_update myc \"cargo install myc --locked\"";
+        let t = with_defaults(parse(cfg));
+        let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
+        assert_eq!(tool.update_cmd.as_deref(), Some("cargo install myc --locked"));
+        assert_eq!(update_commands(tool), vec!["cargo install myc --locked".to_string()]);
+        // A custom tool with no declaration and no descriptor has no known path —
+        // reported as "skipped", never an error.
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        assert!(update_commands(bare.iter().find(|x| x.prefix == "other").unwrap()).is_empty());
+        // An override on a built-in still wins, with the registry's commands after.
+        let over = with_defaults(parse(
+            "cc_tool cc claude 'claude'\ncc_tool_update claude \"claude update --pin 2.1.220\"",
+        ));
+        let c = over.iter().find(|x| x.prefix == "claude").unwrap();
+        assert_eq!(update_commands(c)[0], "claude update --pin 2.1.220");
+        assert!(update_commands(c).len() > 1, "the registry commands remain as fallbacks");
+    }
+
+    #[test]
+    fn update_commands_order_self_update_then_package_manager() {
+        let t = load_tools(None);
+        // claude/codex have their own `update` subcommand — tried first, because
+        // the CLI knows how it was installed.
+        for prefix in ["claude", "codex"] {
+            let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
+            let cmds = update_commands(tool);
+            assert_eq!(cmds[0], format!("{prefix} update"), "{prefix} self-update first");
+            assert_eq!(cmds.len(), 2, "…with the package-manager fallback after: {cmds:?}");
+        }
+        // gemini/kimi have none (verified) — straight to the package manager.
+        let gem = update_commands(t.iter().find(|x| x.prefix == "gemini").unwrap());
+        assert_eq!(gem.len(), 1);
+        assert!(gem[0].contains("gemini-cli"), "{gem:?}");
+        let kimi = update_commands(t.iter().find(|x| x.prefix == "kimi").unwrap());
+        assert_eq!(kimi.len(), 1);
+        assert!(kimi[0].contains("kimi-cli"), "{kimi:?}");
+        // The bare shell is not an assistant — nothing to update, ever.
+        let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
+        assert!(update_commands(sh).is_empty());
+        assert_eq!(version_arg(sh), "--version"); // harmless default; never probed
+    }
+
+    #[test]
     fn every_assistant_maps_to_a_default_tool() {
         // The registry and the tool defaults must not drift: each assistant
         // descriptor describes exactly one built-in tool, with install commands
@@ -683,6 +822,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("assistant '{}' has no default tool", a.prefix));
             assert!(probe_binary(tool).is_some(), "{} must be probeable", a.prefix);
             assert!(!a.install_macos.is_empty() && !a.install_linux.is_empty() && !a.docs.is_empty());
+            // …and (0049) a way to update it + read its version on both platforms.
+            assert!(!a.update_macos.is_empty() && !a.update_linux.is_empty(), "{} update cmd", a.prefix);
+            assert!(!a.version_arg.is_empty(), "{} version_arg", a.prefix);
+            assert!(!update_commands(tool).is_empty(), "{} must have an update path", a.prefix);
         }
         // And the shell tool deliberately has no descriptor.
         assert!(!ASSISTANTS.iter().any(|a| a.prefix == "shell"));

@@ -189,6 +189,11 @@ async fn connect_and_serve(
         // Availability-probed (0046) so a hub-relayed picker greys out a tool
         // whose CLI is missing on THIS machine, same as a direct client's.
         tools: state.tool_infos(),
+        // What this agent can do beyond the base envelope (0049). Advertised
+        // rather than version-sniffed: the hub refuses an op an agent doesn't
+        // list with a clear 501, instead of routing a Cmd the agent can't
+        // deserialize and timing out into a 504.
+        caps: vec![cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string()],
     };
     let _ = out_tx.send(WsOut::Bin(encode_frame(&register, b""))).await;
 

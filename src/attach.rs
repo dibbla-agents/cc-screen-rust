@@ -157,6 +157,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 

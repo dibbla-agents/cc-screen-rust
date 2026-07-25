@@ -80,6 +80,12 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/key", post(handlers::key))
         .route("/api/paste", post(handlers::paste))
         .route("/api/clear-history", post(handlers::clear_history))
+        // Coding-assistant updates (0049) — owner-only, and only for an agent that
+        // advertised the capability (else 501, never a 504 from an old agent).
+        .route(
+            "/api/assistants/update",
+            get(handlers::update_status).post(handlers::update_assistants),
+        )
         // File browser / editor (small ops), routed to the owning agent.
         .route("/api/dirs", get(handlers::dirs))
         .route("/api/dirs/search", get(handlers::dirs_search))

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use cc_screen_protocol::{
     key_bytes, wrap_bracketed_paste, AuthStatus, CreateReq, CreateResp, DeleteReq, Favorite,
-    LoginReq, RestorableSession, SessionInfo, ToolInfo, WsClientFrame,
+    LoginReq, RestorableSession, SessionInfo, ToolInfo, UpdateJob, UpdateReq, WsClientFrame,
 };
 
 use crate::confine::resolve_under;
@@ -439,6 +439,37 @@ pub async fn restore(State(app): State<AppState>) -> Json<Value> {
     Json(out)
 }
 
+// ── POST/GET /api/assistants/update (proposal 0049) ──────────────────────────
+// One deliberate action: update the coding-assistant CLIs on this machine, then
+// restart the sessions that use them with their conversations resumed. It's a
+// *job*, not a request — an `npm install -g` on a cold cache outlives both a hub
+// relay's reply timeout and a phone's screen — so POST starts it and GET reads
+// the snapshot. The body carries only tool NAMES, resolved against this
+// machine's own registry, so no client can supply a command to run.
+
+/// Start the job. `Ok` is the fresh snapshot; `Err` is the *running* job's, which
+/// the caller reports as `409` so the client watches it instead of starting a
+/// second one. Shared by the REST handler and the hub `Cmd::UpdateAssistants`
+/// dispatch (`crate::ops`), the established one-core-two-callers shape.
+pub fn update_start_core(app: &AppState, req: &UpdateReq) -> Result<UpdateJob, UpdateJob> {
+    crate::assistants::start_job(app, req)
+}
+
+pub async fn update_start(
+    State(app): State<AppState>,
+    body: Option<Json<UpdateReq>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    match update_start_core(&app, &req) {
+        Ok(job) => (StatusCode::OK, Json(job)).into_response(),
+        Err(running) => (StatusCode::CONFLICT, Json(running)).into_response(),
+    }
+}
+
+pub async fn update_status(State(app): State<AppState>) -> Json<UpdateJob> {
+    Json(app.update_job())
+}
+
 // ── GET/PUT /api/favorites ───────────────────────────────────────────────────
 fn favorites_path(app: &AppState) -> PathBuf {
     app.inner.config_dir.join("favorites.json")
@@ -693,6 +724,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 

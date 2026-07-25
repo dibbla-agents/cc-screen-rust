@@ -9,6 +9,9 @@
 //   doctor             report-only, exit 0 (the install scripts' non-interactive path)
 //   doctor --strict    exit 1 if any assistant is missing (CI)
 //   doctor --install   on a TTY, offer to run each missing CLI's installer
+//   doctor --update    update the installed CLIs, reporting from → to (0049).
+//                      NOTE `cc-screen-rust update` updates the AGENT itself; this
+//                      updates the assistants it drives, and restarts no sessions.
 //
 // A missing assistant is never fatal to an agent install: a machine with only
 // `claude` is a perfectly good agent for claude sessions (the runtime guard in
@@ -72,11 +75,25 @@ pub fn install_report() {
 pub fn run(args: &[String]) -> i32 {
     let strict = args.iter().any(|a| a == "--strict");
     let install = args.iter().any(|a| a == "--install");
+    let update = args.iter().any(|a| a == "--update");
 
     let cfg = crate::config::load();
     let tools = tools::load_tools(cfg.tools_path);
     let mut rows = probe_rows(&tools, &cfg.env_path);
     print_report(&rows);
+
+    // `--update` (proposal 0049): update the installed CLIs and report from → to.
+    // Deliberately does NOT restart sessions — a CLI invocation is a different
+    // process from the running agent and has no business reaching into its
+    // registry. The web action (POST /api/assistants/update) is what also
+    // restarts them. Note the name split: `cc-screen-rust update` updates the
+    // AGENT; `doctor --update` updates the assistants it drives.
+    let mut update_failed = false;
+    if update {
+        if run_updates(&rows, &cfg.env_path) {
+            update_failed = true;
+        }
+    }
 
     if install {
         if !std::io::stdin().is_terminal() {
@@ -88,10 +105,43 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    if strict && rows.iter().any(|r| !r.present) {
+    if strict && (rows.iter().any(|r| !r.present) || update_failed) {
         return 1;
     }
     0
+}
+
+/// Run the update for every present assistant and print a version-carrying
+/// report row each. Returns whether any update failed (only `--strict` acts on
+/// it — a failed update is reported, never fatal to a plain run).
+fn run_updates(rows: &[Row], env_path: &str) -> bool {
+    use crate::assistants::UpdateOutcome;
+    let mut failed = false;
+    println!();
+    println!("Updating the installed assistants (one at a time):");
+    for r in rows {
+        match crate::assistants::update_tool(&r.tool, env_path) {
+            UpdateOutcome::Updated { from, to } => {
+                println!("  ✓ {:<10} {:<14} {from} → {to}", r.bin, label(&r.tool))
+            }
+            UpdateOutcome::Current { version } => {
+                println!("  ✓ {:<10} {:<14} {version} (already current)", r.bin, label(&r.tool))
+            }
+            UpdateOutcome::Failed { error, .. } => {
+                failed = true;
+                println!("  ✗ {:<10} {:<14} {error}", r.bin, label(&r.tool));
+            }
+            UpdateOutcome::Skipped { reason } => {
+                let hint = tools::install_hint(&r.tool)
+                    .map(|c| format!(" — install: {c}"))
+                    .unwrap_or_default();
+                println!("  – {:<10} {:<14} {reason}{hint}", r.bin, label(&r.tool));
+            }
+        }
+    }
+    println!("  (this updates the binaries only; the web UI's \"Update coding assistants\"");
+    println!("   action also restarts sessions, resuming each conversation.)");
+    failed
 }
 
 /// Prompt per missing assistant, run its installer via `/bin/sh -c` with the
@@ -146,6 +196,7 @@ mod tests {
             resume_keep_extra: false,
             yolo_flag: None,
             install_hint: None,
+            update_cmd: None,
         }
     }
 

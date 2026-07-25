@@ -152,6 +152,19 @@ impl Visibility {
         }
     }
 
+    /// May the caller ADMINISTER this agent — update its coding-assistant CLIs and
+    /// restart its terminals (proposal 0049)? Strictly narrower than
+    /// [`Visibility::may_use_agent`]: under 0039 a share grants *use*, not
+    /// administration, so an agent-grantee must not be able to restart someone
+    /// else's sessions or rewrite binaries on their host. Owner (or single-tenant
+    /// `All`) only.
+    pub fn owns_agent(&self, agent: &AgentConn) -> bool {
+        match self {
+            Visibility::All => true,
+            Visibility::User(v) => agent.user_id == v.user_id,
+        }
+    }
+
     /// May the caller VIEW/attach this specific session on this agent? True if they
     /// may use the agent, OR a session-grant (or a session-share-back) names exactly
     /// this session.
@@ -231,6 +244,11 @@ pub struct AgentConn {
     pub machine_id: String,
     pub hostname: String,
     pub tools: Vec<ToolInfo>,
+    /// Capability tokens this agent advertised at register time (proposal 0049),
+    /// e.g. `assistant-update`. Empty for a pre-0049 agent — the hub refuses the
+    /// corresponding op with a clear `501` rather than routing a `Cmd` the agent
+    /// can't deserialize and waiting out a `504`.
+    pub caps: Vec<String>,
     online: AtomicBool,
     last_sessions: Mutex<Vec<SessionInfo>>,
     /// Encoded `HubMsg` frames → the agent's WS writer (drained by the uplink
@@ -361,6 +379,8 @@ impl Registry {
     /// Single-tenant register: the agent is owned by `cc_screen_auth::OWNER` and
     /// its `agent_id` is its `machine_id` (so the registry key is unchanged from
     /// before multi-tenancy). The byte-for-byte path the local uplink uses.
+    /// Advertises no capabilities (proposal 0049) — real uplinks come through
+    /// [`Registry::register_agent`], which carries the agent's own `caps`.
     pub fn register(
         &self,
         machine_id: &str,
@@ -368,7 +388,7 @@ impl Registry {
         tools: Vec<ToolInfo>,
         to_agent: mpsc::Sender<Vec<u8>>,
     ) -> Arc<AgentConn> {
-        self.register_agent(machine_id, cc_screen_auth::OWNER, machine_id, hostname, tools, to_agent)
+        self.register_agent(machine_id, cc_screen_auth::OWNER, machine_id, hostname, tools, Vec::new(), to_agent)
     }
 
     /// Register a freshly-connected agent (online), keyed by its globally-unique
@@ -382,6 +402,7 @@ impl Registry {
         machine_id: &str,
         hostname: &str,
         tools: Vec<ToolInfo>,
+        caps: Vec<String>,
         to_agent: mpsc::Sender<Vec<u8>>,
     ) -> Arc<AgentConn> {
         let mut g = self.inner.lock().unwrap();
@@ -392,6 +413,7 @@ impl Registry {
             machine_id: machine_id.to_string(),
             hostname: hostname.to_string(),
             tools,
+            caps,
             online: AtomicBool::new(true),
             last_sessions: Mutex::new(carried),
             to_agent,
@@ -707,8 +729,8 @@ mod tests {
     fn tenant_scope_isolates_resolve_and_lists() {
         let r = Registry::new();
         // alice/laptop and bob/laptop — same label, distinct agent ids + owners.
-        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
-        let b = r.register_agent("agent-b", "bob", "laptop", "b.local", vec![], dummy_agent());
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
+        let b = r.register_agent("agent-b", "bob", "laptop", "b.local", vec![], vec![], dummy_agent());
         a.set_sessions(vec![sess("claude-a")]);
         b.set_sessions(vec![sess("claude-b")]);
         let alice = Visibility::user("alice");
@@ -744,12 +766,40 @@ mod tests {
         }
     }
 
+    // Administration is owner-only (proposal 0049). A share grants *use*, not
+    // administration: an agent-grantee may create and attach on someone else's
+    // box, but must not update its binaries or restart its terminals.
+    #[test]
+    fn admin_requires_ownership_not_a_share() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
+
+        let alice = Visibility::user("alice");
+        assert!(alice.owns_agent(&a) && alice.may_use_agent(&a), "the owner may administer");
+
+        // Bob holds a full AGENT grant — the widest share there is.
+        let bob = Visibility::from_rows("bob".into(), vec![row("s1", "agent-a", "alice", "bob", "agent", None, false)]);
+        assert!(bob.may_use_agent(&a), "an agent-grantee may use the machine…");
+        assert!(!bob.owns_agent(&a), "…but may NOT administer it");
+
+        // A session-only grantee likewise.
+        let carol = Visibility::from_rows(
+            "carol".into(),
+            vec![row("s2", "agent-a", "alice", "carol", "session", Some("claude-a"), false)],
+        );
+        assert!(!carol.owns_agent(&a));
+        // A stranger, obviously.
+        assert!(!Visibility::user("mallory").owns_agent(&a));
+        // Single-tenant (no identities) is unaffected.
+        assert!(Visibility::All.owns_agent(&a));
+    }
+
     // A agent-shares to B: B sees A's machine + sessions, may create + attach;
     // and B's created sessions stay hidden from A unless owner-peek is on.
     #[test]
     fn agent_share_visibility_and_asymmetry() {
         let r = Registry::new();
-        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
         a.set_sessions(vec![sess("claude-a"), sess("claude-bee")]);
         a.set_creator("claude-bee", "bob"); // bob created this on alice's agent
 
@@ -785,7 +835,7 @@ mod tests {
     #[test]
     fn session_share_is_view_only_and_scoped() {
         let r = Registry::new();
-        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
         a.set_sessions(vec![sess("shared"), sess("secret")]);
 
         let bob = Visibility::from_rows("bob".into(), vec![row("s2", "agent-a", "alice", "bob", "session", Some("shared"), false)]);
@@ -812,7 +862,7 @@ mod tests {
     #[test]
     fn session_share_back_to_owner() {
         let r = Registry::new();
-        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], dummy_agent());
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
         a.set_sessions(vec![sess("claude-a"), sess("bee-1"), sess("bee-2")]);
         a.set_creator("bee-1", "bob");
         a.set_creator("bee-2", "bob");
