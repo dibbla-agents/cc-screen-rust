@@ -78,6 +78,93 @@ describe("computeDecorations", () => {
     expect(specsIn(specs, "replace", urlStart, urlStart + 5).length).toBeGreaterThan(0);
   });
 
+  // --- Proposal 0052: bare autolinks/emails must stay visible off-line ---
+
+  // A bare URL/email/www/mailto link is not redundant syntax — it IS the link,
+  // so it must never be hidden and it must carry the link style, cursor
+  // anywhere. helper: assert `frag` (first occurrence in `doc`) is never
+  // `replace`d and is covered by a `cm-md-link` mark.
+  function expectVisibleLink(doc: string, frag: string, cursor: number) {
+    const at = doc.indexOf(frag);
+    expect(at).toBeGreaterThanOrEqual(0);
+    const specs = computeDecorations(stateFor(doc, cursor));
+    expect(specsIn(specs, "replace", at, at + frag.length).length).toBe(0);
+    const marks = specsIn(specs, "mark", at, at + frag.length).filter((s) => s.cls === "cm-md-link");
+    expect(marks.length).toBeGreaterThan(0);
+    return specs;
+  }
+
+  it("keeps a bare https URL visible and link-styled off the cursor line", () => {
+    // cursor on the trailing blank/other line, not the URL's line
+    expectVisibleLink("see https://example.com ok\n\nq\n", "https://example.com", 25);
+  });
+
+  it("keeps a bare email address visible and link-styled off the cursor line", () => {
+    expectVisibleLink("mail erik@dibbla.com now\n\nq\n", "erik@dibbla.com", 26);
+  });
+
+  it("keeps a bare www. link visible and link-styled off the cursor line", () => {
+    expectVisibleLink("at www.example.com here\n\nq\n", "www.example.com", 25);
+  });
+
+  it("keeps a mailto: autolink visible and link-styled off the cursor line", () => {
+    expectVisibleLink("write mailto:a@b.com please\n\nq\n", "mailto:a@b.com", 30);
+  });
+
+  it("shows the URL of an <angle> autolink and hides only its brackets", () => {
+    const doc = "go <https://example.com> now\n\nq\n";
+    const url = "https://example.com";
+    const at = doc.indexOf(url);
+    const specs = computeDecorations(stateFor(doc, doc.length - 1)); // cursor in 'q'
+    // The URL itself is not replaced and is link-styled.
+    expect(specsIn(specs, "replace", at, at + url.length).length).toBe(0);
+    expect(specsIn(specs, "mark", at, at + url.length).some((s) => s.cls === "cm-md-link")).toBe(true);
+    // The `<` (just before) and `>` (just after) are each hidden.
+    expect(specsIn(specs, "replace", at - 1, at).length).toBe(1); // '<'
+    expect(specsIn(specs, "replace", at + url.length, at + url.length + 1).length).toBe(1); // '>'
+  });
+
+  it("keeps a bare URL visible and link-styled even on its own cursor line", () => {
+    // styling is not cursor-dependent for bare autolinks (like bold stays bold)
+    const doc = "see https://example.com ok\n";
+    expectVisibleLink(doc, "https://example.com", doc.indexOf("https") + 3);
+  });
+
+  it("keeps a bare URL visible inside a blockquote and inside a list item", () => {
+    // blockquote (parent Paragraph under the quote) and list item (Paragraph)
+    expectVisibleLink("x\n\n> quote https://a.example here\n", "https://a.example", 0);
+    expectVisibleLink("x\n\n- item https://b.example here\n", "https://b.example", 0);
+  });
+
+  it("still hides the URL of an inline [text](url) link off the cursor line", () => {
+    // regression: the [text](url) form is unchanged — URL hidden, text styled.
+    const doc = "see [text](http://x.com) ok\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    const urlStart = doc.indexOf("http://");
+    expect(specsIn(specs, "replace", urlStart, urlStart + 5).length).toBeGreaterThan(0);
+    expect(specs.some((s) => s.type === "mark" && s.cls === "cm-md-link")).toBe(true);
+  });
+
+  it("still hides the URL of an ![alt](url) image off the cursor line", () => {
+    const doc = "img ![alt](http://x.com/i.png) ok\n\nq\n";
+    const specs = computeDecorations(stateFor(doc, doc.length - 1));
+    const urlStart = doc.indexOf("http://");
+    expect(specsIn(specs, "replace", urlStart, urlStart + 5).length).toBeGreaterThan(0);
+  });
+
+  it("reveals the URL of an inline link when its own line holds the cursor", () => {
+    const doc = "see [text](http://x.com) ok\n";
+    const urlStart = doc.indexOf("http://");
+    const specs = computeDecorations(stateFor(doc, urlStart)); // cursor on the link line
+    expect(specsIn(specs, "replace", urlStart, urlStart + 5).length).toBe(0);
+  });
+
+  it("keeps a reference-definition URL ([r]: url) visible and link-styled", () => {
+    // parent LinkReference — not Link/Image, so the definition's URL is the
+    // payload and must not ghost out (consistent with the autolink fix).
+    expectVisibleLink("use [r][r]\n\n[r]: https://ref.example\n", "https://ref.example", 0);
+  });
+
   it("backgrounds fenced code lines and hides the fences off the cursor", () => {
     const doc = "```js\nlet a=1;\n```\n\nq\n";
     const specs = computeDecorations(stateFor(doc, doc.length - 1)); // cursor in 'q'
