@@ -76,7 +76,11 @@ const INLINE_STYLE: Record<string, string> = {
   Link: "cm-md-link",
 };
 
-// Syntax-mark nodes hidden off the active line.
+// Syntax-mark nodes hidden off the active line. `URL` is handled explicitly in
+// computeDecorations (not here): it is redundant syntax only inside `[text](url)`
+// / `![alt](url)`, where the link text stays visible. A bare GFM autolink or an
+// `<…>` autolink has no other text — the URL *is* the link — so it must stay
+// visible. See the `name === "URL"` branch below.
 const HIDE_MARKS = new Set([
   "HeaderMark",
   "EmphasisMark",
@@ -84,7 +88,6 @@ const HIDE_MARKS = new Set([
   "CodeMark",
   "QuoteMark",
   "LinkMark",
-  "URL",
 ]);
 
 // splitRow splits one GFM table row into trimmed cell strings, honouring the
@@ -306,6 +309,27 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
       const cls = INLINE_STYLE[name];
       if (cls) {
         specs.push({ from: node.from, to: node.to, type: "mark", cls });
+        return;
+      }
+
+      // A URL node is redundant syntax only as the destination of a
+      // `[text](url)` / `![alt](url)` — there the link *text* stays visible, so
+      // hide the URL off the active line (matching every other syntax mark).
+      // Everywhere else the URL IS the visible link: a GFM bare autolink
+      // (`https://…`, `www.…`, `user@host`, `mailto:…`; parent = the inline
+      // container — Paragraph, an ATXHeading, a TableCell…), an `<…>` autolink
+      // (parent Autolink; its `<`/`>` LinkMarks still hide off-line), or a
+      // reference definition (`[r]: url`; parent LinkReference). Keep those
+      // visible and style them, on the active line too — like the INLINE_STYLE
+      // classes. Table cells only reach here when the table is being edited;
+      // off-line the whole block is replaced by a widget (no descent).
+      if (name === "URL") {
+        const parent = node.node.parent?.name;
+        if (parent === "Link" || parent === "Image") {
+          if (!isActive(node.from)) specs.push({ from: node.from, to: node.to, type: "replace" });
+        } else {
+          specs.push({ from: node.from, to: node.to, type: "mark", cls: "cm-md-link" });
+        }
         return;
       }
 
