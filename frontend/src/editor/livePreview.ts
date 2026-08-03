@@ -10,6 +10,7 @@
 // pure makes it unit-testable without a live editor view (see
 // livePreview.test.ts) — the heart of the feature is verified in isolation.
 
+import type { SyntaxNode } from "@lezer/common";
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { EditorState, StateField, type Extension, type Range } from "@codemirror/state";
 import {
@@ -686,6 +687,12 @@ const livePreviewTheme = EditorView.baseTheme({
     padding: "0.1em 0.34em",
   },
   ".cm-md-link": { color: "#7cc2ff", textDecoration: "none", borderBottom: "1px solid rgba(124,194,255,0.4)" },
+  // Follow affordance: pointer cursor when Mod is held (desktop) or on a touch
+  // device, where a plain tap opens the link. See the `linkClicks` handler.
+  ".cm-mod-held .cm-md-link": { cursor: "pointer" },
+  "@media (pointer: coarse)": {
+    ".cm-md-link": { cursor: "pointer" },
+  },
   ".cm-md-quote": {
     borderLeft: "3px solid var(--cc-accent, #38bdf8)",
     paddingLeft: "0.9em",
@@ -812,9 +819,99 @@ const mdHighlight = HighlightStyle.define([
   { tag: tags.escape, color: "inherit" },
 ]);
 
+// --- Clickable links (follow-on to 0052) -------------------------------------
+
+// linkNodeUrl finds the destination-URL text of any link touching `pos`. It
+// climbs from the resolved node to the nearest link container: a `[text](url)`
+// / `![alt](url)` (name Link/Image — the URL is a child, and the click may land
+// on the visible *text*, not the hidden URL), an `<…>` autolink (Autolink), or
+// a bare GFM autolink where the `URL` node itself is what was clicked. Returns
+// the raw source text of the `URL` node, or null if `pos` isn't in a link.
+export function linkNodeUrl(state: EditorState, pos: number): string | null {
+  const tree = syntaxTree(state);
+  // Probe both sides — a click at a boundary can resolve to the adjacent node.
+  for (const side of [-1, 1] as const) {
+    let n: SyntaxNode | null = tree.resolveInner(pos, side);
+    for (; n; n = n.parent) {
+      if (n.name === "URL") return state.sliceDoc(n.from, n.to);
+      if (n.name === "Link" || n.name === "Image" || n.name === "Autolink") {
+        const url = n.getChild("URL");
+        if (url) return state.sliceDoc(url.from, url.to);
+      }
+    }
+  }
+  return null;
+}
+
+// hrefFromUrlText turns a `URL` node's raw text into a followable href, matching
+// how remark-gfm autolinks in the reading view: keep an explicit scheme
+// (`http:`, `https:`, `mailto:`, `xmpp:`…), turn a bare `user@host` into
+// `mailto:`, and default a schemeless host (`www.example.com`) to `https://`.
+export function hrefFromUrlText(raw: string): string {
+  const t = raw.trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return t; // already has a scheme
+  if (/^[^\s@]+@[^\s@]+$/.test(t)) return "mailto:" + t; // bare email
+  return "https://" + t; // www.… / schemeless host
+}
+
+// linkClicks makes live-preview links followable without breaking editing. The
+// gesture (chosen with the user): Mod(Cmd/Ctrl)+click always opens; on a touch
+// device a plain tap opens too, but only when the link's line isn't already the
+// active (being-edited) line — so tapping the surrounding text first to reveal
+// the raw source still lets you edit the URL. Plain mouse click (no modifier)
+// always places the caret. Opening uses a fresh tab with noopener so the PWA is
+// never navigated away. Like the widget handlers we act on `mousedown` +
+// preventDefault (the [0009] lesson: never blur the editor / drop the caret /
+// dismiss the soft keyboard), and only when we're actually going to open —
+// otherwise we return and let CodeMirror handle the click normally.
+const coarsePointer = (): boolean =>
+  typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
+
+function openLinkFromEvent(view: EditorView, e: MouseEvent): boolean {
+  const el = (e.target as HTMLElement | null)?.closest?.(".cm-md-link");
+  if (!el) return false;
+  const pos =
+    view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? view.posAtDOM(el as HTMLElement);
+  if (pos == null) return false;
+  const raw = linkNodeUrl(view.state, pos);
+  if (raw == null) return false;
+
+  const mod = e.metaKey || e.ctrlKey;
+  const sel = view.state.selection.main;
+  const clickLine = view.state.doc.lineAt(pos).number;
+  const lineActive =
+    view.state.doc.lineAt(sel.head).number === clickLine ||
+    view.state.doc.lineAt(sel.anchor).number === clickLine;
+  const shouldOpen = mod || (coarsePointer() && !lineActive);
+  if (!shouldOpen) return false;
+
+  e.preventDefault();
+  e.stopPropagation();
+  window.open(hrefFromUrlText(raw), "_blank", "noopener,noreferrer");
+  return true;
+}
+
+const linkClicks = EditorView.domEventHandlers({
+  mousedown: (e, view) => openLinkFromEvent(view, e),
+  // Show a pointer cursor while Mod is held so the "follow" gesture is
+  // discoverable on desktop (CSS: `.cm-mod-held .cm-md-link`).
+  keydown: (e, view) => {
+    if (e.key === "Meta" || e.key === "Control") view.dom.classList.add("cm-mod-held");
+    return false;
+  },
+  keyup: (e, view) => {
+    if (e.key === "Meta" || e.key === "Control") view.dom.classList.remove("cm-mod-held");
+    return false;
+  },
+  blur: (_e, view) => {
+    view.dom.classList.remove("cm-mod-held");
+    return false;
+  },
+});
+
 // livePreview is the full extension: the inline-decoration plugin, the table
-// state field, the theme, and the highlight-style override that strips the
-// default heading/link underline.
+// state field, the theme, the clickable-link handler, and the highlight-style
+// override that strips the default heading/link underline.
 export function livePreview(): Extension {
-  return [livePreviewPlugin, tableField, livePreviewTheme, syntaxHighlighting(mdHighlight)];
+  return [livePreviewPlugin, tableField, livePreviewTheme, linkClicks, syntaxHighlighting(mdHighlight)];
 }
