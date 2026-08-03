@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { EditorState, EditorSelection } from "@codemirror/state";
 import { markdownLanguage } from "@codemirror/lang-markdown";
-import { computeDecorations, parseTableSource, toggleTaskAt, type DecoSpec } from "./livePreview";
+import {
+  computeDecorations,
+  parseTableSource,
+  toggleTaskAt,
+  linkNodeUrl,
+  hrefFromUrlText,
+  type DecoSpec,
+} from "./livePreview";
 
 // Build an EditorState for `doc` with the cursor at `cursor` (default 0). The
 // markdown language is what gives syntaxTree() a parse to walk.
@@ -318,6 +325,57 @@ describe("computeDecorations — task lists", () => {
     const specs = computeDecorations(stateFor(doc, doc.length - 1));
     expect(specs.filter((s) => s.type === "bullet").length).toBe(1); // only the plain one
     expect(specs.filter((s) => s.type === "checkbox").length).toBe(1);
+  });
+});
+
+describe("linkNodeUrl (clickable links)", () => {
+  // resolve the destination URL text for a click at a doc offset.
+  function urlAt(doc: string, at: number): string | null {
+    return linkNodeUrl(stateFor(doc), at);
+  }
+  it("returns the destination when clicking the TEXT of a [text](url) link", () => {
+    const doc = "see [dibbla](https://dibbla.com) ok";
+    const at = doc.indexOf("dibbla]"); // inside the visible link text
+    expect(urlAt(doc, at)).toBe("https://dibbla.com");
+  });
+  it("returns the destination for an image ![alt](url)", () => {
+    const doc = "![pic](https://x.com/i.png)";
+    expect(urlAt(doc, doc.indexOf("pic"))).toBe("https://x.com/i.png");
+  });
+  it("returns the URL of a bare autolink", () => {
+    const doc = "go https://example.com now";
+    expect(urlAt(doc, doc.indexOf("example"))).toBe("https://example.com");
+  });
+  it("returns the URL of an <angle> autolink", () => {
+    const doc = "go <https://example.com> now";
+    expect(urlAt(doc, doc.indexOf("example"))).toBe("https://example.com");
+  });
+  it("returns the address of a bare email", () => {
+    const doc = "mail erik@dibbla.com now";
+    expect(urlAt(doc, doc.indexOf("erik"))).toBe("erik@dibbla.com");
+  });
+  it("returns null when the click is not on any link", () => {
+    const doc = "just some prose here";
+    expect(urlAt(doc, 5)).toBeNull();
+  });
+});
+
+describe("hrefFromUrlText (autolink normalisation)", () => {
+  it("keeps an explicit scheme untouched", () => {
+    expect(hrefFromUrlText("https://x.com")).toBe("https://x.com");
+    expect(hrefFromUrlText("http://x.com")).toBe("http://x.com");
+    expect(hrefFromUrlText("mailto:a@b.com")).toBe("mailto:a@b.com");
+    expect(hrefFromUrlText("xmpp:a@b.com")).toBe("xmpp:a@b.com");
+  });
+  it("prefixes a bare email with mailto:", () => {
+    expect(hrefFromUrlText("erik@dibbla.com")).toBe("mailto:erik@dibbla.com");
+  });
+  it("defaults a schemeless host to https://", () => {
+    expect(hrefFromUrlText("www.example.com")).toBe("https://www.example.com");
+    expect(hrefFromUrlText("example.com/path")).toBe("https://example.com/path");
+  });
+  it("trims surrounding whitespace", () => {
+    expect(hrefFromUrlText("  https://x.com  ")).toBe("https://x.com");
   });
 });
 
