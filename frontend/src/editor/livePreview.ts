@@ -689,7 +689,11 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-md-link": { color: "#7cc2ff", textDecoration: "none", borderBottom: "1px solid rgba(124,194,255,0.4)" },
   // Follow affordance: pointer cursor when Mod is held (desktop) or on a touch
   // device, where a plain tap opens the link. See the `linkClicks` handler.
-  ".cm-mod-held .cm-md-link": { cursor: "pointer !important" },
+  // `&` = the editor root (view.dom), where modKeyAffordance sets the class; a
+  // plain `.cm-mod-held …` selector would compile to a descendant match
+  // (`.ͼx .cm-mod-held …`) and never fire — buildTheme prefixes `&`-less
+  // selectors with `scope + " "`.
+  "&.cm-mod-held .cm-md-link": { cursor: "pointer !important" },
   "@media (pointer: coarse)": {
     ".cm-md-link": { cursor: "pointer !important" },
   },

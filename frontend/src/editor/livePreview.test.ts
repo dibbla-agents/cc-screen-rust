@@ -379,6 +379,52 @@ describe("hrefFromUrlText (autolink normalisation)", () => {
   });
 });
 
+describe("mod-held pointer affordance (compiled CSS + class toggle)", () => {
+  // Mount a real EditorView so the base theme's StyleModule is injected, then
+  // assert the compiled rule. Regression: a `&`-less selector compiles to a
+  // DESCENDANT match (`.ͼx .cm-mod-held …`) which never fires because the class
+  // sits on the editor root itself — the selector must compound onto the scope
+  // class (`.ͼx.cm-mod-held …`, no space).
+  it("compiles the cursor rule against the editor root, not a descendant", async () => {
+    const { EditorView } = await import("@codemirror/view");
+    const { livePreview } = await import("./livePreview");
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      state: EditorState.create({ doc: "x https://a.example\n", extensions: [markdownLanguage, livePreview()] }),
+      parent,
+    });
+    try {
+      const css = Array.from(document.querySelectorAll("style"))
+        .map((s) => s.textContent ?? "")
+        .join("\n");
+      // The rule exists…
+      expect(css).toContain(".cm-mod-held .cm-md-link");
+      // …compounded on the scope class (no space before .cm-mod-held)…
+      expect(css).toMatch(/[\w"'\]]\.cm-mod-held \.cm-md-link/);
+      // …and never as an unreachable descendant selector.
+      expect(css).not.toMatch(/ \.cm-mod-held \.cm-md-link/);
+      // The rule must win over CodeMirror's content cursor.
+      const rule = css.split("}").find((r) => r.includes(".cm-mod-held .cm-md-link"))!;
+      expect(rule).toContain("cursor: pointer !important");
+
+      // And the class toggle reacts to window-level modifier events.
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Meta", metaKey: true }));
+      expect(view.dom.classList.contains("cm-mod-held")).toBe(true);
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "Meta", metaKey: false }));
+      expect(view.dom.classList.contains("cm-mod-held")).toBe(false);
+      // Stuck-class guard: cleared on window blur.
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Control", ctrlKey: true }));
+      expect(view.dom.classList.contains("cm-mod-held")).toBe(true);
+      window.dispatchEvent(new Event("blur"));
+      expect(view.dom.classList.contains("cm-mod-held")).toBe(false);
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  });
+});
+
 describe("toggleTaskAt", () => {
   it("flips an unchecked box to checked, touching only one char", () => {
     const src = "- [ ] todo\nother line\n";
