@@ -689,9 +689,9 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-md-link": { color: "#7cc2ff", textDecoration: "none", borderBottom: "1px solid rgba(124,194,255,0.4)" },
   // Follow affordance: pointer cursor when Mod is held (desktop) or on a touch
   // device, where a plain tap opens the link. See the `linkClicks` handler.
-  ".cm-mod-held .cm-md-link": { cursor: "pointer" },
+  ".cm-mod-held .cm-md-link": { cursor: "pointer !important" },
   "@media (pointer: coarse)": {
-    ".cm-md-link": { cursor: "pointer" },
+    ".cm-md-link": { cursor: "pointer !important" },
   },
   ".cm-md-quote": {
     borderLeft: "3px solid var(--cc-accent, #38bdf8)",
@@ -893,25 +893,45 @@ function openLinkFromEvent(view: EditorView, e: MouseEvent): boolean {
 
 const linkClicks = EditorView.domEventHandlers({
   mousedown: (e, view) => openLinkFromEvent(view, e),
-  // Show a pointer cursor while Mod is held so the "follow" gesture is
-  // discoverable on desktop (CSS: `.cm-mod-held .cm-md-link`).
-  keydown: (e, view) => {
-    if (e.key === "Meta" || e.key === "Control") view.dom.classList.add("cm-mod-held");
-    return false;
-  },
-  keyup: (e, view) => {
-    if (e.key === "Meta" || e.key === "Control") view.dom.classList.remove("cm-mod-held");
-    return false;
-  },
-  blur: (_e, view) => {
-    view.dom.classList.remove("cm-mod-held");
-    return false;
-  },
 });
 
+// modKeyAffordance toggles a `cm-mod-held` class on the editor while Cmd/Ctrl is
+// held, so the CSS can show a pointer cursor over links (the "follow" gesture is
+// desktop-only and modifier-gated). Listeners live on `window` (capture) rather
+// than the editor DOM: a lone modifier keydown/keyup must register even when the
+// editor isn't the focus target, and reading `metaKey`/`ctrlKey` off *any* key
+// event tracks the state without caring which key it was. It never calls
+// preventDefault, so typing is untouched. Cleared on window blur (tab switch) so
+// the class can't get stuck if the keyup lands in another tab.
+const modKeyAffordance = ViewPlugin.fromClass(
+  class {
+    sync = (e: KeyboardEvent) => {
+      this.view.dom.classList.toggle("cm-mod-held", e.metaKey || e.ctrlKey);
+    };
+    clear = () => this.view.dom.classList.remove("cm-mod-held");
+    constructor(readonly view: EditorView) {
+      window.addEventListener("keydown", this.sync, true);
+      window.addEventListener("keyup", this.sync, true);
+      window.addEventListener("blur", this.clear);
+    }
+    destroy() {
+      window.removeEventListener("keydown", this.sync, true);
+      window.removeEventListener("keyup", this.sync, true);
+      window.removeEventListener("blur", this.clear);
+    }
+  }
+);
+
 // livePreview is the full extension: the inline-decoration plugin, the table
-// state field, the theme, the clickable-link handler, and the highlight-style
-// override that strips the default heading/link underline.
+// state field, the theme, the clickable-link handler + its cursor affordance,
+// and the highlight-style override that strips the default heading/link underline.
 export function livePreview(): Extension {
-  return [livePreviewPlugin, tableField, livePreviewTheme, linkClicks, syntaxHighlighting(mdHighlight)];
+  return [
+    livePreviewPlugin,
+    tableField,
+    livePreviewTheme,
+    linkClicks,
+    modKeyAffordance,
+    syntaxHighlighting(mdHighlight),
+  ];
 }
