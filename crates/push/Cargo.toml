@@ -4,7 +4,7 @@
 # AppState-coupled busy→waiting sweep (`finish_watcher`) stays in the agent.
 [package]
 name = "cc-screen-push"
-version = "0.3.59"
+version = "0.4.0"
 edition = "2021"
 license.workspace = true
 description = "Web Push (VAPID + aes128gcm) for cc-screen-rust"

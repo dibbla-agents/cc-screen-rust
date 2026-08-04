@@ -1,6 +1,6 @@
 [package]
 name = "cc-screen-protocol"
-version = "0.3.59"
+version = "0.4.0"
 edition = "2021"
 license.workspace = true
 description = "Shared wire types for cc-screen-rust (server + TUI client)"
