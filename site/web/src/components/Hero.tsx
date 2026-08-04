@@ -1,4 +1,4 @@
-import { GITHUB } from "./Nav";
+import { APP } from "../urls";
 import { TitleBar } from "./ui";
 
 type Session = {
@@ -42,10 +42,9 @@ export function Hero() {
         and always a tap away.
       </h1>
       <p className="mt-5 max-w-[56ch] text-[1.08rem] text-dim">
-        Keep a whole team of AI agents working at once, and drop in on any of them
-        from your phone or laptop — on the couch, on your commute, wherever you
-        are. See what they've done, work on their files, and keep the conversation
-        going.
+        For developers who run Claude, Codex, Gemini or Kimi all day — and don't
+        want to be at the desk they run on. See what your agents did, cowork on
+        their files, keep the conversation going from wherever you are.
       </p>
 
       <div className="mt-9 overflow-hidden rounded-[10px] border border-line bg-surface">
@@ -59,16 +58,22 @@ export function Hero() {
 
       <p className="mt-7 flex flex-wrap gap-2.5">
         <a
-          href="#start"
-          className="rounded-lg bg-green px-5 py-[0.68rem] font-mono text-[0.85rem] font-bold text-[#06120a] transition-colors hover:bg-green-soft"
+          href={APP}
+          className="w-full rounded-lg bg-green px-5 py-[0.68rem] text-center font-mono text-[0.85rem] font-bold text-[#06120a] transition-colors hover:bg-green-soft sm:w-auto"
         >
-          Get started
+          Sign up — free during beta
         </a>
         <a
-          href={GITHUB}
-          className="rounded-lg border border-line px-5 py-[0.68rem] font-mono text-[0.85rem] text-ink transition-colors hover:border-green hover:text-green-soft"
+          href="#how"
+          className="w-full rounded-lg border border-line px-5 py-[0.68rem] text-center font-mono text-[0.85rem] text-ink transition-colors hover:border-green hover:text-green-soft sm:w-auto"
         >
-          See it on GitHub ↗
+          How it works
+        </a>
+      </p>
+      <p className="mt-3 font-mono text-[0.78rem] text-faint">
+        No card. Your code stays on your machines — the hub only relays.{" "}
+        <a className="underline hover:text-green-soft" href="#self-host">
+          Prefer to self-host?
         </a>
       </p>
       <p className="mt-6 font-mono text-[0.78rem] text-faint">

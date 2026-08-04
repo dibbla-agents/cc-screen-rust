@@ -15,6 +15,9 @@ export default defineConfig({
   base: "./",
   build: {
     outDir: "../../docs",
-    emptyOutDir: true,
+    emptyOutDir: false, // 0055 owns docs/docs/; CNAME et al. ride web/public/
+    // (the docs/assets prune lives in package.json's build script — the only
+    // tree Vite actually owns; emptying the whole outDir would nuke siblings'
+    // output.)
   },
 });

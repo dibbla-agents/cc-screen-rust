@@ -1,35 +1,44 @@
 ---
-subtitle: The cc-screen getting-started site — what it is and how to install it.
+subtitle: The cc-screen landing site — the front door for the hosted SaaS and the self-host track.
 ---
 
-# cc-screen — getting-started site
+# cc-screen — landing site
 
-This app serves the **cc-screen** getting-started / landing page: a small static
-website that explains the product and how to install it.
+This app serves the **cc-screen** landing page: the marketing/acquisition site
+for the hosted service at [app.ccscreen.dev](https://app.ccscreen.dev), with a
+self-host guide for people who run their own hub. The canonical home is
+**https://ccscreen.dev** (GitHub Pages); this Dibbla deployment survives as a
+redirect for legacy links.
 
 ## What you'll find here
 
-- **What cc-screen is** — keep a team of AI coding agents running around the clock
-  and check in on any of them from your phone or laptop, with real file cowork
-  across Anthropic, Google, OpenAI and Kimi.
-- **What it's for** — the three things it does best: a whole team always on,
-  checking in from anywhere, and coworking on the files your agents touch.
-- **Getting started** — copy-paste install commands for the server (on the machine
-  where your agents live) and the optional native desktop app.
+- **What cc-screen is** — keep a team of AI coding agents (Claude, Codex,
+  Gemini, Kimi) running around the clock on your own machines, and check in on
+  any of them from your phone or laptop, with real file cowork.
+- **How it works in 3 steps** — sign up at app.ccscreen.dev, paste one install
+  one-liner on your dev box, type the short code it prints. Free during the
+  beta, no card.
+- **Features & apps** — the phone PWA, the browser app, and the native `ccs`
+  terminal client.
+- **Demo** — a short terminal recording of a machine coming online.
+- **Pricing** — the free/pro/unlimited plans; everything is free during the
+  beta.
+- **Self-host** — copy-paste install commands for running the hub and machines
+  yourself: same product, your box, your network.
+- **Docs** — the end-user documentation lives under `/docs/`.
 
 ## How to use it
 
-Just open the site. It's a single page:
-
-- Read the intro at the top.
-- Browse **Features** to see what it's for.
-- Use **Getting started** to copy the install commands (each has a copy button).
-- Follow **GitHub** for the source and releases.
+It's a single page: read the intro, follow **Sign up** to create an account on
+the hosted hub, or jump to **Self-host** for the run-it-yourself commands (each
+has a copy button). **GitHub** has the source and releases.
 
 ## Notes
 
-- The site is read-only and public — there's no login, no account, and nothing to
-  configure. It simply presents the documentation.
-- The canonical source for this content lives in the `docs/` folder of the
+- The page itself is static and public. Accounts live on the hosted hub at
+  app.ccscreen.dev (signing up there is free during the beta); self-hosting
+  needs no account at all.
+- The canonical source for this content lives in `site/web/` of the
   [cc-screen-rust repository](https://github.com/dibbla-agents/cc-screen-rust);
-  this app serves a copy of it.
+  the built page is committed under `docs/` and served by GitHub Pages at
+  https://ccscreen.dev — this app serves (or redirects to) a copy of it.

@@ -1,0 +1,77 @@
+# Site CI (proposal 0054) — build the landing site and enforce the two
+# contracts it ships with:
+#   1. the static root files (CNAME/og.png/robots.txt/sitemap.xml) ride
+#      web/public/ into docs/ on every build;
+#   2. emptyOutDir stays false — a site rebuild must never delete the
+#      docs/docs/ subtree that proposal 0055 owns (sentinel check).
+# Lighthouse is deliberately omitted for v1; the app.ccscreen.dev links are
+# skipped in the link check until 0053's cutover makes them answer.
+name: site-ci
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/**"
+      - ".github/workflows/site-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Assert static root files landed in docs/
+        run: |
+          test -f ../../docs/CNAME
+          grep -qx 'ccscreen.dev' ../../docs/CNAME
+          test -f ../../docs/og.png
+          test -f ../../docs/robots.txt
+          test -f ../../docs/sitemap.xml
+          test -f ../../docs/apple-touch-icon.png
+
+      - name: Assert the page content contract
+        run: |
+          # the SaaS funnel is present…
+          count=$(grep -o 'app\.ccscreen\.dev' ../../docs/assets/*.js ../../docs/index.html | wc -l)
+          echo "app.ccscreen.dev occurrences: $count"
+          test "$count" -ge 3
+          # …and no literal placeholders shipped
+          if grep -q '<hub>' ../../docs/assets/*.js ../../docs/index.html; then
+            echo "literal <hub> placeholder found in the built page" >&2
+            exit 1
+          fi
+
+      - name: emptyOutDir contract — a sibling docs tree survives a rebuild
+        run: |
+          mkdir -p ../../docs/docs
+          touch ../../docs/docs/.sentinel
+          npm run build
+          test -f ../../docs/docs/.sentinel
+
+      - name: Link check the built page
+        run: |
+          npx serve -l 4173 ../../docs &
+          sleep 2
+          # skip app.ccscreen.dev until 0053's cutover is live; ./docs/ until
+          # 0055 populates it. Drop both skips after those land.
+          npx linkinator http://localhost:4173 --recurse \
+            --skip 'app\.ccscreen\.dev|/docs/'

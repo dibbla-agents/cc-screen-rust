@@ -114,6 +114,54 @@ export function Shot({
   );
 }
 
+/* A terminal command block with a copy button. Shared by the 3-step SaaS flow
+   (HowItWorks) and the self-host guide (Start). */
+export function Cmd({ clip, children }: { clip: string; children: ReactNode }) {
+  return (
+    <div className="relative mb-2.5 rounded-lg border border-line-soft bg-black/25 px-3.5 py-2.5">
+      <pre className="overflow-x-auto">
+        <code className="font-mono text-[0.83rem] leading-[1.7] whitespace-pre">
+          {children}
+        </code>
+      </pre>
+      <CopyButton text={clip} />
+    </div>
+  );
+}
+
+/* The shell prompt glyph in front of a Cmd. */
+export const Prompt = () => (
+  <span className="mr-[0.6ch] select-none text-green">$</span>
+);
+
+/* A numbered step card — the ①②③ pattern used by HowItWorks and Start. */
+export function Step({
+  badge,
+  title,
+  note,
+  children,
+  after,
+}: {
+  badge: string;
+  title: string;
+  note: string;
+  children: ReactNode;
+  after?: ReactNode;
+}) {
+  return (
+    <div className="rounded-[10px] border border-line bg-card p-6">
+      <h3 className="flex items-center gap-[0.6ch] font-mono text-[0.98rem] font-bold">
+        <span className="text-green">{badge}</span> {title}
+      </h3>
+      <p className="my-3 text-[0.88rem] text-dim">{note}</p>
+      {children}
+      {after !== undefined && (
+        <p className="mt-3 text-[0.86rem] text-faint">{after}</p>
+      )}
+    </div>
+  );
+}
+
 /* Copy-to-clipboard button used on the install commands. */
 export function CopyButton({ text }: { text: string }) {
   const [label, setLabel] = useState("copy");
