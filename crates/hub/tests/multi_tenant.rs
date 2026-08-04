@@ -64,10 +64,10 @@ async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> Strin
     let registry = Registry::new();
     // Register both agents online with a dummy uplink channel + their sessions.
     let (txa, _rxa) = mpsc::channel::<Vec<u8>>(8);
-    registry.register_agent(&alice_agent, &alice, "laptop", "a.local", vec![], txa)
+    registry.register_agent(&alice_agent, &alice, "laptop", "a.local", vec![], Vec::new(), txa)
         .set_sessions(alice_sessions.iter().map(|n| sess(n)).collect());
     let (txb, _rxb) = mpsc::channel::<Vec<u8>>(8);
-    registry.register_agent(&bob_agent, &bob, "laptop", "b.local", vec![], txb)
+    registry.register_agent(&bob_agent, &bob, "laptop", "b.local", vec![], Vec::new(), txb)
         .set_sessions(bob_sessions.iter().map(|n| sess(n)).collect());
     // Keep the fake agents' uplink receivers alive for the life of the hub so a
     // relayed Attach frame doesn't fail the send (the WS still upgrades regardless).

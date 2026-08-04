@@ -270,11 +270,46 @@ function formatCode(raw: string): string {
   return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
 }
 
-export function ActivatePage({ email, onDone }: { email?: string; onDone: () => void }) {
+export function ActivatePage({
+  email,
+  onDone,
+  onInstall,
+}: {
+  email?: string;
+  onDone: () => void;
+  /// Open the assistant install/update dialog for a machine that just enrolled
+  /// short of CLIs (proposal 0050 F3) — the catch-all for "I forgot the flag".
+  onInstall?: (machine: string, tools?: string[]) => void;
+}) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; machine?: string; error?: string } | null>(null);
+  const [missing, setMissing] = useState<string[]>([]);
   const ready = code.replace(/[^A-Z0-9]/gi, "").length === 8;
+
+  // The agent dials in a moment AFTER approval, so its tool list isn't in the
+  // registry the instant we land here. Poll briefly, then say nothing rather
+  // than guess — an absent line is the correct outcome on a complete machine.
+  useEffect(() => {
+    if (!result?.ok || !result.machine) return;
+    const machine = result.machine;
+    let tries = 0;
+    let stop = false;
+    const tick = async () => {
+      if (stop || tries++ > 6) return;
+      const found = (await listAgents().catch(() => [] as AgentInfo[])).find((a) => a.machine === machine);
+      if (stop) return;
+      if (found?.online) {
+        setMissing(found.missing ?? []);
+        return;
+      }
+      window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => {
+      stop = true;
+    };
+  }, [result?.ok, result?.machine]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -302,7 +337,28 @@ export function ActivatePage({ email, onDone }: { email?: string; onDone: () => 
                 It's linked to your account and will appear in your machines. You can close this on the box —
                 it's already dialing in.
               </p>
-              <button onClick={onDone} className={`${primaryBtn} mt-6`}>
+              {missing.length > 0 && (
+                <p className="mx-auto mt-3 max-w-xs text-sm text-amber">
+                  {missing.length} of the coding assistants aren’t installed there
+                  {onInstall ? " — install them now?" : "."}
+                </p>
+              )}
+              {missing.length > 0 && onInstall && result.machine && (
+                <button
+                  onClick={() => onInstall(result.machine as string, missing)}
+                  className={`${primaryBtn} mt-4`}
+                >
+                  Install {missing.length} assistant{missing.length === 1 ? "" : "s"}
+                </button>
+              )}
+              <button
+                onClick={onDone}
+                className={
+                  missing.length > 0 && onInstall
+                    ? "mt-3 w-full rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:text-slate-200"
+                    : `${primaryBtn} mt-6`
+                }
+              >
                 Go to my machines
               </button>
             </div>
@@ -359,7 +415,7 @@ function MachineRow({
   /// Open the "Update coding assistants" flow scoped to this machine (0049).
   /// The per-machine case belongs here, where per-machine administration
   /// already lives; the top-bar button remains the whole-fleet action.
-  onUpdate?: (machine: string) => void;
+  onUpdate?: (machine: string, tools?: string[]) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [token, setToken] = useState<string | null>(null);
@@ -382,6 +438,20 @@ function MachineRow({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* A linked machine that's short of assistants says so BEFORE it bites
+              (proposal 0050 F2) — otherwise the gap only surfaces as a failed
+              create. Opens the same dialog scoped to this machine, with the
+              install box ticked. Disappears on the next dashboard reload after a
+              successful install, because the agent re-advertises its tools. */}
+          {onUpdate && a.online && !!a.missing?.length && (
+            <button
+              onClick={() => onUpdate(a.machine, a.missing)}
+              className="flex items-center gap-1 rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber transition hover:border-amber hover:bg-amber/10"
+              title={`Not installed here: ${a.missing.join(", ")}. Install them for this machine's user.`}
+            >
+              ⚠ {a.missing.length} missing · Install
+            </button>
+          )}
           {onUpdate && a.online && (
             <button
               onClick={() => onUpdate(a.machine)}
@@ -656,7 +726,7 @@ export function Dashboard({
   onClose: () => void;
   onLoggedOut: () => void;
   /// Per-machine entry point into the assistant-update flow (proposal 0049).
-  onUpdateAssistants?: (machine: string) => void;
+  onUpdateAssistants?: (machine: string, tools?: string[]) => void;
 }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
@@ -671,8 +741,40 @@ export function Dashboard({
   const safeName = (machineName.trim() || "my-machine").replace(/[^A-Za-z0-9._-]/g, "-");
   // macOS/Linux pass the name as an arg; PowerShell's `iex` can't take one as
   // cleanly, so the hub bakes it in via ?name= (proposal 0045).
-  const installShell = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}`;
-  const installPwsh = `irm ${origin}/install.ps1?name=${encodeURIComponent(safeName)} | iex`;
+  // Coding assistants (proposal 0050): the moment the user is deciding what this
+  // box should BE is the right moment to ask, and the answer is then VISIBLE in
+  // the command they copy — that is the consent, auditable before it runs.
+  // Unticking gives today's command byte-for-byte.
+  const ASSISTANTS = ["claude", "codex", "gemini", "kimi"] as const;
+  const ASSISTANT_LABELS: Record<string, string> = {
+    claude: "Claude",
+    codex: "Codex",
+    gemini: "Gemini",
+    kimi: "Kimi",
+  };
+  const [withAssistants, setWithAssistants] = useState(true);
+  const [pickedAssistants, setPickedAssistants] = useState<string[]>([...ASSISTANTS]);
+  const allPicked = pickedAssistants.length === ASSISTANTS.length;
+  const assistantsArg = !withAssistants
+    ? ""
+    : allPicked
+      ? "--assistants"
+      : pickedAssistants.length
+        ? `--assistants=${pickedAssistants.join(",")}`
+        : "";
+  const assistantsQuery = !withAssistants
+    ? ""
+    : allPicked
+      ? "&assistants=all"
+      : pickedAssistants.length
+        ? `&assistants=${encodeURIComponent(pickedAssistants.join(","))}`
+        : "";
+  const installShell = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}${
+    assistantsArg ? ` ${assistantsArg}` : ""
+  }`;
+  // PowerShell's `irm … | iex` can't take positional args, so the choice rides
+  // the served script's query string — the same reason `?name=` exists (0045).
+  const installPwsh = `irm ${origin}/install.ps1?name=${encodeURIComponent(safeName)}${assistantsQuery} | iex`;
   const installCmd = osTab === "win" ? installPwsh : installShell;
   const reload = () => listAgents().then(setAgents).catch(() => setAgents([]));
   const firstLoad = useRef(true);
@@ -771,6 +873,59 @@ export function Dashboard({
                 {label}
               </button>
             ))}
+          </div>
+          <div className="mb-3 rounded-lg border border-edge bg-bar/50 px-3 py-2.5">
+            <label className="flex items-start gap-2 text-[12px] text-slate-300">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 shrink-0 accent-amber"
+                checked={withAssistants}
+                onChange={(e) => setWithAssistants(e.target.checked)}
+              />
+              <span className="min-w-0 flex-1">
+                Also install the coding assistants
+                <span className="block text-[11px] text-slate-500">
+                  Installed under that user’s home directory — no sudo. Several hundred MB.
+                </span>
+              </span>
+            </label>
+            {withAssistants && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 pl-6">
+                {ASSISTANTS.map((k) => (
+                  <label key={k} className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 accent-amber"
+                      checked={pickedAssistants.includes(k)}
+                      onChange={(e) =>
+                        setPickedAssistants((prev) =>
+                          e.target.checked ? [...prev, k] : prev.filter((x) => x !== k)
+                        )
+                      }
+                    />
+                    {ASSISTANT_LABELS[k]}
+                    {osTab === "win" && k === "kimi" && (
+                      <span className="text-slate-600">(unverified on Windows)</span>
+                    )}
+                  </label>
+                ))}
+              </div>
+            )}
+            {withAssistants && osTab === "win" && (
+              <p className="mt-2 pl-6 text-[11px] text-slate-500">
+                Codex and Gemini need Node.js, which on Windows is a machine-wide installer —
+                install it once from{" "}
+                <a
+                  href="https://nodejs.org/en/download"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-accent hover:underline"
+                >
+                  nodejs.org
+                </a>{" "}
+                if it isn’t there. Everything else installs for your user only.
+              </p>
+            )}
           </div>
           <div className="flex items-stretch gap-2">
             <code className="flex-1 overflow-x-auto whitespace-nowrap rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-xs text-accent">

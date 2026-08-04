@@ -9,6 +9,8 @@
 #   ./install.sh --no-build           (re)install the service without rebuilding
 #   ./install.sh --no-service         just build the binary, don't run it
 #   ./install.sh --no-restore         don't auto-resume sessions at startup
+#   ./install.sh --assistants[=LIST]  also install the missing coding-assistant CLIs
+#                                     for your user (~/.local, no sudo); LIST narrows it
 #
 # Slave mode — also register with a hub (see HUB.md / `cc-screen-hub install`):
 #   ./install.sh --hub URL --hub-token TOK --machine-id NAME [--hub-only]
@@ -27,6 +29,7 @@ HUB=""
 HUB_TOKEN=""
 MACHINE_ID=""
 HUB_ONLY=0
+ASSISTANTS="${CCSCREEN_ASSISTANTS:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,7 +47,10 @@ while [ $# -gt 0 ]; do
     --machine-id)   MACHINE_ID="$2"; shift 2 ;;
     --machine-id=*) MACHINE_ID="${1#*=}"; shift ;;
     --hub-only)     HUB_ONLY=1; shift ;;
-    -h|--help)      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --assistants)   ASSISTANTS="all"; shift ;;
+    --assistants=*) ASSISTANTS="${1#*=}"; shift ;;
+    --no-assistants) ASSISTANTS=""; shift ;;
+    -h|--help)      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -71,11 +77,19 @@ BIN="$(pwd)/target/release/cc-screen-rust"
 # Interactive runs get an offer to install each missing one; piped runs just get
 # the report + install one-liners. The list lives in the binary (single source
 # of truth), so this script stays thin.
-if [ -t 0 ]; then
-  "$BIN" doctor --install || true
-else
-  "$BIN" doctor || true
-fi
+# `--assistants` (proposal 0050) installs them non-interactively, for this user
+# only (~/.local, no sudo) — the same runner the web action uses.
+case "$ASSISTANTS" in
+  "")
+    if [ -t 0 ]; then
+      "$BIN" doctor --install || true
+    else
+      "$BIN" doctor || true
+    fi
+    ;;
+  all) "$BIN" doctor --install --yes || true ;;
+  *)   "$BIN" doctor --install --yes --only "$ASSISTANTS" || true ;;
+esac
 
 # Service setup now lives in the binary itself (`cc-screen-rust install`), so the
 # systemd-unit / launchd-plist logic has a single source of truth and works on

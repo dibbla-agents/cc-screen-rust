@@ -5,11 +5,15 @@
 members = ["crates/protocol", "crates/auth", "crates/push", "crates/tui", "crates/hub", "crates/summary"]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+
 [package]
 name = "cc-screen-rust"
 version = "0.3.59"
 edition = "2021"
 description = "Web-only, tmux-free engine for driving AI coding CLIs from a phone"
+license.workspace = true
 
 # The server is distributed too, but it embeds the frontend via rust-embed, so the
 # release CI must build frontend/dist BEFORE `dist build` — wired through the

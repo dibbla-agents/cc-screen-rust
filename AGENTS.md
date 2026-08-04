@@ -209,6 +209,39 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   not a `504`) and on **ownership** — a 0039 share grants *use*, not
   administration. CLI parity is `doctor --update` (binaries only): `cc-screen-rust
   update` still means "update the agent itself". See proposal 0049.
+- **Install the missing assistants (0050).** [0046] made *presence* a concern and
+  [0049] made *staying current* one; 0050 makes **becoming present** an action.
+  One runner (`src/provision.rs`) drives the registry's install column: non
+  -interactive, **`$HOME`-only, never `sudo`**, with declared prerequisites
+  (`Assistant.needs` → `PREREQS`: `npm` for codex/gemini, `uv` for kimi) installed
+  the same way. The verdict is the **re-probe on the session PATH**, never the
+  exit code — which is why the **landing zone** matters: an installer that drops
+  the binary in a prefix the session PATH doesn't include gets a symlink (copy on
+  Windows, no admin needed) into `~/.local/bin`, the one dir `build_env_path`
+  guarantees, so `installed` means launchable *now* with no agent restart. Never
+  clobbers a file it didn't put there. Three surfaces: the [0049] job gains a
+  phase-1 branch (`installing`→`installed` — new **row states**, not a new
+  `phase`, so an older client degrades legibly) plus a phase-2
+  `restore_prefixes` that brings back the sessions the missing CLI was blocking;
+  the dashboard row shows `N missing · Install`; and the machine-add one-liner
+  takes a visible `--assistants` flag (`?assistants=` on Windows). CLI parity is
+  `doctor --install --yes [--only a,b]` — the switch a piped `curl | sh` needs,
+  since `--install` alone refuses without a TTY. Over the hub: owner-only (as
+  [0049]), plus an additive `assistant-install` cap so an older agent gets a
+  `501` instead of silently running an update-only job, `AgentMsg::Tools` to
+  un-freeze the hub's register-time `unavailable` cache, and `UpdateBody` **must**
+  stay `rename_all = "camelCase"`. See proposal 0050.
+- **The Windows binary probe (0051).** `binary_on_path` split the PATH on `':'`
+  and ignored `PATHEXT`, so on Windows it matched *nothing* — including
+  `powershell`, the bare shell tool's head. Every create `424`d, every restore
+  skipped, `/api/tools` greyed everything out and [0049]/[0050] were no-ops there.
+  `tools::Resolver` now takes the separator + extension list as **inputs** (one
+  implementation, unit-testable from Linux with a Windows-shaped PATH), follows
+  `PATHEXT` rather than guessing (`.ps1` is *not* added when `PATHEXT` omits it —
+  `cmd.exe /C` wouldn't run it either), and treats an absolute/drive/backslash
+  head as a path. `resolve_on_path` returns *what* it found — `doctor` prints it
+  and 0050's landing zone consumes it. Also: `--version` used to fall through to
+  *serving*. See proposal 0051.
 - **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
   staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
   Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The

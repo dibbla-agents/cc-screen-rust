@@ -62,6 +62,9 @@ interface Props {
   createInitialMachine: string;
   recentDirs?: string[];
   onCreated: (ref: PaneRef) => void;
+  /// Open the assistant install dialog for a tool whose CLI is missing on that
+  /// machine (proposal 0050 F4). Passed straight through to the create flow.
+  onInstallTool?: (machine: string, tool: string) => void;
   // "New layout" routes here (desktop only — there's no multi-pane grid on
   // phone). Reaches the existing LayoutPalette. `showLayout` gates the row.
   showLayout?: boolean;
@@ -173,6 +176,7 @@ export default function SessionDrawer({
   createInitialMachine,
   recentDirs,
   onCreated,
+  onInstallTool,
   showLayout = false,
   onLayout,
   deleting,
@@ -517,6 +521,7 @@ export default function SessionDrawer({
           }}
           onClose={onClose}
           onCreated={onCreated}
+          onInstallTool={onInstallTool}
         />
       </div>
     );

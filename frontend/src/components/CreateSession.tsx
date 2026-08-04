@@ -40,6 +40,10 @@ interface Props {
   onBack: () => void; // back to the session list
   onClose: () => void; // close the drawer entirely
   onCreated: (ref: PaneRef) => void;
+  // Offer to INSTALL a tool whose CLI is missing here (proposal 0050 F4). This
+  // is where a user feels the gap most often, and until now it was a dead end:
+  // the pill said "not installed on this machine" and that was that.
+  onInstallTool?: (machine: string, tool: string) => void;
 }
 
 function basename(p: string): string {
@@ -76,6 +80,7 @@ export default function CreateSession({
   onBack,
   onClose,
   onCreated,
+  onInstallTool,
 }: Props) {
   const [tools, setTools] = useState<Tool[]>([]);
   const [tool, setTool] = useState<string>("");
@@ -93,6 +98,9 @@ export default function CreateSession({
   const [extraDirs, setExtraDirs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // The picked tool, when its CLI is missing here — drives the "Install it" row.
+  const missingSelected = tools.find((t) => t.cmd === tool && t.unavailable);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -537,6 +545,25 @@ export default function CreateSession({
             </button>
           ))}
         </div>
+        {/* Selecting a greyed-out tool used to be a dead end. Now it points at
+            the fix (0050 F4) — the same install dialog, scoped to this machine
+            and this one CLI. */}
+        {missingSelected && (
+          <div className="mb-1.5 flex items-center gap-2 rounded-md bg-bar/60 px-2 py-1.5 text-[11px] text-slate-400">
+            <span className="min-w-0 flex-1 truncate">
+              {missingSelected.prefix} isn’t installed on this machine.
+            </span>
+            {onInstallTool && (
+              <button
+                type="button"
+                onClick={() => onInstallTool(selectedMachine, missingSelected.prefix)}
+                className="shrink-0 rounded-md border border-amber/60 px-2 py-0.5 font-semibold text-amber transition hover:bg-amber/10"
+              >
+                Install it
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="mb-1.5 flex items-center gap-2">
           <button

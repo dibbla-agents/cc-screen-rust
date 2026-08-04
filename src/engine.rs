@@ -692,6 +692,13 @@ pub struct Inner {
     /// was asleep) still sees the result — which is why this lives here and not
     /// in React state.
     pub update_job: Mutex<cc_screen_protocol::UpdateJob>,
+    /// Set when an install changed which CLIs exist here (proposal 0050 C4), so
+    /// the uplink re-advertises the tool registry on its next tick. A flag rather
+    /// than a poll: the hub caches `unavailable` from `Register` and a direct
+    /// client live-probes per request, so this is the *only* consumer — and
+    /// re-probing the filesystem every second to notice a once-a-month event
+    /// would be the wrong trade.
+    pub tools_dirty: std::sync::atomic::AtomicBool,
     pub env_path: String,
     /// Loopback base URL exported to each session as `CCWEB_CLIP_URL` so the
     /// clipboard shim fetches staged images from THIS agent (see clip.rs). Empty
@@ -737,6 +744,7 @@ impl AppState {
                 registry: Mutex::new(HashMap::new()),
                 restarting: Mutex::new(std::collections::HashSet::new()),
                 update_job: Mutex::new(cc_screen_protocol::UpdateJob::idle()),
+                tools_dirty: std::sync::atomic::AtomicBool::new(false),
                 env_path,
                 clip_url,
                 push: crate::push::Push::new(&config_dir),
@@ -773,6 +781,18 @@ impl AppState {
             .iter()
             .map(|t| tools::tool_info(t, self.tool_binary_missing(t).is_some()))
             .collect()
+    }
+
+    /// Availability changed — ask the uplink to re-advertise the tool registry
+    /// (proposal 0050 C4). No-op for a standalone agent, whose `/api/tools`
+    /// live-probes per request anyway.
+    pub fn announce_tools(&self) {
+        self.inner.tools_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Consume the flag above — `true` exactly once per `announce_tools`.
+    pub fn take_tools_dirty(&self) -> bool {
+        self.inner.tools_dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Session>> {
@@ -871,10 +891,28 @@ impl AppState {
     /// Bring back every recorded-but-not-live session, resuming its conversation.
     /// Idempotent; used by POST /api/sessions/restore and at startup.
     pub fn restore_all(&self) -> (Vec<String>, HashMap<String, String>) {
+        let (restored, failed) = self.restore_matching(&[]);
+        (restored.into_iter().map(|(name, _)| name).collect(), failed.into_iter().collect())
+    }
+
+    /// Restore only the recorded sessions belonging to `prefixes` (proposal
+    /// 0050 C3): after an install job makes a CLI appear, the manifest entries
+    /// Restore has been skipping on every startup for that CLI come back — under
+    /// their original names, with their marks and labels — instead of waiting for
+    /// the next agent restart. Shares `restore_all`'s body, including the
+    /// colour/label re-apply, so there is one restore recipe.
+    ///
+    /// Returns `(restored (session, tool), failed (session, why))`.
+    pub fn restore_prefixes(&self, prefixes: &[String]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        self.restore_matching(prefixes)
+    }
+
+    /// The shared body. Empty `prefixes` = every recorded session.
+    fn restore_matching(&self, prefixes: &[String]) -> (Vec<(String, String)>, Vec<(String, String)>) {
         let live: std::collections::HashSet<String> =
             self.inner.registry.lock().unwrap().keys().cloned().collect();
-        let mut restored = Vec::new();
-        let mut failed = HashMap::new();
+        let mut restored: Vec<(String, String)> = Vec::new();
+        let mut failed: Vec<(String, String)> = Vec::new();
         for e in manifest::entries(&self.inner.config_dir) {
             if live.contains(&e.session) {
                 continue;
@@ -882,6 +920,9 @@ impl AppState {
             let Some(tool) = self.find_tool(&e.prefix).or_else(|| self.find_tool(&e.cmd)) else {
                 continue;
             };
+            if !prefixes.is_empty() && !prefixes.iter().any(|p| p == &tool.prefix) {
+                continue;
+            }
             if !std::path::Path::new(&e.dir).is_dir() {
                 continue;
             }
@@ -896,7 +937,7 @@ impl AppState {
                     .map(|c| format!(" — install it with: {c}"))
                     .unwrap_or_default();
                 tracing::warn!("restore: skipping {} — `{bin}` is not installed{hint}", e.session);
-                failed.insert(e.session.clone(), format!("{bin} is not installed{hint}"));
+                failed.push((e.session.clone(), format!("{bin} is not installed{hint}")));
                 continue;
             }
             match self.create(
@@ -924,10 +965,10 @@ impl AppState {
                         }
                         manifest::set_label(&self.inner.config_dir, &name, Some(e.label.clone()));
                     }
-                    restored.push(name);
+                    restored.push((name, tool.prefix.clone()));
                 }
                 Err(err) => {
-                    failed.insert(e.session.clone(), err.to_string());
+                    failed.push((e.session.clone(), err.to_string()));
                 }
             }
         }
@@ -1150,6 +1191,77 @@ mod tests {
             install_hint: None,
             update_cmd: None,
         }
+    }
+
+
+    // Proposal 0050 C3. `restore_all`'s own comment says a session skipped for a
+    // missing CLI comes back once the CLI is installed — nothing performed that
+    // sentence's second half at the moment the CLI appeared. `restore_prefixes`
+    // does, and it must (a) touch ONLY the installed tool's entries and (b) reuse
+    // `restore_all`'s recipe, including the colour/label re-apply.
+    #[tokio::test]
+    async fn restore_prefixes_touches_only_that_tool_and_keeps_mark_and_label() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut alpha = shell_tool("sleep 30");
+        alpha.cmd = "al".into();
+        alpha.prefix = "alpha".into();
+        let mut beta = shell_tool("sleep 30");
+        beta.cmd = "be".into();
+        beta.prefix = "beta".into();
+        let state = AppState::new(
+            vec![alpha.clone(), beta.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let dir = tmp.to_string_lossy().to_string();
+        let a = state.create(&alpha, "work", &dir, vec![], false, true).unwrap();
+        let b = state.create(&beta, "work", &dir, vec![], false, true).unwrap();
+        // A marked + labelled session, so the re-apply is actually observable.
+        state.get(&a).unwrap().set_color(Some("teal".into()));
+        manifest::set_color(&tmp, &a, Some("teal".into()));
+        state.get(&a).unwrap().set_label(Some("Auth refactor".into()));
+        manifest::set_label(&tmp, &a, Some("Auth refactor".into()));
+
+        // Kill both: a hard exit is NOT a goodbye, so both manifest entries stay
+        // — the state a machine is in after the CLI went missing.
+        state.get(&a).unwrap().kill();
+        state.get(&b).unwrap().kill();
+        for _ in 0..100 {
+            if state.get(&a).is_none() && state.get(&b).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(state.get(&a).is_none() && state.get(&b).is_none(), "reaper cleared the registry");
+
+        // Only alpha's CLI "appeared", so only alpha's sessions come back.
+        let (restored, failed) = state.restore_prefixes(&["alpha".to_string()]);
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(restored, vec![(a.clone(), "alpha".to_string())]);
+        assert!(state.get(&a).is_some(), "alpha is live again under its original name");
+        assert!(state.get(&b).is_none(), "beta was not touched");
+
+        // …with its mark and label intact, live and persisted.
+        assert_eq!(state.get(&a).unwrap().color().as_deref(), Some("teal"));
+        assert_eq!(state.get(&a).unwrap().label().as_deref(), Some("Auth refactor"));
+        let entry = manifest::entries(&tmp).into_iter().find(|e| e.session == a).unwrap();
+        assert_eq!(entry.color, "teal");
+        assert_eq!(entry.label, "Auth refactor");
+
+        // An empty prefix list is "everything" — the shape `restore_all` uses.
+        let (all, _) = state.restore_prefixes(&[]);
+        assert_eq!(all, vec![(b.clone(), "beta".to_string())], "alpha is already live");
+
+        state.get(&a).unwrap().kill();
+        state.get(&b).unwrap().kill();
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

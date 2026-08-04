@@ -193,7 +193,13 @@ async fn connect_and_serve(
         // rather than version-sniffed: the hub refuses an op an agent doesn't
         // list with a clear 501, instead of routing a Cmd the agent can't
         // deserialize and timing out into a 504.
-        caps: vec![cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string()],
+        caps: vec![
+            cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string(),
+            // …and installing the missing ones for the local user (0050). The
+            // hub answers 501 rather than letting an older agent silently ignore
+            // `install_missing` and report an update-only job as an install.
+            cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL.to_string(),
+        ],
     };
     let _ = out_tx.send(WsOut::Bin(encode_frame(&register, b""))).await;
 
@@ -247,6 +253,16 @@ async fn connect_and_serve(
                 if cur != last {
                     last = cur.clone();
                     let frame = encode_frame(&AgentMsg::Sessions { sessions: cur }, b"");
+                    if out_tx.send(WsOut::Bin(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                // An install job changed which CLIs exist here (0050 C4). The hub
+                // caches `unavailable` from `Register`, so without this the
+                // dashboard's "N missing" badge stays frozen at connect time and
+                // keeps claiming a CLI we just installed is absent.
+                if state.take_tools_dirty() {
+                    let frame = encode_frame(&AgentMsg::Tools { tools: state.tool_infos() }, b"");
                     if out_tx.send(WsOut::Bin(frame)).await.is_err() {
                         break;
                     }

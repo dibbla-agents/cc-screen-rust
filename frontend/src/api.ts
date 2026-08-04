@@ -170,6 +170,10 @@ export interface AgentInfo {
   machine: string;
   online: boolean;
   createdAt: number;
+  // Tool prefixes whose CLI isn't installed on that machine (proposal 0050).
+  // Absent on an older hub, and empty once everything's there — so the
+  // dashboard's "N missing · Install" affordance simply doesn't render.
+  missing?: string[];
 }
 
 export async function listAgents(): Promise<AgentInfo[]> {
@@ -427,14 +431,21 @@ export async function fetchUpdateJob(machine?: string): Promise<UpdateJob> {
 // back: "updated" (only those whose CLI actually changed — the default), "all",
 // or "none". A 409 means one is already running; we return that job so the
 // caller just watches it instead of racing a second one.
+// `installMissing` (proposal 0050) additionally installs the CLIs that aren't on
+// the machine at all, for the local user. A hub answers 501 when the agent is too
+// old to install — never a silent update-only run.
 export async function startAssistantUpdate(
   machine?: string,
-  opts?: { tools?: string[]; restart?: "updated" | "all" | "none" }
+  opts?: { tools?: string[]; restart?: "updated" | "all" | "none"; installMissing?: boolean }
 ): Promise<UpdateJob> {
   const r = await fetch(withMachine("/api/assistants/update", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tools: opts?.tools ?? [], restart: opts?.restart ?? "updated" }),
+    body: JSON.stringify({
+      tools: opts?.tools ?? [],
+      restart: opts?.restart ?? "updated",
+      installMissing: opts?.installMissing ?? false,
+    }),
   });
   const text = (await r.text()).trim();
   if (r.status === 409) {
@@ -447,6 +458,42 @@ export async function startAssistantUpdate(
   }
   if (!r.ok) throw new Error(text || `update: ${r.status}`);
   return JSON.parse(text) as UpdateJob;
+}
+
+// ── Install plan (proposal 0050) ──────────────────────────────────────────────
+// What installing the missing assistants on a machine WOULD do, fetched before
+// the user confirms. The commands come from the AGENT's registry (including a
+// machine's own cc_tool_install override), so the UI never hard-codes a vendor
+// command. A pure probe — no side effects.
+
+export interface InstallPrereqPlan {
+  key: string;
+  label: string;
+  command: string;
+  docs?: string;
+  sizeHint?: string;
+}
+
+export interface InstallPlanItem {
+  tool: string;
+  label: string;
+  command: string;
+  docs?: string;
+  sizeHint?: string;
+  prereqs: InstallPrereqPlan[];
+  // Set when this machine can't install it at all (no command for the platform,
+  // or a prerequisite with no user-scope bootstrap — Node on Windows).
+  unsupported?: string;
+}
+
+export interface InstallPlan {
+  items: InstallPlanItem[];
+}
+
+export async function fetchInstallPlan(machine?: string): Promise<InstallPlan> {
+  const r = await fetch(withMachine("/api/assistants/plan", machine));
+  if (!r.ok) throw new Error((await r.text()).trim() || `install plan: ${r.status}`);
+  return r.json();
 }
 
 // sendKey injects one named key (out-of-band; no focus needed). Names match

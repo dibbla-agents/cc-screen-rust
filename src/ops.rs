@@ -114,8 +114,8 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
         // calls. `Err` = one is already running → 409 carrying its snapshot, so
         // the client watches that job instead of racing a second one. The frame
         // carries only tool NAMES; the commands come from this machine's registry.
-        Cmd::UpdateAssistants { tools, restart } => {
-            let req = cc_screen_protocol::UpdateReq { tools, restart };
+        Cmd::UpdateAssistants { tools, restart, install_missing } => {
+            let req = cc_screen_protocol::UpdateReq { tools, restart, install_missing };
             match crate::handlers::update_start_core(app, &req) {
                 Ok(job) => json_reply(&job),
                 Err(running) => match serde_json::to_string(&running) {
@@ -127,6 +127,13 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             }
         }
         Cmd::UpdateStatus => json_reply(&app.update_job()),
+        // What an install would do, before the user confirms (proposal 0050).
+        // A probe with no side effects, resolved against THIS machine's registry.
+        Cmd::InstallPlan { tools } => json_reply(&crate::provision::plan(
+            &app.inner.tools,
+            &app.inner.env_path,
+            &tools,
+        )),
     }
 }
 

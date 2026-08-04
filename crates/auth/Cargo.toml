@@ -7,6 +7,7 @@
 name = "cc-screen-auth"
 version = "0.3.59"
 edition = "2021"
+license.workspace = true
 description = "Opt-in password/API-token auth with signed session cookies for cc-screen-rust"
 
 [dependencies]

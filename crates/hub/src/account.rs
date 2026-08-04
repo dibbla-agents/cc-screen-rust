@@ -58,8 +58,20 @@ pub async fn list(State(hub): State<HubState>, headers: HeaderMap) -> Response {
         .await
         .into_iter()
         .map(|a| {
-            let online = hub.registry.is_online(&a.agent_id);
-            json!({ "agentId": a.agent_id, "machine": a.machine_id, "online": online, "createdAt": a.created_at })
+            let conn = hub.registry.get(&a.agent_id);
+            let online = conn.as_ref().is_some_and(|c| c.online());
+            // Which coding assistants this machine is short of (proposal 0050
+            // D3) — so the dashboard can say `⚠ 2 missing · Install` without N
+            // extra round-trips. Empty (and omitted client-side) when it's
+            // complete or offline; kept honest by `AgentMsg::Tools`.
+            let missing: Vec<String> = conn.as_ref().map(|c| c.missing_tools()).unwrap_or_default();
+            json!({
+                "agentId": a.agent_id,
+                "machine": a.machine_id,
+                "online": online,
+                "createdAt": a.created_at,
+                "missing": missing,
+            })
         })
         .collect();
     Json(out).into_response()

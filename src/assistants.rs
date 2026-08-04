@@ -58,17 +58,26 @@ fn update_timeout() -> Duration {
 
 /// What running one command produced: its exit status (`None` = timed out or
 /// never started) and the combined stdout+stderr.
-struct Run {
-    ok: bool,
-    output: String,
-    error: Option<String>,
+pub(crate) struct Run {
+    pub ok: bool,
+    pub output: String,
+    pub error: Option<String>,
 }
 
 /// Run `line` through the session's launch shell with `PATH = env_path`,
 /// capturing output, with a hard timeout. **stdin is /dev/null** — this runs
 /// unattended inside the agent, so a command that decides to prompt must fail
 /// rather than block forever (the consent for this already happened in the UI).
-fn run_shell(line: &str, env_path: &str, timeout: Duration) -> Run {
+///
+/// `extra_env` are additional variables for this one command (proposal 0050's
+/// install environment: `npm_config_prefix`, `UV_TOOL_BIN_DIR`, …) — set on the
+/// child only, so the user's own config is never rewritten.
+pub(crate) fn run_shell(
+    line: &str,
+    env_path: &str,
+    timeout: Duration,
+    extra_env: &[(&str, String)],
+) -> Run {
     let (program, pre_args) = tools::launch_shell();
     let mut cmd = Command::new(program);
     for a in pre_args {
@@ -79,6 +88,9 @@ fn run_shell(line: &str, env_path: &str, timeout: Duration) -> Run {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -150,7 +162,7 @@ fn read_all<R: Read>(r: &mut R) -> String {
 pub fn probe_version(t: &Tool, env_path: &str) -> String {
     let Some(bin) = tools::probe_binary(t) else { return String::new() };
     let line = format!("{bin} {}", tools::version_arg(t));
-    let run = run_shell(&line, env_path, VERSION_TIMEOUT);
+    let run = run_shell(&line, env_path, VERSION_TIMEOUT, &[]);
     if !run.ok && run.output.trim().is_empty() {
         return String::new();
     }
@@ -167,7 +179,7 @@ fn first_line(s: &str) -> String {
 
 /// The last few meaningful lines of a failed command's output, for the row's
 /// message. Bounded so a build log can't flood the UI.
-fn tail_error(output: &str, fallback: &str) -> String {
+pub(crate) fn tail_error(output: &str, fallback: &str) -> String {
     let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let tail = lines.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" · ");
     let msg = if tail.is_empty() { fallback.to_string() } else { format!("{fallback}: {tail}") };
@@ -201,7 +213,7 @@ pub fn update_tool(t: &Tool, env_path: &str) -> UpdateOutcome {
     let mut last_error: Option<String> = None;
 
     for cmd in &cmds {
-        let run = run_shell(cmd, env_path, timeout);
+        let run = run_shell(cmd, env_path, timeout, &[]);
         let after = probe_version(t, env_path);
         if !after.is_empty() && after != before {
             return UpdateOutcome::Updated { from: before, to: after };
@@ -288,22 +300,68 @@ pub fn start_job(app: &AppState, req: &UpdateReq) -> Result<UpdateJob, UpdateJob
 
     let app = app.clone();
     let restart_mode = req.restart.clone();
+    let install_missing = req.install_missing;
     // A dedicated thread, like the reaper: these are blocking `Command` calls
     // with no business on the async runtime.
-    std::thread::spawn(move || run_job(&app, selected, &restart_mode));
+    std::thread::spawn(move || run_job(&app, selected, &restart_mode, install_missing));
     Ok(started)
 }
 
 /// The worker: phase 1 (update each CLI, one at a time), then phase 2 (restart
 /// the affected sessions), writing every transition into the shared snapshot.
-fn run_job(app: &AppState, selected: Vec<Tool>, restart_mode: &str) {
+fn run_job(app: &AppState, selected: Vec<Tool>, restart_mode: &str, install_missing: bool) {
     let env_path = app.inner.env_path.clone();
+    let home = app.inner.home.clone();
     // Serialised on purpose: `codex` and `gemini` are both global npm installs,
     // and concurrent `npm install -g` runs contend on the same prefix — exactly
-    // the half-written state this feature exists to avoid.
+    // the half-written state this feature exists to avoid. Installing adds a
+    // second reason (proposal 0050 C2): two assistants can share a prerequisite,
+    // and the second must see the Node the first one installed.
     let mut updated: Vec<String> = Vec::new();
+    let mut installed: Vec<String> = Vec::new();
     let mut not_updated: Vec<(String, String)> = Vec::new(); // (prefix, why)
     for t in &selected {
+        // The install branch (proposal 0050): a CLI that isn't on the machine at
+        // all can't be *updated*, and until now the row simply said so and
+        // stopped. `phase` stays `updating` — install and update are the same act
+        // on the same row (preparing the CLIs), and a third phase would be a
+        // wrong picture on a client that predates it.
+        if install_missing && crate::tools::missing_binary(t, &env_path).is_some() {
+            set_tool_state(app, &t.prefix, |row| row.state = "installing".into());
+            match crate::provision::install_tool(t, &env_path, &home) {
+                crate::provision::InstallOutcome::Installed { version, via } => {
+                    installed.push(t.prefix.clone());
+                    set_tool_state(app, &t.prefix, move |row| {
+                        row.state = "installed".into();
+                        row.to = Some(version).filter(|s| !s.is_empty());
+                        row.message = Some(format!("via {via}"));
+                    });
+                }
+                // Won the race with someone else's install, or a stale probe.
+                crate::provision::InstallOutcome::AlreadyPresent { version } => {
+                    not_updated.push((t.prefix.clone(), "already current".into()));
+                    set_tool_state(app, &t.prefix, move |row| {
+                        row.state = "current".into();
+                        row.to = Some(version).filter(|s| !s.is_empty());
+                    });
+                }
+                crate::provision::InstallOutcome::Failed { error } => {
+                    not_updated.push((t.prefix.clone(), format!("install failed: {error}")));
+                    set_tool_state(app, &t.prefix, move |row| {
+                        row.state = "failed".into();
+                        row.message = Some(error);
+                    });
+                }
+                crate::provision::InstallOutcome::Unsupported { reason } => {
+                    not_updated.push((t.prefix.clone(), reason.clone()));
+                    set_tool_state(app, &t.prefix, move |row| {
+                        row.state = "skipped".into();
+                        row.message = Some(reason);
+                    });
+                }
+            }
+            continue;
+        }
         set_tool_state(app, &t.prefix, |row| row.state = "updating".into());
         let outcome = update_tool(t, &env_path);
         match &outcome {
@@ -402,10 +460,45 @@ fn run_job(app: &AppState, selected: Vec<Tool>, restart_mode: &str) {
         });
     });
 
+    // C3 — a freshly installed CLI has no live sessions to restart (its `Create`
+    // was refused by the 424), but it may well have RECORDED ones that Restore
+    // has been skipping on every startup. `restore_all`'s own comment says
+    // installing the CLI and restoring brings them back; this is the code that
+    // performs that sentence's second half. "The CLI is back" vs "my work is back".
+    if !installed.is_empty() {
+        let (restored, failed) = app.restore_prefixes(&installed);
+        app.with_update_job(|j| {
+            for (session, tool) in restored {
+                j.sessions.push(SessionRestartStatus {
+                    session,
+                    tool,
+                    state: "resumed".into(),
+                    message: Some("restored after install".into()),
+                });
+            }
+            for (session, why) in failed {
+                j.sessions.push(SessionRestartStatus {
+                    session,
+                    tool: String::new(),
+                    state: "failed".into(),
+                    message: Some(why),
+                });
+            }
+        });
+    }
+
     app.with_update_job(|j| {
         j.phase = "done".into();
         j.finished_at = Some(crate::engine::now_secs() as i64);
     });
+
+    // C4 — availability changed, so re-advertise. A standalone agent needs
+    // nothing (`/api/tools` live-probes per request); a hub caches the list from
+    // `Register`, so without this the dashboard's "N missing" badge would stay
+    // frozen at connect time and keep claiming a CLI we just installed is absent.
+    if !installed.is_empty() {
+        app.announce_tools();
+    }
 }
 
 /// Update one tool's row in the live snapshot (no-op if the job was replaced).
@@ -466,6 +559,82 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+
+    // Proposal 0050 C2: with `installMissing`, a row that used to read
+    // `skipped: not installed` and stop becomes `installing` → `installed`, while
+    // a CLI that IS present stays on the update path — one loop, three branches.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_job_installs_what_is_missing_and_updates_what_is_there() {
+        let b = Bin::new("job");
+        let home = b.0.join("home");
+        std::fs::create_dir_all(home.join(".local").join("bin")).unwrap();
+        // The install drops the binary straight onto the session PATH.
+        b.write(
+            "do-install",
+            &format!(
+                "#!/bin/sh\nprintf '#!/bin/sh\\necho \"ghost 9.9\"\\n' > {d}/ghost-cli\nchmod 755 {d}/ghost-cli\n",
+                d = b.0.display()
+            ),
+        );
+        b.write("here-cli", "#!/bin/sh\necho 'here 1.0'\n");
+        // A deliberately narrow session PATH: this box must look like one with
+        // neither CLI, whatever the test host happens to have installed.
+        let env_path = format!("{}:{}:/usr/bin:/bin", home.join(".local").join("bin").display(), b.0.display());
+
+        let mut missing = tool("ghost", "ghost-cli");
+        missing.install_hint = Some("do-install".into());
+        let mut present = tool("here", "here-cli");
+        present.update_cmd = Some("true".into()); // succeeds, moves nothing → `current`
+
+        let tmp = b.0.join("cfg");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let app = AppState::new(
+            vec![missing.clone(), present.clone()],
+            env_path.clone(),
+            String::new(),
+            tmp.clone(),
+            home.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+
+        // Without the flag: today's behaviour, byte for byte.
+        start_job(&app, &UpdateReq { install_missing: false, ..Default::default() }).unwrap();
+        let job = await_done(&app).await;
+        let ghost = job.tools.iter().find(|t| t.tool == "ghost").unwrap();
+        assert_eq!(ghost.state, "skipped");
+        assert!(ghost.message.as_deref().unwrap_or("").contains("not installed"));
+        assert!(!tools::binary_on_path("ghost-cli", &env_path), "nothing was installed");
+
+        // With it: the same row installs, and availability is re-advertised.
+        start_job(&app, &UpdateReq { install_missing: true, ..Default::default() }).unwrap();
+        let job = await_done(&app).await;
+        let ghost = job.tools.iter().find(|t| t.tool == "ghost").unwrap();
+        assert_eq!(ghost.state, "installed", "{:?}", ghost.message);
+        assert_eq!(ghost.to.as_deref(), Some("ghost 9.9"));
+        assert!(tools::binary_on_path("ghost-cli", &env_path));
+        // The tool that was already there took the UPDATE path, not the install one.
+        let here = job.tools.iter().find(|t| t.tool == "here").unwrap();
+        assert_eq!(here.state, "current");
+        assert!(app.take_tools_dirty(), "an install must re-advertise the registry to the hub");
+        assert!(!app.take_tools_dirty(), "…exactly once");
+
+        let _ = std::fs::remove_dir_all(&b.0);
+    }
+
+    async fn await_done(app: &AppState) -> UpdateJob {
+        for _ in 0..600 {
+            let j = app.update_job();
+            if j.phase == "done" {
+                return j;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("job never finished: {:?}", app.update_job());
     }
 
     #[cfg(unix)]

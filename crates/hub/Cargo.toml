@@ -6,6 +6,7 @@
 name = "cc-screen-hub"
 version = "0.3.59"
 edition = "2021"
+license.workspace = true
 description = "Aggregator hub for cc-screen-rust: one endpoint over many agents"
 
 # Cross-built + shipped by `dist` like the server: embeds frontend/dist (built

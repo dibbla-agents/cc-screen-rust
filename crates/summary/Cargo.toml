@@ -7,6 +7,7 @@
 name = "cc-screen-summary"
 version = "0.3.59"
 edition = "2021"
+license.workspace = true
 description = "Haiku-backed session-status summarizer for cc-screen-rust"
 
 [dependencies]

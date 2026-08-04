@@ -21,6 +21,7 @@ mod files;
 mod handlers;
 mod manifest;
 mod ops;
+mod provision;
 mod push;
 mod render;
 mod service;
@@ -57,9 +58,11 @@ USAGE
   cc-screen-rust uninstall           remove that service
   cc-screen-rust install-shim        (re)install the clipboard image-paste shim only
   cc-screen-rust doctor              check which assistant CLIs (claude, codex, gemini,
-                                     kimi) are on the session PATH; --install offers to
-                                     install missing ones, --update updates the installed
-                                     ones (prints from → to), --strict exits 1 on any miss
+                                     kimi) are on the session PATH; --install [--yes]
+                                     installs the missing ones for your user (--only a,b
+                                     narrows it), --update updates the installed ones
+                                     (prints from → to), --strict exits 1 on any miss
+  cc-screen-rust --version           print this agent's version and exit
 
 NOTE `update` updates cc-screen-rust ITSELF; `doctor --update` updates the assistant
 CLIs it drives. Only the web UI's "Update coding assistants" action (or
@@ -169,6 +172,13 @@ async fn main() {
                 eprintln!("update failed: {e}");
                 std::process::exit(1);
             }
+            return;
+        }
+        // `--version` used to fall through to *serving* (proposal 0051 Part B):
+        // asking a box which build it ran left a stray agent process behind. Print
+        // the same string the uplink advertises to the hub (`agent_version`).
+        Some("-V") | Some("--version") | Some("version") => {
+            println!("cc-screen-rust {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         Some("-h") | Some("--help") | Some("help") => {
@@ -318,6 +328,8 @@ async fn main() {
             "/api/assistants/update",
             get(handlers::update_status).post(handlers::update_start),
         )
+        // …and what installing the missing ones would do, before you confirm (0050)
+        .route("/api/assistants/plan", get(handlers::install_plan))
         .route(
             "/api/favorites",
             get(handlers::get_favorites).put(handlers::put_favorites),

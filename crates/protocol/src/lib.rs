@@ -312,7 +312,12 @@ pub struct UpdateToolStatus {
     pub tool: String,
     /// Human name ("Claude Code") for the row.
     pub label: String,
-    /// "pending" | "updating" | "updated" | "current" | "failed" | "skipped".
+    /// "pending" | "updating" | "updated" | "current" | "failed" | "skipped"
+    /// — plus, since proposal 0050, "installing" | "installed" for a CLI that
+    /// wasn't on the machine at all. Deliberately new *row states* rather than a
+    /// new `phase`: a client that predates them renders the raw string with a
+    /// neutral glyph (legible), where an unknown phase would draw a wrong
+    /// picture.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -346,6 +351,11 @@ pub struct UpdateReq {
     /// "updated" (default — only sessions whose CLI actually changed) | "all" | "none".
     #[serde(default = "default_restart")]
     pub restart: String,
+    /// Install the assistants that aren't installed on this machine, for the
+    /// local user, before updating the ones that are (proposal 0050). Default
+    /// `false`, so an older client's request behaves exactly as it does today.
+    #[serde(default)]
+    pub install_missing: bool,
 }
 
 fn default_restart() -> String {
@@ -354,8 +364,66 @@ fn default_restart() -> String {
 
 impl Default for UpdateReq {
     fn default() -> Self {
-        Self { tools: Vec::new(), restart: default_restart() }
+        Self { tools: Vec::new(), restart: default_restart(), install_missing: false }
     }
+}
+
+// ── GET /api/assistants/plan ─────────────────────────────────────────────────
+// Proposal 0050 Part B/E. What an install WOULD do, fetched before the user
+// confirms: the exact command, the prerequisites actually missing, and the size
+// hints. A pure probe with no side effects — and it comes from the agent so the
+// UI never hard-codes a vendor command; `tools.rs`'s registry stays the single
+// source of truth (including a machine's own `cc_tool_install` override).
+
+/// The plan for every *missing* tool on this machine. Tools that are already
+/// installed contribute no row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPlan {
+    #[serde(default)]
+    pub items: Vec<InstallPlanItem>,
+}
+
+/// One missing tool: what installing it would run, and what that needs first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPlanItem {
+    /// `Tool.prefix` — "codex" | "kimi" | …
+    pub tool: String,
+    /// Human name ("Codex CLI").
+    pub label: String,
+    /// The exact one-liner, shown verbatim. Empty when this platform has none.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs: String,
+    /// Rough download footprint for this platform ("~30 MB").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size_hint: String,
+    /// Only the prerequisites that are actually missing here.
+    #[serde(default)]
+    pub prereqs: Vec<InstallPrereqPlan>,
+    /// Set when this tool can't be installed on this machine at all (no command
+    /// for the platform, or a prerequisite with no user-scope bootstrap) — the
+    /// dialog says so instead of promising an install that would fail later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<String>,
+}
+
+/// A missing prerequisite (`npm`, `uv`), named in the dialog beside the
+/// assistant that needs it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPrereqPlan {
+    pub key: String,
+    pub label: String,
+    /// Empty = no user-scope bootstrap on this platform (Node on Windows).
+    #[serde(default)]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size_hint: String,
 }
 
 // ── WebSocket client → server frame (GET /api/ws) ────────────────────────────
@@ -508,6 +576,52 @@ mod tests {
         );
         let parsed: ToolInfo = serde_json::from_str(r#"{"cmd":"cc","prefix":"claude"}"#).unwrap();
         assert!(!parsed.unavailable);
+    }
+
+    #[test]
+    fn update_req_install_missing_is_camel_case_and_defaults_off() {
+        // The PWA sends `installMissing`; a snake_case field here would be
+        // silently dropped and the user would believe something was installed
+        // (proposal 0050 C1/D4). Both directions are asserted.
+        let r = UpdateReq { tools: vec!["kimi".into()], restart: "updated".into(), install_missing: true };
+        let v = serde_json::to_string(&r).unwrap();
+        assert!(v.contains(r#""installMissing":true"#), "{v}");
+        // An older client omits it entirely → today's update-only behaviour.
+        let old: UpdateReq = serde_json::from_str(r#"{"tools":[],"restart":"updated"}"#).unwrap();
+        assert!(!old.install_missing);
+        assert!(!UpdateReq::default().install_missing);
+        // …and a client that sends it round-trips.
+        let back: UpdateReq = serde_json::from_str(&v).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn install_plan_is_camel_case_and_omits_what_it_doesnt_know() {
+        let p = InstallPlan {
+            items: vec![InstallPlanItem {
+                tool: "codex".into(),
+                label: "Codex CLI".into(),
+                command: "npm install -g @openai/codex".into(),
+                docs: "https://github.com/openai/codex".into(),
+                size_hint: "~120 MB".into(),
+                prereqs: vec![InstallPrereqPlan {
+                    key: "npm".into(),
+                    label: "Node.js (npm)".into(),
+                    command: "install-node".into(),
+                    docs: String::new(),
+                    size_hint: "~30 MB".into(),
+                }],
+                unsupported: None,
+            }],
+        };
+        let v = serde_json::to_string(&p).unwrap();
+        assert!(v.contains(r#""sizeHint":"~120 MB""#), "{v}");
+        assert!(!v.contains("unsupported"), "absent reason should be omitted: {v}");
+        // The prereq's empty docs is skipped, so the key never appears twice.
+        assert_eq!(v.matches("docs").count(), 1, "empty prereq docs should be omitted: {v}");
+        assert_eq!(serde_json::from_str::<InstallPlan>(&v).unwrap(), p);
+        // An empty plan is the "nothing to install" answer, not an error.
+        assert!(serde_json::from_str::<InstallPlan>("{}").unwrap().items.is_empty());
     }
 
     #[test]

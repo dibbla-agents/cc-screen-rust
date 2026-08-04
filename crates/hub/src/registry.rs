@@ -243,7 +243,11 @@ pub struct AgentConn {
     /// and what session rows are tagged with. Unique only *within* a tenant.
     pub machine_id: String,
     pub hostname: String,
-    pub tools: Vec<ToolInfo>,
+    /// The agent's tool registry with its `unavailable` probe results. Cached
+    /// from `Register` — and REFRESHED by `AgentMsg::Tools` (proposal 0050),
+    /// which is why this is behind a lock: a list frozen at connect time keeps
+    /// claiming a freshly installed CLI is missing.
+    tools: Mutex<Vec<ToolInfo>>,
     /// Capability tokens this agent advertised at register time (proposal 0049),
     /// e.g. `assistant-update`. Empty for a pre-0049 agent — the hub refuses the
     /// corresponding op with a clear `501` rather than routing a `Cmd` the agent
@@ -282,6 +286,31 @@ impl AgentConn {
 
     pub fn set_sessions(&self, sessions: Vec<SessionInfo>) {
         *self.last_sessions.lock().unwrap() = sessions;
+    }
+
+    /// This agent's tool registry as last advertised.
+    pub fn tools(&self) -> Vec<ToolInfo> {
+        self.tools.lock().unwrap().clone()
+    }
+
+    /// Replace it (proposal 0050): the agent re-probed after an install changed
+    /// availability, so `GET /api/tools` and the dashboard's missing-count stop
+    /// reflecting connect-time state.
+    pub fn set_tools(&self, tools: Vec<ToolInfo>) {
+        *self.tools.lock().unwrap() = tools;
+    }
+
+    /// The tool prefixes whose CLI isn't installed on this machine — what the
+    /// dashboard row's `⚠ N missing · Install` affordance reads (proposal 0050
+    /// D3). Derived from the cached list, kept honest by `set_tools`.
+    pub fn missing_tools(&self) -> Vec<String> {
+        self.tools
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.unavailable)
+            .map(|t| t.prefix.clone())
+            .collect()
     }
 
     /// This agent's sessions, each stamped with its `machine`.
@@ -412,7 +441,7 @@ impl Registry {
             user_id: user_id.to_string(),
             machine_id: machine_id.to_string(),
             hostname: hostname.to_string(),
-            tools,
+            tools: Mutex::new(tools),
             caps,
             online: AtomicBool::new(true),
             last_sessions: Mutex::new(carried),

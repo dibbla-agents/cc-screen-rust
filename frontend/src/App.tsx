@@ -262,6 +262,10 @@ export default function App() {
   // Non-empty when the flow was opened from a machine row (the dashboard's
   // per-machine entry point) rather than from the top bar's fleet action.
   const [updateScope, setUpdateScope] = useState("");
+  // Non-empty when the flow was opened from a *greyed-out tool* (the create
+  // picker's "Install it" path, proposal 0050 F4) — the dialog then scopes to
+  // that one CLI on that one machine.
+  const [updateTools, setUpdateTools] = useState<string[]>([]);
   // The file editor is a SINGLETON, app-wide overlay — not per-pane (desktop can
   // show up to 4 terminals, but only ever one editor, covering the whole
   // screen). `path` is the file to open; null means "let the user pick from the
@@ -1896,6 +1900,15 @@ export default function App() {
       onClose={() => setDrawerOpen(false)}
       onNew={() => setNewForPane(active)}
       onCreated={onSessionCreated}
+      // A greyed-out tool in the create picker is where the gap is felt most
+      // often (proposal 0050 F4) — make it an entry point into the install
+      // dialog rather than a dead end.
+      onInstallTool={(m, tool) => {
+        setDrawerOpen(false);
+        setUpdateScope(m);
+        setUpdateTools([tool]);
+        setUpdateOpen(true);
+      }}
     />
   );
 
@@ -1926,6 +1939,14 @@ export default function App() {
             window.history.replaceState({}, "", "/");
             setShowDash(true);
           }}
+          // A machine that just enrolled short of CLIs can fix it right here
+          // (proposal 0050 F3) — the same dialog, scoped to that box.
+          onInstall={(m, tools) => {
+            window.history.replaceState({}, "", "/");
+            setUpdateScope(m);
+            setUpdateTools(tools ?? []);
+            setUpdateOpen(true);
+          }}
         />
       );
     }
@@ -1936,8 +1957,9 @@ export default function App() {
           // Per-machine entry into the assistant update (0049): the dashboard is
           // a full-screen view, so hand back to the terminal with the flow open
           // and scoped to that machine.
-          onUpdateAssistants={(m) => {
+          onUpdateAssistants={(m, tools) => {
             setUpdateScope(m);
+            setUpdateTools(tools ?? []);
             setShowDash(false);
             setUpdateOpen(true);
           }}
@@ -2448,10 +2470,12 @@ export default function App() {
         open={updateOpen}
         machines={machines}
         scopeMachine={updateScope || undefined}
+        scopeTools={updateTools.length ? updateTools : undefined}
         sessions={sessions}
         onClose={() => {
           setUpdateOpen(false);
           setUpdateScope("");
+          setUpdateTools([]);
         }}
         onBusyChange={setUpdateBusy}
         onDone={() => {

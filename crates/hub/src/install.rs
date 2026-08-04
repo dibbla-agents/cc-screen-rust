@@ -44,6 +44,32 @@ const DEFAULT_INSTALLER_PS1_URL: &str =
 #[derive(serde::Deserialize, Default)]
 pub struct InstallParams {
     name: Option<String>,
+    /// Optional `?assistants=all|claude,codex` (proposal 0050): bake the
+    /// coding-assistant install choice into the served script. On POSIX the
+    /// dashboard prefers the visible `-s -- <name> --assistants` argument (the
+    /// consent is auditable in the command the user copies); this query form
+    /// exists because PowerShell's `irm … | iex` can't take positional args —
+    /// the same reason `?name=` exists.
+    assistants: Option<String>,
+}
+
+/// Sanitize `?assistants=` to `""` (report only), `"all"`, or a comma list of
+/// tool names. Anything unexpected collapses to empty — a served script must
+/// never carry a user-supplied string into a shell command line.
+fn sanitize_assistants(v: &str) -> String {
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("none") || v == "0" || v.eq_ignore_ascii_case("false") {
+        return String::new();
+    }
+    if v.eq_ignore_ascii_case("all") || v == "1" || v.eq_ignore_ascii_case("true") {
+        return "all".into();
+    }
+    let names: Vec<&str> = v
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .collect();
+    names.join(",")
 }
 
 /// This hub's public base URL: prefer the configured CCHUB_PUBLIC_URL (the
@@ -83,10 +109,13 @@ pub async fn install_sh(
         .unwrap_or_else(|| DEFAULT_INSTALLER_URL.to_string());
     let name = params.name.as_deref().map(sanitize_machine).unwrap_or_default();
 
+    let assistants = params.assistants.as_deref().map(sanitize_assistants).unwrap_or_default();
+
     let body = INSTALL_SCRIPT
         .replace("__CCSCREEN_HUB_URL__", &hub_url)
         .replace("__CCSCREEN_INSTALLER_URL__", &installer_url)
-        .replace("__CCSCREEN_MACHINE_NAME__", &name);
+        .replace("__CCSCREEN_MACHINE_NAME__", &name)
+        .replace("__CCSCREEN_ASSISTANTS__", &assistants);
     ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], body).into_response()
 }
 
@@ -107,9 +136,12 @@ pub async fn install_ps1(
         .unwrap_or_else(|| DEFAULT_INSTALLER_PS1_URL.to_string());
     let name = params.name.as_deref().map(sanitize_machine).unwrap_or_default();
 
+    let assistants = params.assistants.as_deref().map(sanitize_assistants).unwrap_or_default();
+
     let body = INSTALL_PS1
         .replace("__CCSCREEN_HUB_URL__", &hub_url)
         .replace("__CCSCREEN_INSTALLER_URL__", &installer_url)
-        .replace("__CCSCREEN_MACHINE_NAME__", &name);
+        .replace("__CCSCREEN_MACHINE_NAME__", &name)
+        .replace("__CCSCREEN_ASSISTANTS__", &assistants);
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }

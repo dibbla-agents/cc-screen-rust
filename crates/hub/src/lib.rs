@@ -86,6 +86,8 @@ pub fn build_router(hub: HubState) -> Router {
             "/api/assistants/update",
             get(handlers::update_status).post(handlers::update_assistants),
         )
+        // …and what installing the missing ones would do (0050), same gate.
+        .route("/api/assistants/plan", get(handlers::install_plan))
         // File browser / editor (small ops), routed to the owning agent.
         .route("/api/dirs", get(handlers::dirs))
         .route("/api/dirs/search", get(handlers::dirs_search))

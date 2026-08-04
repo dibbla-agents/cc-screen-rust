@@ -22,6 +22,13 @@ $Baked = '__CCSCREEN_MACHINE_NAME__'
 $Machine = if ($args.Count -ge 1 -and $args[0]) { $args[0] }
            elseif ($Baked) { $Baked }
            else { $env:COMPUTERNAME }
+# Coding assistants (proposal 0050): '' = report only, 'all' = install every
+# missing one, or a comma list. Passed as ?assistants= on the served script
+# rather than as an argument, because `irm ... | iex` can't take positional args
+# — the same reason ?name= exists. $env:CCSCREEN_ASSISTANTS overrides it.
+$Assistants = '__CCSCREEN_ASSISTANTS__'
+if ($Assistants -like '__CCSCREEN_*') { $Assistants = '' }
+if ($env:CCSCREEN_ASSISTANTS) { $Assistants = $env:CCSCREEN_ASSISTANTS }
 
 Write-Host "==> Installing the cc-screen-rust binary..."
 # Re-running this one-liner is also the UPDATE path, so a previous install may have
@@ -43,6 +50,30 @@ $Bin = Join-Path $env:USERPROFILE '.local\bin\cc-screen-rust.exe'
 if (-not (Test-Path $Bin)) {
     $cmd = Get-Command cc-screen-rust -ErrorAction SilentlyContinue
     if ($cmd) { $Bin = $cmd.Source }
+}
+
+Write-Host ""
+Write-Host "==> Checking which coding assistants are installed..."
+# Best-effort preflight — the binary owns the list (see `cc-screen-rust doctor`).
+# With $Assistants set (0050) it also installs the missing ones, for THIS USER
+# only: everything lands under the user profile, nothing needs admin or Developer
+# Mode. A missing (or failing) assistant never aborts the machine install.
+#
+# NOTE Codex/Gemini need Node.js, which on Windows is a machine-scope MSI — if
+# npm isn't there, those rows report it with a link instead of guessing at a
+# user-scope Node. Install Node once from https://nodejs.org/en/download.
+try {
+    if (-not $Assistants) {
+        & $Bin doctor
+    } elseif ($Assistants -eq 'all') {
+        Write-Host "    installing the missing ones for user '$env:USERNAME' under your profile — no admin"
+        & $Bin doctor --install --yes
+    } else {
+        Write-Host "    installing $Assistants for user '$env:USERNAME' under your profile — no admin"
+        & $Bin doctor --install --yes --only $Assistants
+    }
+} catch {
+    Write-Host "    (assistant preflight failed: $_ — continuing)"
 }
 
 Write-Host ""

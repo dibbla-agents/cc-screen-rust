@@ -47,7 +47,7 @@ pub async fn tools(
     let tools = hub
         .registry
         .resolve_scoped(&scope, &q.machine, None)
-        .map(|a| a.tools.clone())
+        .map(|a| a.tools())
         .unwrap_or_default();
     Json(tools)
 }
@@ -426,6 +426,21 @@ fn update_target(
     scope: &Visibility,
     machine: &str,
 ) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
+    update_target_caps(hub, scope, machine, false)
+}
+
+/// As `update_target`, but additionally requires `assistant-install` when the
+/// request asks the agent to **install** something (proposal 0050 D1). Installing
+/// is not more permission than updating — it's the same owner-only gate — but it
+/// IS a newer agent capability, and the field that carries it is additive, so
+/// without this check a 0049-era agent would quietly run an update-only job and
+/// the user would believe a CLI had been installed.
+fn update_target_caps(
+    hub: &HubState,
+    scope: &Visibility,
+    machine: &str,
+    needs_install: bool,
+) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
     let agent = hub.registry.resolve_scoped(scope, machine, None).ok_or_else(|| {
         (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
     })?;
@@ -440,6 +455,15 @@ fn update_target(
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             "this machine's agent is too old to self-update — run `cc-screen-rust update` on it",
+        )
+            .into_response());
+    }
+    if needs_install
+        && !agent.caps.iter().any(|c| c == cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL)
+    {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "this machine's agent is too old to install assistants — run `cc-screen-rust update` on it",
         )
             .into_response());
     }
@@ -465,12 +489,19 @@ async fn update_send(agent: std::sync::Arc<crate::registry::AgentConn>, cmd: Cmd
     }
 }
 
+/// The PWA sends `installMissing`, so this MUST be `camelCase` like `UpdateReq`
+/// — today's single-word fields hide the mismatch, and a silently-dropped
+/// `install_missing` would be the exact "believed it installed" failure the
+/// capability gate exists to prevent (proposal 0050 D4).
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateBody {
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
     restart: Option<String>,
+    #[serde(default)]
+    install_missing: bool,
 }
 
 pub async fn update_assistants(
@@ -480,15 +511,30 @@ pub async fn update_assistants(
     body: Option<Json<UpdateBody>>,
 ) -> Response {
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    let agent = match update_target(&hub, &scope, &q.machine) {
+    let agent = match update_target_caps(&hub, &scope, &q.machine, b.install_missing) {
         Ok(a) => a,
         Err(resp) => return resp,
     };
     let cmd = Cmd::UpdateAssistants {
         tools: b.tools,
         restart: b.restart.unwrap_or_else(|| "updated".into()),
+        install_missing: b.install_missing,
     };
     update_send(agent, cmd).await
+}
+
+/// `GET /api/assistants/plan` — relayed straight through. Same owner-only gate:
+/// the plan names this machine's install commands, which is administrative
+/// detail about someone's host.
+pub async fn install_plan(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+    Query(q): Query<MachineQ>,
+) -> Response {
+    match update_target_caps(&hub, &scope, &q.machine, true) {
+        Ok(agent) => update_send(agent, Cmd::InstallPlan { tools: Vec::new() }).await,
+        Err(resp) => resp,
+    }
 }
 
 pub async fn update_status(

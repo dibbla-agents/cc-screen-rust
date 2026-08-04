@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  fetchInstallPlan,
   fetchTools,
   fetchUpdateJob,
   jobRunning,
   startAssistantUpdate,
+  type InstallPlanItem,
   type MachineInfo,
   type Session,
   type Tool,
@@ -22,6 +24,13 @@ import {
 // Closing does NOT cancel: the job runs on the agent, so closing just stops
 // watching. Re-opening (or reloading the page, or unlocking a phone that slept
 // through it) resumes watching, because every status here is server state.
+//
+// Proposal 0050 folds INSTALLING into the same surface: a CLI that isn't on the
+// machine at all can't be updated, and the phone is the surface with no SSH and
+// no `doctor --install`. So the confirmation state grows a checkbox that names
+// every CLI it would install, its exact command, its prerequisites and a rough
+// size — and the button label follows, so the action never under-promises. With
+// nothing missing, this dialog is byte-for-byte 0049's.
 
 // A machine's slot in this dialog. `key` is the `?machine=` value — "" for a
 // standalone agent with no hub, where the whole roster collapses to one row.
@@ -33,7 +42,16 @@ interface Slot {
   // show before starting), or the reason it can't take part.
   job?: UpdateJob;
   tools?: Tool[];
+  // The tools whose CLI ISN'T there (proposal 0050). 0049 fetched these and threw
+  // them away; they're the whole point of the install path.
+  missing?: Tool[];
+  // What installing them would run, straight from the agent's registry — so this
+  // UI never hard-codes a vendor command.
+  plan?: InstallPlanItem[];
   blocked?: string;
+  // Set when this machine can't install (an agent too old → 501), while it can
+  // still take part in a plain update.
+  installBlocked?: string;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -48,6 +66,8 @@ const toolLabel = (prefix: string) => TOOL_LABELS[prefix] ?? prefix;
 // reinforcement, never the only signal.
 const GLYPH: Record<string, string> = {
   pending: "·",
+  installing: "⟳",
+  installed: "✓",
   updating: "⟳",
   stopping: "⟳",
   starting: "⟳",
@@ -59,6 +79,8 @@ const GLYPH: Record<string, string> = {
 };
 const TONE: Record<string, string> = {
   pending: "text-slate-500",
+  installing: "text-accent",
+  installed: "text-amber",
   updating: "text-accent",
   stopping: "text-accent",
   starting: "text-accent",
@@ -100,7 +122,7 @@ function PhaseStrip({ phase }: { phase: string }) {
     step === n ? "text-accent" : step > n ? "text-slate-300" : "text-slate-600";
   return (
     <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-edge/60 bg-bar px-4 py-2 text-[11px] uppercase tracking-wider">
-      <span className={lit(1)}>① Updating CLIs</span>
+      <span className={lit(1)}>① Preparing CLIs</span>
       <span aria-hidden className="text-slate-700">──▶</span>
       <span className={lit(2)}>② Restarting sessions</span>
       {step === 3 && <span className="ml-auto text-amber">done</span>}
@@ -113,6 +135,7 @@ export default function UpdateAssistants({
   machines,
   sessions,
   scopeMachine,
+  scopeTools,
   onClose,
   onDone,
   onBusyChange,
@@ -122,6 +145,9 @@ export default function UpdateAssistants({
   sessions: Session[];
   /// Pre-scope to one machine (the per-machine entry point in the dashboard).
   scopeMachine?: string;
+  /// Pre-scope to specific tool prefixes — the create picker's "Install it" path
+  /// (proposal 0050 F4), where the user tapped one greyed-out tool.
+  scopeTools?: string[];
   onClose: () => void;
   /// Called when every watched job reaches `done`, so the app can re-poll its
   /// sessions and tools promptly rather than waiting out the normal interval.
@@ -133,6 +159,12 @@ export default function UpdateAssistants({
   const [slots, setSlots] = useState<Slot[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [restartAll, setRestartAll] = useState(false);
+  // Ticked by default whenever something is missing: the whole point of pressing
+  // this action is that a missing CLI should appear. The surrounding text states
+  // the blast radius and the button label changes with it, so it never does more
+  // than it says. Default-off would just reproduce the status quo.
+  const [installMissing, setInstallMissing] = useState(true);
+  const [showCommands, setShowCommands] = useState(false);
   const [running, setRunning] = useState(false);
   const [jobs, setJobs] = useState<Record<string, UpdateJob>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -168,7 +200,23 @@ export default function UpdateAssistants({
             fetchUpdateJob(t.key),
             fetchTools(t.key).catch(() => [] as Tool[]),
           ]);
-          return { ...t, job, tools: tools.filter((x) => !x.unavailable) };
+          const wanted = (x: Tool) => !scopeTools?.length || scopeTools.includes(x.prefix);
+          const missing = tools.filter((x) => x.unavailable && wanted(x));
+          // Only ask the agent what an install would run when something IS
+          // missing; on a complete machine this dialog stays exactly 0049's.
+          let plan: InstallPlanItem[] | undefined;
+          let installBlocked: string | undefined;
+          if (missing.length) {
+            try {
+              const p = await fetchInstallPlan(t.key);
+              plan = p.items.filter((i) => missing.some((m) => m.prefix === i.tool));
+            } catch (e) {
+              // An agent too old to install (501) can still take part in a plain
+              // update — say so on the row rather than dropping the machine.
+              installBlocked = reasonOf(e);
+            }
+          }
+          return { ...t, job, tools: tools.filter((x) => !x.unavailable), missing, plan, installBlocked };
         } catch (e) {
           return { ...t, blocked: reasonOf(e) };
         }
@@ -189,7 +237,7 @@ export default function UpdateAssistants({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, scopeMachine, machines.map((m) => `${m.machine}:${m.online}`).join(",")]);
+  }, [open, scopeMachine, (scopeTools ?? []).join(","), machines.map((m) => `${m.machine}:${m.online}`).join(",")]);
 
   // Esc closes (watching only — the job runs on).
   useEffect(() => {
@@ -240,7 +288,12 @@ export default function UpdateAssistants({
     await Promise.all(
       targets.map(async (t) => {
         try {
-          const j = await startAssistantUpdate(t.key, { restart: restartAll ? "all" : "updated" });
+          const j = await startAssistantUpdate(t.key, {
+            tools: scopeTools ?? [],
+            restart: restartAll ? "all" : "updated",
+            // Never ask a machine that can't install to install.
+            installMissing: installMissing && !t.installBlocked && !!t.missing?.length,
+          });
           setJobs((prev) => ({ ...prev, [t.key]: j }));
         } catch (e) {
           // A per-machine failure is a row, never fatal to the rest.
@@ -248,7 +301,7 @@ export default function UpdateAssistants({
         }
       })
     );
-  }, [slots, picked, restartAll]);
+  }, [slots, picked, restartAll, installMissing, scopeTools]);
 
   if (!open) return null;
 
@@ -256,6 +309,16 @@ export default function UpdateAssistants({
     sessions.filter((s) => s.tool !== "shell" && (key === "" || s.machine === key)).length;
   const chosen = slots.filter((s) => picked.has(s.key) && !s.blocked);
   const totalSessions = chosen.reduce((n, s) => n + sessionCount(s.key), 0);
+  // Every install row across the chosen machines, deduped by tool — the dialog's
+  // consent copy. `unsupported` items are shown but never counted as pending:
+  // the action must not promise an install the machine can't perform.
+  const planRows: InstallPlanItem[] = [];
+  for (const s of chosen) {
+    if (s.installBlocked) continue;
+    for (const i of s.plan ?? []) if (!planRows.some((p) => p.tool === i.tool)) planRows.push(i);
+  }
+  const installable = planRows.filter((i) => !i.unsupported);
+  const willInstall = installMissing && installable.length > 0;
   const phase = running
     ? anyRunning
       ? Object.values(jobs).some((j) => j.phase === "updating")
@@ -280,7 +343,9 @@ export default function UpdateAssistants({
           <div className="text-xs text-slate-400">
             {running
               ? "This runs on the machine — closing this panel doesn’t stop it."
-              : "Updates the CLIs, then restarts the sessions that use them — each resumes its conversation."}
+              : willInstall
+                ? "Installs what’s missing, updates the rest, then restarts the sessions that use them — each resumes its conversation."
+                : "Updates the CLIs, then restarts the sessions that use them — each resumes its conversation."}
           </div>
         </div>
 
@@ -304,6 +369,9 @@ export default function UpdateAssistants({
                 .map((t) => `${t.tool} ${t.to}`)
                 .join(" · ");
               const available = (s.tools ?? []).map((t) => t.prefix).join(" · ");
+              const missingLine = s.missing?.length
+                ? `${s.missing.length} missing: ${s.missing.map((t) => toolLabel(t.prefix)).join(", ")}`
+                : "";
               return (
                 <label
                   key={s.key || "self"}
@@ -330,6 +398,14 @@ export default function UpdateAssistants({
                     <span className="block truncate text-[11px] text-slate-500">
                       {s.blocked || versions || available || "no assistants detected"}
                     </span>
+                    {!s.blocked && missingLine && (
+                      <span className="block truncate text-[11px] text-amber">{missingLine}</span>
+                    )}
+                    {!s.blocked && s.installBlocked && (
+                      <span className="block truncate text-[11px] text-slate-500">
+                        can’t install here: {s.installBlocked}
+                      </span>
+                    )}
                   </span>
                   {!disabled && (
                     <span className="shrink-0 text-[11px] text-slate-400">
@@ -361,9 +437,11 @@ export default function UpdateAssistants({
                         detail={
                           t.state === "updated"
                             ? `${t.from ?? "?"} → ${t.to ?? "?"}`
-                            : t.state === "current"
-                              ? `already current${t.to ? ` (${t.to})` : ""}`
-                              : t.message || undefined
+                            : t.state === "installed"
+                              ? `installed${t.to ? ` ${t.to}` : ""}`
+                              : t.state === "current"
+                                ? `already current${t.to ? ` (${t.to})` : ""}`
+                                : t.message || undefined
                         }
                       />
                     ))}
@@ -384,6 +462,62 @@ export default function UpdateAssistants({
         </div>
 
         <div className="shrink-0 border-t border-edge px-4 py-3">
+          {!running && planRows.length > 0 && (
+            <div className="mb-3 rounded-lg border border-edge/60 bg-panel/40 px-3 py-2">
+              <label className="flex items-start gap-2 text-[12px] text-slate-300">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-amber"
+                  disabled={installable.length === 0}
+                  checked={willInstall}
+                  onChange={(e) => setInstallMissing(e.target.checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  Install the {installable.length} missing assistant
+                  {installable.length === 1 ? "" : "s"} for my user
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowCommands((v) => !v)}
+                  aria-expanded={showCommands}
+                  className="shrink-0 text-[11px] text-slate-400 hover:text-slate-200"
+                >
+                  {showCommands ? "hide commands ⌃" : "show commands ⌄"}
+                </button>
+              </label>
+              {/* Collapsed by default so a phone sheet doesn't become a wall of
+                  shell commands — but every command is shown verbatim on demand,
+                  the same consent shape as `doctor --install`'s prompt. */}
+              {showCommands && (
+                <ul className="mt-2 space-y-1.5">
+                  {planRows.map((i) => (
+                    <li key={i.tool} className="text-[11px] leading-snug">
+                      <span className="text-slate-300">· {i.label}</span>{" "}
+                      {i.unsupported ? (
+                        <span className="text-claude">{i.unsupported}</span>
+                      ) : (
+                        <>
+                          <code className="break-all font-mono text-slate-400">{i.command}</code>
+                          {i.sizeHint && <span className="text-slate-500"> — {i.sizeHint}</span>}
+                          {i.prereqs.map((p) => (
+                            <span key={p.key} className="block pl-3 text-slate-500">
+                              needs {p.label}
+                              {p.sizeHint ? ` — ${p.sizeHint}` : ""}
+                              {p.command ? "" : ` (install it yourself: ${p.docs ?? "see the vendor docs"})`}
+                            </span>
+                          ))}
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-1.5 text-[11px] text-slate-500">
+                Everything installs under your home directory (~/.local). No sudo, no
+                system-wide changes.
+              </div>
+            </div>
+          )}
           {!running && (
             <label className="mb-3 flex items-center gap-2 text-[12px] text-slate-400">
               <input
@@ -401,9 +535,9 @@ export default function UpdateAssistants({
                 ? anyRunning
                   ? "Running — safe to close."
                   : "Finished."
-                : `${chosen.length} machine${chosen.length === 1 ? "" : "s"} · ${totalSessions} session${
-                    totalSessions === 1 ? "" : "s"
-                  } will restart`}
+                : `${chosen.length} machine${chosen.length === 1 ? "" : "s"} · ${
+                    willInstall ? `${installable.length} to install · ` : ""
+                  }${totalSessions} session${totalSessions === 1 ? "" : "s"} will restart`}
             </span>
             <button
               onClick={onClose}
@@ -417,7 +551,7 @@ export default function UpdateAssistants({
                 disabled={chosen.length === 0}
                 className="min-h-[44px] rounded-lg bg-amber px-3 text-sm font-semibold text-bar disabled:opacity-40"
               >
-                Update &amp; restart
+                {willInstall ? "Install, update & restart" : "Update & restart"}
               </button>
             )}
           </div>

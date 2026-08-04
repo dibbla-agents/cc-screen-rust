@@ -14,7 +14,7 @@ use std::time::Duration;
 use cc_screen_auth::Auth;
 use cc_screen_hub::{build_router, registry::Registry, state::HubState};
 use cc_screen_protocol::hub::{
-    decode_frame, encode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_ASSISTANT_UPDATE,
+    decode_frame, encode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_ASSISTANT_INSTALL, CAP_ASSISTANT_UPDATE,
     HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{SessionInfo, ToolInfo, UpdateJob};
@@ -104,7 +104,7 @@ async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, sess
             hostname: machine_id.into(),
             agent_version: "test".into(),
             tools: vec![],
-            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_ASSISTANT_INSTALL.to_string()],
         },
         b"",
     )
@@ -130,7 +130,19 @@ async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, sess
                 // without a real updater; everything else is a bare Ok.
                 HubMsg::Command { req, cmd } => {
                     let result = match cmd {
-                        Cmd::UpdateStatus | Cmd::UpdateAssistants { .. } => CmdResult::Json(
+                        // The job id echoes `install_missing` so a test can assert
+                        // the flag survived the UpdateBody → Cmd hop (0050 D4) —
+                        // a silently-dropped one is exactly the "believed it
+                        // installed" failure the capability gate exists to stop.
+                        Cmd::UpdateAssistants { install_missing, .. } => CmdResult::Json(
+                            serde_json::to_value(UpdateJob {
+                                id: format!("install={install_missing}"),
+                                phase: "done".into(),
+                                ..Default::default()
+                            })
+                            .unwrap(),
+                        ),
+                        Cmd::UpdateStatus => CmdResult::Json(
                             serde_json::to_value(UpdateJob { phase: "done".into(), ..Default::default() }).unwrap(),
                         ),
                         _ => CmdResult::Ok,
@@ -525,4 +537,108 @@ async fn assistant_update_on_an_old_agent_is_501() {
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
     let body = resp.text().await.unwrap();
     assert!(body.contains("too old"), "the message says what to do: {body}");
+}
+
+// Proposal 0050 D1/D4. Two things must hold on the install path:
+//   * the boolean survives the `UpdateBody` → `Cmd` hop (it's camelCase on both
+//     sides — a snake_case slip would drop it silently), and
+//   * an agent that can update but NOT install is refused up front with 501,
+//     rather than quietly running an update-only job the user reads as an
+//     install.
+#[tokio::test]
+async fn assistant_install_flag_survives_the_relay() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    spawn_fake_agent(&hub, "boxA", None, "shell-x").await;
+    await_machine(&hub).await;
+
+    let client = reqwest::Client::new();
+    let job: UpdateJob = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .json(&serde_json::json!({ "tools": [], "restart": "updated", "installMissing": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job.id, "install=true", "installMissing must reach the agent");
+
+    // Absent (an older client) → today's update-only job, unchanged.
+    let job: UpdateJob = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .json(&serde_json::json!({ "tools": [], "restart": "updated" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job.id, "install=false");
+}
+
+#[tokio::test]
+async fn asking_an_update_only_agent_to_install_is_501() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut ws = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "updateonly".into(),
+            hostname: "updateonly".into(),
+            agent_version: "0.3.59".into(),
+            tools: vec![],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string()], // 0049-era: update, not install
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![] }, b"").await;
+    // Answer the update op so the "no installs requested" leg can succeed.
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Binary(buf) = msg else { continue };
+            let Ok((HubMsg::Command { req, .. }, _)) = decode_frame::<HubMsg>(&buf) else { continue };
+            let job = UpdateJob { phase: "done".into(), ..Default::default() };
+            send(&mut ws, &AgentMsg::Reply { req, result: CmdResult::Json(serde_json::to_value(job).unwrap()) }, b"")
+                .await;
+        }
+    });
+    await_machine(&hub).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{hub}/api/assistants/update?machine=updateonly"))
+        .json(&serde_json::json!({ "installMissing": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    assert!(resp.text().await.unwrap().contains("too old to install"));
+
+    // …and it still serves a plain update.
+    let resp = client
+        .post(format!("http://{hub}/api/assistants/update?machine=updateonly"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // The plan route needs the install capability too.
+    let resp = reqwest::get(format!("http://{hub}/api/assistants/plan?machine=updateonly")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+/// Wait for the uplink to register before routing anything to it.
+async fn await_machine(hub: &str) {
+    for _ in 0..50 {
+        let m: Vec<serde_json::Value> =
+            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+        if !m.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    panic!("no machine registered");
 }

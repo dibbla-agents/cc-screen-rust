@@ -153,6 +153,10 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
             incoming = ws_read.next() => match incoming {
                 Some(Ok(Message::Binary(buf))) => match decode_frame::<AgentMsg>(&buf) {
                     Ok((AgentMsg::Sessions { sessions }, _)) => conn.set_sessions(sessions),
+                    // The agent re-probed its registry after an install (0050):
+                    // refresh the cache `GET /api/tools` and the dashboard's
+                    // missing-count read, which was otherwise frozen at Register.
+                    Ok((AgentMsg::Tools { tools }, _)) => conn.set_tools(tools),
                     // Terminal output for an attached client → its browser bridge.
                     Ok((AgentMsg::Snapshot { ch }, p)) | Ok((AgentMsg::Output { ch }, p)) => {
                         conn.route_to_browser(ch, ToBrowser::Bytes(p.to_vec())).await;

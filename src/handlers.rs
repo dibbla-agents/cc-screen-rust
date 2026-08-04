@@ -470,6 +470,16 @@ pub async fn update_status(State(app): State<AppState>) -> Json<UpdateJob> {
     Json(app.update_job())
 }
 
+// ── GET /api/assistants/plan (proposal 0050) ─────────────────────────────────
+/// What installing the missing assistants on this machine WOULD do: the exact
+/// commands, the prerequisites that are actually missing, and the size hints.
+/// A pure probe with no side effects — it exists so the confirmation dialog can
+/// state the blast radius from the registry rather than hard-coding a vendor
+/// command in the UI.
+pub async fn install_plan(State(app): State<AppState>) -> Json<cc_screen_protocol::InstallPlan> {
+    Json(crate::provision::plan(&app.inner.tools, &app.inner.env_path, &[]))
+}
+
 // ── GET/PUT /api/favorites ───────────────────────────────────────────────────
 fn favorites_path(app: &AppState) -> PathBuf {
     app.inner.config_dir.join("favorites.json")

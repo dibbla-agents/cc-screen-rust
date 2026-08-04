@@ -82,11 +82,25 @@ pub struct Assistant {
     /// Human name for messages ("Claude Code").
     pub label: &'static str,
     /// Install one-liner per platform — each CLI's official installer. Kept
-    /// data-only so a stale vendor command is a one-line fix here.
+    /// data-only so a stale vendor command is a one-line fix here. A Windows
+    /// entry that needs PowerShell carries its own `powershell -NoProfile …`
+    /// wrapper, because the launch shell there is `cmd.exe /C` (proposal 0050
+    /// Part H) — the runner stays platform-agnostic.
     pub install_macos: &'static str,
     pub install_linux: &'static str,
+    pub install_windows: &'static str,
     /// Fallback URL for platforms with no one-liner (or for humans who want it).
     pub docs: &'static str,
+    /// Prerequisite keys (see `PREREQS`) this assistant's install command needs
+    /// on the session PATH. Installed — user-locally — only when missing, and
+    /// only as a dependency of an assistant the user asked for (proposal 0050).
+    pub needs: &'static [&'static str],
+    /// Rough download footprint, shown in the confirmation dialog so a metered
+    /// connection isn't surprised. Registry data, never measured at runtime; the
+    /// Windows numbers are genuinely different (verified: `@openai/codex` is
+    /// 407 MB there), so they're their own column.
+    pub size_hint: &'static str,
+    pub size_hint_windows: &'static str,
     /// The CLI's own self-update subcommand, if it has one — the FIRST candidate,
     /// because the CLI knows how it was installed. `""` = it has none, so the
     /// package-manager command below is the only path (proposal 0049).
@@ -97,10 +111,122 @@ pub struct Assistant {
     /// copy legitimately refuses).
     pub update_macos: &'static str,
     pub update_linux: &'static str,
+    pub update_windows: &'static str,
     /// The argument that prints the version. `--version` for all four (verified),
     /// but kept per-descriptor so a fifth assistant that spells it differently
     /// needs no code change.
     pub version_arg: &'static str,
+}
+
+/// A prerequisite: a *tool-chain* dependency of an assistant's install command,
+/// not an assistant itself (proposal 0050 Part A). Same data-only shape and the
+/// same "installed for the local user, never `sudo`" rule.
+pub struct Prereq {
+    /// The key an `Assistant.needs` entry names.
+    pub key: &'static str,
+    /// The binary probed on the session PATH to decide "is it already here?".
+    pub bin: &'static str,
+    /// Human name for the dialog ("Node.js (npm)").
+    pub label: &'static str,
+    pub install_macos: &'static str,
+    pub install_linux: &'static str,
+    /// Empty = no user-scope bootstrap on this platform; we report and link to
+    /// the docs rather than guessing (Node on Windows is a machine-scope MSI).
+    pub install_windows: &'static str,
+    pub docs: &'static str,
+    /// Extra binaries to expose in the landing zone after installing: a Node
+    /// tarball yields node/npm/npx under its own prefix.
+    pub also_link: &'static [&'static str],
+    pub size_hint: &'static str,
+    pub size_hint_windows: &'static str,
+}
+
+/// Unpack the official Node distribution into `$HOME/.local/share/node` — which
+/// is exactly what a working box looks like, and a writable `npm` prefix by
+/// construction, so `npm install -g` needs no root. The version is data
+/// (`CCWEB_NODE_VERSION`); platform/arch come from `uname`.
+const NODE_TARBALL_INSTALL: &str = "set -e; \
+V=\"${CCWEB_NODE_VERSION:-v22.20.0}\"; \
+P=$(uname -s | tr 'A-Z' 'a-z'); \
+A=$(uname -m); case \"$A\" in x86_64|amd64) A=x64;; aarch64|arm64) A=arm64;; esac; \
+D=\"$HOME/.local/share/node\"; mkdir -p \"$D\"; \
+curl -fsSL \"https://nodejs.org/dist/$V/node-$V-$P-$A.tar.xz\" | tar -xJ -C \"$D\" --strip-components=1";
+
+pub const PREREQS: &[Prereq] = &[
+    Prereq {
+        key: "npm",
+        bin: "npm",
+        label: "Node.js (npm)",
+        install_macos: NODE_TARBALL_INSTALL,
+        install_linux: NODE_TARBALL_INSTALL,
+        // Node's Windows distribution is an MSI / machine-scope install, so an
+        // absent `npm` is REPORTED with the docs link, never guessed at (0050
+        // Non-Goals). Verified: `harebell` has it at C:\Program Files\nodejs.
+        install_windows: "",
+        docs: "https://nodejs.org/en/download",
+        also_link: &["node", "npm", "npx"],
+        size_hint: "~30 MB (≈120 MB unpacked)",
+        size_hint_windows: "",
+    },
+    Prereq {
+        key: "uv",
+        bin: "uv",
+        label: "uv",
+        // Astral's own user-local installer — lands `uv` in ~/.local/bin
+        // (verified). `kimi` then brings its own Python via `uv tool install`,
+        // so Python is not a separate prerequisite.
+        install_macos: "curl -LsSf https://astral.sh/uv/install.sh | sh",
+        install_linux: "curl -LsSf https://astral.sh/uv/install.sh | sh",
+        // `UV_NO_MODIFY_PATH=1` / `UV_INSTALL_DIR` come from the install
+        // environment (provision.rs), not from this string: an unattended
+        // install must not rewrite the user's PATH behind their back.
+        install_windows:
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\"",
+        docs: "https://docs.astral.sh/uv/getting-started/installation/",
+        also_link: &["uv", "uvx"],
+        size_hint: "~15 MB",
+        size_hint_windows: "~74 MB",
+    },
+];
+
+/// The prerequisite descriptor for a key, if it's one we know.
+pub fn prereq(key: &str) -> Option<&'static Prereq> {
+    PREREQS.iter().find(|p| p.key == key)
+}
+
+/// The prerequisites a tool's *built-in* install command needs. A tool with a
+/// user-declared `cc_tool_install` has none: the self-hoster said exactly what
+/// they wanted, and rewriting it would be worse (proposal 0050 Part A).
+pub fn prereqs_for(t: &Tool) -> Vec<&'static Prereq> {
+    if t.install_hint.is_some() {
+        return Vec::new();
+    }
+    let Some(a) = assistant_for(t) else { return Vec::new() };
+    a.needs.iter().filter_map(|k| prereq(k)).collect()
+}
+
+/// This platform's install one-liner for a prerequisite, or `None` when there
+/// is no user-scope bootstrap for it here (Windows Node).
+pub fn prereq_install_command(p: &Prereq) -> Option<&'static str> {
+    let cmd = if cfg!(target_os = "macos") {
+        p.install_macos
+    } else if cfg!(windows) {
+        p.install_windows
+    } else {
+        p.install_linux
+    };
+    (!cmd.is_empty()).then_some(cmd)
+}
+
+/// This platform's rough download size for a prerequisite (empty = unknown).
+pub fn prereq_size_hint(p: &Prereq) -> &'static str {
+    if cfg!(windows) && !p.size_hint_windows.is_empty() { p.size_hint_windows } else { p.size_hint }
+}
+
+/// This platform's rough download size for a tool, when it's a known assistant.
+pub fn size_hint(t: &Tool) -> &'static str {
+    let Some(a) = assistant_for(t) else { return "" };
+    if cfg!(windows) && !a.size_hint_windows.is_empty() { a.size_hint_windows } else { a.size_hint }
 }
 
 pub const ASSISTANTS: &[Assistant] = &[
@@ -109,11 +235,22 @@ pub const ASSISTANTS: &[Assistant] = &[
         label: "Claude Code",
         install_macos: "curl -fsSL https://claude.ai/install.sh | bash",
         install_linux: "curl -fsSL https://claude.ai/install.sh | bash",
+        // Verified on `harebell`: the vendor's PowerShell installer drops a
+        // single claude.exe in %USERPROFILE%\.local\bin, and `claude update`
+        // works there (proposal 0050 Part H).
+        install_windows:
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"",
         docs: "https://docs.claude.com/en/docs/claude-code/setup",
+        // Its installer is self-contained (curl + bash / irm + iex).
+        needs: &[],
+        size_hint: "~60 MB",
+        size_hint_windows: "~60 MB",
         self_update: "claude update",
         // The official installer is idempotent — re-running upgrades in place.
         update_macos: "curl -fsSL https://claude.ai/install.sh | bash",
         update_linux: "curl -fsSL https://claude.ai/install.sh | bash",
+        update_windows:
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"",
         version_arg: "--version",
     },
     Assistant {
@@ -121,10 +258,18 @@ pub const ASSISTANTS: &[Assistant] = &[
         label: "Codex CLI",
         install_macos: "npm install -g @openai/codex",
         install_linux: "npm install -g @openai/codex",
+        // Verified on `harebell`: exit 0 as a non-admin user; the default npm
+        // prefix (%APPDATA%\npm) is user-writable AND already on the User PATH,
+        // so no prefix override is needed there.
+        install_windows: "npm install -g @openai/codex",
         docs: "https://github.com/openai/codex",
+        needs: &["npm"],
+        size_hint: "~120 MB",
+        size_hint_windows: "~407 MB", // measured on harebell (vendored binaries)
         self_update: "codex update",
         update_macos: "npm install -g @openai/codex@latest",
         update_linux: "npm install -g @openai/codex@latest",
+        update_windows: "npm install -g @openai/codex@latest",
         version_arg: "--version",
     },
     Assistant {
@@ -132,11 +277,16 @@ pub const ASSISTANTS: &[Assistant] = &[
         label: "Gemini CLI",
         install_macos: "npm install -g @google/gemini-cli",
         install_linux: "npm install -g @google/gemini-cli",
+        install_windows: "npm install -g @google/gemini-cli",
         docs: "https://github.com/google-gemini/gemini-cli",
+        needs: &["npm"],
+        size_hint: "~30 MB",
+        size_hint_windows: "~30 MB",
         // No self-update subcommand (verified) — npm is the only route.
         self_update: "",
         update_macos: "npm install -g @google/gemini-cli@latest",
         update_linux: "npm install -g @google/gemini-cli@latest",
+        update_windows: "npm install -g @google/gemini-cli@latest",
         version_arg: "--version",
     },
     Assistant {
@@ -144,11 +294,21 @@ pub const ASSISTANTS: &[Assistant] = &[
         label: "Kimi CLI",
         install_macos: "uv tool install --python 3.13 kimi-cli",
         install_linux: "uv tool install --python 3.13 kimi-cli",
+        // UNVERIFIED on Windows end-to-end (proposal 0050 Part H): the command is
+        // documented cross-platform and `uv` itself bootstraps user-scope there,
+        // but nobody has run this through to a launchable `kimi`. The failure
+        // mode is an honest `failed` row carrying uv's own error. Whoever
+        // verifies it on a Windows box should delete this comment.
+        install_windows: "uv tool install --python 3.13 kimi-cli",
         docs: "https://github.com/MoonshotAI/kimi-cli",
+        needs: &["uv"],
+        size_hint: "~15 MB (+ a CPython build)",
+        size_hint_windows: "~15 MB (+ a CPython build)",
         // No self-update subcommand (verified) — uv owns the install.
         self_update: "",
         update_macos: "uv tool upgrade kimi-cli",
         update_linux: "uv tool upgrade kimi-cli",
+        update_windows: "uv tool upgrade kimi-cli",
         version_arg: "--version",
     },
 ];
@@ -176,16 +336,41 @@ pub fn probe_binary(t: &Tool) -> Option<&str> {
 /// registry, else `None` (the guard still reports the miss, just without a
 /// command). Data lives in one place; this only selects.
 pub fn install_hint(t: &Tool) -> Option<String> {
+    if let Some(cmd) = install_command(t) {
+        return Some(cmd);
+    }
+    let a = assistant_for(t)?;
+    Some(format!("see {}", a.docs))
+}
+
+/// The **runnable** install one-liner for this platform: a `cc_tool_install`
+/// override, else the registry's per-OS column. `None` when this platform has
+/// none — deliberately distinct from `install_hint`, which falls back to a
+/// `"see <docs>"` *display* string that must never be handed to a shell
+/// (proposal 0050 Part B2).
+pub fn install_command(t: &Tool) -> Option<String> {
     if let Some(h) = &t.install_hint {
         return Some(h.clone());
     }
     let a = assistant_for(t)?;
-    let cmd = if cfg!(target_os = "macos") { a.install_macos } else if cfg!(target_os = "linux") { a.install_linux } else { "" };
-    if cmd.is_empty() {
-        Some(format!("see {}", a.docs))
+    let cmd = if cfg!(target_os = "macos") {
+        a.install_macos
+    } else if cfg!(windows) {
+        a.install_windows
     } else {
-        Some(cmd.to_string())
-    }
+        a.install_linux
+    };
+    (!cmd.is_empty()).then(|| cmd.to_string())
+}
+
+/// The docs URL for a tool, when it's a known assistant.
+pub fn docs_url(t: &Tool) -> Option<&'static str> {
+    assistant_for(t).map(|a| a.docs)
+}
+
+/// The human label for a tool: the assistant descriptor's, else its prefix.
+pub fn label(t: &Tool) -> String {
+    assistant_for(t).map(|a| a.label.to_string()).unwrap_or_else(|| t.prefix.clone())
 }
 
 /// The ordered candidate commands that bring a tool up to date (proposal 0049),
@@ -205,7 +390,13 @@ pub fn update_commands(t: &Tool) -> Vec<String> {
     if let Some(a) = assistant_for(t) {
         for cand in [
             a.self_update,
-            if cfg!(target_os = "macos") { a.update_macos } else if cfg!(target_os = "linux") { a.update_linux } else { "" },
+            if cfg!(target_os = "macos") {
+                a.update_macos
+            } else if cfg!(windows) {
+                a.update_windows
+            } else {
+                a.update_linux
+            },
         ] {
             let cand = cand.trim();
             if !cand.is_empty() && !out.iter().any(|c| c == cand) {
@@ -224,12 +415,88 @@ pub fn version_arg(t: &Tool) -> &'static str {
     assistant_for(t).map(|a| a.version_arg).unwrap_or("--version")
 }
 
-/// Whether `bin` resolves to an executable on `env_path` — the same lookup
-/// `/bin/sh` performs for the launch (`engine.rs` spawns with this exact PATH),
-/// so the guard's verdict and the spawn agree. A head containing `/` is checked
-/// as a path directly, mirroring the shell.
-pub fn binary_on_path(bin: &str, env_path: &str) -> bool {
-    fn is_executable(p: &std::path::Path) -> bool {
+// ── Resolving a launch head on the session PATH (proposals 0046, 0051) ───────
+// The probe must agree with the *launch*: if `launch_shell()`'s interpreter would
+// find the binary, we say present; if it wouldn't, we say missing. On Unix that's
+// `/bin/sh`'s lookup (':'-separated PATH, executable bit). On Windows it's
+// `cmd.exe /C`'s (';'-separated PATH, `PATHEXT` candidate extensions, and the
+// extension IS the executability signal) — 0051: splitting a Windows PATH on ':'
+// matched nothing at all, which made every create/restore/update fail there.
+//
+// Both platforms run ONE implementation; the two differences are *inputs*
+// (`Resolver`), so the Windows behaviour is unit-testable from a Linux box.
+
+/// The PATH separator for this platform — must match `config::build_env_path`,
+/// which builds the string we split (`src/config.rs`).
+pub const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
+
+/// The documented `cmd.exe` fallback when `PATHEXT` is unset or empty.
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// The platform-shaped inputs to a PATH lookup: how the PATH is split, which
+/// extensions a bare name may gain, and what counts as executable. Constructed
+/// from the host by `host()`; the explicit constructors exist so a test can
+/// resolve a Windows-shaped PATH on Linux and vice versa.
+pub struct Resolver {
+    sep: char,
+    /// Always starts with `""` (try the name as written first, so `claude.exe`
+    /// on the PATH resolves as itself and never becomes `claude.exe.EXE`).
+    exts: Vec<String>,
+    /// Windows rules: `\` is also a separator, a drive prefix means "path", and
+    /// `is_file()` — not an executable bit — is the test.
+    windows: bool,
+}
+
+impl Resolver {
+    /// The resolver for the host we're running on.
+    pub fn host() -> Resolver {
+        if cfg!(windows) {
+            Resolver::windows(&std::env::var("PATHEXT").unwrap_or_default())
+        } else {
+            Resolver::unix()
+        }
+    }
+
+    pub fn unix() -> Resolver {
+        Resolver { sep: ':', exts: vec![String::new()], windows: false }
+    }
+
+    /// `pathext` is the raw `PATHEXT` value (`".COM;.EXE;…"`); empty falls back
+    /// to what `cmd.exe` itself defaults to.
+    pub fn windows(pathext: &str) -> Resolver {
+        let mut exts = vec![String::new()];
+        let raw = if pathext.trim().is_empty() { DEFAULT_PATHEXT } else { pathext };
+        for e in raw.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+            let e = if e.starts_with('.') { e.to_string() } else { format!(".{e}") };
+            if !exts.iter().any(|x| x.eq_ignore_ascii_case(&e)) {
+                exts.push(e);
+            }
+        }
+        Resolver { sep: ';', exts, windows: true }
+    }
+
+    /// Whether `bin` is already a path rather than a bare name — checked
+    /// directly, mirroring the shell. Not `contains('/')`: `C:\tools\claude.exe`
+    /// and `a\b` are paths too.
+    fn is_path(&self, bin: &str) -> bool {
+        if bin.contains('/') || std::path::Path::new(bin).is_absolute() {
+            return true;
+        }
+        if self.windows {
+            // A drive prefix (`C:…`) or a backslash component separator.
+            let b = bin.as_bytes();
+            return bin.contains('\\')
+                || (b.get(1) == Some(&b':') && b.first().is_some_and(|c| c.is_ascii_alphabetic()));
+        }
+        false
+    }
+
+    /// Executable *for this platform*: the mode bit on Unix, the extension (i.e.
+    /// merely being a file with a candidate suffix) on Windows.
+    fn is_runnable(&self, p: &std::path::Path) -> bool {
+        if self.windows {
+            return p.is_file();
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -240,13 +507,65 @@ pub fn binary_on_path(bin: &str, env_path: &str) -> bool {
             p.is_file()
         }
     }
-    if bin.contains('/') {
-        return is_executable(std::path::Path::new(bin));
+
+    /// The PATH's directory entries, in order — empty ones dropped and the
+    /// surrounding quotes Windows allows around an entry stripped.
+    fn entries<'a>(&self, env_path: &'a str) -> Vec<&'a str> {
+        env_path
+            .split(self.sep)
+            .map(|d| d.trim().trim_matches('"'))
+            .filter(|d| !d.is_empty())
+            .collect()
     }
-    env_path
-        .split(':')
-        .filter(|d| !d.is_empty())
-        .any(|d| is_executable(&std::path::Path::new(d).join(bin)))
+
+    /// Resolve `bin` against `env_path`, returning what was found.
+    pub fn resolve(&self, bin: &str, env_path: &str) -> Option<PathBuf> {
+        if bin.is_empty() {
+            return None;
+        }
+        if self.is_path(bin) {
+            let p = PathBuf::from(bin);
+            // A path is still allowed to gain an extension (`C:\tools\claude`
+            // → `claude.exe`), exactly as the interpreter would.
+            return self.with_exts(&p);
+        }
+        for dir in self.entries(env_path) {
+            if let Some(hit) = self.with_exts(&std::path::Path::new(dir).join(bin)) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// `base` as written first, then each candidate extension appended.
+    fn with_exts(&self, base: &std::path::Path) -> Option<PathBuf> {
+        for ext in &self.exts {
+            let cand = if ext.is_empty() {
+                base.to_path_buf()
+            } else {
+                let mut s = base.as_os_str().to_os_string();
+                s.push(ext);
+                PathBuf::from(s)
+            };
+            if self.is_runnable(&cand) {
+                return Some(cand);
+            }
+        }
+        None
+    }
+}
+
+/// Whether `bin` resolves to something launchable on `env_path` — the same
+/// lookup this platform's launch interpreter performs (`launch_shell`), so the
+/// guard's verdict and the spawn agree.
+pub fn binary_on_path(bin: &str, env_path: &str) -> bool {
+    resolve_on_path(bin, env_path).is_some()
+}
+
+/// The same search, returning **what it found** — the landing-zone step
+/// (proposal 0050) needs the file, and `doctor` shows it in the ✓ row.
+pub fn resolve_on_path(bin: &str, env_path: &str) -> Option<PathBuf> {
+    Resolver::host().resolve(bin, env_path)
 }
 
 /// `Some(binary)` iff the tool needs a binary that is NOT on `env_path` —
@@ -743,6 +1062,128 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A scratch dir with files created by name — used to express *Windows*
+    /// on-disk shapes (`claude.exe`, `codex.cmd`) from a Linux test run.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            let d = std::env::temp_dir().join(format!("ccr-res-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Scratch(d)
+        }
+        fn file(&self, name: &str) -> PathBuf {
+            let p = self.0.join(name);
+            std::fs::write(&p, "x").unwrap();
+            p
+        }
+        fn dir(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn windows_path_splits_on_semicolons_not_colons() {
+        // 0051's bug 1: a ';'-separated PATH split on ':' yields fragments like
+        // "C" and "\Users\erik\.local\bin;C" — never a directory.
+        let r = Resolver::windows(".COM;.EXE");
+        let entries = r.entries(r"C:\a\bin;C:\Program Files\nodejs;;C:\Users\erik\.local\bin");
+        assert_eq!(entries, vec![r"C:\a\bin", r"C:\Program Files\nodejs", r"C:\Users\erik\.local\bin"]);
+        // Quoted entries (legal on Windows) lose their quotes, as cmd.exe does.
+        assert_eq!(Resolver::windows("").entries("\"C:\\a b\";C:\\c"), vec![r"C:\a b", r"C:\c"]);
+        // Unix is unchanged.
+        assert_eq!(Resolver::unix().entries("/usr/bin:/bin::/opt/x"), vec!["/usr/bin", "/bin", "/opt/x"]);
+    }
+
+    #[test]
+    fn windows_resolves_through_pathext() {
+        // 0051's bug 2: the file on disk is `claude.exe` / `codex.cmd`, never the
+        // bare name — and `cmd.exe /C` is what actually launches the session.
+        let s = Scratch::new("pathext");
+        s.file("claude.exe");
+        s.file("codex.cmd");
+        s.file("only.ps1");
+        let dir = s.dir();
+        // A real `PATHEXT` is upper-case and a real Windows filesystem is
+        // case-insensitive, so `claude` + `.EXE` finds `claude.exe` there. This
+        // test runs on a case-SENSITIVE host, so it spells the same list in the
+        // case the files use — the resolver deliberately plays no case games
+        // (`with_exts` appends the candidate exactly as given).
+        let pathext = ".com;.exe;.bat;.cmd;.vbs";
+        let r = Resolver::windows(pathext);
+        assert_eq!(r.resolve("claude", &dir).unwrap(), s.0.join("claude.exe"));
+        assert_eq!(r.resolve("codex", &dir).unwrap(), s.0.join("codex.cmd"));
+        // A head that already carries its extension resolves as itself — it must
+        // not become `claude.exe.EXE`.
+        assert_eq!(r.resolve("claude.exe", &dir).unwrap(), s.0.join("claude.exe"));
+        // PATHEXT is FOLLOWED, not guessed: `.PS1` isn't listed here, and
+        // `cmd.exe /C only` wouldn't run it either, so we don't claim it.
+        assert!(r.resolve("only", &dir).is_none());
+        assert!(r.resolve("nope", &dir).is_none());
+        // An unset PATHEXT falls back to cmd.exe's own documented default set —
+        // and the bare name is always the first candidate.
+        let dflt = Resolver::windows("");
+        assert_eq!(dflt.exts[0], "");
+        assert!(dflt.exts.iter().any(|e| e == ".EXE") && dflt.exts.iter().any(|e| e == ".CMD"));
+        // A bare entry ("EXE", no dot) is normalised, and duplicates collapse
+        // case-insensitively.
+        let odd = Resolver::windows("EXE;.exe;.CMD");
+        assert_eq!(odd.exts, vec!["".to_string(), ".EXE".to_string(), ".CMD".to_string()]);
+    }
+
+    #[test]
+    fn absolute_and_drive_heads_take_the_direct_branch() {
+        // 0051's bug 3: `contains('/')` is POSIX-only, so `C:\tools\claude.exe`
+        // took the search-the-PATH branch and never matched.
+        let s = Scratch::new("abs");
+        let exe = s.file("claude.exe");
+        let win = Resolver::windows(".EXE");
+        let head = exe.to_string_lossy().replace('/', "\\");
+        assert!(win.is_path(&head), "{head} must read as a path");
+        assert!(win.is_path(r"C:\tools\claude.exe"));
+        assert!(win.is_path(r"tools\claude.exe"));
+        assert!(!win.is_path("claude"));
+        // …and on Unix an absolute head is checked directly, with an empty PATH.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = s.file("direct");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let u = Resolver::unix();
+            assert!(u.is_path(bin.to_str().unwrap()));
+            assert_eq!(u.resolve(bin.to_str().unwrap(), "").unwrap(), bin);
+        }
+    }
+
+    #[test]
+    fn unix_resolution_is_byte_for_byte_unchanged() {
+        // The Unix contract: ':'-separated, the executable bit is the test, no
+        // extensions are ever appended.
+        let s = Scratch::new("unix");
+        let exe = s.file("fake-cli");
+        s.file("plain");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let r = Resolver::unix();
+        assert_eq!(r.exts, vec![String::new()], "no extension candidates on Unix");
+        let path = format!("/nonexistent:{}", s.dir());
+        #[cfg(unix)]
+        {
+            assert_eq!(r.resolve("fake-cli", &path).unwrap(), exe);
+            assert!(r.resolve("plain", &path).is_none(), "a non-executable file is not a hit");
+        }
+        assert!(r.resolve("nope", &path).is_none());
+        assert!(r.resolve("", &path).is_none());
+    }
+
     #[test]
     fn cc_tool_install_declares_a_hint() {
         // A custom tool can declare its own install one-liner (0046), matched by
@@ -822,6 +1263,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("assistant '{}' has no default tool", a.prefix));
             assert!(probe_binary(tool).is_some(), "{} must be probeable", a.prefix);
             assert!(!a.install_macos.is_empty() && !a.install_linux.is_empty() && !a.docs.is_empty());
+            // …on all three platforms (0050 Part H): Windows is no longer a
+            // "see <docs>" hole, which is what made install/update no-ops there.
+            assert!(!a.install_windows.is_empty(), "{} install_windows", a.prefix);
+            assert!(!a.update_windows.is_empty(), "{} update_windows", a.prefix);
+            // …with a size hint for the dialog, and every declared prerequisite
+            // resolving to a real PREREQS entry (a typo'd key would silently
+            // install nothing and then blame the assistant).
+            assert!(!a.size_hint.is_empty(), "{} size_hint", a.prefix);
+            for key in a.needs {
+                assert!(prereq(key).is_some(), "{} needs unknown prerequisite '{key}'", a.prefix);
+            }
             // …and (0049) a way to update it + read its version on both platforms.
             assert!(!a.update_macos.is_empty() && !a.update_linux.is_empty(), "{} update cmd", a.prefix);
             assert!(!a.version_arg.is_empty(), "{} version_arg", a.prefix);
@@ -829,6 +1281,66 @@ mod tests {
         }
         // And the shell tool deliberately has no descriptor.
         assert!(!ASSISTANTS.iter().any(|a| a.prefix == "shell"));
+    }
+
+    #[test]
+    fn prerequisites_are_declared_and_a_cc_tool_install_suppresses_them() {
+        let t = load_tools(None);
+        let need = |prefix: &str| {
+            prereqs_for(t.iter().find(|x| x.prefix == prefix).unwrap())
+                .into_iter()
+                .map(|p| p.key)
+                .collect::<Vec<_>>()
+        };
+        // The declared shape (0050 Part A), verified against a working machine.
+        assert_eq!(need("codex"), vec!["npm"]);
+        assert_eq!(need("gemini"), vec!["npm"]);
+        assert_eq!(need("kimi"), vec!["uv"]);
+        // Claude's installer is self-contained (curl + bash).
+        assert!(need("claude").is_empty());
+        // The bare shell isn't an assistant — nothing to install, ever.
+        assert!(need("shell").is_empty());
+        assert!(install_command(t.iter().find(|x| x.prefix == "shell").unwrap()).is_none());
+
+        // A machine that declares its own install line short-circuits the
+        // prerequisite logic entirely: the self-hoster said what they wanted, and
+        // rewriting someone's config would be worse than trusting it.
+        let custom = with_defaults(parse(
+            "cc_tool coc codex 'codex'\ncc_tool_install codex \"my-mirror add codex\"",
+        ));
+        let c = custom.iter().find(|x| x.prefix == "codex").unwrap();
+        assert_eq!(install_command(c).as_deref(), Some("my-mirror add codex"));
+        assert!(prereqs_for(c).is_empty(), "an explicit install line owns its own deps");
+
+        // Every prerequisite is user-scope on at least the two Unix platforms,
+        // and none of them escalates.
+        for p in PREREQS {
+            assert!(!p.install_macos.is_empty() && !p.install_linux.is_empty(), "{} unix install", p.key);
+            assert!(!p.docs.is_empty() && !p.bin.is_empty() && !p.label.is_empty());
+            assert!(!p.size_hint.is_empty(), "{} size_hint", p.key);
+        }
+    }
+
+    #[test]
+    fn install_command_is_runnable_but_install_hint_may_be_prose() {
+        // The distinction 0050 B2 depends on: `install_hint` can return a
+        // "see <docs>" DISPLAY string, which must never reach a shell. A custom
+        // tool with no descriptor and no declaration has neither.
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let b = bare.iter().find(|x| x.prefix == "other").unwrap();
+        assert_eq!(install_command(b), None);
+        assert_eq!(install_hint(b), None);
+        // A built-in always has a runnable command on every supported platform
+        // now, so the two agree — the "see docs" branch is the fallback for a
+        // future assistant that lacks a per-OS line.
+        let t = load_tools(None);
+        for prefix in ["claude", "codex", "gemini", "kimi"] {
+            let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
+            let cmd = install_command(tool).expect(prefix);
+            assert!(!cmd.starts_with("see "), "{prefix}: {cmd}");
+            assert_eq!(install_hint(tool).as_deref(), Some(cmd.as_str()));
+            assert!(!size_hint(tool).is_empty(), "{prefix} size hint");
+        }
     }
 
     #[test]

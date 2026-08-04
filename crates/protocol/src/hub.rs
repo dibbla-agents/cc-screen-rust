@@ -63,6 +63,17 @@ pub const CONTROL_CHANNEL: ChannelId = 0;
 /// `caps`; the hub refuses the op with `501` for an agent that doesn't list it.
 pub const CAP_ASSISTANT_UPDATE: &str = "assistant-update";
 
+/// Capability token: this agent can **install** the missing assistants for the
+/// local user (proposal 0050) — i.e. it honours `install_missing` on
+/// [`Cmd::UpdateAssistants`] and understands [`Cmd::InstallPlan`].
+///
+/// Load-bearing, because the field itself is additive: nothing in this crate uses
+/// `deny_unknown_fields`, so a 0049-era agent would silently *ignore*
+/// `install_missing` and run an update-only job while the user believed something
+/// was installed. The token is what turns that silent downgrade into an honest
+/// `501` from the hub.
+pub const CAP_ASSISTANT_INSTALL: &str = "assistant-install";
+
 /// WebSocket close code the hub uses to reject an agent uplink whose token is
 /// **unauthorized** — unknown, or revoked because the machine was unlinked from
 /// the dashboard. In the private-use range (4000–4999); echoes HTTP 401. The
@@ -91,6 +102,16 @@ pub enum AgentMsg {
     /// The agent's live session list (sent on register and whenever it changes).
     /// `SessionInfo` is the same type the client-facing `/api/sessions` returns.
     Sessions { sessions: Vec<SessionInfo> },
+    /// The agent's tool registry **re-probed** (proposal 0050): sent after an
+    /// install job changes availability, so the hub's cached `unavailable` flags
+    /// — and the dashboard badge that reads them — stop lying. Without this the
+    /// list is frozen at `Register` time and a freshly installed CLI stays
+    /// invisible until the agent reconnects.
+    ///
+    /// Safe against an **older hub** by inspection: an unknown `AgentMsg` variant
+    /// fails deserialization there, and that arm logs "malformed frame (skipped)"
+    /// and drops it — the uplink lives.
+    Tools { tools: Vec<ToolInfo> },
     /// Result of a [`HubMsg::Command`], correlated by `req`.
     Reply { req: ReqId, result: CmdResult },
     /// Snapshot (RIS-prefixed repaint) for a freshly-attached client; **payload
@@ -199,9 +220,23 @@ pub enum Cmd {
     /// agent resolves each name against its own registry. Replies
     /// [`CmdResult::Json`] with the [`crate::UpdateJob`] snapshot (or a `409` error
     /// carrying the running job's).
-    UpdateAssistants { tools: Vec<String>, restart: String },
+    /// `install_missing` (proposal 0050) additionally installs the assistants
+    /// that aren't on the machine at all, for the local user, before updating the
+    /// ones that are. Gated on [`CAP_ASSISTANT_INSTALL`] — see that constant for
+    /// why the capability, not the field, is what keeps this honest.
+    UpdateAssistants {
+        tools: Vec<String>,
+        restart: String,
+        #[serde(default)]
+        install_missing: bool,
+    },
     /// Read the current-or-last update job (proposal 0049) → [`CmdResult::Json`].
     UpdateStatus,
+    /// What installing the missing assistants on this machine WOULD do (proposal
+    /// 0050): the exact commands, the missing prerequisites and the size hints,
+    /// so the dialog can show them before the user confirms. A pure probe.
+    /// Replies [`CmdResult::Json`] with [`crate::InstallPlan`].
+    InstallPlan { tools: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,8 +407,11 @@ mod tests {
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
             HubMsg::Command { req: 5, cmd: Cmd::SetColor { session: "claude-x".into(), color: Some("teal".into()) } },
             HubMsg::Command { req: 6, cmd: Cmd::SetColor { session: "claude-x".into(), color: None } },
-            HubMsg::Command { req: 7, cmd: Cmd::UpdateAssistants { tools: vec!["claude".into()], restart: "updated".into() } },
+            HubMsg::Command { req: 7, cmd: Cmd::UpdateAssistants { tools: vec!["claude".into()], restart: "updated".into(), install_missing: false } },
             HubMsg::Command { req: 8, cmd: Cmd::UpdateStatus },
+            // Proposal 0050: installing what's missing, and asking what that would run.
+            HubMsg::Command { req: 9, cmd: Cmd::UpdateAssistants { tools: vec![], restart: "updated".into(), install_missing: true } },
+            HubMsg::Command { req: 10, cmd: Cmd::InstallPlan { tools: vec!["kimi".into()] } },
             HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::SummaryResult {
                 session: "claude-x".into(),
