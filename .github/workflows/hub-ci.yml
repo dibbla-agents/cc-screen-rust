@@ -1,0 +1,32 @@
+# Linux CI for the hub: proves BOTH builds of cc-screen-hub on every push — the
+# default (single-tenant) build and the `--features multi-tenant` SaaS build.
+# This enforces the crates/hub/Cargo.toml contract ("every other PR must keep the
+# default (no-feature) build green") and runs the feature-gated
+# crates/hub/tests/multi_tenant.rs suite (incl. the 0042/0053 security
+# regression tests), which otherwise only runs on developer machines.
+name: hub-ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # The hub embeds the React PWA via rust-embed (frontend/dist), so the
+      # frontend must be built before cargo compiles the hub.
+      - name: Build the frontend (rust-embed input)
+        run: cd frontend && npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (default single-tenant build)
+        run: cargo test -p cc-screen-hub
+      - name: Test (multi-tenant SaaS build)
+        run: cargo test -p cc-screen-hub --features multi-tenant

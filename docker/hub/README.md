@@ -31,6 +31,15 @@ docker run -d --name cc-screen-hub -p 8840:8840 --env-file docker/hub/.env \
   -v cc-screen-hub-config:/home/app/.config/cc-screen-hub cc-screen-hub
 ```
 
+The image is built with `--features multi-tenant` by default: the SaaS
+capability ships in every hub artifact but stays **dormant** until
+`CCHUB_DATABASE_URL` is set (see below) — without it the hub behaves exactly
+like the classic single-tenant hub. The only visible deltas of the feature-on
+build are that the gated routes exist and answer honestly (e.g.
+`POST /api/signup` → `501 "not a multi-tenant hub"` instead of `404`) and a
+slightly larger binary. If you want the minimal build anyway, use the escape
+hatch: `docker build --build-arg FEATURES= …`.
+
 ## Pull the prebuilt image (run it on another machine)
 
 You don't have to build — CI publishes the hub image to GHCR on every release tag.
@@ -67,10 +76,48 @@ uplink** — only acceptable on a trusted private network.
 | `CCWEB_PASSWORD` | Web-login password (mints a 2-week cookie). Optional; the token alone gates everything. | `hunter2` |
 | `CCHUB_AGENT_TOKENS` | Per-agent uplink tokens, `machine:token,m2:tok2`. Empty = any agent may register. **Separate** secret from the client gate. | `pine:abc,oak:def` |
 | `CCWEB_ADDR` | Bind address inside the container. The image defaults it to `0.0.0.0:8840`; don't usually override. | `0.0.0.0:8840` |
+| `CCWEB_ALLOWED_ORIGINS` | Extra allowed Origin/Host values (comma-separated) for a proxy/tunnel-fronted hub. List every public hostname clients use. | `app.example.com` |
+| `CCHUB_DATABASE_URL` | **Turns on multi-tenant (SaaS) mode.** SQLite URL; keep the file in the config volume (convention below). Unset = single-tenant. | `sqlite:///home/app/.config/cc-screen-hub/hub.db` |
+| `CCHUB_PUBLIC_URL` | Canonical public origin (no trailing `/`) baked into the served installers, the device flow's `verification_uri`, and OAuth redirects. | `https://app.example.com` |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Enable "Sign in with Google" (redirect URI `<CCHUB_PUBLIC_URL>/api/auth/google/callback`). | — |
+| `CCHUB_OAUTH_ONLY` | Set to `1` to disable password signup/login (Google only). | `1` |
+| `CCHUB_SUPPORT_EMAIL` | Optional support contact shown at plan-limit walls. | `support@example.com` |
+| `CCHUB_SUMMARY_BUDGET` / `CCHUB_SUMMARY_USER_BUDGET` | Session-summary spend caps in USD (fleet-wide / per-user). | `50` / `2` |
 
 The image sets `HOME=/home/app`, so persisted state lives at
 `/home/app/.config/cc-screen-hub` — mount a volume there (the compose file does)
 to keep the cookie-signing key, favorites, and Web Push keys across restarts.
+
+## Multi-tenant (SaaS) mode
+
+The shipped image can run as a multi-account service: public signup + Google
+sign-in, per-user machine enrollment via `<hub>/activate`, per-plan
+machine/session caps. It's runtime opt-in — set `CCHUB_DATABASE_URL` and
+restart; unset it and the same image is the classic single-tenant hub.
+
+**DB-in-volume convention:** point the SQLite file into the state dir the
+compose file already persists, so the database rides the existing
+`hub-config` volume with no extra mount:
+
+```sh
+CCHUB_DATABASE_URL=sqlite:///home/app/.config/cc-screen-hub/hub.db
+```
+
+Plans are manual (no billing): `cc-screen-hub user plan <email> free|pro|unlimited`
+— run it inside the container with the same env, e.g.
+`docker exec -e CCHUB_DATABASE_URL=sqlite:///home/app/.config/cc-screen-hub/hub.db cc-screen-hub cc-screen-hub user plan you@example.com pro`.
+
+**Production deploy runbook (reproducible):** on the origin host, production is
+the shipped image + this compose file + a `.env` — no hand-built binaries:
+
+```sh
+cd docker/hub
+# .env holds the multi-tenant block: CCHUB_DATABASE_URL, CCHUB_PUBLIC_URL,
+# GOOGLE_OAUTH_CLIENT_ID/SECRET, CCWEB_ALLOWED_ORIGINS (every public hostname), …
+docker compose pull && docker compose up -d
+```
+
+`scripts/hubctl.sh` is the dev-box analogue of the same test/prod split.
 
 ## Connecting a machine host (agent) to this hub
 

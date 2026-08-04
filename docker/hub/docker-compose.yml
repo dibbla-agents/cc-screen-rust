@@ -32,7 +32,10 @@ services:
       # a native hub on 8840); the container always listens on 8840 internally.
       - "${HUB_BIND:-127.0.0.1}:${HUB_HOST_PORT:-8840}:8840"
     volumes:
-      # Persists session.key, favorites, VAPID keys, and push subscriptions.
+      # Persists session.key, favorites, VAPID keys, and push subscriptions — and,
+      # in multi-tenant mode, the SQLite database: set
+      #   CCHUB_DATABASE_URL=sqlite:///home/app/.config/cc-screen-hub/hub.db
+      # in .env so the DB lives in this same volume (no extra mount needed).
       - hub-config:/home/app/.config/cc-screen-hub
 
 volumes:

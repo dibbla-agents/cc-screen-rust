@@ -1,183 +1,140 @@
-# cc-screen-rust
+# cc-screen
 
-A **web-only, tmux-free** backend for driving AI coding CLIs
-(claude / kimi / gemini / codex) from a phone — a Rust rewrite of cc-screen's
-`web/` daemon. The React PWA is reused nearly unchanged; tmux is replaced by an
-in-process PTY session engine.
+[![Release](https://img.shields.io/github/v/release/dibbla-agents/cc-screen-rust)](https://github.com/dibbla-agents/cc-screen-rust/releases/latest)
+[![hub-ci](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/hub-ci.yml/badge.svg)](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/hub-ci.yml)
+[![windows-ci](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/windows-ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-See **[PLAN.md](PLAN.md)** for the design, decisions, and milestones, and
-**[HUB.md](HUB.md)** to run one address in front of many machines.
+**Drive Claude Code, Codex, Gemini, and Kimi sessions on all your machines —
+from your phone.** cc-screen keeps your AI coding agents running 24/7 as
+long-lived terminal sessions on your own computers, and lets you check in,
+type, approve, paste images, and browse/edit files from anywhere: a phone
+browser (installable PWA), any desktop browser, or a native terminal client.
+Sessions survive disconnects and reboots — a restart resumes each agent's
+conversation right where it left off.
 
-## Status
+<p align="center">
+  <img src="site/web/src/assets/img/mobile-agent.png" width="290" alt="A live Claude Code session, driven from a phone">
+  &nbsp;&nbsp;
+  <img src="site/web/src/assets/img/mobile-sessions.png" width="290" alt="All your sessions across machines, in one list">
+</p>
 
-**Full parity (M1–M6), deployed.** Terminal core (create/attach/type/kill,
-key/paste, clear-history, favourites), graceful `exit` vs `kill`, session
-persistence + restore (resume-only: a restart ends the agents and auto-restore
-resumes each conversation), the `$HOME`-confined files/editor/upload block, and
-clipboard image-paste — all working against the real React PWA. Runs as the
-`cc-screen-rust` systemd --user service on port 8839, side-by-side with the Go
-`cc-screen-web` on 8838. `/api/download` supports HTTP Range; `POST /api/session`
-confines the dir + extra dirs to `$HOME`. No known feature or protocol
-divergence from the Go app — see PLAN.md "Parity notes".
+Website: **<https://ccscreen.dev>** · Docs: **<https://ccscreen.dev/docs/>**
 
-## Build & run
+## Get started (hosted)
 
-```sh
-./build.sh build          # frontend -> embed -> ./target/release/cc-screen-rust
-./build.sh run            # build + run in the foreground
-CCWEB_ADDR=127.0.0.1:8839 ./target/release/cc-screen-rust
-# or: ./target/release/cc-screen-rust --addr 0.0.0.0:8839
-```
+The hosted hub is the fastest path — **free during beta**:
 
-Requires the Rust toolchain (`rustup`) and Node (for the Vite build).
+1. **Sign up** at **<https://app.ccscreen.dev>** (email or Google).
+2. **Connect a machine** — run the one-liner on any computer where your coding
+   agents should live, then approve the short code it prints from your
+   dashboard:
 
-## Install
+   ```sh
+   # macOS / Linux
+   curl -fsSL https://app.ccscreen.dev/install.sh | sh -s -- <machine-name> --assistants
+   ```
 
-Both binaries ship as prebuilt artifacts (macOS arm64/x86_64, Linux arm64/x86_64
-static musl, Windows x86_64), cross-built by `dist`
-(`.github/workflows/release.yml`, config in `dist-workspace.toml`) and served
-straight from the **GitHub Release** (always the latest tag). The repo is public,
-so the one-liners download anonymously — no GitHub account needed. Each installer
-detects OS/arch, verifies the embedded SHA-256 checksum, and drops the binary into
-`~/.local/bin`.
+   ```powershell
+   # Windows
+   irm "https://app.ccscreen.dev/install.ps1?name=<machine-name>&assistants=all" | iex
+   ```
 
-The hub is the front door: run one hub, point every machine's agent at it, and
-reach all of them from one address. Three pieces, in order.
+3. **Open <https://app.ccscreen.dev> on your phone** (Add to Home Screen for
+   the app experience) — your machine is online, start a session.
 
-**① The hub — your front door.** Its own binary + service (default port 8840);
-it's the address you open and the clients connect to:
+The `--assistants` flag also offers to install any missing coding CLIs
+(claude / codex / gemini / kimi) into `~/.local/bin` — no sudo. Your code and
+terminals stay on **your** machines; the hub is a relay that owns no PTY and no
+filesystem, and each machine dials *out* to it (no inbound ports).
+
+## Self-host
+
+Everything the hosted hub runs is in this repo — run your own hub and point
+your machines at it. Both binaries ship as prebuilt artifacts (macOS
+arm64/x86_64, Linux arm64/x86_64 static musl, Windows x86_64) served straight
+from the latest GitHub Release.
+
+**① The hub — your front door** (its own binary + service, default port 8840):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-hub-installer.sh | sh
 cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
-# cc-screen-hub uninstall          # tear the service back down
 ```
 
-**② The machines — headless hosts.** On each computer where your coding agents
-live, install the agent and point it at the hub. `--hub-only` keeps it a pure host:
-it runs the agents and dials out, with no inbound and nothing to open directly.
+**② The machines** — on each computer where your coding agents live:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh
 cc-screen-rust install --hub https://hub:8840 --hub-token T1 --machine-id laptop --hub-only
-# cc-screen-rust uninstall         # tear the service back down
-# cc-screen-rust install --help    # all flags
 ```
 
-One machine? Run the hub and the host on the same box.
-
-**③ The clients — point them at the hub.** The web app is served by the hub (open
-it and Add to Home Screen); `ccs` is the native terminal client:
+**③ The clients** — the web app is served by the hub (open it in a browser and
+Add to Home Screen); `ccs` is the native terminal client:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
-#   browser → https://hub:8840
-#   ccs --server https://hub:8840 --token <client-token>
+ccs --server https://hub:8840 --token <client-token>
 ```
 
-See **[HUB.md](HUB.md)** for the full guide (per-agent uplink tokens, the security
-model, TLS for off-tailnet). The agent keeps owning its PTYs, so a hub restart
-never kills sessions. (A single agent can also serve directly — drop the hub flags
-and open `http://machine:8839` — but the hub is the front door for everything.)
-Building from source (`./install.sh`) delegates the service step to that same
-`cc-screen-rust install`, so the unit/plist has a single source of truth.
+One machine? Run the hub and the agent on the same box. A single agent can also
+serve directly with no hub (`http://machine:8839`). Every binary self-updates:
+`cc-screen-rust update` / `cc-screen-hub update` / `ccs update`.
 
-### Updating
+See **[HUB.md](HUB.md)** for the full guide: per-agent uplink tokens, the
+security model (the agents run YOLO — keep them tailnet-only), auth/passwords,
+and TLS for off-tailnet access.
 
-Every binary self-updates by re-running its hosted installer (and the services
-restart onto the new build):
+**Run your own multi-tenant hub.** The shipped hub binary and Docker image are
+built with the `multi-tenant` feature — dormant by default. Set
+`CCHUB_DATABASE_URL` (e.g. `sqlite:///path/hub.db`) and the same hub becomes a
+multi-account service: public signup, Google sign-in, per-user machine
+enrollment via `<hub>/activate`, per-plan caps (`cc-screen-hub user plan
+<email> free|pro|unlimited` — no billing; plans are set by hand). See
+[`docker/hub/README.md`](docker/hub/README.md) and `cc-screen-hub --help`.
+
+**Docker:** CI publishes both images to GHCR on every release tag —
+`ghcr.io/dibbla-agents/cc-screen-hub` (the front door) and
+`ghcr.io/dibbla-agents/cc-screen-agent` (a containerized machine host). The
+compose files in [`docker/hub/`](docker/hub/README.md) and
+[`docker/agent/`](docker/agent/README.md) reference those tags.
+
+## Build from source
 
 ```sh
-cc-screen-rust update     # agent: fetch the latest + restart the service
-cc-screen-hub  update     # hub:   fetch the latest + restart the service
-ccs            update     # TUI:   fetch the latest ccs binary
+./build.sh build          # frontend -> embed -> ./target/release/cc-screen-rust
+./build.sh run            # build + run in the foreground
+CCWEB_ADDR=127.0.0.1:8839 ./target/release/cc-screen-rust
 ```
 
-### Run from a prebuilt Docker image
+Requires the Rust toolchain (`rustup`) and Node (for the Vite build — the React
+PWA is embedded into the binaries at compile time, so `frontend/dist` must be
+built first; `build.sh` handles the ordering). `./install.sh` builds and
+installs the local service, delegating the service step to `cc-screen-rust
+install` so the unit/plist has a single source of truth. Tests:
+`cargo test --workspace`.
 
-Instead of building, pull the CI-published images from GHCR (public — no login).
-Both track every release tag (`latest` + the semver version):
+**Cutting a release:** bump with `./bump.sh X.Y.Z`, commit, then `./release.sh`
+tags and the CI cross-build publishes the GitHub Release — the install
+one-liners serve straight from `releases/latest`.
 
-```sh
-docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the aggregator / front door
-docker pull ghcr.io/dibbla-agents/cc-screen-agent:latest   # a machine host (PTYs + the YOLO CLIs)
-```
-
-The compose files in [`docker/hub/`](docker/hub/README.md) and
-[`docker/agent/`](docker/agent/README.md) already reference these tags — `docker
-compose pull && up -d` runs the registry image; keep their `build:` block to build
-locally instead. The **hub** is a stateless relay and containerizes cleanly; the
-**agent** runs YOLO agents, so containerizing it is a *feature* (the container +
-the home volume you mount become the sandbox) — never publish its port publicly.
-
-**Test/prod on one box:** the hub compose host-port defaults to **8840**; set
-`HUB_HOST_PORT=8841` to run a second (e.g. "prod") hub alongside one already on
-8840. `scripts/hubctl.sh` wires up exactly that split — see the `environments`
-guidance in `.claude/skills/`.
-
-### Password protection (optional)
-
-Auth is **off by default** — it's tailnet-only, so the gate is just basic
-protection against *other* people on your Tailscale network, not the public
-internet. Clients connect to the hub, so turn the gate on **there**:
-
-```sh
-cc-screen-hub install --password 'your-passphrase' --token '<client-token>'
-```
-
-The web UI then shows a login screen; a correct password (or the token) sets a
-**2-week session cookie**. For the `ccs` TUI, drop the token into
-`~/.config/cc-screen-tui/config.toml` as `api_token = "…"` (or pass `ccs --token`,
-or set `CCS_API_TOKEN`). This client gate is **separate** from how agents
-authenticate to the hub — those use per-agent uplink tokens
-(`--agents 'machine:token,…'` on the hub, `--hub-token` on the agent), so a leaked
-client password can't impersonate a machine. A standalone agent (no hub) takes the
-same `--password`/`--token` via `cc-screen-rust install`; secrets live in each
-tool's `web.env` and survive re-running `install`. See [HUB.md](HUB.md).
-
-**Cutting a release.** Bump the version with `./bump.sh X.Y.Z` (lockstep across the
-crates + `Cargo.lock`) and commit it; then `./release.sh` tags + waits for the CI
-cross-build and publishes the GitHub Release. The one-liners above serve straight
-from `releases/latest`, so a published release is installable immediately — nothing
-else to host. (The `/release` skill walks an agent through the whole thing,
-including updating the running server vs. the docs site.)
-
-## Docs site
-
-The getting-started site lives in **`docs/`** (one source of truth) and is
-deployed through **Dibbla** as the `cc-screen` app — a tiny Rust static server
-(`site/`, axum + tower-http) in a small non-root Alpine container:
-
-- **Live:** https://cc-screen-b4687da9.dibbla.app
-- **Deploy / update:** `cd site && ./deploy.sh` — syncs `docs/` → `site/public`,
-  then `dibbla deploy --alias cc-screen` (first run creates the app; later runs do
-  a zero-downtime `--update`). See `site/README.md`.
-
-(`docs/` is also served by GitHub Pages at
-https://dibbla-agents.github.io/cc-screen-rust/.)
-
-## Layout
+## Repository layout
 
 | Path | What |
 |------|------|
-| `src/main.rs` | axum router, static embed, startup, `--help`, `install`/`uninstall` |
-| `src/config.rs` | paths (`~/.config/cc-screen-rust/`), bind addr, tool-registry + hub-flag resolution |
-| `src/tools.rs` | `tools.conf` parsing + launch/resume command building (port of the Go `tmux.go` registry) |
-| `src/engine.rs` | the session engine: `Session` (PTY + vt100 + ring + broadcast), `AppState`, spawn/pump/reap |
-| `src/handlers.rs` | HTTP + WebSocket handlers (the existing frontend's wire contract) |
-| `src/attach.rs` | the transport-agnostic attach loop (drives both the local WS handler and the hub uplink) |
-| `src/uplink.rs` | the agent→hub uplink (slave mode): dial out, register, relay terminals/files/watch |
-| `crates/hub/` | **`cc-screen-hub`** — the aggregator binary (registry + relay; see [HUB.md](HUB.md)) |
-| `crates/protocol/` | shared HTTP+WS wire types + the agent↔hub envelope (`src/hub.rs`) |
-| `crates/auth/`, `crates/push/` | shared auth (signed cookies/tokens) + Web Push, used by both agent and hub |
-| `crates/tui/` | **`ccs`** — the native terminal client |
-| `frontend/` | copy of the cc-screen React PWA with minimal tmux-decoupling patches |
+| `src/` | the **agent**: axum router, the PTY session engine, HTTP+WS handlers, files/upload/clip, the embedded frontend |
+| `crates/hub/` | **`cc-screen-hub`** — the aggregator: registry + auth gate + byte relay; multi-tenant SaaS mode behind `CCHUB_DATABASE_URL` |
+| `crates/protocol/` | shared HTTP+WS wire types + the agent↔hub envelope — the single source of truth for the contract |
+| `crates/auth/`, `crates/push/` | shared auth (signed cookies/tokens) + Web Push |
+| `crates/tui/` | **`ccs`** — the native terminal client (ratatui, session switcher + multi-pane grid) |
+| `frontend/` | the React PWA, embedded into both the agent and the hub |
 
-## Relationship to cc-screen
+## Contributing & design docs
 
-This runs **side-by-side** with the Go app: its own config dir and port, reusing
-the `tools.conf` format. It is **tailnet-only** by design (the agents launch with
-`--dangerously-skip-permissions`/YOLO) — never bind a public interface.
+Start with **[AGENTS.md](AGENTS.md)** (repo guide for humans and AI agents),
+then **[PLAN.md](PLAN.md)** (server design + decisions), **[TUI_PLAN.md](TUI_PLAN.md)**
+(the `ccs` client), and **[HUB.md](HUB.md)** (the aggregator). Licensed under
+[MIT](LICENSE).

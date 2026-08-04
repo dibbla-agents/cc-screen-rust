@@ -27,13 +27,20 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY crates ./crates
+# The multi-tenant hub serves the machine-installer one-liners, embedded at
+# compile time (crates/hub/src/install.rs include_str!s scripts/install-machine.*).
+COPY scripts ./scripts
 # The hub embeds the PWA at compile time (rust-embed → ../../frontend/dist).
 COPY --from=frontend /app/frontend/dist ./frontend/dist
+# Features baked into the shipped hub. multi-tenant is compile-time capability,
+# runtime opt-in: without CCHUB_DATABASE_URL the hub runs single-tenant
+# (crates/hub/src/main.rs). Build with --build-arg FEATURES= for a minimal build.
+ARG FEATURES="multi-tenant"
 # Cache the cargo registry + target dir across builds. Because target/ is a cache
 # mount it isn't in the image layer, so copy the binary out before the RUN ends.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p cc-screen-hub && \
+    cargo build --release -p cc-screen-hub ${FEATURES:+--features "$FEATURES"} && \
     cp target/release/cc-screen-hub /cc-screen-hub
 
 # ── Stage 3: minimal non-root runtime ────────────────────────────────────────

@@ -27,6 +27,9 @@ USAGE
   cc-screen-hub install [--help]       set it up as an auto-starting service (usual way)
   cc-screen-hub update                 fetch the latest release + restart the service
   cc-screen-hub uninstall              remove that service
+  cc-screen-hub user <add|agent|plan|delete> …
+                                       manage multi-tenant accounts (needs
+                                       CCHUB_DATABASE_URL; `user --help` for details)
 
 RUN-DIRECTLY FLAGS
   --addr HOST:PORT    bind address (default 127.0.0.1:8840; env CCWEB_ADDR)
@@ -37,10 +40,20 @@ CONFIG (env / ~/.config/cc-screen-hub/web.env)
                                      Empty = OPEN uplink (any agent may register); the
                                      hub refuses to start in that case (even on loopback —
                                      it may be tunnel-fronted) unless CCHUB_ALLOW_OPEN_UPLINK=1.
-                                     Set tokens to require known agents.
+                                     Set tokens to require known agents. (Multi-tenant mode
+                                     gates every uplink on per-agent DB tokens instead.)
   CCWEB_CONFIG_DIR                   override the state dir (default ~/.config/cc-screen-hub)
                                      so a second hub (e.g. a test instance on another
                                      port) runs with fully isolated state.
+
+MULTI-TENANT (SaaS) MODE
+  Set CCHUB_DATABASE_URL (e.g. sqlite:///path/hub.db) and the hub becomes a
+  multi-account service: public signup + Google sign-in, per-user machine
+  enrollment via <hub>/activate, per-plan machine/session caps
+  (`user plan <email> free|pro|unlimited`). Unset = classic single-tenant hub.
+  CCHUB_PUBLIC_URL       canonical public origin (installer + OAuth + /activate URLs)
+  GOOGLE_OAUTH_CLIENT_ID / _SECRET   enable "Sign in with Google"
+  CCHUB_OAUTH_ONLY=1     disable password signup/login (Google only)
 
 SETUP
   1. On the hub box:   cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
@@ -52,8 +65,9 @@ Off-tailnet: front the hub with a TLS reverse proxy and always set CCHUB_AGENT_T
 }
 
 /// `cc-screen-hub user add <email> <password>` / `user agent <email> <machine>` —
-/// hand-provision a multi-tenant account or mint an agent uplink token for it
-/// (Phase 1 has no public signup / device flow yet). Reads CCHUB_DATABASE_URL.
+/// operator CLI for multi-tenant accounts, alongside the public signup + device
+/// enrollment the hub serves ([0001] §10.2–§10.4): hand-provision an account,
+/// mint an uplink token, assign a plan, or delete a user. Reads CCHUB_DATABASE_URL.
 #[cfg(feature = "multi-tenant")]
 async fn user_admin(args: &[String]) -> anyhow::Result<()> {
     use cc_screen_hub::db::{SqliteStore, Store};
@@ -139,8 +153,9 @@ async fn main() {
             print_usage();
             return;
         }
-        // Hand-provision a multi-tenant account (proposal 0001 Phase 1 — no public
-        // signup yet). DB via CCHUB_DATABASE_URL. Only in a multi-tenant build.
+        // Operator CLI for multi-tenant accounts (add/agent/plan/delete) — the
+        // admin companion to the public signup + device flow the hub serves.
+        // DB via CCHUB_DATABASE_URL. Only in a multi-tenant build.
         #[cfg(feature = "multi-tenant")]
         Some("user") => {
             if let Err(e) = user_admin(&argv[2..]).await {
