@@ -17,9 +17,45 @@ pub struct SignupReq {
     password: String,
 }
 
+/// The one message every server-side signup failure returns (proposal 0053 Part
+/// E / [0042]): a duplicate email is byte-identical to any other create failure,
+/// so an anonymous caller can't probe which addresses have accounts.
+const SIGNUP_GENERIC_ERROR: &str =
+    "could not create the account — if you already have one, sign in instead";
+
+/// How many signup attempts one source gets per rolling minute before a 429.
+/// Generous enough for the whole-journey E2E (one signup + retries), tight
+/// enough that a scripted burst is stopped (proposal 0053 Part E item 2).
+const SIGNUP_PER_MIN: usize = 5;
+
+/// Per-source sliding-window rate limit for signup, independent of the shared
+/// login backoff (which only reacts to *failures* — an unauthenticated
+/// account-creation endpoint must also bound *successful* bursts). Process-wide;
+/// bounded; prunes as it goes.
+fn signup_rate_limited(source: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static WINDOWS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+    let mut map = WINDOWS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let now = Instant::now();
+    let cutoff = now - Duration::from_secs(60);
+    if map.len() >= 4096 {
+        map.retain(|_, v| v.iter().any(|t| *t > cutoff));
+    }
+    let hits = map.entry(source.to_string()).or_default();
+    hits.retain(|t| *t > cutoff);
+    if hits.len() >= SIGNUP_PER_MIN {
+        return true;
+    }
+    hits.push(now);
+    false
+}
+
 /// `POST /api/signup` — create an account and log the user straight in (mint the
-/// identity cookie). Unauthenticated (it's how you get an account). Throttled with
-/// the shared login throttle to blunt abuse.
+/// identity cookie). Unauthenticated (it's how you get an account). Rate-limited
+/// per source (plus the shared login backoff), and enumeration-safe: every
+/// server-side failure answers the same status + body (proposal 0053 Part E).
 pub async fn signup(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<SignupReq>) -> Response {
     if !hub.multi_tenant() {
         return (StatusCode::NOT_IMPLEMENTED, "not a multi-tenant hub").into_response();
@@ -29,20 +65,35 @@ pub async fn signup(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
     }
     let source = cc_screen_auth::source_key(&headers);
     let now = std::time::Instant::now();
-    if hub.login_throttle.locked_for(&source, now).is_some() {
+    if hub.login_throttle.locked_for(&source, now).is_some() || signup_rate_limited(&source) {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "ok": false, "error": "too many attempts" }))).into_response();
+    }
+    // Input-policy failures are deterministic from the request alone (no account
+    // knowledge involved), so they may keep a specific message + status.
+    if req.email.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": "email is required" }))).into_response();
+    }
+    if req.password.len() < crate::db::MIN_PASSWORD_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": format!("password must be at least {} characters", crate::db::MIN_PASSWORD_LEN) })),
+        )
+            .into_response();
     }
     match hub.create_user(&req.email, &req.password).await {
         Ok(user_id) => {
+            // Land any email invites waiting for this address (proposal 0056 C3)
+            // — they show in the new account's inbox on its first poll.
+            hub.attach_email_invites(&user_id, &req.email).await;
             hub.login_throttle.record_success(&source);
             let cookie = hub.client_auth.issue_cookie_for(&user_id, cc_screen_auth::is_https(&headers));
             (StatusCode::OK, [(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
         }
-        Err(e) => {
+        Err(_) => {
             hub.login_throttle.record_failure(&source, now);
-            // Most failures are a duplicate email or a too-short password — 409 with
-            // a human message the signup form can show.
-            (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": e.to_string() }))).into_response()
+            // One generic answer for every server-side failure — a duplicate
+            // email is indistinguishable from any other create error ([0042]).
+            (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": SIGNUP_GENERIC_ERROR }))).into_response()
         }
     }
 }

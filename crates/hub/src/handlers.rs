@@ -118,16 +118,35 @@ pub async fn logout(State(hub): State<HubState>) -> Response {
 /// session cookie is valid, the logged-in account. Single-tenant reports
 /// `multiTenant:false` and the frontend falls back to the `/api/auth` gate.
 /// Exempt from the auth gate so it can answer "who am I?" with no session.
+// `headers` is only read by the multi-tenant branch below.
+#[cfg_attr(not(feature = "multi-tenant"), allow(unused_variables))]
 pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
     let multi = hub.multi_tenant();
     let google = multi && google_enabled();
     let password = password_login_enabled();
+    #[cfg(feature = "multi-tenant")]
     if multi {
         if let Some(user_id) = hub.client_auth.user_from_cookie(&headers) {
             if let Some(email) = hub.user_email(&user_id).await {
+                // Plan facts for the limit-card UX (proposal 0056 B1): the plan's
+                // name + caps and the current agent count, plus the operator's
+                // support address (CCHUB_SUPPORT_EMAIL) for the upgrade mailto.
+                let limits = hub.limits_for(&user_id).await;
+                let agents = hub.agent_count(&user_id).await;
+                let support = std::env::var("CCHUB_SUPPORT_EMAIL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 return Json(json!({
                     "multiTenant": true, "googleEnabled": google, "passwordLogin": password,
                     "authenticated": true, "userId": user_id, "email": email,
+                    "plan": {
+                        "name": limits.plan,
+                        "maxAgents": limits.max_agents,
+                        "maxSessions": limits.max_concurrent_sessions,
+                        "agents": agents,
+                    },
+                    "supportEmail": support,
                 }))
                 .into_response();
             }
@@ -821,6 +840,11 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         // is intentionally NOT exempt — it needs the user's session to bind the
         // enrollment to their tenant.
         || matches!(path.as_str(), "/api/device/code" | "/api/device/token" | "/api/device/validate");
+    // The invite-link read (proposal 0056 C4) is public by design: the token is
+    // the capability, and the landing page must render before login. The route
+    // only exists in the multi-tenant build, so the exemption is gated with it.
+    #[cfg(feature = "multi-tenant")]
+    let exempt = exempt || path.starts_with("/api/invite/");
 
     // Multi-tenant (proposal 0001 §4.1): identity comes from the session cookie,
     // not the shared secret. A gated request without a valid session is refused

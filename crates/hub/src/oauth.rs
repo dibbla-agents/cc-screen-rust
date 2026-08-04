@@ -181,6 +181,10 @@ pub async fn google_callback(
         tracing::warn!("oauth: could not provision user for {email}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not provision user").into_response();
     };
+    // Land any email invites waiting for this address (proposal 0056 C3) — this
+    // covers a fresh Google signup AND the first Google login of an address
+    // invited pre-account. Idempotent (attached rows are stamped converted).
+    hub.attach_email_invites(&user_id, email).await;
     let session = hub.client_auth.issue_cookie_for(&user_id, cc_screen_auth::is_https(&headers));
     // Single Set-Cookie: emit ONLY the session cookie. We deliberately do NOT also
     // clear the short-lived ccs_oauth state cookie here — a second Set-Cookie on

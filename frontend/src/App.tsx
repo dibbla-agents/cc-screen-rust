@@ -45,7 +45,7 @@ import LayoutPicker from "./components/LayoutPicker";
 import LayoutPalette from "./components/LayoutPalette";
 import UploadSheet from "./components/UploadSheet";
 import LoginScreen from "./components/LoginScreen";
-import { AuthScreen, ActivatePage, Dashboard } from "./components/MultiTenant";
+import { AuthScreen, ActivatePage, Dashboard, InviteLanding } from "./components/MultiTenant";
 import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
 import InboxButton from "./components/InboxButton";
 import UpdateAssistants from "./components/UpdateAssistants";
@@ -149,6 +149,11 @@ export default function App() {
   // machines dashboard; single-tenant keeps the shared-secret LoginScreen.
   const [me, setMe] = useState<MeInfo | null>(null);
   const [showDash, setShowDash] = useState(false);
+  // A one-shot seed for the drawer's create mode (proposal 0056 A1/A2): set by
+  // "Start your first session" (/activate) and a machine row's "New session",
+  // consumed by SessionDrawer, which opens straight into create pre-scoped to
+  // that machine.
+  const [createSeed, setCreateSeed] = useState<string | null>(null);
   // Sharing (proposal 0041). The active shares granted TO me drive the
   // shared-vs-owned badges; `shareTarget` (when set) opens the ShareForm overlay
   // for one session. Multi-tenant only — empty/idle otherwise.
@@ -1881,6 +1886,10 @@ export default function App() {
     onRestore,
     toastsOn: toastsEnabled,
     onToggleToasts: toggleToasts,
+    // Build-aware empty states + the 402 limit card (proposal 0056 A3/B2).
+    multiTenant: !!me?.multiTenant,
+    plan: me?.plan,
+    supportEmail: me?.supportEmail ?? undefined,
   };
 
   // The session switcher, built once and rendered in one of two places:
@@ -1900,6 +1909,10 @@ export default function App() {
       onClose={() => setDrawerOpen(false)}
       onNew={() => setNewForPane(active)}
       onCreated={onSessionCreated}
+      // The one-shot machine seed (proposal 0056 A1/A2): opens the drawer
+      // straight into create mode scoped to that machine.
+      createSeed={createSeed}
+      onSeedConsumed={() => setCreateSeed(null)}
       // A greyed-out tool in the create picker is where the gap is felt most
       // often (proposal 0050 F4) — make it an entry point into the install
       // dialog rather than a dead end.
@@ -1920,7 +1933,35 @@ export default function App() {
   // Multi-tenant gate (proposal 0001): email/Google login, the /activate device-
   // approval page, and the machines dashboard. Single-tenant keeps LoginScreen.
   if (me?.multiTenant) {
-    const onActivate = typeof window !== "undefined" && window.location.pathname === "/activate";
+    const pathname = typeof window !== "undefined" ? window.location.pathname : "/";
+    const onActivate = pathname === "/activate";
+    // /invite/<token> — the email-invite landing (proposal 0056 C4). Handles
+    // its own unauthenticated state (AuthScreen with a hint + prefill).
+    const inviteToken = pathname.startsWith("/invite/") ? pathname.slice("/invite/".length) : "";
+    if (inviteToken) {
+      return (
+        <InviteLanding
+          token={inviteToken}
+          me={me}
+          onAuthed={refetchMe}
+          onDone={() => {
+            window.history.replaceState({}, "", "/");
+            setShowDash(false);
+            refetchMe();
+          }}
+          onLoggedOut={() => setAuthed(false)}
+        />
+      );
+    }
+    // Open the create flow pre-scoped to a machine (proposal 0056 A1/A2): leave
+    // any full-screen page, remember the target pane, seed the drawer.
+    const startSessionOn = (m: string) => {
+      window.history.replaceState({}, "", "/");
+      setShowDash(false);
+      setNewForPane(active);
+      setCreateSeed(m);
+      setDrawerOpen(true);
+    };
     if (!authed) {
       return (
         <AuthScreen
@@ -1935,6 +1976,8 @@ export default function App() {
       return (
         <ActivatePage
           email={me.email}
+          plan={me.plan}
+          support={me.supportEmail}
           onDone={() => {
             window.history.replaceState({}, "", "/");
             setShowDash(true);
@@ -1947,6 +1990,8 @@ export default function App() {
             setUpdateTools(tools ?? []);
             setUpdateOpen(true);
           }}
+          // Activation ends in a live terminal (proposal 0056 A1).
+          onStartSession={startSessionOn}
         />
       );
     }
@@ -1963,6 +2008,8 @@ export default function App() {
             setShowDash(false);
             setUpdateOpen(true);
           }}
+          // "New session" on a machine row (proposal 0056 A2).
+          onStartSession={startSessionOn}
           onClose={() => setShowDash(false)}
           onLoggedOut={() => {
             setShowDash(false);
@@ -2455,6 +2502,7 @@ export default function App() {
         sessions={sessions}
         machines={machines}
         multiMachine={multiMachine}
+        multiTenant={!!me?.multiTenant}
         onClose={() => setStatusOpen(false)}
         onPick={(s) => {
           pick(s);

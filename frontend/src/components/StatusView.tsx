@@ -27,12 +27,15 @@ interface Props {
   sessions: Session[];
   machines: MachineInfo[];
   multiMachine: boolean;
+  // Hub build (proposal 0056 A3): the empty state points at "New session"
+  // instead of leaving a bare "No sessions.".
+  multiTenant?: boolean;
   onClose: () => void;
   // Mount the chosen session (same path as a drawer pick).
   onPick: (s: Session) => void;
 }
 
-export default function StatusView({ open, sessions, machines, multiMachine, onClose, onPick }: Props) {
+export default function StatusView({ open, sessions, machines, multiMachine, multiTenant = false, onClose, onPick }: Props) {
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -137,7 +140,11 @@ export default function StatusView({ open, sessions, machines, multiMachine, onC
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
           {view.length === 0 ? (
             <div className="px-3 py-8 text-center text-sm text-slate-500">
-              {sessions.length === 0 ? "No sessions." : "No matches."}
+              {sessions.length === 0
+                ? multiTenant
+                  ? "No sessions. Start one with “New session” in the sessions list."
+                  : "No sessions."
+                : "No matches."}
             </div>
           ) : (
             <ul className="flex flex-col gap-1">

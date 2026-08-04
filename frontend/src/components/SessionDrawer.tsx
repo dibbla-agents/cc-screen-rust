@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type MachineInfo, type PaneRef, type RestorableSession, type Session } from "../api";
+import { type MachineInfo, type MePlan, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedOwner, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
 import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
@@ -90,6 +90,18 @@ interface Props {
   // owns that, since it holds the toast host). Defaults on.
   toastsOn: boolean;
   onToggleToasts: () => void;
+  // Build-aware empty state (proposal 0056 A3): on a multi-tenant hub the
+  // no-sessions copy points at "New session", never at running `cc` on the box.
+  multiTenant?: boolean;
+  // Plan facts + support address for the 402 limit card in the create flow
+  // (proposal 0056 B2), threaded through to CreateSession.
+  plan?: MePlan;
+  supportEmail?: string;
+  // A one-shot machine seed (proposal 0056 A1/A2): when set, the drawer opens
+  // straight into create mode pre-scoped to that machine, then reports it
+  // consumed. Only the main drawer instance receives it.
+  createSeed?: string | null;
+  onSeedConsumed?: () => void;
 }
 
 // The slice of switcher props that aren't pane-specific — shared verbatim by the
@@ -119,6 +131,9 @@ export type PaneSwitcherProps = Pick<
   | "onRestore"
   | "toastsOn"
   | "onToggleToasts"
+  | "multiTenant"
+  | "plan"
+  | "supportEmail"
 >;
 
 // A navigable item the keyboard cursor can land on (proposal 0011, generalized
@@ -188,6 +203,11 @@ export default function SessionDrawer({
   onRestore,
   toastsOn,
   onToggleToasts,
+  multiTenant = false,
+  plan,
+  supportEmail,
+  createSeed,
+  onSeedConsumed,
 }: Props) {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
   // Inline rename (proposal 0035): the session name currently being renamed
@@ -205,6 +225,17 @@ export default function SessionDrawer({
   // filter when "New session ‹q›" is picked.
   const [mode, setMode] = useState<"list" | "create">("list");
   const [createQuery, setCreateQuery] = useState("");
+  // A machine override for create mode (proposal 0056 A1/A2): set by the
+  // createSeed prop or a tapped idle-machine header; cleared on leaving create.
+  const [seedMachine, setSeedMachine] = useState<string | null>(null);
+  // Consume the one-shot seed: jump straight into create mode scoped to it.
+  useEffect(() => {
+    if (!createSeed) return;
+    setSeedMachine(createSeed);
+    setCreateQuery("");
+    setMode("create");
+    onSeedConsumed?.();
+  }, [createSeed, onSeedConsumed]);
   // The type-to-filter query (Part A). Empty = exactly today's resting list.
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -364,6 +395,7 @@ export default function SessionDrawer({
       setCursor(-1);
       setConfirmDel(null);
       setMode("list");
+      setSeedMachine(null);
       setQuery("");
     }
   }, [open]);
@@ -512,11 +544,14 @@ export default function SessionDrawer({
         <CreateSession
           machines={machines}
           multiMachine={multiMachine}
-          initialMachine={createInitialMachine}
+          initialMachine={seedMachine ?? createInitialMachine}
           initialQuery={createQuery}
           recentDirs={recentDirs}
+          plan={plan}
+          supportEmail={supportEmail}
           onBack={() => {
             setMode("list");
+            setSeedMachine(null);
             setQuery("");
           }}
           onClose={onClose}
@@ -950,18 +985,73 @@ export default function SessionDrawer({
           return sessionRow(it.session, i, showHeader);
         })}
 
+        {/* Build-aware empty state (proposal 0056 A3): a SaaS user drives the
+            box from here — point them at "New session", never at running `cc`
+            on the box. Single-tenant keeps the cc hint (correct there) plus a
+            docs link (proposal 0056 Part D). */}
         {!filtering && !error && sessions.length === 0 && (
           <div className="px-3 py-10 text-center text-[12px] leading-relaxed text-slate-600">
-            No sessions yet.
-            <br />
-            Start one with <code className="text-slate-500">cc</code> on the box, or “New session”.
+            {multiTenant ? (
+              <>
+                No sessions yet.
+                <br />
+                Press <span className="font-semibold text-slate-400">New session</span> — pick a machine,
+                an assistant, and a folder.
+                <button
+                  onClick={enterCreate}
+                  className="mx-auto mt-3 flex items-center gap-1.5 rounded-md border border-accent/50 px-3 py-1.5 text-[12px] font-medium text-accent transition hover:bg-accent/10"
+                >
+                  <PlusIcon className="h-3.5 w-3.5" />
+                  New session
+                </button>
+              </>
+            ) : (
+              <>
+                No sessions yet.
+                <br />
+                Start one with <code className="text-slate-500">cc</code> on the box, or “New session”.
+                <br />
+                <a
+                  href="https://ccscreen.dev/docs"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-accent/80 hover:underline"
+                >
+                  Read the docs
+                </a>
+              </>
+            )}
           </div>
         )}
 
         {/* Idle/offline machines with no sessions — visible so you know they're
-            there (start one via New session). Grouping only, unfiltered. */}
+            there. Tapping a header opens create mode scoped to that machine
+            (proposal 0056 A3). Grouping only, unfiltered. */}
         {emptyMachines.map((m) => (
-          <Fragment key={`empty/${m.machine}`}>{renderMachineHeader(m.machine, true)}</Fragment>
+          <div
+            key={`empty/${m.machine}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              onNew(); // App records which pane to mount the new session into
+              setSeedMachine(m.machine);
+              setCreateQuery("");
+              setMode("create");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onNew();
+                setSeedMachine(m.machine);
+                setCreateQuery("");
+                setMode("create");
+              }
+            }}
+            title={`Start a session on ${m.hostname || m.machine}`}
+            className="cursor-pointer rounded-md transition-colors hover:bg-edge/40"
+          >
+            {renderMachineHeader(m.machine, true)}
+          </div>
         ))}
       </div>
     </div>

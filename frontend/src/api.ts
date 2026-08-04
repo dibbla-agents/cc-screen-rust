@@ -125,6 +125,16 @@ export async function logout(): Promise<void> {
 // `googleEnabled` whether to show the Google button; the rest is the logged-in
 // account when authenticated. Single-tenant returns multiTenant=false and the app
 // falls back to the shared-secret /api/auth gate.
+// The authenticated account's plan facts (proposal 0056 B1) — drives the
+// LimitCard's copy and the dashboard's cheap cap preemption notice.
+export interface MePlan {
+  name: string;
+  maxAgents: number;
+  maxSessions: number;
+  // How many machines the account currently has registered.
+  agents: number;
+}
+
 export interface MeInfo {
   multiTenant: boolean;
   googleEnabled: boolean;
@@ -133,6 +143,21 @@ export interface MeInfo {
   authenticated: boolean;
   userId?: string;
   email?: string;
+  // Present when authenticated on a multi-tenant hub (proposal 0056 B1).
+  plan?: MePlan;
+  // The operator's support address (CCHUB_SUPPORT_EMAIL) for the upgrade mailto.
+  supportEmail?: string | null;
+}
+
+// An HTTP failure that keeps its status code, so callers can branch on e.g. a
+// 402 plan-limit answer (proposal 0056 B2) without string-matching the message.
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
 export async function getMe(): Promise<MeInfo> {
@@ -204,9 +229,11 @@ export async function rotateAgent(machine: string): Promise<string | null> {
 
 // Approve a headless box's device code (the /activate flow). The browser is the
 // logged-in side; the server binds the pending enrollment to this tenant.
+// A failure carries the server's human message and, for a 402, the `limit` flag
+// so the page renders the plan-limit card instead of an error line (0056 B2).
 export async function approveDevice(
   userCode: string
-): Promise<{ ok: boolean; machine?: string; error?: string }> {
+): Promise<{ ok: boolean; machine?: string; limit?: boolean; error?: string }> {
   const r = await fetch("/api/device/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -216,7 +243,9 @@ export async function approveDevice(
     const j = await r.json().catch(() => ({}) as { machine_id?: string });
     return { ok: true, machine: j.machine_id };
   }
-  return { ok: false, error: r.status === 404 ? "Unknown or expired code" : `Error ${r.status}` };
+  const text = (await r.text().catch(() => "")).trim();
+  if (r.status === 404) return { ok: false, error: "Unknown or expired code" };
+  return { ok: false, limit: r.status === 402, error: text || `Error ${r.status}` };
 }
 
 // ── Sharing (proposals 0039 permission model / 0040 invite lifecycle) ─────────
@@ -236,9 +265,13 @@ export interface ShareInvite {
   // [0039]'s grant level rendered as a friendly verb: "use" (agent) / "view" (session).
   permission: "use" | "view";
   ownerPeek: boolean;
-  status: "pending" | "accepted" | "declined" | "revoked" | "expired";
+  // "invited" (proposal 0056 Part C) = an email invite awaiting the address's
+  // signup — outbox-only, revocable like a pending invite.
+  status: "pending" | "accepted" | "declined" | "revoked" | "expired" | "invited";
   createdAt: number;
   expiresAt?: number | null;
+  // The /invite/<token> link for an email-invite outbox row (0056 Part C).
+  inviteUrl?: string;
 }
 
 // One active grant TO me (GET /api/shares/received) — drives the "shared with
@@ -255,14 +288,18 @@ export interface ReceivedShare {
 }
 
 // createShare offers an agent (no session) or a single session to a user by
-// email. Resolves nothing until the recipient accepts. Throws with the server's
-// message on a bad request (unknown email, not your resource, self-share).
+// email. Resolves nothing until the recipient accepts. Any email works
+// (proposal 0056 Part C): an address with no account gets a pending email
+// invite that lands in their inbox on signup — the response shape is identical
+// either way (no account-existence oracle), including a copyable invite link.
+// Throws with the server's message on a bad request (not your resource,
+// self-share) — an ApiError, so a 429 invite-cap answer is identifiable.
 export async function createShare(args: {
   granteeEmail: string;
   machine: string;
   session?: string;
   ownerPeek?: boolean;
-}): Promise<{ id: string; status: string }> {
+}): Promise<{ id: string; status: string; inviteUrl?: string }> {
   const r = await fetch("/api/shares", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -273,7 +310,24 @@ export async function createShare(args: {
       owner_peek: args.ownerPeek ?? false,
     }),
   });
-  if (!r.ok) throw new Error((await r.text()).trim() || `share: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `share: ${r.status}`);
+  const j = (await r.json()) as { id: string; status: string; invite_url?: string };
+  return { id: j.id, status: j.status, inviteUrl: j.invite_url };
+}
+
+// The invite-link landing read (proposal 0056 C4): what /invite/<token> shows
+// before login. Unauthenticated; a dead/unknown token throws an ApiError(404).
+// When the caller IS signed in with the matching email, the server also
+// attaches the invite to their inbox as a side effect.
+export interface InviteInfo {
+  email: string;
+  inviterEmail: string;
+  kind: "agent" | "session";
+}
+
+export async function getInviteInfo(token: string): Promise<InviteInfo> {
+  const r = await fetch(`/api/invite/${encodeURIComponent(token)}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `invite: ${r.status}`);
   return r.json();
 }
 
@@ -924,7 +978,9 @@ export async function createSession(
   });
   if (!r.ok) {
     const msg = (await r.text()).trim();
-    throw new Error(msg || `session: ${r.status}`);
+    // ApiError keeps the status so the create form can render the plan-limit
+    // card for a 402 instead of the raw message (proposal 0056 B2).
+    throw new ApiError(r.status, msg || `session: ${r.status}`);
   }
   const { name: session } = await r.json();
   // Return the owning machine alongside the name so the caller can mount the

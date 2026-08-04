@@ -399,6 +399,73 @@ impl HubState {
         }
     }
 
+    // ── email invites (proposal 0056 Part C) ──────────────────────────────────
+    /// Create/re-offer an email invite; returns `(invite_id, link_token)`.
+    #[cfg(feature = "multi-tenant")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn email_invite_create(
+        &self,
+        inviter: &str,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+        converted: bool,
+    ) -> anyhow::Result<(String, String)> {
+        match &self.tenancy {
+            Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
+            Tenancy::Multi(store) => {
+                store.email_invite_create(inviter, email, kind, agent_id, session, owner_peek, converted).await
+            }
+        }
+    }
+
+    /// Attach every live email invite for `email` to the (new) `user_id`.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn attach_email_invites(&self, user_id: &str, email: &str) -> usize {
+        match &self.tenancy {
+            Tenancy::Single => 0,
+            Tenancy::Multi(store) => store.attach_email_invites(user_id, email).await,
+        }
+    }
+
+    /// Resolve an invite link token (the `/api/invite/:token` read).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn email_invite_by_token(&self, token: &str) -> Option<crate::db::EmailInviteRow> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.email_invite_by_token(token).await,
+        }
+    }
+
+    /// The inviter cancels an unconverted email invite (outbox fall-through).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn email_invite_revoke(&self, inviter: &str, id: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.email_invite_revoke(inviter, id).await,
+        }
+    }
+
+    /// The inviter's live email invites (outbox rows with status "invited").
+    #[cfg(feature = "multi-tenant")]
+    pub async fn email_invite_outbox(&self, inviter: &str) -> Vec<crate::db::EmailInviteRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.email_invite_outbox(inviter).await,
+        }
+    }
+
+    /// How many agents a user has registered (for `/api/me`'s plan block).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn agent_count(&self, user_id: &str) -> i64 {
+        match &self.tenancy {
+            Tenancy::Single => 0,
+            Tenancy::Multi(store) => store.agent_count(user_id).await,
+        }
+    }
+
     /// True when the uplink is open (no per-agent tokens) and the operator has NOT
     /// explicitly opted in via `CCHUB_ALLOW_OPEN_UPLINK`. In this state any party
     /// who reaches `/agent/ws` could impersonate any machine, so the runtime

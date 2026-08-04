@@ -44,20 +44,21 @@ fn sess(name: &str) -> SessionInfo {
 /// Build a multi-tenant hub over a fresh temp SQLite db with two users, each
 /// owning an online (fake) agent labelled "laptop". Returns the base URL.
 async fn start_multi_tenant_hub() -> String {
-    start_hub_with(&["claude-a"], &["claude-b"]).await
+    start_hub_with(&["claude-a"], &["claude-b"]).await.0
 }
 
 /// As above, but with explicit session lists per tenant (so a sharing test can
-/// give Alice a second session that a *session* share must NOT expose).
-async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> String {
+/// give Alice a second session that a *session* share must NOT expose). Also
+/// hands back the store, so a test can seed rows (e.g. a squeezed plan).
+async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> (String, Arc<SqliteStore>) {
     let tmp = std::env::temp_dir().join(format!("ccr-hub-mt-{}-{}", std::process::id(), now_nanos()));
     let _ = std::fs::create_dir_all(&tmp);
     let store = SqliteStore::connect(&format!("sqlite://{}/hub.db", tmp.display()))
         .await
         .expect("open store");
     // Two tenants, each with a "laptop" — the label collides across tenants.
-    let alice = store.create_user("alice@x.com", "alicepass1").await.unwrap();
-    let bob = store.create_user("bob@x.com", "bobpass1234").await.unwrap();
+    let alice = store.create_user("alice@x.com", "alicepass1-long").await.unwrap();
+    let bob = store.create_user("bob@x.com", "bobpass1234-long").await.unwrap();
     let (_atok, alice_agent) = store.upsert_agent(&alice, "laptop").await.unwrap();
     let (_btok, bob_agent) = store.upsert_agent(&bob, "laptop").await.unwrap();
 
@@ -73,6 +74,7 @@ async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> Strin
     // relayed Attach frame doesn't fail the send (the WS still upgrades regardless).
     std::mem::forget((_rxa, _rxb));
 
+    let store = Arc::new(store);
     let hub = HubState {
         registry,
         agent_tokens: Arc::new(Default::default()),
@@ -85,12 +87,12 @@ async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> Strin
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
         bulk: Default::default(),
         summary: Arc::new(cc_screen_hub::summarizer::Summarizer::disabled()),
-        tenancy: Tenancy::Multi(Arc::new(store)),
+        tenancy: Tenancy::Multi(store.clone()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, cc_screen_hub::build_router(hub)).await.unwrap() });
-    format!("{addr}")
+    (format!("{addr}"), store)
 }
 
 fn now_nanos() -> u128 {
@@ -174,8 +176,8 @@ async fn tenants_are_isolated_end_to_end() {
     let anon = client.get(format!("http://{base}/api/sessions")).send().await.unwrap();
     assert_eq!(anon.status(), reqwest::StatusCode::UNAUTHORIZED, "no cookie ⇒ 401");
 
-    let alice = login(&client, &base, "alice@x.com", "alicepass1").await;
-    let bob = login(&client, &base, "bob@x.com", "bobpass1234").await;
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
 
     // ── /api/sessions is scoped: each tenant sees only their own session ───────
     let list = |cookie: &str| {
@@ -229,10 +231,10 @@ async fn tenants_are_isolated_end_to_end() {
 #[tokio::test]
 async fn agent_share_invite_accept_revoke_end_to_end() {
     // Alice has two sessions so "agent share ⇒ sees them all" is meaningful.
-    let base = start_hub_with(&["claude-a", "claude-a2"], &["claude-b"]).await;
+    let (base, _store) = start_hub_with(&["claude-a", "claude-a2"], &["claude-b"]).await;
     let client = reqwest::Client::new();
-    let alice = login(&client, &base, "alice@x.com", "alicepass1").await;
-    let bob = login(&client, &base, "bob@x.com", "bobpass1234").await;
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
 
     // Baseline isolation: Bob sees only his own; can't attach Alice's.
     assert_eq!(session_names(&client, &base, &bob).await, vec!["claude-b"]);
@@ -286,10 +288,10 @@ async fn agent_share_invite_accept_revoke_end_to_end() {
 /// decline blocks it; a re-offer + accept grants it; Leave gives it back.
 #[tokio::test]
 async fn session_share_decline_reoffer_and_leave() {
-    let base = start_hub_with(&["claude-a", "claude-a2"], &["claude-b"]).await;
+    let (base, _store) = start_hub_with(&["claude-a", "claude-a2"], &["claude-b"]).await;
     let client = reqwest::Client::new();
-    let alice = login(&client, &base, "alice@x.com", "alicepass1").await;
-    let bob = login(&client, &base, "bob@x.com", "bobpass1234").await;
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
 
     // Alice shares ONLY claude-a (a session), not the machine.
     let created = post_json(&client, &base, &alice, "/api/shares",
@@ -318,4 +320,263 @@ async fn session_share_decline_reoffer_and_leave() {
     let grant_id = received[0]["id"].as_str().unwrap().to_string();
     assert!(post_json(&client, &base, &bob, &format!("/api/shares/received/{grant_id}/leave"), serde_json::json!({})).await.status().is_success());
     assert_eq!(session_names(&client, &base, &bob).await, vec!["claude-b"], "leave removes access");
+}
+
+// ── Proposal 0056 (in-product onboarding) + 0053 Part E (security gate) ───────
+
+/// POST /api/signup with a per-test X-Forwarded-For (the signup throttle is a
+/// process-wide per-source window — distinct sources keep tests independent).
+async fn signup_req(
+    client: &reqwest::Client,
+    base: &str,
+    email: &str,
+    password: &str,
+    source: &str,
+) -> reqwest::Response {
+    client
+        .post(format!("http://{base}/api/signup"))
+        .header("x-forwarded-for", source)
+        .json(&serde_json::json!({ "email": email, "password": password }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Signup expected to succeed; returns the minted session cookie.
+async fn signup_ok(client: &reqwest::Client, base: &str, email: &str, password: &str, source: &str) -> String {
+    let resp = signup_req(client, base, email, password, source).await;
+    assert!(resp.status().is_success(), "signup {email} should succeed ({})", resp.status());
+    let set = resp.headers().get(reqwest::header::SET_COOKIE).expect("Set-Cookie").to_str().unwrap();
+    set.split(';').next().unwrap().to_string()
+}
+
+/// Part C: inviting an email with no account creates a pending email invite
+/// (uniform response + link), which lands in the inbox on signup and walks the
+/// normal accept → grant path. A revoke before signup means nothing attaches.
+#[tokio::test]
+async fn email_invite_signup_lands_in_inbox() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    // Invite a ghost address → 200 with the unified shape + a copyable link.
+    let created = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost@x.com", "machine": "laptop" })).await;
+    assert!(created.status().is_success(), "unknown email no longer 404s");
+    let j = created.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(j["status"], "pending");
+    let invite_url = j["invite_url"].as_str().expect("invite_url").to_string();
+    let token = invite_url.rsplit('/').next().unwrap().to_string();
+    assert!(invite_url.contains("/invite/") && !token.is_empty());
+
+    // The outbox shows it as an "invited" row addressed to the email.
+    let outbox = get_json(&client, &base, &alice, "/api/shares/outbox").await;
+    let invited: Vec<_> = outbox.as_array().unwrap().iter().filter(|r| r["status"] == "invited").collect();
+    assert_eq!(invited.len(), 1);
+    assert_eq!(invited[0]["granteeEmail"], "ghost@x.com");
+
+    // The public invite-link read resolves for the token holder (no cookie).
+    let info = client.get(format!("http://{base}/api/invite/{token}")).send().await.unwrap();
+    assert!(info.status().is_success());
+    let info = info.json::<serde_json::Value>().await.unwrap();
+    assert_eq!(info["email"], "ghost@x.com");
+    assert_eq!(info["inviterEmail"], "alice@x.com");
+    assert_eq!(info["kind"], "agent");
+    // A bogus token 404s.
+    let bogus = client.get(format!("http://{base}/api/invite/not-a-token")).send().await.unwrap();
+    assert_eq!(bogus.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Ghost signs up → the invite is waiting in the inbox on the first poll.
+    let ghost = signup_ok(&client, &base, "ghost@x.com", "ghostpass12345", "10.56.0.1").await;
+    let inbox = get_json(&client, &base, &ghost, "/api/shares/inbox").await;
+    let arr = inbox.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "email invite converted into a pending 0040 invite");
+    assert_eq!(arr[0]["inviterEmail"], "alice@x.com");
+    let invite_id = arr[0]["id"].as_str().unwrap().to_string();
+
+    // Accepting walks the untouched 0039 path — ghost now sees alice's session.
+    assert!(post_json(&client, &base, &ghost, &format!("/api/shares/{invite_id}/accept"), serde_json::json!({})).await.status().is_success());
+    let names = session_names(&client, &base, &ghost).await;
+    assert!(names.contains(&"claude-a".to_string()), "got: {names:?}");
+
+    // Scenario 2: revoke BEFORE signup → nothing attaches for that address.
+    let created2 = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost2@x.com", "machine": "laptop" })).await;
+    let j2 = created2.json::<serde_json::Value>().await.unwrap();
+    let id2 = j2["id"].as_str().unwrap().to_string();
+    assert!(post_json(&client, &base, &alice, &format!("/api/shares/{id2}/revoke"), serde_json::json!({})).await.status().is_success(),
+        "outbox Cancel works on an email invite via the revoke fall-through");
+    let ghost2 = signup_ok(&client, &base, "ghost2@x.com", "ghost2pass1234", "10.56.0.2").await;
+    let inbox2 = get_json(&client, &base, &ghost2, "/api/shares/inbox").await;
+    assert!(inbox2.as_array().unwrap().is_empty(), "revoked pre-signup ⇒ nothing attaches");
+}
+
+/// Part C2 / [0042]: creating a share to a known vs unknown email answers with
+/// the same status and the same JSON shape — no account-existence oracle.
+#[tokio::test]
+async fn share_create_does_not_disclose_accounts() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    let known = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "laptop" })).await;
+    let unknown = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "nobody-here@x.com", "machine": "laptop" })).await;
+    assert_eq!(known.status(), unknown.status(), "identical status");
+
+    let kj = known.json::<serde_json::Value>().await.unwrap();
+    let uj = unknown.json::<serde_json::Value>().await.unwrap();
+    let keys = |v: &serde_json::Value| {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&kj), keys(&uj), "identical body shape (keys)");
+    assert_eq!(kj["status"], uj["status"], "both report pending");
+    assert!(kj["invite_url"].as_str().unwrap().contains("/invite/"));
+    assert!(uj["invite_url"].as_str().unwrap().contains("/invite/"));
+}
+
+/// Part B: the machine cap answers 402 with the human message; unlinking frees
+/// a slot and re-approving the same (still-pending) code succeeds.
+#[tokio::test]
+async fn machine_cap_answers_402_with_message() {
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    // Squeeze alice onto a tiny plan (1 machine — she already has "laptop").
+    sqlx::query("INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions) VALUES ('tiny56', 1, 1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.set_plan("alice@x.com", "tiny56").await.unwrap();
+
+    // /api/me reports the squeezed plan facts (proposal 0056 B1).
+    let me = get_json(&client, &base, &alice, "/api/me").await;
+    assert_eq!(me["plan"]["name"], "tiny56");
+    assert_eq!(me["plan"]["maxAgents"], 1);
+    assert_eq!(me["plan"]["agents"], 1);
+
+    // A NEW machine's device code → approve is refused with 402 + the message.
+    let code = client
+        .post(format!("http://{base}/api/device/code"))
+        .json(&serde_json::json!({ "device_id": "d-56", "machine_id": "newbox" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let user_code = code["user_code"].as_str().unwrap().to_string();
+    let denied = post_json(&client, &base, &alice, "/api/device/approve",
+        serde_json::json!({ "user_code": user_code })).await;
+    assert_eq!(denied.status(), reqwest::StatusCode::PAYMENT_REQUIRED);
+    let msg = denied.text().await.unwrap();
+    assert!(msg.contains("Machine limit reached"), "got: {msg}");
+
+    // Unlink the existing machine → the SAME pending code now approves fine.
+    let agents = get_json(&client, &base, &alice, "/api/agents").await;
+    let agent_id = agents[0]["agentId"].as_str().unwrap().to_string();
+    let unlinked = post_json(&client, &base, &alice, "/api/agents/unlink",
+        serde_json::json!({ "agent_id": agent_id })).await;
+    assert!(unlinked.status().is_success());
+    let approved = post_json(&client, &base, &alice, "/api/device/approve",
+        serde_json::json!({ "user_code": user_code })).await;
+    assert!(approved.status().is_success(), "re-approve after unlink ({})", approved.status());
+}
+
+/// Part B: the concurrent-session cap answers 402 from POST /api/session.
+#[tokio::test]
+async fn session_cap_answers_402() {
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    sqlx::query("INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions) VALUES ('tiny56s', 10, 1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.set_plan("alice@x.com", "tiny56s").await.unwrap();
+
+    // Alice already runs 1 session (claude-a) — creating another hits the cap.
+    let denied = post_json(&client, &base, &alice, "/api/session",
+        serde_json::json!({ "tool": "cc", "name": "second", "dir": "/tmp" })).await;
+    assert_eq!(denied.status(), reqwest::StatusCode::PAYMENT_REQUIRED);
+    let msg = denied.text().await.unwrap();
+    assert!(msg.contains("Session limit reached"), "got: {msg}");
+}
+
+/// 0053 Part E item 1: the duplicate-email signup path is indistinguishable
+/// (status + body) from any other server-side signup failure, and login answers
+/// identically for unknown emails and wrong passwords.
+#[tokio::test]
+async fn signup_no_enumeration() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+
+    // Duplicate email (alice exists) → the one generic failure answer.
+    let dup = signup_req(&client, &base, "alice@x.com", "a-valid-password", "10.56.1.1").await;
+    assert_eq!(dup.status(), reqwest::StatusCode::CONFLICT);
+    let dup_body = dup.json::<serde_json::Value>().await.unwrap();
+    let msg = dup_body["error"].as_str().unwrap().to_lowercase();
+    assert!(
+        !msg.contains("duplicate") && !msg.contains("exists") && !msg.contains("taken"),
+        "must not confirm the account exists: {msg}"
+    );
+    // A second, independent duplicate answers byte-identically.
+    let dup2 = signup_req(&client, &base, "bob@x.com", "a-valid-password", "10.56.1.2").await;
+    assert_eq!(dup2.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(dup_body, dup2.json::<serde_json::Value>().await.unwrap(), "one generic body for all failures");
+
+    // Login: unknown email and wrong password answer with the same status/body.
+    let bad_pw = client.post(format!("http://{base}/api/login"))
+        .json(&serde_json::json!({ "email": "alice@x.com", "secret": "wrong-password" }))
+        .send().await.unwrap();
+    let unknown = client.post(format!("http://{base}/api/login"))
+        .json(&serde_json::json!({ "email": "who@x.com", "secret": "wrong-password" }))
+        .send().await.unwrap();
+    assert_eq!(bad_pw.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown.status(), bad_pw.status());
+    assert_eq!(bad_pw.text().await.unwrap(), unknown.text().await.unwrap());
+}
+
+/// 0053 Part E item 2: a burst of signups from one source is rate-limited (429)
+/// while a normal journey (a signup or two) is untouched.
+#[tokio::test]
+async fn signup_throttled() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let source = "10.56.2.99"; // dedicated to this test — the window is per-source
+
+    let mut saw_429 = false;
+    for i in 0..8 {
+        let r = signup_req(&client, &base, &format!("burst{i}@x.com"), "burst-password-12", source).await;
+        if i < 5 {
+            assert_ne!(r.status(), reqwest::StatusCode::TOO_MANY_REQUESTS, "attempt {i} within the window");
+        } else if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            saw_429 = true;
+        }
+    }
+    assert!(saw_429, "a >5/min burst from one source must hit 429");
+
+    // A different source is unaffected.
+    let other = signup_req(&client, &base, "calm@x.com", "calm-password-12", "10.56.2.100").await;
+    assert!(other.status().is_success(), "other sources keep signing up");
+}
+
+/// 0053 Part E item 3: public signup requires a 12-character password.
+#[tokio::test]
+async fn password_min_12() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+
+    let short = signup_req(&client, &base, "pwtest@x.com", "elevenchars", "10.56.3.1").await;
+    assert_eq!(short.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = short.json::<serde_json::Value>().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("12"), "hint names the minimum");
+
+    let ok = signup_req(&client, &base, "pwtest@x.com", "twelve-chars", "10.56.3.2").await;
+    assert!(ok.status().is_success(), "12 chars accepted ({})", ok.status());
 }

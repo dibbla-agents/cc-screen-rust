@@ -36,22 +36,36 @@ pub struct CreateShareReq {
     owner_peek: bool,
 }
 
+/// The public base for invite links: `CCHUB_PUBLIC_URL` when configured (the
+/// same env the OAuth redirect + device verification_uri build on), else a
+/// relative path the frontend resolves against its own origin.
+fn invite_url(token: &str) -> String {
+    let base = std::env::var("CCHUB_PUBLIC_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    format!("{base}/invite/{token}")
+}
+
 /// `POST /api/shares` — create (or re-offer) an invite to a user by email.
+///
+/// Proposal 0056 C2: the two arms — the email has an account ([0040]'s invite)
+/// vs. it doesn't (an `email_invites` row that converts on signup) — return the
+/// SAME status and body shape (`{id, status:"pending", invite_url}`), so share
+/// creation no longer discloses account existence ([0042]). Both arms mint a
+/// link token in `email_invites` (the known-user row is pre-converted, so it
+/// never re-attaches — it only backs the link).
 pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<CreateShareReq>) -> Response {
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
-    let Some(grantee) = hub.user_id_by_email(&req.grantee_email).await else {
-        return (StatusCode::NOT_FOUND, "no account with that email").into_response();
-    };
-    if grantee == actor {
-        return (StatusCode::BAD_REQUEST, "cannot share with yourself").into_response();
-    }
     let session = req.session.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let kind = if session.is_some() { "session" } else { "agent" };
 
     // Resolve the machine under the inviter's OWN scope (no grants) — you can only
     // invite to a resource you own (proposal 0040 §5, the §4.1 isolation keystone).
+    // Done BEFORE the grantee lookup so both arms share every early exit.
     let owner_scope = Visibility::user(actor.clone());
     let Some(agent) = hub.registry.resolve_scoped(&owner_scope, &req.machine, session) else {
         return (StatusCode::NOT_FOUND, "no such machine/session you own (try ?machine=)").into_response();
@@ -59,8 +73,16 @@ pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
     let agent_id = agent.agent_id.clone();
     let machine_label = agent.machine_id.clone();
 
-    match hub.share_create(&actor, &grantee, kind, &agent_id, session, req.owner_peek).await {
-        Ok((id, status)) => {
+    let (id, status, token) = match hub.user_id_by_email(&req.grantee_email).await {
+        Some(grantee) => {
+            if grantee == actor {
+                return (StatusCode::BAD_REQUEST, "cannot share with yourself").into_response();
+            }
+            let (id, status) =
+                match hub.share_create(&actor, &grantee, kind, &agent_id, session, req.owner_peek).await {
+                    Ok(v) => v,
+                    Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+                };
             // Best-effort push, scoped to the grantee's own devices (§8). A missed
             // buzz never loses the invite — it sits in /inbox.
             let inviter_email = hub.user_email(&actor).await.unwrap_or_default();
@@ -76,10 +98,58 @@ pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
                     "share-invite",
                 )
                 .await;
-            (StatusCode::OK, Json(json!({ "id": id, "status": status }))).into_response()
+            // Mint the link token (pre-converted — it identifies, never grants).
+            let token = hub
+                .email_invite_create(&actor, &req.grantee_email, kind, &agent_id, session, req.owner_peek, true)
+                .await
+                .map(|(_, t)| t)
+                .unwrap_or_default();
+            (id, status, token)
         }
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        None => {
+            match hub
+                .email_invite_create(&actor, &req.grantee_email, kind, &agent_id, session, req.owner_peek, false)
+                .await
+            {
+                Ok((id, token)) => (id, "pending".to_string(), token),
+                Err(e) => {
+                    let msg = e.to_string();
+                    // The per-inviter live cap (C2's abuse bound) → 429.
+                    return match msg.strip_prefix("CAP:") {
+                        Some(m) => (StatusCode::TOO_MANY_REQUESTS, m.to_string()).into_response(),
+                        None => (StatusCode::BAD_REQUEST, msg).into_response(),
+                    };
+                }
+            }
+        }
+    };
+    (StatusCode::OK, Json(json!({ "id": id, "status": status, "invite_url": invite_url(&token) })))
+        .into_response()
+}
+
+/// `GET /api/invite/:token` — resolve an invite link (unauthenticated; the token
+/// IS the read capability — it was handed to the invited address). Discloses the
+/// invited email + inviter to the token holder only; a dead/unknown token 404s.
+/// Throttled per source against token brute force. If the caller is already
+/// signed in with the MATCHING email, defensively attach (proposal 0056 C3.3).
+pub async fn invite_info(State(hub): State<HubState>, headers: HeaderMap, Path(token): Path<String>) -> Response {
+    let source = format!("invite:{}", cc_screen_auth::source_key(&headers));
+    let now = std::time::Instant::now();
+    if hub.login_throttle.locked_for(&source, now).is_some() {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response();
     }
+    let Some(row) = hub.email_invite_by_token(&token).await else {
+        hub.login_throttle.record_failure(&source, now);
+        return (StatusCode::NOT_FOUND, "no such invitation").into_response();
+    };
+    let inviter_email = hub.user_email(&row.inviter_user_id).await.unwrap_or_default();
+    if let Some(uid) = hub.client_auth.user_from_cookie(&headers) {
+        if hub.user_email(&uid).await.as_deref() == Some(row.email.as_str()) {
+            hub.attach_email_invites(&uid, &row.email).await;
+        }
+    }
+    Json(json!({ "email": row.email, "inviterEmail": inviter_email, "kind": row.resource_kind }))
+        .into_response()
 }
 
 /// `GET /api/shares/inbox` — the caller's pending, unexpired invites.
@@ -97,7 +167,9 @@ pub async fn inbox(State(hub): State<HubState>, headers: HeaderMap) -> Response 
     Json(out).into_response()
 }
 
-/// `GET /api/shares/outbox` — the invites the caller has sent (all statuses).
+/// `GET /api/shares/outbox` — the invites the caller has sent (all statuses),
+/// plus their live email invites (proposal 0056 Part C) with status `"invited"`
+/// and the invited address as the counterpart label.
 pub async fn outbox(State(hub): State<HubState>, headers: HeaderMap) -> Response {
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
@@ -105,6 +177,26 @@ pub async fn outbox(State(hub): State<HubState>, headers: HeaderMap) -> Response
     let mut out = Vec::new();
     for row in hub.share_outbox(&actor).await {
         out.push(invite_view(&hub, &row).await);
+    }
+    let inviter_email = hub.user_email(&actor).await;
+    for row in hub.email_invite_outbox(&actor).await {
+        let machine = hub.registry.get(&row.agent_id).map(|a| a.machine_id.clone());
+        let permission = if row.resource_kind == "session" { "view" } else { "use" };
+        out.push(json!({
+            "id": row.id,
+            "inviterEmail": inviter_email,
+            "granteeEmail": row.email,
+            "resourceKind": row.resource_kind,
+            "agentId": row.agent_id,
+            "machine": machine,
+            "session": row.session_name,
+            "permission": permission,
+            "ownerPeek": row.owner_peek,
+            "status": "invited",
+            "createdAt": row.created_at,
+            "expiresAt": row.expires_at,
+            "inviteUrl": invite_url(&row.token),
+        }));
     }
     Json(out).into_response()
 }
@@ -161,11 +253,22 @@ async fn respond(hub: &HubState, headers: &HeaderMap, id: &str, accept: bool) ->
 }
 
 /// `POST /api/shares/{id}/revoke` — the inviter cancels (pre- or post-accept).
+/// Falls through to the email-invite table (proposal 0056 Part C) so the
+/// outbox's Cancel works on an `"invited"` row too.
 pub async fn revoke(State(hub): State<HubState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
-    outcome_to_response(hub.share_revoke(&actor, &id).await)
+    match hub.share_revoke(&actor, &id).await {
+        ShareOutcome::NotFound => {
+            if hub.email_invite_revoke(&actor, &id).await {
+                (StatusCode::OK, Json(json!({ "status": "revoked" }))).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "no such invite").into_response()
+            }
+        }
+        outcome => outcome_to_response(outcome),
+    }
 }
 
 /// `POST /api/shares/received/{id}/leave` — the grantee gives back a share they

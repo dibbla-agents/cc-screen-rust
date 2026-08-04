@@ -205,3 +205,31 @@ describe("SessionDrawer — display label (proposal 0035)", () => {
     );
   });
 });
+
+// Proposal 0056 A3/D — the no-sessions empty state is build-aware: a hub user
+// is pointed at "New session" (a real button), never at running `cc` on the
+// box; single-tenant keeps the cc hint and gains the docs link (Part D).
+describe("SessionDrawer — build-aware empty state (proposal 0056)", () => {
+  const empty = { ...baseProps, sessions: [] as Session[] };
+
+  it("multi-tenant copy names New session and drops the cc-on-the-box hint", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...empty} multiTenant pane open current={null} keyboardActive />
+    );
+    expect(html).toContain("No sessions yet.");
+    expect(html).toContain("pick a machine,");
+    expect(html).toContain("an assistant, and a folder");
+    expect(html).not.toContain("on the box");
+    expect(html).not.toContain("ccscreen.dev/docs");
+  });
+
+  it("single-tenant keeps the cc hint and gains the docs link", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...empty} pane open current={null} keyboardActive />
+    );
+    expect(html).toContain("No sessions yet.");
+    expect(html).toContain("on the box");
+    expect(html).toContain("https://ccscreen.dev/docs");
+    expect(html).not.toContain("pick a machine,");
+  });
+});

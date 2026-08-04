@@ -70,6 +70,20 @@ export default function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
         >
           {busy ? "Checking…" : "Unlock"}
         </button>
+
+        {/* Single-tenant first-run courtesy (proposal 0056 Part D). */}
+        <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-600">
+          Self-hosting? The password is whatever you started the server with —{" "}
+          <a
+            href="https://ccscreen.dev/docs"
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent/80 hover:underline"
+          >
+            see the docs
+          </a>
+          .
+        </p>
       </form>
     </div>
   );

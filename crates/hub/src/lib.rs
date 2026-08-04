@@ -141,7 +141,10 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/shares/received/:id/leave", post(share::leave))
         .route("/api/shares/:id/accept", post(share::accept))
         .route("/api/shares/:id/decline", post(share::decline))
-        .route("/api/shares/:id/revoke", post(share::revoke));
+        .route("/api/shares/:id/revoke", post(share::revoke))
+        // Email-invite landing read (proposal 0056 C4): unauthenticated (the
+        // token is the capability; exempted in require_client_auth), throttled.
+        .route("/api/invite/:token", get(share::invite_info));
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router

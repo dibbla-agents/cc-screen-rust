@@ -91,3 +91,80 @@ describe("fetchMachines", () => {
     await expect(fetchMachines()).resolves.toEqual([]);
   });
 });
+
+// ── Proposal 0056 Part B — the 402 plan-limit plumbing ─────────────────────────
+
+describe("approveDevice (proposal 0056 B2)", () => {
+  it("no longer swallows the body: a 402 sets limit + the server's message", async () => {
+    const { approveDevice } = await import("./api");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 402,
+        text: async () => "Machine limit reached for your plan (10). Unlink one or ask for an upgrade.",
+      })
+    );
+    await expect(approveDevice("WDJB-MJHT")).resolves.toEqual({
+      ok: false,
+      limit: true,
+      error: "Machine limit reached for your plan (10). Unlink one or ask for an upgrade.",
+    });
+  });
+
+  it("keeps the friendly 404 and flags a non-402 failure as limit:false", async () => {
+    const { approveDevice } = await import("./api");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => "unknown or expired code" })
+    );
+    await expect(approveDevice("WDJB-MJHT")).resolves.toEqual({
+      ok: false,
+      error: "Unknown or expired code",
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "boom" })
+    );
+    await expect(approveDevice("WDJB-MJHT")).resolves.toEqual({
+      ok: false,
+      limit: false,
+      error: "boom",
+    });
+  });
+});
+
+describe("createSession errors (proposal 0056 B2)", () => {
+  it("throws an ApiError carrying the 402 status + the server's message", async () => {
+    const { createSession, ApiError } = await import("./api");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 402,
+        text: async () => "Session limit reached for your plan (50).",
+      })
+    );
+    const err = await createSession("cc", "x", "/tmp").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).status).toBe(402);
+    expect((err as Error).message).toBe("Session limit reached for your plan (50).");
+  });
+});
+
+describe("createShare (proposal 0056 C2)", () => {
+  it("returns the unified shape with the invite link mapped to inviteUrl", async () => {
+    const { createShare } = await import("./api");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "i1", status: "pending", invite_url: "/invite/tok123" }),
+      })
+    );
+    await expect(
+      createShare({ granteeEmail: "ghost@x.com", machine: "laptop" })
+    ).resolves.toEqual({ id: "i1", status: "pending", inviteUrl: "/invite/tok123" });
+  });
+});

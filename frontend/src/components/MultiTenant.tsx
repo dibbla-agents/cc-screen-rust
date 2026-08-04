@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   approveDevice,
+  getInviteInfo,
   leaveShare,
   listAgents,
   listOutbox,
@@ -17,8 +18,11 @@ import {
   rotateAgent,
   signup,
   unlinkAgent,
+  ApiError,
   type AgentInfo,
+  type InviteInfo,
   type MeInfo,
+  type MePlan,
   type ReceivedShare,
   type ShareInvite,
 } from "../api";
@@ -111,6 +115,47 @@ const inputCls =
   "w-full rounded-lg border border-edge bg-bar px-3.5 py-3 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-accent focus:ring-2 focus:ring-accent/25";
 const primaryBtn =
   "w-full rounded-lg bg-accent px-3.5 py-3 text-sm font-semibold text-bar transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-40";
+const secondaryBtn =
+  "w-full rounded-lg border border-edge px-3.5 py-3 text-sm font-medium text-slate-200 transition hover:border-accent hover:text-accent";
+
+// ── Plan-limit card (proposal 0056 Part B) — one component, two mounts: the
+// /activate error slot (what="machines") and the create form (what="sessions").
+// Honest about manual billing: the action is a mailto to the operator, never a
+// checkout.
+export function LimitCard({
+  plan,
+  what,
+  support,
+}: {
+  plan?: MePlan;
+  what: "machines" | "sessions";
+  support?: string | null;
+}) {
+  const cap = what === "machines" ? plan?.maxAgents : plan?.maxSessions;
+  const subject = encodeURIComponent(`cc-screen plan upgrade (${what})`);
+  return (
+    <div className="mt-3 rounded-lg border border-amber/30 bg-amber/10 p-3 text-left">
+      <div className="mb-1 text-[11px] uppercase tracking-wider text-amber">Plan limit reached</div>
+      <p className="text-xs text-slate-300">
+        Your <span className="text-amber">{plan?.name ?? "current"}</span> plan allows{" "}
+        {cap ?? "a limited number of"} {what === "machines" ? "machines" : "concurrent sessions"}.
+        {what === "machines" &&
+          " Unlink a machine you no longer use, or ask for a bigger plan — the code on the box keeps polling, so approving again just works."}
+      </p>
+      {support && (
+        <a
+          href={`mailto:${support}?subject=${subject}`}
+          className="mt-2 inline-block rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber hover:bg-amber/10"
+        >
+          Request an upgrade
+        </a>
+      )}
+      <p className="mt-1.5 text-[11px] text-slate-500">
+        Plans are free during the beta — upgrades are switched on by a human, usually the same day.
+      </p>
+    </div>
+  );
+}
 
 function GoogleButton() {
   return (
@@ -134,16 +179,19 @@ export function AuthScreen({
   google,
   password = true,
   hint,
+  initialEmail,
   onAuthed,
 }: {
   google: boolean;
   /// Whether to offer email/password login + signup. False on a Google-only hub.
   password?: boolean;
   hint?: string;
+  /// Prefill for the email field (the /invite landing, proposal 0056 C4).
+  initialEmail?: string;
   onAuthed: () => void;
 }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail ?? "");
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -226,7 +274,7 @@ export function AuthScreen({
                   setPw(e.target.value);
                   setError(null);
                 }}
-                placeholder={mode === "signup" ? "at least 8 characters" : "••••••••"}
+                placeholder={mode === "signup" ? "at least 12 characters" : "••••••••"}
                 className={inputCls}
               />
             </label>
@@ -272,18 +320,28 @@ function formatCode(raw: string): string {
 
 export function ActivatePage({
   email,
+  plan,
+  support,
   onDone,
   onInstall,
+  onStartSession,
 }: {
   email?: string;
+  /// The account's plan facts + support address (from /api/me), for the
+  /// plan-limit card when approve answers 402 (proposal 0056 B2).
+  plan?: MePlan;
+  support?: string | null;
   onDone: () => void;
   /// Open the assistant install/update dialog for a machine that just enrolled
   /// short of CLIs (proposal 0050 F3) — the catch-all for "I forgot the flag".
   onInstall?: (machine: string, tools?: string[]) => void;
+  /// Open the create flow pre-scoped to the just-connected machine (proposal
+  /// 0056 A1) — activation should end in a live terminal, not a dashboard.
+  onStartSession?: (machine: string) => void;
 }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; machine?: string; error?: string } | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; machine?: string; limit?: boolean; error?: string } | null>(null);
   const [missing, setMissing] = useState<string[]>([]);
   const ready = code.replace(/[^A-Z0-9]/gi, "").length === 8;
 
@@ -351,10 +409,22 @@ export function ActivatePage({
                   Install {missing.length} assistant{missing.length === 1 ? "" : "s"}
                 </button>
               )}
+              {/* The hand-off (proposal 0056 A1): activation ends in a live
+                  terminal. Primary unless the install prompt already claimed
+                  the slot — installing the missing CLIs first is the better
+                  first step (0050). */}
+              {result.machine && onStartSession && (
+                <button
+                  onClick={() => onStartSession(result.machine as string)}
+                  className={missing.length > 0 && onInstall ? `${secondaryBtn} mt-3` : `${primaryBtn} mt-6`}
+                >
+                  Start your first session
+                </button>
+              )}
               <button
                 onClick={onDone}
                 className={
-                  missing.length > 0 && onInstall
+                  (missing.length > 0 && onInstall) || (result.machine && onStartSession)
                     ? "mt-3 w-full rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:text-slate-200"
                     : `${primaryBtn} mt-6`
                 }
@@ -383,7 +453,15 @@ export function ActivatePage({
                   placeholder="WDJB-MJHT"
                   className="w-full rounded-lg border border-edge bg-bar px-4 py-4 text-center font-mono text-2xl tracking-[0.4em] text-slate-100 outline-none transition placeholder:text-slate-700 focus:border-accent focus:ring-2 focus:ring-accent/25"
                 />
-                {result?.error && <div className="mt-3 text-center text-xs text-claude">{result.error}</div>}
+                {result?.error &&
+                  (result.limit ? (
+                    // Machine cap (402) → the plan-limit card, not an error
+                    // line (proposal 0056 B2). The enrollment code keeps
+                    // polling, so approving again after an unlink just works.
+                    <LimitCard plan={plan} what="machines" support={support} />
+                  ) : (
+                    <div className="mt-3 text-center text-xs text-claude">{result.error}</div>
+                  ))}
                 <button type="submit" disabled={busy || !ready} className={`${primaryBtn} mt-5`}>
                   {busy ? "Approving…" : "Approve machine"}
                 </button>
@@ -409,6 +487,7 @@ function MachineRow({
   a,
   onChanged,
   onUpdate,
+  onStartSession,
 }: {
   a: AgentInfo;
   onChanged: () => void;
@@ -416,6 +495,9 @@ function MachineRow({
   /// The per-machine case belongs here, where per-machine administration
   /// already lives; the top-bar button remains the whole-fleet action.
   onUpdate?: (machine: string, tools?: string[]) => void;
+  /// Open the create flow scoped to this machine (proposal 0056 A2) — the
+  /// standing answer to "I have a machine, now what?".
+  onStartSession?: (machine: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [token, setToken] = useState<string | null>(null);
@@ -438,6 +520,17 @@ function MachineRow({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* The one action a new user actually wants from a machine row
+              (proposal 0056 A2): start a session on it. Online machines only. */}
+          {onStartSession && a.online && (
+            <button
+              onClick={() => onStartSession(a.machine)}
+              className="flex items-center gap-1 rounded-md border border-accent/60 px-2.5 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
+              title="Start a session on this machine"
+            >
+              New session
+            </button>
+          )}
           {/* A linked machine that's short of assistants says so BEFORE it bites
               (proposal 0050 F2) — otherwise the gap only surfaces as a failed
               create. Opens the same dialog scoped to this machine, with the
@@ -635,7 +728,10 @@ function SharedCard() {
   }, []);
 
   // Only the live offers/grants are actionable; terminal rows are dropped.
-  const active = (outbox ?? []).filter((i) => i.status === "pending" || i.status === "accepted");
+  // "invited" (proposal 0056 Part C) = an email invite awaiting signup.
+  const active = (outbox ?? []).filter(
+    (i) => i.status === "pending" || i.status === "accepted" || i.status === "invited"
+  );
   const loading = outbox === null || received === null;
 
   return (
@@ -665,7 +761,7 @@ function SharedCard() {
                 </>
               }
               badge={i.status}
-              actionLabel={i.status === "pending" ? "Cancel" : "Revoke"}
+              actionLabel={i.status === "accepted" ? "Revoke" : "Cancel"}
               confirmText={`Stop sharing ${subjectTitle(i.machine, i.session)} with ${i.granteeEmail || "them"}? They lose access immediately.`}
               onConfirm={async () => {
                 await revokeShare(i.id);
@@ -721,12 +817,15 @@ export function Dashboard({
   onClose,
   onLoggedOut,
   onUpdateAssistants,
+  onStartSession,
 }: {
   me: MeInfo;
   onClose: () => void;
   onLoggedOut: () => void;
   /// Per-machine entry point into the assistant-update flow (proposal 0049).
   onUpdateAssistants?: (machine: string, tools?: string[]) => void;
+  /// Per-machine entry into the create flow (proposal 0056 A2).
+  onStartSession?: (machine: string) => void;
 }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
@@ -828,7 +927,13 @@ export function Dashboard({
           ) : (
             <ul className="space-y-2.5">
               {agents.map((a) => (
-                <MachineRow key={a.agentId} a={a} onChanged={reload} onUpdate={onUpdateAssistants} />
+                <MachineRow
+                  key={a.agentId}
+                  a={a}
+                  onChanged={reload}
+                  onUpdate={onUpdateAssistants}
+                  onStartSession={onStartSession}
+                />
               ))}
             </ul>
           )}
@@ -840,6 +945,14 @@ export function Dashboard({
         {/* Add a machine */}
         <Window path="~/add-machine">
           <h3 className="mb-1 font-mono text-sm font-semibold text-slate-100">Add a machine</h3>
+          {/* Cheap cap preemption (proposal 0056 B2): learn about the machine
+              cap BEFORE running an installer on a box. Live agent count. */}
+          {me.plan && agents !== null && agents.length >= me.plan.maxAgents && (
+            <p className="mb-2 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-[11px] text-amber">
+              Your {me.plan.name} plan is at its machine limit ({me.plan.maxAgents}) — a new box can't be
+              approved until you unlink one{me.supportEmail ? " or request an upgrade" : ""}.
+            </p>
+          )}
           <p className="mb-3 text-xs text-slate-400">
             Name the machine, then paste the generated command on that box (macOS, Linux, or
             Windows). It installs cc-screen-rust and connects it — a code will appear that you
@@ -945,6 +1058,124 @@ export function Dashboard({
           <p className="mt-2 text-[11px] text-slate-600">
             Runs the device-flow enrollment, then installs a background service that reconnects on boot.
           </p>
+        </Window>
+      </div>
+    </Backdrop>
+  );
+}
+
+// ── /invite/<token> landing (proposal 0056 C4) — the /activate mold. The token
+// only *identifies* the invitation (the share still lands via the inbox accept);
+// attaching happens server-side when an authenticated, email-matched caller
+// reads the info endpoint. Never reveals whether the invited email has an
+// account.
+export function InviteLanding({
+  token,
+  me,
+  onAuthed,
+  onDone,
+  onLoggedOut,
+}: {
+  token: string;
+  me: MeInfo;
+  /// Re-read identity after a login/signup from the embedded AuthScreen.
+  onAuthed: () => void;
+  /// Leave /invite for the app root (the inbox bell does the rest).
+  onDone: () => void;
+  onLoggedOut: () => void;
+}) {
+  const [info, setInfo] = useState<InviteInfo | null>(null);
+  const [dead, setDead] = useState(false);
+
+  // (Re)read the invite — also after login, because an authenticated matching
+  // read is what defensively attaches the invite server-side (C3.3).
+  useEffect(() => {
+    let alive = true;
+    getInviteInfo(token)
+      .then((i) => alive && setInfo(i))
+      .catch((e) => {
+        if (!alive) return;
+        if (e instanceof ApiError && e.status === 404) setDead(true);
+        else setDead(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [token, me.authenticated, me.email]);
+
+  const matched = !!info && me.authenticated && (me.email ?? "").toLowerCase() === info.email.toLowerCase();
+
+  // Authenticated + matching → the invite is attached; hand over to the app
+  // (the inbox badge takes it from here).
+  useEffect(() => {
+    if (matched) onDone();
+  }, [matched, onDone]);
+
+  if (dead) {
+    return (
+      <Backdrop>
+        <div className="w-full max-w-sm">
+          <Wordmark />
+          <Window path="~/invite">
+            <p className="text-sm text-slate-300">This invitation link is no longer valid.</p>
+            <p className="mt-2 text-xs text-slate-500">
+              It may have expired or been cancelled — ask the person who sent it for a fresh one.
+            </p>
+            <button onClick={onDone} className={`${primaryBtn} mt-5`}>
+              Open cc-screen
+            </button>
+          </Window>
+        </div>
+      </Backdrop>
+    );
+  }
+
+  if (!info || matched) {
+    return (
+      <Backdrop>
+        <div className="py-10 text-center font-mono text-sm text-slate-500">loading…</div>
+      </Backdrop>
+    );
+  }
+
+  if (!me.authenticated) {
+    return (
+      <AuthScreen
+        google={me.googleEnabled}
+        password={me.passwordLogin !== false}
+        hint={`${info.inviterEmail} invited you — sign in or create an account as ${info.email} to see it.`}
+        initialEmail={info.email}
+        onAuthed={onAuthed}
+      />
+    );
+  }
+
+  // Authenticated with a DIFFERENT email: say so, offer logout. (Don't reveal
+  // anything about the invited address's account status.)
+  return (
+    <Backdrop>
+      <div className="w-full max-w-sm">
+        <Wordmark />
+        <Window path="~/invite">
+          <p className="text-sm text-slate-300">
+            This invitation was sent to <span className="text-amber">{info.email}</span>, but you're
+            signed in as <span className="text-slate-100">{me.email}</span>.
+          </p>
+          <p className="mt-2 text-xs text-slate-500">
+            Sign out, then sign in (or create an account) as {info.email} to accept it.
+          </p>
+          <button
+            onClick={async () => {
+              await logout();
+              onLoggedOut();
+            }}
+            className={`${primaryBtn} mt-5`}
+          >
+            Log out
+          </button>
+          <button onClick={onDone} className="mt-3 w-full rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:text-slate-200">
+            Keep my session
+          </button>
         </Window>
       </div>
     </Backdrop>

@@ -51,8 +51,9 @@ pub trait Store: Send + Sync {
     /// a row was removed. Admin CLI only.
     async fn delete_user(&self, email: &str) -> bool;
 
-    /// Hand-provision a user (Phase 1 has no public signup). Returns the new
-    /// `user_id`. Errors on a duplicate email or a too-short password.
+    /// Create a user — backs both public signup and the `user add` admin CLI.
+    /// Returns the new `user_id`. Errors on a duplicate email or a too-short
+    /// password.
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String>;
 
     /// Resolve a Google sign-in to a local `user_id` (proposal 0001 §3.3), creating
@@ -175,6 +176,45 @@ pub trait Store: Send + Sync {
     /// scoped by the `shares` row id; removes the grant and settles the matching
     /// invite to `declined`. Returns true if a grant went away.
     async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool;
+
+    // ── email invites (proposal 0056 Part C) ───────────────────────────────────
+    /// Create (or re-offer, upserting on `(email, resource)`) an email invite —
+    /// the pre-account row that converts into a `share_invites` row when an
+    /// account with this email appears. `converted` pre-stamps `converted_at`
+    /// (used for known-user invites, which only need the row for its link token).
+    /// Owner-scoped; caps live (unconverted, unexpired) invites per inviter —
+    /// over the cap errors with the `CAP:` prefix so the handler answers 429.
+    /// Returns `(invite_id, link_token)`.
+    #[allow(clippy::too_many_arguments)]
+    async fn email_invite_create(
+        &self,
+        inviter: &str,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+        converted: bool,
+    ) -> anyhow::Result<(String, String)>;
+
+    /// Convert every live (unconverted, unexpired) email invite for `email` into
+    /// a normal `share_invites` row for `user_id` (the new account), stamping
+    /// `converted_at`. Called from signup + the Google callback + the invite-info
+    /// endpoint. Returns how many attached.
+    async fn attach_email_invites(&self, user_id: &str, email: &str) -> usize;
+
+    /// Look up a live (unexpired) email invite by its link token — the
+    /// `/api/invite/:token` read. `None` for unknown/expired/revoked.
+    async fn email_invite_by_token(&self, token: &str) -> Option<EmailInviteRow>;
+
+    /// The inviter cancels an unconverted email invite by id (the outbox
+    /// fall-through when `share_revoke` finds no `share_invites` row). Returns
+    /// true if a row went away.
+    async fn email_invite_revoke(&self, inviter: &str, id: &str) -> bool;
+
+    /// The inviter's live (unconverted, unexpired) email invites — rendered in
+    /// the outbox with status `"invited"` and the email as the counterpart.
+    async fn email_invite_outbox(&self, inviter: &str) -> Vec<EmailInviteRow>;
 }
 
 /// One `share_invites` row (proposal 0040).
@@ -191,6 +231,23 @@ pub struct ShareInviteRow {
     pub created_at: i64,
     pub responded_at: Option<i64>,
     pub expires_at: Option<i64>,
+}
+
+/// One `email_invites` row (proposal 0056 Part C) — a pre-account invitation
+/// keyed by email, plus the link token the inviter hands out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailInviteRow {
+    pub id: String,
+    pub token: String,
+    pub inviter_user_id: String,
+    pub email: String,
+    pub resource_kind: String,
+    pub agent_id: String,
+    pub session_name: Option<String>,
+    pub owner_peek: bool,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub converted_at: Option<i64>,
 }
 
 /// The result of an invite transition — mirrors [`DevicePoll`]'s shape so handlers
@@ -225,8 +282,10 @@ pub enum DevicePoll {
 /// A plan's enforced caps (proposal 0001 Phase 4). Resolved from `plan_limits`
 /// joined on `users.plan`; falls back to [`PlanLimits::default`] if the plan row
 /// is missing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanLimits {
+    /// The plan's name (`users.plan`), surfaced by `/api/me` (proposal 0056 B1).
+    pub plan: String,
     pub max_agents: i64,
     pub max_concurrent_sessions: i64,
 }
@@ -234,7 +293,7 @@ impl Default for PlanLimits {
     fn default() -> Self {
         // Mirrors the seeded 'free' row, so an unknown/missing plan is merely
         // conservative, never unbounded.
-        PlanLimits { max_agents: 10, max_concurrent_sessions: 50 }
+        PlanLimits { plan: "free".into(), max_agents: 10, max_concurrent_sessions: 50 }
     }
 }
 
@@ -274,6 +333,12 @@ impl SqliteStore {
         Ok(Self { pool })
     }
 
+    /// The raw pool — for admin tooling and integration tests that need to seed
+    /// rows (e.g. a squeezed `plan_limits` plan) the trait doesn't expose.
+    pub fn pool(&self) -> &Db {
+        &self.pool
+    }
+
     /// Materialise an accepted invite into a 0039 `shares` grant — the row the
     /// visibility predicate reads. Reuses the owner-scoped grant inserts, so this
     /// re-validates ownership and the no-self-share rule.
@@ -304,6 +369,12 @@ impl SqliteStore {
     /// and a share to oneself is rejected (a no-op — the owner already sees all).
     async fn assert_owns(&self, owner_user_id: &str, agent_id: &str, grantee_user_id: &str) -> anyhow::Result<()> {
         anyhow::ensure!(owner_user_id != grantee_user_id, "cannot share with yourself");
+        self.assert_owns_agent(owner_user_id, agent_id).await
+    }
+
+    /// The ownership half of [`Self::assert_owns`], for callers with no grantee
+    /// user yet (email invites, proposal 0056 Part C).
+    async fn assert_owns_agent(&self, owner_user_id: &str, agent_id: &str) -> anyhow::Result<()> {
         let owner: Option<String> = sqlx::query("SELECT user_id FROM agents WHERE id = ?1")
             .bind(agent_id)
             .fetch_optional(&self.pool)
@@ -348,10 +419,26 @@ impl Store for SqliteStore {
             .bind(&email)
             .fetch_optional(&self.pool)
             .await
-            .ok()??;
-        let id: String = row.try_get("id").ok()?;
-        let hash: Option<String> = row.try_get("password_hash").ok()?;
-        verify_password(password, &hash?).then_some(id)
+            .ok()
+            .flatten();
+        let (id, hash) = match row {
+            Some(row) => {
+                let id: String = row.try_get("id").ok()?;
+                let hash: Option<String> = row.try_get("password_hash").ok()?;
+                (Some(id), hash)
+            }
+            None => (None, None),
+        };
+        match (id, hash) {
+            (Some(id), Some(hash)) => verify_password(password, &hash).then_some(id),
+            // Unknown email or an OAuth-only account: burn a comparable Argon2
+            // verify against a fixed baked hash so response timing doesn't leak
+            // account existence (proposal 0053 Part E / 0042 candidate #5).
+            _ => {
+                dummy_verify(password);
+                None
+            }
+        }
     }
 
     async fn user_email(&self, user_id: &str) -> Option<String> {
@@ -385,7 +472,9 @@ impl Store for SqliteStore {
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String> {
         let email = normalize_email(email);
         anyhow::ensure!(!email.is_empty(), "email is required");
-        anyhow::ensure!(password.len() >= 8, "password must be at least 8 characters");
+        // 12-char minimum on public signup, aligned with the hub's own
+        // CCWEB_PASSWORD warning bar (proposal 0053 Part E).
+        anyhow::ensure!(password.len() >= MIN_PASSWORD_LEN, "password must be at least {MIN_PASSWORD_LEN} characters");
         let id = cc_screen_auth::generate_token();
         let hash = hash_password(password)?;
         sqlx::query("INSERT INTO users (id, email, password_hash, created_at) VALUES (?1, ?2, ?3, ?4)")
@@ -615,7 +704,7 @@ impl Store for SqliteStore {
 
     async fn limits_for(&self, user_id: &str) -> PlanLimits {
         sqlx::query(
-            "SELECT pl.max_agents, pl.max_concurrent_sessions
+            "SELECT pl.plan, pl.max_agents, pl.max_concurrent_sessions
                FROM users u JOIN plan_limits pl ON pl.plan = u.plan
               WHERE u.id = ?1",
         )
@@ -626,6 +715,7 @@ impl Store for SqliteStore {
         .flatten()
         .and_then(|r| {
             Some(PlanLimits {
+                plan: r.try_get("plan").ok()?,
                 max_agents: r.try_get("max_agents").ok()?,
                 max_concurrent_sessions: r.try_get("max_concurrent_sessions").ok()?,
             })
@@ -1032,6 +1122,186 @@ impl Store for SqliteStore {
         gone
     }
 
+    async fn email_invite_create(
+        &self,
+        inviter: &str,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+        owner_peek: bool,
+        converted: bool,
+    ) -> anyhow::Result<(String, String)> {
+        self.assert_owns_agent(inviter, agent_id).await?;
+        anyhow::ensure!(kind == "agent" || kind == "session", "bad resource_kind");
+        anyhow::ensure!((kind == "session") == session.is_some(), "session iff session-kind");
+        let email = normalize_email(email);
+        anyhow::ensure!(!email.is_empty(), "email is required");
+        let now = now_secs() as i64;
+        let expires = now + SHARE_INVITE_TTL;
+        let converted_at = converted.then_some(now);
+
+        // Upsert by (email, kind, agent, session) explicitly — a NULL session for
+        // an agent invite is DISTINCT under the UNIQUE index (same discipline as
+        // share_invites). A re-offer keeps the row id but mints a FRESH token
+        // (the old link dies) and refreshes the TTL.
+        let existing: Option<String> = sqlx::query(
+            "SELECT id FROM email_invites
+              WHERE email = ?1 AND agent_id = ?2 AND resource_kind = ?3
+                AND ((?4 IS NULL AND session_name IS NULL) OR session_name = ?4)",
+        )
+        .bind(&email)
+        .bind(agent_id)
+        .bind(kind)
+        .bind(session)
+        .fetch_optional(&self.pool)
+        .await?
+        .and_then(|r| r.try_get("id").ok());
+
+        let token = cc_screen_auth::generate_token();
+        if let Some(id) = existing {
+            sqlx::query(
+                "UPDATE email_invites
+                    SET token = ?1, owner_peek = ?2, created_at = ?3, expires_at = ?4,
+                        converted_at = ?5
+                  WHERE id = ?6",
+            )
+            .bind(&token)
+            .bind(owner_peek as i64)
+            .bind(now)
+            .bind(expires)
+            .bind(converted_at)
+            .bind(&id)
+            .execute(&self.pool)
+            .await?;
+            return Ok((id, token));
+        }
+
+        // Abuse bound (proposal 0056 C2): cap the inviter's LIVE (unconverted,
+        // unexpired) email invites. Pre-converted known-user rows don't count.
+        if !converted {
+            let live: i64 = sqlx::query(
+                "SELECT count(*) AS n FROM email_invites
+                  WHERE inviter_user_id = ?1 AND converted_at IS NULL AND expires_at > ?2",
+            )
+            .bind(inviter)
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .and_then(|r| r.try_get::<i64, _>("n").ok())
+            .unwrap_or(0);
+            anyhow::ensure!(
+                live < EMAIL_INVITE_CAP,
+                "CAP:too many pending invitations — cancel some from your outbox first"
+            );
+        }
+
+        let id = cc_screen_auth::generate_token();
+        sqlx::query(
+            "INSERT INTO email_invites
+                (id, token, inviter_user_id, email, resource_kind, agent_id,
+                 session_name, owner_peek, created_at, expires_at, converted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(&id)
+        .bind(&token)
+        .bind(inviter)
+        .bind(&email)
+        .bind(kind)
+        .bind(agent_id)
+        .bind(session)
+        .bind(owner_peek as i64)
+        .bind(now)
+        .bind(expires)
+        .bind(converted_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("email_invite_create: {e}"))?;
+        Ok((id, token))
+    }
+
+    async fn attach_email_invites(&self, user_id: &str, email: &str) -> usize {
+        let email = normalize_email(email);
+        let now = now_secs() as i64;
+        let rows = sqlx::query(
+            "SELECT * FROM email_invites
+              WHERE email = ?1 AND converted_at IS NULL AND expires_at > ?2",
+        )
+        .bind(&email)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let mut attached = 0;
+        for row in rows.iter().filter_map(email_invite_row) {
+            // The existing 0040 upsert — re-validates ownership + no-self-share,
+            // so an invite to an address the inviter later registers themselves
+            // simply doesn't attach.
+            let ok = self
+                .share_create(
+                    &row.inviter_user_id,
+                    user_id,
+                    &row.resource_kind,
+                    &row.agent_id,
+                    row.session_name.as_deref(),
+                    row.owner_peek,
+                )
+                .await
+                .is_ok();
+            if ok {
+                let _ = sqlx::query("UPDATE email_invites SET converted_at = ?1 WHERE id = ?2")
+                    .bind(now)
+                    .bind(&row.id)
+                    .execute(&self.pool)
+                    .await;
+                attached += 1;
+            }
+        }
+        attached
+    }
+
+    async fn email_invite_by_token(&self, token: &str) -> Option<EmailInviteRow> {
+        let now = now_secs() as i64;
+        let row = sqlx::query("SELECT * FROM email_invites WHERE token = ?1 AND expires_at > ?2")
+            .bind(token)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        email_invite_row(&row)
+    }
+
+    async fn email_invite_revoke(&self, inviter: &str, id: &str) -> bool {
+        // Only an unconverted row is the invite's live lifecycle record — once
+        // converted, the share_invites row (share_revoke) is authoritative.
+        sqlx::query(
+            "DELETE FROM email_invites
+              WHERE id = ?1 AND inviter_user_id = ?2 AND converted_at IS NULL",
+        )
+        .bind(id)
+        .bind(inviter)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+    }
+
+    async fn email_invite_outbox(&self, inviter: &str) -> Vec<EmailInviteRow> {
+        let now = now_secs() as i64;
+        let rows = sqlx::query(
+            "SELECT * FROM email_invites
+              WHERE inviter_user_id = ?1 AND converted_at IS NULL AND expires_at > ?2
+              ORDER BY created_at DESC",
+        )
+        .bind(inviter)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(email_invite_row).collect()
+    }
+
     async fn share_sweep(&self) {
         let now = now_secs() as i64;
         // Flip overdue pending rows.
@@ -1049,6 +1319,17 @@ impl Store for SqliteStore {
               WHERE status IN ('declined','revoked','expired')
                 AND COALESCE(responded_at, created_at) < ?1",
         )
+        .bind(now - SHARE_INVITE_REAP_AFTER)
+        .execute(&self.pool)
+        .await;
+        // Email invites (proposal 0056 C3): reap expired unconverted rows and
+        // long-converted ones (their lifecycle lives in share_invites now).
+        let _ = sqlx::query(
+            "DELETE FROM email_invites
+              WHERE (converted_at IS NULL AND expires_at < ?1)
+                 OR (converted_at IS NOT NULL AND converted_at < ?2)",
+        )
+        .bind(now)
         .bind(now - SHARE_INVITE_REAP_AFTER)
         .execute(&self.pool)
         .await;
@@ -1078,6 +1359,12 @@ const SHARE_INVITE_TTL: i64 = 14 * 86_400;
 /// Dead terminal invite rows are hard-deleted by the sweep this long after they
 /// settled, bounding table growth without yanking a just-declined row from a view.
 const SHARE_INVITE_REAP_AFTER: i64 = 7 * 86_400;
+/// Live (unconverted, unexpired) email invites per inviter (proposal 0056 C2's
+/// abuse bound); over it the handler answers 429.
+const EMAIL_INVITE_CAP: i64 = 20;
+/// Public-signup password minimum, aligned with the CCWEB_PASSWORD warning bar
+/// (proposal 0053 Part E).
+pub const MIN_PASSWORD_LEN: usize = 12;
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -1152,6 +1439,35 @@ fn verify_password(pw: &str, phc: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Burn one Argon2 verification against a fixed hash so a login for an unknown
+/// email costs the same as one for a real account (no timing oracle, proposal
+/// 0053 Part E). The hash is computed once per process with the same default
+/// parameters real accounts use. Always "fails".
+fn dummy_verify(pw: &str) {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let phc = DUMMY.get_or_init(|| {
+        hash_password("cc-screen-dummy-baseline-password").unwrap_or_default()
+    });
+    let _ = verify_password(pw, phc);
+}
+
+/// Map an `email_invites` result row to an [`EmailInviteRow`].
+fn email_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<EmailInviteRow> {
+    Some(EmailInviteRow {
+        id: r.try_get("id").ok()?,
+        token: r.try_get("token").ok()?,
+        inviter_user_id: r.try_get("inviter_user_id").ok()?,
+        email: r.try_get("email").ok()?,
+        resource_kind: r.try_get("resource_kind").ok()?,
+        agent_id: r.try_get("agent_id").ok()?,
+        session_name: r.try_get::<Option<String>, _>("session_name").ok().flatten().filter(|s| !s.is_empty()),
+        owner_peek: r.try_get::<i64, _>("owner_peek").ok()? != 0,
+        created_at: r.try_get("created_at").ok()?,
+        expires_at: r.try_get("expires_at").ok()?,
+        converted_at: r.try_get::<Option<i64>, _>("converted_at").ok().flatten(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1171,9 +1487,86 @@ mod tests {
     #[tokio::test]
     async fn duplicate_email_and_short_password_rejected() {
         let s = SqliteStore::in_memory().await;
-        s.create_user("a@b.com", "longenough").await.unwrap();
-        assert!(s.create_user("a@b.com", "longenough").await.is_err(), "duplicate email");
+        s.create_user("a@b.com", "longenough123").await.unwrap();
+        assert!(s.create_user("a@b.com", "longenough123").await.is_err(), "duplicate email");
         assert!(s.create_user("c@d.com", "short").await.is_err(), "short password");
+        // The public-signup minimum is 12 (proposal 0053 Part E): 11 fails, 12 passes.
+        assert!(s.create_user("c@d.com", "elevenchars").await.is_err(), "11 chars rejected");
+        assert!(s.create_user("c@d.com", "twelve-chars").await.is_ok(), "12 chars accepted");
+    }
+
+    // Proposal 0056 Part C — email invites: create/upsert/cap, attach-on-signup,
+    // revoke, token lookup, and the known-user pre-converted variant.
+    #[tokio::test]
+    async fn email_invites_create_attach_and_revoke() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+
+        // Not-your-agent is rejected; bad kinds are rejected.
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        assert!(s.email_invite_create(&bob, "g@x.com", "agent", &agent, None, false, false).await.is_err());
+        assert!(s.email_invite_create(&alice, "g@x.com", "nope", &agent, None, false, false).await.is_err());
+
+        // Create → the row is live, in the outbox, and findable by token.
+        let (id, token) =
+            s.email_invite_create(&alice, "Ghost@X.com", "agent", &agent, None, true, false).await.unwrap();
+        let row = s.email_invite_by_token(&token).await.expect("live token");
+        assert_eq!(row.email, "ghost@x.com", "email normalized");
+        assert!(row.owner_peek && row.converted_at.is_none());
+        assert_eq!(s.email_invite_outbox(&alice).await.len(), 1);
+
+        // Re-offer upserts the same row but mints a fresh token (old link dies).
+        let (id2, token2) =
+            s.email_invite_create(&alice, "ghost@x.com", "agent", &agent, None, false, false).await.unwrap();
+        assert_eq!(id, id2);
+        assert_ne!(token, token2);
+        assert!(s.email_invite_by_token(&token).await.is_none(), "old token dead");
+
+        // Attach on signup: ghost's new account gets a normal pending 0040 invite.
+        let ghost = s.create_user("ghost@x.com", "ghostpass12345").await.unwrap();
+        assert_eq!(s.attach_email_invites(&ghost, "ghost@x.com").await, 1);
+        let inbox = s.share_inbox(&ghost).await;
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].inviter_user_id, alice);
+        // Converted: no longer in the outbox, and a second attach is a no-op.
+        assert!(s.email_invite_outbox(&alice).await.is_empty());
+        assert_eq!(s.attach_email_invites(&ghost, "ghost@x.com").await, 0);
+
+        // Revoke pre-signup: a fresh invite revoked before signup never attaches.
+        let (rid, _rtok) =
+            s.email_invite_create(&alice, "ghost2@x.com", "agent", &agent, None, false, false).await.unwrap();
+        assert!(!s.email_invite_revoke(&bob, &rid).await, "not the inviter's to revoke");
+        assert!(s.email_invite_revoke(&alice, &rid).await);
+        let ghost2 = s.create_user("ghost2@x.com", "ghost2pass1234").await.unwrap();
+        assert_eq!(s.attach_email_invites(&ghost2, "ghost2@x.com").await, 0, "revoked ⇒ nothing attaches");
+
+        // Known-user variant: pre-converted rows don't attach and don't count
+        // toward the cap, but their token still resolves (for the invite link).
+        let (_kid, ktok) =
+            s.email_invite_create(&alice, "bob@x.com", "agent", &agent, None, false, true).await.unwrap();
+        assert!(s.email_invite_by_token(&ktok).await.is_some());
+        assert_eq!(s.attach_email_invites(&bob, "bob@x.com").await, 0, "pre-converted never attaches");
+    }
+
+    #[tokio::test]
+    async fn email_invite_cap_bounds_live_invites() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        for i in 0..EMAIL_INVITE_CAP {
+            s.email_invite_create(&alice, &format!("g{i}@x.com"), "agent", &agent, None, false, false)
+                .await
+                .unwrap();
+        }
+        let err = s
+            .email_invite_create(&alice, "one-too-many@x.com", "agent", &agent, None, false, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("CAP:"), "got: {err}");
+        // A re-offer of an existing live invite is NOT blocked by the cap.
+        assert!(s.email_invite_create(&alice, "g0@x.com", "agent", &agent, None, false, false).await.is_ok());
     }
 
     // The §4.1 keystone's data half: a token resolves to its OWNER's agent and
@@ -1181,8 +1574,8 @@ mod tests {
     #[tokio::test]
     async fn agent_token_resolves_to_owning_tenant_only() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
-        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
         // Both name a machine "laptop" — collision across tenants is expected.
         let (alice_tok, alice_agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
         let (bob_tok, bob_agent) = s.upsert_agent(&bob, "laptop").await.unwrap();
@@ -1210,7 +1603,7 @@ mod tests {
 
         // Linking: a pre-existing password account adopts the google_sub on first
         // Google sign-in, keeping the same id.
-        let pw_id = s.create_user("link@example.com", "password1").await.unwrap();
+        let pw_id = s.create_user("link@example.com", "password12345").await.unwrap();
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
         // Subsequent sign-in matches on the subject.
         assert_eq!(s.upsert_google_user("sub-link", "link@example.com").await.unwrap(), pw_id);
@@ -1219,7 +1612,7 @@ mod tests {
     #[tokio::test]
     async fn plan_limits_gate_new_machines() {
         let s = SqliteStore::in_memory().await;
-        let u = s.create_user("u@x.com", "password1").await.unwrap();
+        let u = s.create_user("u@x.com", "password12345").await.unwrap();
         // Default 'free' plan = 10 agents; confirm + then squeeze to 1 via 'pro'?
         // Simpler: set a tiny custom plan to test the gate deterministically.
         sqlx::query("INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions) VALUES ('tiny', 1, 1)")
@@ -1248,8 +1641,8 @@ mod tests {
     #[tokio::test]
     async fn list_and_delete_agents_are_owner_scoped() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
-        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
         let (_t, alice_agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
         s.upsert_agent(&alice, "server").await.unwrap();
         s.upsert_agent(&bob, "laptop").await.unwrap();
@@ -1282,7 +1675,7 @@ mod tests {
     #[tokio::test]
     async fn device_flow_approve_and_single_use_claim() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
         let code = s.device_create("dev-1", "laptop").await.unwrap();
 
         // Approve case/dash-insensitively → binds to alice's "laptop".
@@ -1308,8 +1701,8 @@ mod tests {
     #[tokio::test]
     async fn shares_owner_scoped_idempotent_and_cascade() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
-        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
         let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
 
         // Self-share and not-your-agent are rejected.
@@ -1351,8 +1744,8 @@ mod tests {
     #[tokio::test]
     async fn share_invite_lifecycle_and_materialisation() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
-        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
         let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
 
         // Self-invite + not-your-agent are rejected.
@@ -1406,8 +1799,8 @@ mod tests {
     #[tokio::test]
     async fn unlink_agent_reaps_invites_and_grants() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
-        let bob = s.create_user("bob@x.com", "password2").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
         let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
         let (id, _) = s.share_create(&alice, &bob, "agent", &agent, None, false).await.unwrap();
         s.share_respond(&bob, &id, true).await;
@@ -1426,7 +1819,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_rotates_token_in_place() {
         let s = SqliteStore::in_memory().await;
-        let alice = s.create_user("alice@x.com", "password1").await.unwrap();
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
         let (tok1, agent1) = s.upsert_agent(&alice, "laptop").await.unwrap();
         let (tok2, agent2) = s.upsert_agent(&alice, "laptop").await.unwrap();
         assert_eq!(agent1, agent2, "same (user, machine) keeps its agent id");

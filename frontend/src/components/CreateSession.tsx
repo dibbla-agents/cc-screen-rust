@@ -5,12 +5,15 @@ import {
   fetchTools,
   makeDir,
   searchDirs,
+  ApiError,
   type DirSearchResult,
   type DirsResp,
   type MachineInfo,
+  type MePlan,
   type PaneRef,
   type Tool,
 } from "../api";
+import { LimitCard } from "./MultiTenant";
 import { toolColor, useDebouncedValue } from "../util";
 
 // Search-first create flow (proposal 0016, Part B). Rendered *inside* the
@@ -44,6 +47,10 @@ interface Props {
   // is where a user feels the gap most often, and until now it was a dead end:
   // the pill said "not installed on this machine" and that was that.
   onInstallTool?: (machine: string, tool: string) => void;
+  // Plan facts + support address for the 402 limit card (proposal 0056 B2).
+  // Absent on single-tenant — the card still renders a generic cap message.
+  plan?: MePlan;
+  supportEmail?: string;
 }
 
 function basename(p: string): string {
@@ -81,6 +88,8 @@ export default function CreateSession({
   onClose,
   onCreated,
   onInstallTool,
+  plan,
+  supportEmail,
 }: Props) {
   const [tools, setTools] = useState<Tool[]>([]);
   const [tool, setTool] = useState<string>("");
@@ -98,6 +107,9 @@ export default function CreateSession({
   const [extraDirs, setExtraDirs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // A 402 from create (session cap, proposal 0056 B2) — renders the plan-limit
+  // card instead of the raw error line.
+  const [limitHit, setLimitHit] = useState(false);
 
   // The picked tool, when its CLI is missing here — drives the "Install it" row.
   const missingSelected = tools.find((t) => t.cmd === tool && t.unavailable);
@@ -262,6 +274,7 @@ export default function CreateSession({
       }
       setBusy(true);
       setErr(null);
+      setLimitHit(false);
       try {
         localStorage.setItem(LAST_TOOL_KEY, tool);
         const ref = await createSession(
@@ -274,7 +287,9 @@ export default function CreateSession({
         );
         onCreated(ref);
       } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e));
+        // Session cap (402) → the plan-limit card, not an error line (0056 B2).
+        if (e instanceof ApiError && e.status === 402) setLimitHit(true);
+        else setErr(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(false);
       }
@@ -447,6 +462,11 @@ export default function CreateSession({
       </div>
 
       {err && <div className="border-b border-edge/40 px-3 py-1.5 text-[12px] text-red-400">{err}</div>}
+      {limitHit && (
+        <div className="border-b border-edge/40 px-3 pb-2">
+          <LimitCard plan={plan} what="sessions" support={supportEmail} />
+        </div>
+      )}
 
       {/* Result / browse list. */}
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">

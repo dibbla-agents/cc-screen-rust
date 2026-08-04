@@ -32,6 +32,8 @@ export default function ShareForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const isSession = !!subject.session;
 
   async function submit(e: React.FormEvent) {
@@ -41,16 +43,16 @@ export default function ShareForm({
     setBusy(true);
     setError(null);
     try {
-      await createShare({
+      const r = await createShare({
         granteeEmail: to,
         machine: subject.machine,
         session: subject.session,
         ownerPeek: isSession ? false : peek,
       });
+      // A relative link (no CCHUB_PUBLIC_URL) resolves against this origin.
+      setInviteUrl(r.inviteUrl ? new URL(r.inviteUrl, window.location.origin).toString() : null);
       setDone(true);
       onShared?.();
-      // Brief success flash, then close.
-      setTimeout(onClose, 1100);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not send the invite.");
     } finally {
@@ -59,9 +61,41 @@ export default function ShareForm({
   }
 
   if (done) {
+    // ONE success message for both outcomes — whether the address already has
+    // an account is deliberately not disclosed (proposal 0056 C2 / [0042]).
+    // No email is sent by the hub (v1): the copyable link is how the invite
+    // travels, so it is the visual centerpiece.
     return (
       <div className="rounded-lg border border-amber/30 bg-amber/10 px-3 py-2.5 text-xs text-amber">
-        Invitation sent to <span className="font-semibold">{email.trim()}</span> — they'll see it in their inbox.
+        <div>
+          Invitation created for <span className="font-semibold">{email.trim()}</span> — they'll see it
+          when they sign in. You can also send them this link:
+        </div>
+        {inviteUrl && (
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
+              {inviteUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard?.writeText(inviteUrl);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="shrink-0 rounded-md border border-amber/60 px-2.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+            >
+              {copied ? "Copied!" : "Copy link"}
+            </button>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-2 rounded-md px-1.5 py-1 text-[11px] text-slate-400 transition hover:text-slate-200"
+        >
+          Done
+        </button>
       </div>
     );
   }
