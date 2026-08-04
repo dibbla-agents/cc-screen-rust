@@ -6,7 +6,9 @@
   "description": "Vite + React + TypeScript + Tailwind source for the cc-screen getting-started site. Builds into ../../docs (GitHub Pages + the Dibbla cc-screen app).",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && rm -rf ../../docs/assets && vite build && node scripts/build-docs.mjs",
+    "docs": "node scripts/build-docs.mjs",
+    "check-links": "node scripts/check-links.mjs ../../docs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,6 +20,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.0",
+    "marked": "^18.0.9",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.0",
     "vite": "^8.0.0"

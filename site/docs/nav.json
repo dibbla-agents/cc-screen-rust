@@ -1,0 +1,20 @@
+{
+  "sections": [
+    {
+      "label": "Getting started",
+      "pages": ["index", "quickstart", "install-macos-linux", "install-windows"]
+    },
+    {
+      "label": "Using cc-screen",
+      "pages": ["web-app", "tui"]
+    },
+    {
+      "label": "Running your own",
+      "pages": ["self-hosting", "security"]
+    },
+    {
+      "label": "Help",
+      "pages": ["troubleshooting", "faq"]
+    }
+  ]
+}

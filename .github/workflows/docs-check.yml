@@ -1,0 +1,39 @@
+# Docs check (proposal 0055): on PRs touching site/**, build the marketing site
+# + docs generator and fail on missing pages or dead internal links. This is the
+# first CI that builds site/web at all.
+name: docs-check
+
+on:
+  pull_request:
+    paths:
+      - "site/**"
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/web/package-lock.json
+
+      - name: Install
+        working-directory: site/web
+        run: npm ci
+
+      - name: Build (site + docs generator)
+        working-directory: site/web
+        run: npm run build
+
+      - name: Docs pages exist
+        run: |
+          test -f docs/docs/index.html
+          test -f docs/docs/quickstart/index.html
+          test -f docs/docs/docs.css
+
+      - name: Link check
+        working-directory: site/web
+        run: npm run check-links
