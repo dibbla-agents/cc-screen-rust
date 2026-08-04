@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Self-hosting — cc-screen docs</title>
+<meta name="description" content="Run your own cc-screen hub and agents — quick start, uplink tokens, Docker, off-tailnet TLS, and the full environment reference." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/" aria-current="page">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/" aria-current="page">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="self-hosting">Self-hosting</h1>
+<p>Everything the hosted hub at <code>app.ccscreen.dev</code> does, you can run yourself.
+Same binaries, same clients. Three shapes, smallest first:</p>
+<ol>
+<li><strong>One machine, no hub.</strong> Run the agent stand-alone and open it directly
+(its private/tailnet IP, port 8839) from a browser or <code>ccs</code>.</li>
+<li><strong>A hub in front of many machines.</strong> Each machine&#39;s agent <em>dials out</em> to
+your hub and registers; clients talk to the hub and see every machine&#39;s
+sessions in one list. This is the classic setup and most of this page.</li>
+<li><strong>A multi-tenant hub</strong> — your own miniature <code>app.ccscreen.dev</code>, with
+signup, Google sign-in, and per-user machine enrollment. One environment
+variable turns it on (below).</li>
+</ol>
+<p>Read the <a href="../security/">Security model</a> alongside this page — a hub
+concentrates access to every connected machine, so its auth settings matter.</p>
+<h2 id="quick-start-hub-machines">Quick start (hub + machines)</h2>
+<p><strong>1 — Install the hub</strong> on whichever box should be the front door:</p>
+<pre><code class="language-sh">curl --proto &#39;=https&#39; --tlsv1.2 -LsSf \
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-hub-installer.sh | sh
+cc-screen-hub install --password &#39;choose-a-passphrase&#39; \
+    --agents &#39;laptop:LAPTOP_TOKEN,server:SERVER_TOKEN&#39;
+</code></pre>
+<p><code>install</code> writes <code>~/.config/cc-screen-hub/web.env</code>, registers a service
+(systemd <code>--user</code> on Linux, launchd on macOS), and starts it on port <strong>8840</strong>,
+bound to the tailnet IP if there is one. Re-running <code>install</code> preserves keys
+you don&#39;t override.</p>
+<table>
+<thead>
+<tr>
+<th>flag</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--port N</code></td>
+<td>port (default <strong>8840</strong>)</td>
+</tr>
+<tr>
+<td><code>--bind ADDR</code></td>
+<td>bind address (default: the tailnet IP, else <code>127.0.0.1</code>)</td>
+</tr>
+<tr>
+<td><code>--password PW</code></td>
+<td>turn on the <strong>client</strong> auth gate (browser/TUI login; 2-week cookie)</td>
+</tr>
+<tr>
+<td><code>--token TOK</code></td>
+<td>the <strong>client</strong> API token (for <code>ccs</code>/scripts); auto-minted if you set <code>--password</code> without one</td>
+</tr>
+<tr>
+<td><code>--agents SPEC</code></td>
+<td>the <strong>per-agent uplink tokens</strong>, <code>machine:token,machine2:token2</code></td>
+</tr>
+</tbody></table>
+<p><strong>2 — Point each machine&#39;s agent at it:</strong></p>
+<pre><code class="language-sh">curl --proto &#39;=https&#39; --tlsv1.2 -LsSf \
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh | sh
+cc-screen-rust install --hub https://hub.example:8840 \
+    --hub-token LAPTOP_TOKEN --machine-id laptop
+</code></pre>
+<p><strong>3 — Open it.</strong> Browse <code>https://hub.example:8840</code> (log in with the password;
+Add to Home Screen on a phone), or <code>ccs --server https://hub.example:8840 --token &lt;client-token&gt;</code>.</p>
+<h2 id="the-agent39s-hub-flags">The agent&#39;s hub flags</h2>
+<p>Same binary as the stand-alone server; the hub flags are additive.</p>
+<table>
+<thead>
+<tr>
+<th>flag</th>
+<th>env</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>--hub URL</code></td>
+<td><code>CCWEB_HUB_URL</code></td>
+<td>hub to dial out to and register with</td>
+</tr>
+<tr>
+<td><code>--hub-token TOK</code></td>
+<td><code>CCWEB_HUB_TOKEN</code></td>
+<td>this machine&#39;s uplink token (must match the hub&#39;s <code>--agents</code>)</td>
+</tr>
+<tr>
+<td><code>--machine-id NAME</code></td>
+<td><code>CCWEB_MACHINE_ID</code></td>
+<td>name shown in the hub&#39;s list (default: hostname)</td>
+</tr>
+<tr>
+<td><code>--hub-only</code></td>
+<td><code>CCWEB_HUB_ONLY</code></td>
+<td>bind <strong>no</strong> local port — reachable <em>only</em> through the hub</td>
+</tr>
+</tbody></table>
+<p>Without <code>--hub-only</code> the agent also keeps serving clients directly on its own
+port. With it, the agent binds no inbound socket at all — it only dials out —
+the strictest posture for a box running unattended agents, and what the
+hosted installer uses.</p>
+<p>The agent always <strong>owns its sessions locally</strong>: a hub restart never kills
+them; the agent just reconnects.</p>
+<h2 id="two-independent-credentials">Two independent credentials</h2>
+<p>Don&#39;t mix these up:</p>
+<ul>
+<li>the <strong>client gate</strong> (<code>CCWEB_PASSWORD</code> / <code>CCWEB_API_TOKEN</code>) — what a browser
+or <code>ccs</code> uses to talk to the hub;</li>
+<li>the <strong>per-agent uplink tokens</strong> (<code>CCHUB_AGENT_TOKENS</code>, set by <code>--agents</code>) —
+what each agent uses to register.</li>
+</ul>
+<p>A leaked client password can&#39;t impersonate an agent; a leaked agent token
+scopes to one machine. With <code>CCHUB_AGENT_TOKENS</code> empty the uplink is <strong>open</strong>
+(any agent may register) — the hub refuses to start that way unless you
+explicitly set <code>CCHUB_ALLOW_OPEN_UPLINK=1</code>, which is for trusted-network dev
+use only.</p>
+<h2 id="multi-tenant-mode-your-own-appccscreendev">Multi-tenant mode (your own app.ccscreen.dev)</h2>
+<p>The shipped hub binary and Docker image include multi-tenant support,
+dormant by default. Give the hub a database and it becomes a multi-account
+service:</p>
+<pre><code class="language-sh">CCHUB_DATABASE_URL=sqlite:///home/you/.config/cc-screen-hub/hub.db
+CCHUB_PUBLIC_URL=https://cc.your-domain.example   # the canonical origin
+</code></pre>
+<p>You get public signup (email/password, optionally Google OAuth), per-user
+machine enrollment — the hub serves its own <code>/install.sh</code> and <code>/install.ps1</code>
+with its URL baked in, and machines are approved at <code>&lt;your-hub&gt;/activate</code> —
+plus sharing and per-plan caps. Plans are assigned by hand
+(<code>cc-screen-hub user plan &lt;email&gt; free|pro|unlimited</code>); there is no billing
+machinery.</p>
+<h2 id="docker">Docker</h2>
+<p>Both images are published to GHCR on every release:</p>
+<pre><code class="language-sh">docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the front door
+docker pull ghcr.io/dibbla-agents/cc-screen-agent:latest   # a containerized machine host
+</code></pre>
+<ul>
+<li><strong>Hub:</strong> mount a volume at <code>/home/app/.config/cc-screen-hub</code> (cookie keys,
+push keys, the multi-tenant DB) and set the env vars from the reference
+below. Compose files ship in the repo.</li>
+<li><strong>Agent:</strong> the recommended containerized machine host runs hub-only (no
+inbound port at all); the mounted home volume is the sandbox — projects,
+CLI logins, and state all live there. Log the assistants in once with
+<code>docker compose exec agent claude</code> (or set API keys in <code>.env</code>).</li>
+</ul>
+<p>Full operator detail (compose files, GHCR/CI publishing):
+<a href="https://github.com/dibbla-agents/cc-screen-rust/blob/main/docker/hub/README.md">docker/hub/README.md</a>
+and
+<a href="https://github.com/dibbla-agents/cc-screen-rust/blob/main/docker/agent/README.md">docker/agent/README.md</a>.</p>
+<h2 id="off-tailnet-access-tls-required">Off-tailnet access: TLS required</h2>
+<p>On a private network (a VPN or a tailnet), plain <code>http://</code>/<code>ws://</code> is fine —
+the network is the transport security. Beyond it, the hub must be fronted by
+TLS: the agent fully trusts whatever answers at <code>--hub</code>, and <code>wss://</code> (with a
+valid certificate) is what authenticates the hub to the agent. The uplink
+client validates certificates against the standard root store and fails
+closed on a bad one.</p>
+<p>A concrete no-inbound-port recipe with a <strong>Cloudflare Tunnel</strong>:</p>
+<ol>
+<li>Bind the hub to loopback: <code>cc-screen-hub install --bind 127.0.0.1</code>.</li>
+<li>Run <code>cloudflared</code> on the same host with the public hostname&#39;s <strong>Service</strong>
+set to <code>http://127.0.0.1:8840</code>.</li>
+<li>Browse / <code>ccs</code> at <code>https://your-hostname</code>. Cloudflare terminates TLS and
+sets <code>X-Forwarded-Proto: https</code>, so the hub&#39;s <code>Secure</code> login cookie works.</li>
+</ol>
+<p>Gotchas:</p>
+<ul>
+<li><strong>502 Bad Gateway</strong> almost always means the tunnel&#39;s origin can&#39;t reach the
+hub — e.g. the hub is bound to its tailnet IP (the install default) while
+the tunnel origin points at <code>localhost</code>. Align the two.</li>
+<li><strong>A loopback bind is not private once a tunnel fronts it.</strong> A public hub
+needs per-agent uplink tokens (<code>--agents</code>) — the client password does <em>not</em>
+gate agent registration — and ideally an access policy at the edge too.</li>
+<li><strong>Browser 403s after fronting with your own domain?</strong> Add the domain to
+<code>CCWEB_ALLOWED_ORIGINS</code> (the hub&#39;s cross-origin/DNS-rebinding guard only
+auto-accepts same-origin, raw IPs, <code>localhost</code>, and <code>*.ts.net</code>).</li>
+</ul>
+<h2 id="environment-reference">Environment reference</h2>
+<p>Agent (<code>~/.config/cc-screen-rust/web.env</code>):</p>
+<table>
+<thead>
+<tr>
+<th>key</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CCWEB_ADDR</code></td>
+<td>bind address (default <code>127.0.0.1:8839</code>)</td>
+</tr>
+<tr>
+<td><code>CCWEB_PASSWORD</code> / <code>CCWEB_API_TOKEN</code></td>
+<td>opt-in client auth (the agent&#39;s own gate)</td>
+</tr>
+<tr>
+<td><code>CCWEB_HUB_URL</code></td>
+<td>hub to register with</td>
+</tr>
+<tr>
+<td><code>CCWEB_HUB_TOKEN</code></td>
+<td>this machine&#39;s uplink token</td>
+</tr>
+<tr>
+<td><code>CCWEB_MACHINE_ID</code></td>
+<td>name in the hub&#39;s list (default hostname)</td>
+</tr>
+<tr>
+<td><code>CCWEB_HUB_ONLY</code></td>
+<td><code>1</code>/<code>true</code> → bind no local port</td>
+</tr>
+<tr>
+<td><code>CCWEB_ALLOWED_ORIGINS</code></td>
+<td>extra allowed browser Origin/Host values (reverse-proxy domain), comma-separated</td>
+</tr>
+<tr>
+<td><code>CCWEB_ALLOW_UNAUTHENTICATED_REMOTE</code></td>
+<td><code>1</code> → allow a routable bind with auth off (overrides the fail-closed guard)</td>
+</tr>
+<tr>
+<td><code>CCWEB_CSP</code></td>
+<td>override the embedded app&#39;s Content-Security-Policy (<code>off</code>/empty disables it)</td>
+</tr>
+</tbody></table>
+<p>Hub (<code>~/.config/cc-screen-hub/web.env</code>):</p>
+<table>
+<thead>
+<tr>
+<th>key</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CCWEB_ADDR</code></td>
+<td>bind address (default <code>127.0.0.1:8840</code>)</td>
+</tr>
+<tr>
+<td><code>CCWEB_PASSWORD</code> / <code>CCWEB_API_TOKEN</code></td>
+<td>client auth gate</td>
+</tr>
+<tr>
+<td><code>CCHUB_AGENT_TOKENS</code></td>
+<td>per-agent uplink tokens, <code>machine:token,…</code> (empty = open)</td>
+</tr>
+<tr>
+<td><code>CCHUB_ALLOW_OPEN_UPLINK</code></td>
+<td><code>1</code> → allow an empty <code>CCHUB_AGENT_TOKENS</code>. Required for any no-token run, including loopback. Trusted networks/dev only.</td>
+</tr>
+<tr>
+<td><code>CCHUB_DATABASE_URL</code></td>
+<td>set → multi-tenant mode (accounts, enrollment, sharing)</td>
+</tr>
+<tr>
+<td><code>CCHUB_PUBLIC_URL</code></td>
+<td>the hub&#39;s canonical public origin (used by <code>/activate</code> instructions, OAuth, the served installers)</td>
+</tr>
+<tr>
+<td><code>CCWEB_ALLOWED_ORIGINS</code></td>
+<td>extra allowed browser Origin/Host values, comma-separated</td>
+</tr>
+<tr>
+<td><code>CCWEB_ALLOW_UNAUTHENTICATED_REMOTE</code></td>
+<td><code>1</code> → allow a routable bind with client auth off</td>
+</tr>
+<tr>
+<td><code>CCWEB_CSP</code></td>
+<td>override the embedded app&#39;s Content-Security-Policy</td>
+</tr>
+</tbody></table>
+<h2 id="updating">Updating</h2>
+<p>Each binary re-runs its hosted installer and (for the services) restarts onto
+the new build:</p>
+<pre><code class="language-sh">cc-screen-hub  update     # on the hub box
+cc-screen-rust update     # on each machine
+ccs            update     # the TUI
+</code></pre>
+<h2 id="troubleshooting-a-self-hosted-setup">Troubleshooting a self-hosted setup</h2>
+<ul>
+<li><strong>A machine isn&#39;t in the list.</strong> Check the agent&#39;s log for <code>uplink: …</code>; a
+bad token logs &quot;rejected (bad uplink token)&quot; on the hub. The hub&#39;s
+<code>--agents</code> entry name must match the agent&#39;s <code>--machine-id</code>, token and all.</li>
+<li><strong>Browser can&#39;t log in.</strong> The hub needs <code>CCWEB_PASSWORD</code> /
+<code>CCWEB_API_TOKEN</code> set for the gate.</li>
+<li><strong>Off-tailnet over plain http drops the login cookie.</strong> Use a TLS proxy
+that sets <code>X-Forwarded-Proto: https</code> — the cookie is <code>Secure</code>-only then.</li>
+</ul>
+<p>More in <a href="../troubleshooting/">Troubleshooting</a>.</p>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Security model — cc-screen docs</title>
+<meta name="description" content="What the hub can and cannot see, what the agents run with, where credentials live, and the transport rules — cc-screen's security model, honestly stated." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/" aria-current="page">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/" aria-current="page">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="security-model">Security model</h1>
+<p>cc-screen&#39;s security model is short enough to state honestly. This page is
+it — what the hub sees, what the agents do, where the credentials live, and
+what that means for you.</p>
+<h2 id="the-hub-owns-no-terminals-and-no-files">The hub owns no terminals and no files</h2>
+<p>The hub — hosted or self-run — is a <strong>registry and a byte relay</strong>. It holds
+no PTYs, runs no agent code, and has no filesystem access of its own. Every
+file operation executes on the <em>owning machine</em>, inside that machine&#39;s
+home-directory confinement — the hub cannot widen it. What transits the hub
+is the relayed view: terminal bytes, file contents you open, session
+metadata.</p>
+<p>The honest flip side: <strong>whoever controls a hub can drive every machine
+connected to it</strong> — that&#39;s the product working as designed, and it is exactly
+why you choose who runs your hub. Use the hosted one, or
+<a href="../self-hosting/">run your own</a>; the software is the same.</p>
+<h2 id="the-agents-run-yolo-treat-the-machine-accordingly">The agents run YOLO — treat the machine accordingly</h2>
+<p>By default, cc-screen launches the coding CLIs with their approval-bypass
+flags (Claude Code&#39;s is literally named <code>--dangerously-skip-permissions</code>).
+That&#39;s the point of unattended agents — they don&#39;t stop to ask — but it means
+a session can do anything your user account can do on that machine.</p>
+<ul>
+<li>Each session has a <strong>Skip permissions</strong> switch at creation (default on).
+Turn it off for a supervised session; it launches without the bypass flag
+and wears a &quot;safe&quot; badge.</li>
+<li>For real containment, run the machine host <strong>in a container</strong>: the
+container plus its mounted home volume become the sandbox, and a runaway
+agent is confined there. See
+<a href="../self-hosting/#docker">Self-hosting → Docker</a>.</li>
+<li>File operations through cc-screen&#39;s browser/editor are confined to the
+machine user&#39;s home directory. (The CLIs themselves are processes on the
+box — the confinement bounds cc-screen&#39;s file API, not what you ask an
+agent to do.)</li>
+</ul>
+<h2 id="credentials-and-where-they-live">Credentials, and where they live</h2>
+<ul>
+<li><strong>Your account</strong> authenticates to the hub with a password (or Google) and
+rides a signed session cookie. Headless clients (<code>ccs</code>, scripts) use a
+bearer token instead.</li>
+<li><strong>Each machine</strong> has its own uplink credential, minted when you approve its
+enrollment code. It&#39;s stored on the machine at
+<code>~/.config/cc-screen-rust/enroll.json</code>, written with owner-only (<code>0600</code>)
+permissions (on Windows the filesystem&#39;s protections are weaker — the file
+relies on your user profile&#39;s ACLs).</li>
+<li>The two are independent by design: a leaked account password can&#39;t
+impersonate a machine, and a machine&#39;s credential is scoped to that one
+machine — <strong>Rotate</strong> or <strong>Unlink</strong> on the dashboard kills it instantly.</li>
+<li>Enrollment codes (<code>XXXX-XXXX</code>) are short-lived (10 minutes), single-use,
+and approving one requires a logged-in browser — possession of the code
+alone links a machine to <em>your</em> account only if <em>you</em> approve it.</li>
+</ul>
+<h2 id="transport-when-tls-is-required">Transport: when TLS is required</h2>
+<p>The agent fully trusts whatever answers at its hub URL — once connected, it
+executes what the hub sends. So:</p>
+<ul>
+<li><strong>Across the internet, the uplink must be <code>wss://</code></strong> (an <code>https://</code> hub URL
+derives one). Certificates are validated against the standard root store
+and a bad certificate <strong>fails closed</strong> — the agent won&#39;t connect. This is
+what stops anyone from impersonating your hub. The hosted hub is TLS-only.</li>
+<li><strong>On a trusted private network</strong> (a VPN/tailnet), plain <code>ws://</code> is
+acceptable — the network is the authenticated transport.</li>
+</ul>
+<p>Machines connected the standard way accept <strong>no inbound connections at all</strong>:
+the agent runs hub-only, binding no port, only dialing out.</p>
+<h2 id="fail-closed-by-default-self-hosted">Fail-closed by default (self-hosted)</h2>
+<p>The binaries refuse insecure-by-accident setups rather than warning about
+them:</p>
+<ul>
+<li>An agent won&#39;t bind a routable address with auth disabled.</li>
+<li>A hub won&#39;t start with an open uplink (no per-agent tokens) — even on
+loopback, because loopback hubs get fronted by tunnels. Each has an
+explicit env-var override for genuine dev use.</li>
+<li>Both reject cross-origin and DNS-rebinding browser requests independent of
+the auth gate.</li>
+</ul>
+<p>Details and the exact variables: <a href="../self-hosting/">Self-hosting</a>.</p>
+<h2 id="what-we39d-tell-a-security-reviewer">What we&#39;d tell a security reviewer</h2>
+<ul>
+<li>Your code and your CLI logins live on your machines and never rest on the
+hub. The hub relays views of them while you look.</li>
+<li>Session traffic through the hosted hub is TLS in transit, relayed through
+memory.</li>
+<li>The blast radius of a compromised machine credential is that machine; of a
+compromised account, the machines it owns <em>plus anything shared to it</em> —
+scope your shares deliberately (&quot;can view&quot; vs &quot;can use&quot;).</li>
+</ul>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

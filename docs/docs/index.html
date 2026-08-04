@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>What is cc-screen? — cc-screen docs</title>
+<meta name="description" content="Run AI coding agents on your machines and drive them from anywhere — the concepts behind cc-screen in two minutes." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="" aria-current="page">What is cc-screen?</a></li>
+        <li><a href="quickstart/">Quickstart</a></li>
+        <li><a href="install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="web-app/">The web app</a></li>
+        <li><a href="tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="self-hosting/">Self-hosting</a></li>
+        <li><a href="security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="troubleshooting/">Troubleshooting</a></li>
+        <li><a href="faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="" aria-current="page">What is cc-screen?</a></li>
+        <li><a href="quickstart/">Quickstart</a></li>
+        <li><a href="install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="web-app/">The web app</a></li>
+        <li><a href="tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="self-hosting/">Self-hosting</a></li>
+        <li><a href="security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="troubleshooting/">Troubleshooting</a></li>
+        <li><a href="faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="what-is-cc-screen">What is cc-screen?</h1>
+<p>cc-screen keeps a team of AI coding <strong>agents</strong> — Claude Code, Codex, Gemini,
+Kimi — working around the clock on your own computers, and lets you check in on
+any of them from a phone, a browser, or a terminal.</p>
+<p>Four words carry the whole model:</p>
+<ul>
+<li><strong>Machines</strong> are your computers — a laptop, a home server, a cloud box.
+Each one runs a small background process (the cc-screen <em>agent</em>) that you
+install with one command.</li>
+<li><strong>Sessions</strong> are real terminal sessions the agent owns on that machine. A
+session runs one coding CLI (<code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, or a plain
+shell) in a real PTY, so it keeps running whether or not you&#39;re watching.</li>
+<li><strong>Assistants</strong> are the coding CLIs themselves. cc-screen doesn&#39;t replace
+them — it launches, supervises, and reconnects them.</li>
+<li><strong>The hub</strong> at <a href="https://app.ccscreen.dev">app.ccscreen.dev</a> is one address
+in front of all your machines. Each machine dials <em>out</em> to the hub and
+registers; you sign in once and see every machine&#39;s sessions in one list.</li>
+</ul>
+<pre><code>   phone / browser / ccs                  the hub                     your machines
+   ─────────────────────                  ───────                     ─────────────
+        │                                    │                      ┌─ agent (laptop) ── claude, codex …
+        │   one URL (app.ccscreen.dev)       │  ◀── dials out ──────┤
+        └───────────────────────────────────►│  ◀── dials out ──────┼─ agent (server) ── gemini …
+                                             │  ◀── dials out ──────┤
+         relays each request                 │                      └─ agent (pi) ────── kimi …
+         to the owning machine
+</code></pre>
+<p>The hub owns <strong>no terminals and no files</strong> — it&#39;s a registry and a relay. Your
+code, your sessions, and your CLI logins stay on your machines; the hub passes
+bytes between your browser and the machine that owns them. (More in
+<a href="security/">Security model</a>.)</p>
+<p><img src="img/mobile-sessions.png" alt="Every machine&#39;s sessions in one switcher, on a phone"></p>
+<h2 id="what-it-feels-like">What it feels like</h2>
+<ul>
+<li>Start a Claude Code session on your desktop from the bus, watch it work,
+and answer its questions from your phone.</li>
+<li>Keep four agents busy in a multi-pane grid on a laptop, each pane a live
+terminal on a different machine.</li>
+<li>Open the built-in file browser and editor to review what an agent just
+wrote — markdown preview included — without SSH.</li>
+<li>Get a push notification when an agent finishes its turn.</li>
+</ul>
+<h2 id="two-ways-in">Two ways in</h2>
+<ul>
+<li><strong>The web app</strong> — a PWA served by the hub. Works in any browser; add it to
+your phone&#39;s home screen for the app experience.
+See <a href="web-app/">Using the web app</a>.</li>
+<li><strong><code>ccs</code></strong> — a native terminal client with a session switcher and a
+multi-pane grid, for when you live in a terminal anyway.
+See <a href="tui/">The ccs terminal client</a>.</li>
+</ul>
+<h2 id="where-to-go-next">Where to go next</h2>
+<ul>
+<li><strong><a href="quickstart/">Quickstart</a></strong> — signup to your first live session in about
+five minutes.</li>
+<li><strong><a href="self-hosting/">Self-hosting</a></strong> — everything the hosted hub does, you can
+run yourself. Fully supported.</li>
+</ul>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

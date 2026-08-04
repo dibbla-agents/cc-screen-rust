@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>The ccs terminal client — cc-screen docs</title>
+<meta name="description" content="ccs — a native terminal client with a session switcher and a multi-machine grid, for people who live in a terminal." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/" aria-current="page">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/" aria-current="page">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="the-ccs-terminal-client">The ccs terminal client</h1>
+<p><code>ccs</code> is a native terminal app that speaks to the same hub (or to a single
+machine&#39;s agent directly, if you self-host without a hub). A session
+switcher, a multi-pane grid with real scrollback, tmux-style keys — your
+whole fleet without leaving the terminal.</p>
+<p><img src="../img/tui-grid.png" alt="Four sessions in the ccs grid"></p>
+<h2 id="install">Install</h2>
+<pre><code class="language-sh">curl --proto &#39;=https&#39; --tlsv1.2 -LsSf \
+  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
+</code></pre>
+<p>drops <code>ccs</code> into <code>~/.local/bin</code>. It&#39;s a real terminal app — it needs an
+interactive TTY.</p>
+<h2 id="connect">Connect</h2>
+<pre><code class="language-sh">ccs --server https://app.ccscreen.dev --token &lt;token&gt;
+</code></pre>
+<p>The server URL and token are remembered in
+<code>~/.config/cc-screen-tui/config.toml</code>, so from then on plain <code>ccs</code>
+reconnects. The token can also come from <code>api_token</code> in that config file or
+the <code>CCS_API_TOKEN</code> / <code>CCWEB_API_TOKEN</code> environment variables.</p>
+<p>This is the <em>client</em> token — the credential a browser or script uses to talk
+to the hub — not a machine&#39;s uplink credential.</p>
+<p>Self-hosting? Point it at your own endpoint instead:</p>
+<pre><code class="language-sh">ccs --server http://laptop:8839          # one machine&#39;s agent, directly
+ccs --server http://hub:8840 --token …   # your own hub (all machines)
+</code></pre>
+<p>(<code>--insecure</code> accepts a self-signed certificate for an ad-hoc <code>wss</code> setup.)</p>
+<h2 id="using-it">Using it</h2>
+<p><code>ccs</code> opens in the <strong>switcher</strong>: every machine&#39;s sessions in one list, each
+tagged with its machine, plus create / kill / restore actions. Pick sessions
+into the <strong>grid</strong> — the same six layouts as the web app, and panes from
+different machines can sit side by side. Each pane is a full terminal
+emulator with multi-thousand-line scrollback.</p>
+<p>Inside the grid the prefix key is <strong>Ctrl-A</strong> (tmux-style):</p>
+<ul>
+<li><code>Ctrl-A d</code> — open the menu</li>
+<li><code>Ctrl-A</code> then a digit — switch layout</li>
+<li>click or move spatially to focus panes</li>
+</ul>
+<p>Everything else you type goes straight to the focused session&#39;s PTY.</p>
+<h2 id="maintenance">Maintenance</h2>
+<pre><code class="language-sh">ccs update       # fetch the latest ccs build
+ccs uninstall    # remove the ccs binary + config
+ccs --help       # the full flag reference
+</code></pre>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

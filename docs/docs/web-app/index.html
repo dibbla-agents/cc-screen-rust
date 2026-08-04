@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Using the web app — cc-screen docs</title>
+<meta name="description" content="Sessions, the multi-pane grid, the file browser and editor, uploads, notifications, and sharing — a tour of the cc-screen web app." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/" aria-current="page">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/" aria-current="page">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="using-the-web-app">Using the web app</h1>
+<p>Everything at <a href="https://app.ccscreen.dev">app.ccscreen.dev</a> works in any
+browser, phone or desktop. On a phone, use <strong>Add to Home Screen</strong> — cc-screen
+is a PWA, so you get a real app icon, full-screen terminals, and push
+notifications.</p>
+<h2 id="sessions-and-the-switcher">Sessions and the switcher</h2>
+<p>The session drawer lists every session on every connected machine, grouped by
+machine, with a live preview line so you can tell at a glance who&#39;s working
+and who&#39;s waiting for you. Tap a session to attach; the terminal is the real
+PTY — what you see is exactly what&#39;s running on the box, and it keeps running
+when you close the tab.</p>
+<p><strong>New session</strong> starts one: pick the machine, the tool (Claude, Codex,
+Gemini, Kimi, or a plain shell), and the working directory (with a
+directory search, so deep project paths are a few keystrokes). Two details
+worth knowing:</p>
+<p><img src="../img/web-new-session.png" alt="Creating a session — tool, directory, options"></p>
+<ul>
+<li><strong>Skip permissions</strong> (on by default) launches the CLI with its
+approval-bypass flag — the agent won&#39;t stop to ask before running tools.
+Turn it off for a session you want to supervise; sessions with it off wear
+a &quot;safe&quot; badge.</li>
+<li>Sessions survive you. Closing the browser, losing signal, even the machine
+rebooting — the agent resumes its sessions and your panes re-attach.</li>
+</ul>
+<h2 id="the-grid-desktop">The grid (desktop)</h2>
+<p>On a wide screen you can tile up to six sessions side by side, in six layout
+templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
+from <em>different machines</em> — one grid, your whole fleet. There&#39;s a layout
+palette to switch arrangements, and each pane is a full live terminal.</p>
+<h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
+<p>Every machine gets a built-in file browser and editor, confined to that
+machine&#39;s home directory. The tree is live (it follows filesystem changes as
+your agent works), and the editor previews markdown — handy for reading the
+plan or review docs agents produce.</p>
+<p><img src="../img/web-cowork.png" alt="Coworking on a file next to a live session"></p>
+<p><img src="../img/mobile-editor.png" alt="The editor on a phone"></p>
+<ul>
+<li><strong>Uploads:</strong> drop files (up to 500 MiB) onto a machine from the browser.</li>
+<li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude
+session — cc-screen stages it on the machine so the CLI can read it, as if
+you&#39;d pasted locally.</li>
+<li><strong>Downloads:</strong> pull any file back out, PDFs render in-app.</li>
+</ul>
+<h2 id="notifications">Notifications</h2>
+<p>Enable notifications (the bell button) and your phone buzzes when an agent
+<strong>finishes its turn</strong> — the moment it stops working and waits for your input.
+One subscription covers every machine; the machine&#39;s name is in the title. On
+iOS this requires the PWA installed to the home screen.</p>
+<h2 id="sharing">Sharing</h2>
+<p>Share a whole machine (from its dashboard row) or a single session (from its
+menu) with another person, as <strong>can view</strong> or <strong>can use</strong>:</p>
+<ul>
+<li>If they already have an account, the share lands in their inbox (the bell
+icon) to accept or decline.</li>
+<li>If they don&#39;t, you get an invite link to send them — the share attaches
+automatically when they sign up with that email.</li>
+</ul>
+<p>You can see everything shared by you and with you on the dashboard&#39;s
+<strong>Sharing</strong> card, and revoke (or leave) any of it there. Access stops
+immediately on revoke.</p>
+<h2 id="the-dashboard">The dashboard</h2>
+<p>The machines dashboard (your account page) is the admin surface:</p>
+<ul>
+<li><strong>online/offline</strong> per machine, live.</li>
+<li><strong>⚠ N missing · Install</strong> — the machine lacks some coding assistants;
+installs them remotely, for that machine&#39;s user, no sudo.</li>
+<li><strong>Update</strong> — update a machine&#39;s assistants, then restart their sessions.</li>
+<li><strong>Share</strong> — invite someone to the machine.</li>
+<li><strong>Rotate</strong> — mint a new machine credential (the old one stops working;
+shown once).</li>
+<li><strong>Unlink</strong> — detach the machine from your account; it would need to
+re-enroll to come back.</li>
+<li><strong>Add a machine</strong> — generates the install one-liner for macOS/Linux or
+Windows. See the <a href="../quickstart/">Quickstart</a>.</li>
+</ul>
+<p>If you hit your plan&#39;s machine or session limit, the app tells you which cap
+you hit and how to request more — see the <a href="../faq/">FAQ</a> on plans.</p>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

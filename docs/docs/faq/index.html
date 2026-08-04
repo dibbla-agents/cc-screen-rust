@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FAQ — cc-screen docs</title>
+<meta name="description" content="Short answers — pricing, plans, supported CLIs, phones, privacy, and what happens when things restart." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/" aria-current="page">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/" aria-current="page">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="faq">FAQ</h1>
+<h2 id="is-it-free">Is it free?</h2>
+<p>During the beta, yes. Every account starts on the <strong>free</strong> plan — up to 10
+machines and 50 concurrent sessions, which is generous on purpose. Higher
+plans exist (pro: 100 machines / 500 sessions, and unlimited) and are
+currently enabled manually — if you hit a limit, ask. There is no billing
+machinery today.</p>
+<h2 id="which-coding-clis-are-supported">Which coding CLIs are supported?</h2>
+<p><strong>Claude Code</strong> (<code>claude</code>), <strong>Codex</strong> (<code>codex</code>), <strong>Gemini CLI</strong> (<code>gemini</code>),
+and <strong>Kimi</strong> (<code>kimi</code>) — plus a plain <strong>shell</strong> session, which is just your
+shell on the box and always available. A machine only offers the CLIs it
+actually has installed; the installer&#39;s <code>--assistants</code> flag (and the
+dashboard&#39;s Install button) can install the missing ones. Self-hosters can
+also declare custom tools per machine.</p>
+<h2 id="where-does-my-code-live-what-does-the-hub-see">Where does my code live? What does the hub see?</h2>
+<p>On your machines, full stop. The hub stores your account, your machine
+registrations, and sharing grants — never your repositories or your CLI
+logins. What passes <em>through</em> it is the relayed view: the terminal bytes and
+file contents you&#39;re currently looking at. See
+<a href="../security/">Security model</a>.</p>
+<h2 id="what-happens-when-the-hub-restarts">What happens when the hub restarts?</h2>
+<p>Nothing, from your sessions&#39; point of view. Your machines own their sessions;
+the hub is a relay. Agents reconnect automatically and the session list comes
+back. Same answer for your phone losing signal or your browser closing —
+sessions run server-side on <em>your</em> box, not in the browser tab.</p>
+<h2 id="and-when-the-machine-itself-reboots">And when the machine itself reboots?</h2>
+<p>The agent starts on boot (it&#39;s a background service) and resumes its recorded
+sessions with each CLI&#39;s own resume flag — Claude Code sessions come back
+with their conversation intact via <code>--continue</code>.</p>
+<h2 id="can-i-use-cc-screen-without-the-hosted-service">Can I use cc-screen without the hosted service?</h2>
+<p>Yes — fully. Run a single agent and connect to it directly, or run your own
+hub (even your own multi-tenant hub with signup and enrollment). Same
+binaries, no feature gap in the core product. See
+<a href="../self-hosting/">Self-hosting</a>.</p>
+<h2 id="can-i-share-access-with-a-teammate">Can I share access with a teammate?</h2>
+<p>Yes — share a whole machine or a single session, as &quot;can view&quot; or &quot;can use&quot;.
+If the invitee has no account yet, you get an invite link to send them; the
+share attaches when they sign up with that email. Revoke any time from the
+dashboard&#39;s Sharing card. See
+<a href="../web-app/#sharing">Using the web app → Sharing</a>.</p>
+<h2 id="does-it-work-on-phones">Does it work on phones?</h2>
+<p>That&#39;s half the point. The web app is a PWA — <strong>Add to Home Screen</strong> gives
+you an app icon, full-screen terminals sized to the phone, the file
+browser/editor, and push notifications when an agent finishes its turn (on
+iOS, notifications require the home-screen install).</p>
+<h2 id="what-are-the-codes-like-wdjb-mjht">What are the codes like <code>WDJB-MJHT</code>?</h2>
+<p>One-time machine-activation codes. The installer prints one; you approve it
+at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> while
+signed in, which links the machine to your account. They expire after 10
+minutes and the installer auto-requests a fresh one, so an expired code costs
+nothing.</p>
+<h2 id="is-cc-screen-open-source-what39s-it-built-with">Is cc-screen open source? What&#39;s it built with?</h2>
+<p>The code lives at
+<a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.
+The agent, hub, and terminal client are Rust; the web app is React, embedded
+into the binaries so there&#39;s nothing separate to deploy.</p>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

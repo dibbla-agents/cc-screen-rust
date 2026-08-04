@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Troubleshooting — cc-screen docs</title>
+<meta name="description" content="Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, and proxy 403s." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/" aria-current="page">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/" aria-current="page">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="troubleshooting">Troubleshooting</h1>
+<p>Symptom first, fix second. Self-hosting problems (uplink tokens, TLS,
+binds) have their own section on the <a href="../self-hosting/">Self-hosting</a> page.</p>
+<h2 id="the-activation-code-expired">&quot;The activation code expired&quot;</h2>
+<p>Codes live <strong>10 minutes</strong>. There&#39;s nothing to redo: the installer notices the
+expiry and prints a fresh code by itself —</p>
+<pre><code>  Code expired before approval — requesting a new one…
+</code></pre>
+<p>— so just enter the new one at
+<a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a>. If you closed
+the installer, re-run the one-liner; it&#39;s idempotent.</p>
+<h2 id="approve-machine-says-login-required">&quot;Approve machine&quot; says login required</h2>
+<p>Approving binds the machine to <em>your</em> account, so the browser on <code>/activate</code>
+must be signed in. Sign in first, then enter the code — on the same site,
+any device.</p>
+<h2 id="a-session-fails-to-start-an-assistant-isn39t-offered">A session fails to start / an assistant isn&#39;t offered</h2>
+<p>The machine doesn&#39;t have that coding CLI installed. cc-screen tells you
+rather than launching a doomed session: the picker greys the tool out, and
+the machine&#39;s dashboard row shows <strong>⚠ N missing · Install</strong> — click it to
+install the missing CLIs remotely (for that machine&#39;s user, no sudo). On the
+box itself, the equivalent is:</p>
+<pre><code class="language-sh">cc-screen-rust doctor                  # what&#39;s installed, and where
+cc-screen-rust doctor --install --yes  # install everything missing
+</code></pre>
+<p>On Windows, remember Codex and Gemini need Node.js first — see
+<a href="../install-windows/">Install on Windows</a>.</p>
+<h2 id="a-machine-shows-offline">A machine shows offline</h2>
+<p>Its agent&#39;s connection to the hub dropped — the box is asleep, offline, or
+rebooting. Nothing is lost: the agent owns its sessions locally, keeps them
+running, and reconnects with backoff the moment it can. Sessions re-attach by
+themselves. If it stays offline, check that the machine is actually up and
+that the background service is running (<code>systemctl --user status cc-screen-rust</code> on Linux).</p>
+<h2 id="machine-limit-reached-for-your-plan">&quot;Machine limit reached for your plan&quot;</h2>
+<p>You hit your plan&#39;s cap (free: 10 machines, 50 concurrent sessions). The app
+shows which cap you hit and your current plan. Unlink a machine (or stop a
+session) you no longer need, or request an upgrade — plans are free during
+the beta and upgrades are handled manually, so it&#39;s a short email, not a
+checkout.</p>
+<h2 id="assistants-are-outdated">Assistants are outdated</h2>
+<p>Use the <strong>Update</strong> button on the machine&#39;s dashboard row — it updates the
+CLIs first (a failed update leaves the machine untouched), then gracefully
+restarts the sessions that use them, and your panes re-attach under the same
+names. On the box: <code>cc-screen-rust doctor --update</code> (updates the CLIs only,
+restarts nothing).</p>
+<h2 id="notifications-don39t-arrive">Notifications don&#39;t arrive</h2>
+<ul>
+<li>On iOS, Web Push only works for a PWA <strong>installed to the home screen</strong> —
+the notifications button hides until then.</li>
+<li>Re-check the permission: the bell button shows whether the subscription is
+active, and has a &quot;send a test&quot; action.</li>
+</ul>
+<h2 id="the-page-looks-stale-after-an-update">The page looks stale after an update</h2>
+<p>The web app is a PWA; after a deploy the service worker can serve the old
+bundle for one more load. Close and reopen the app (or reload twice).</p>
+<h2 id="browser-gets-403-behind-my-own-proxy-self-host">Browser gets 403 behind my own proxy (self-host)</h2>
+<p>Your hub rejects unknown browser origins as an anti-DNS-rebinding measure.
+Add your domain to <code>CCWEB_ALLOWED_ORIGINS</code> — see
+<a href="../self-hosting/#off-tailnet-access-tls-required">Self-hosting</a>.</p>
+<h2 id="still-stuck">Still stuck?</h2>
+<p>Check the <a href="../faq/">FAQ</a>, or open an issue at
+<a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.</p>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Homepage only for now; proposal 0055 extends this with the /docs/ pages. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://ccscreen.dev/</loc>
+  </url>
+</urlset>

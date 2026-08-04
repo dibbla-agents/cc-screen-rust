@@ -1,0 +1,299 @@
+/* docs.css — the cc-screen docs shell (proposal 0055).
+   Mobile-first, mirroring the marketing site's palette (site/web/src/index.css)
+   without importing its Tailwind build. */
+
+:root {
+  --bg: #060e09;
+  --surface: #0a1510;
+  --card: rgba(118, 179, 96, 0.055);
+  --line: rgba(118, 179, 96, 0.2);
+  --line-soft: rgba(118, 179, 96, 0.12);
+  --ink: #edf3ea;
+  --dim: #9db098;
+  --faint: #5f7060;
+  --green: #76b360;
+  --green-soft: #8ac471;
+  --green-light: #a4d48f;
+  --sans: "Hanken Grotesk", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg);
+  background-image: radial-gradient(
+    56rem 30rem at 50% -10rem,
+    rgba(118, 179, 96, 0.12),
+    transparent 70%
+  );
+  background-repeat: no-repeat;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+}
+
+a {
+  color: var(--green-soft);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--green-light);
+  text-decoration: underline;
+}
+
+/* ── header ─────────────────────────────────────────────────────────────── */
+.docs-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.wordmark {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+.wordmark:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+.wordmark .prompt {
+  color: var(--green);
+}
+.docs-tag {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--faint);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 0.08rem 0.45rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.signin {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--green-soft);
+  padding: 0.5rem 0.7rem; /* ≥40px tap target with the line-height */
+}
+
+/* ── layout: single column on mobile, sidebar ≥900px ────────────────────── */
+.docs-layout {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1rem 1.1rem 2rem;
+}
+
+.docs-nav .nav-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  margin: 1rem 0 0.35rem;
+}
+.docs-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.docs-nav li a {
+  display: block;
+  padding: 0.45rem 0.6rem; /* comfortable tap target */
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 0.92rem;
+}
+.docs-nav li a:hover {
+  color: var(--ink);
+  background: var(--card);
+  text-decoration: none;
+}
+.docs-nav li a[aria-current="page"] {
+  color: var(--green-light);
+  background: var(--card);
+  font-weight: 600;
+}
+
+/* mobile: the nav is a <details> disclosure above the content */
+.mobile-nav {
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 0.2rem 0.8rem;
+  margin-bottom: 1.25rem;
+}
+.mobile-nav summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--green-soft);
+  padding: 0.6rem 0;
+}
+.mobile-nav nav {
+  padding-bottom: 0.6rem;
+}
+.desktop-nav {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .docs-layout {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 1fr);
+    gap: 2.5rem;
+    padding-top: 1.5rem;
+  }
+  .mobile-nav {
+    display: none;
+  }
+  .desktop-nav {
+    display: block;
+    position: sticky;
+    top: 1.5rem;
+    align-self: start;
+    max-height: calc(100vh - 3rem);
+    overflow-y: auto;
+    padding-right: 0.5rem;
+  }
+  .docs-content {
+    max-width: 72ch;
+  }
+}
+
+/* ── content typography ─────────────────────────────────────────────────── */
+.docs-content h1,
+.docs-content h2,
+.docs-content h3,
+.docs-content h4 {
+  font-family: var(--mono);
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  scroll-margin-top: 1rem;
+}
+.docs-content h1 {
+  font-size: 1.65rem;
+  margin: 0.5rem 0 1rem;
+}
+.docs-content h2 {
+  font-size: 1.2rem;
+  margin: 2.2rem 0 0.6rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line-soft);
+}
+.docs-content h3 {
+  font-size: 1rem;
+  margin: 1.6rem 0 0.4rem;
+  color: var(--green-soft);
+}
+.docs-content p,
+.docs-content li {
+  color: var(--dim);
+}
+.docs-content strong {
+  color: var(--ink);
+}
+.docs-content hr {
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  margin: 2rem 0;
+}
+
+/* code: inline + fenced. Horizontal scroll stays INSIDE the block. */
+.docs-content code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--green-light);
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 0.1em 0.35em;
+}
+.docs-content pre {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+}
+.docs-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+/* tables (the env-var references) scroll inside their own container */
+.docs-content table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.docs-content th,
+.docs-content td {
+  text-align: left;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--line-soft);
+  color: var(--dim);
+}
+.docs-content th {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--card);
+  white-space: nowrap;
+}
+
+.docs-content blockquote {
+  margin: 1rem 0;
+  padding: 0.1rem 1rem;
+  border-left: 3px solid var(--green);
+  background: var(--card);
+  border-radius: 0 10px 10px 0;
+}
+
+/* ── footer ─────────────────────────────────────────────────────────────── */
+.docs-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.2rem 1.1rem 2.2rem;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}

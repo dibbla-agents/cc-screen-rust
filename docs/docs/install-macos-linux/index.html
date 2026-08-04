@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Install on macOS / Linux — cc-screen docs</title>
+<meta name="description" content="What the one-line installer does on macOS and Linux, step by step — and how to update, re-run, and uninstall." />
+<meta name="theme-color" content="#060e09" />
+<link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="../docs.css" />
+</head>
+<body>
+<header class="docs-header">
+  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <span class="docs-tag">docs</span>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+</header>
+<div class="docs-layout">
+  <details class="docs-nav mobile-nav">
+    <summary>On this site</summary>
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/" aria-current="page">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </details>
+  <aside class="docs-nav desktop-nav">
+    <nav>
+      <div class="nav-section">
+        <div class="nav-label">Getting started</div>
+        <ul>
+        <li><a href="../">What is cc-screen?</a></li>
+        <li><a href="../quickstart/">Quickstart</a></li>
+        <li><a href="../install-macos-linux/" aria-current="page">Install — macOS / Linux</a></li>
+        <li><a href="../install-windows/">Install — Windows</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Using cc-screen</div>
+        <ul>
+        <li><a href="../web-app/">The web app</a></li>
+        <li><a href="../tui/">The ccs terminal client</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Running your own</div>
+        <ul>
+        <li><a href="../self-hosting/">Self-hosting</a></li>
+        <li><a href="../security/">Security model</a></li>
+        </ul>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Help</div>
+        <ul>
+        <li><a href="../troubleshooting/">Troubleshooting</a></li>
+        <li><a href="../faq/">FAQ</a></li>
+        </ul>
+      </div>
+    </nav>
+  </aside>
+  <main class="docs-content">
+<h1 id="install-on-macos-linux">Install on macOS / Linux</h1>
+<p>One command connects a machine to your account (replace <code>&lt;machine-name&gt;</code>,
+e.g. <code>my-laptop</code>):</p>
+<pre><code class="language-sh">curl -fsSL https://app.ccscreen.dev/install.sh | sh -s -- &lt;machine-name&gt; --assistants
+</code></pre>
+<p>If you skip the name, the machine is named after its hostname. The
+<a href="https://app.ccscreen.dev">dashboard</a> generates this exact command on the
+<strong>Add a machine</strong> card, so you rarely type it by hand.</p>
+<p>This page explains what that script actually does, in the order it does it.</p>
+<h2 id="1-the-binary">1. The binary</h2>
+<p>The script downloads the latest <code>cc-screen-rust</code> release for your platform
+(macOS arm64/x64 and Linux are auto-detected) and installs it to
+<code>~/.local/bin/cc-screen-rust</code>. No sudo, no system package manager.</p>
+<h2 id="2-the-coding-assistants">2. The coding assistants</h2>
+<p>cc-screen <em>drives</em> the coding CLIs — it doesn&#39;t bundle them — so the installer
+checks which of <code>claude</code>, <code>codex</code>, <code>gemini</code>, and <code>kimi</code> this machine has:</p>
+<ul>
+<li><strong><code>--assistants</code></strong> — install every missing one, non-interactively, for your
+user only. Everything lands under <code>$HOME/.local</code>; there is no sudo anywhere
+in the path. Budget several hundred MB.</li>
+<li><strong><code>--assistants=claude,codex</code></strong> — install just those.</li>
+<li><strong><code>--no-assistants</code></strong> (or no flag) — report only: each missing CLI is
+listed with the command that would install it, and nothing is installed.</li>
+</ul>
+<p>A missing assistant never aborts the install — a machine with only <code>claude</code>
+is a perfectly good machine for Claude sessions. You can install the rest
+later from the dashboard (the machine row shows <em>&quot;N missing · Install&quot;</em>) or on
+the box:</p>
+<pre><code class="language-sh">cc-screen-rust doctor                     # report what&#39;s installed, and where
+cc-screen-rust doctor --install --yes     # install everything missing
+</code></pre>
+<h2 id="3-enrollment">3. Enrollment</h2>
+<p>The installer prints a short code (like <code>WDJB-MJHT</code>) and waits. You approve it
+at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> from any
+logged-in browser. Codes live 10 minutes; an expired code is replaced with a
+fresh one automatically.</p>
+<p>On approval the machine receives its own credential, stored at
+<code>~/.config/cc-screen-rust/enroll.json</code> with owner-only permissions. It&#39;s
+scoped to this one machine — see <a href="../security/">Security model</a>.</p>
+<h2 id="4-the-background-service">4. The background service</h2>
+<p>Finally the script registers a background service — systemd <code>--user</code> on
+Linux, launchd on macOS — that starts the agent now and on every boot. The
+service runs in <strong>hub-only</strong> mode: the agent opens no local port at all, it
+only dials out to the hub. Sessions you had running are resumed after a
+restart.</p>
+<h2 id="updating">Updating</h2>
+<p>Re-running the one-liner is safe and is also the update path — it replaces
+the binary and restarts the service; the machine keeps its identity (no new
+code to approve). Or, on the box:</p>
+<pre><code class="language-sh">cc-screen-rust update           # update the agent itself
+cc-screen-rust doctor --update  # update the coding assistants it drives
+</code></pre>
+<p>You can also update assistants per machine from the dashboard&#39;s <strong>Update</strong>
+button, which restarts the affected sessions for you.</p>
+<h2 id="uninstalling">Uninstalling</h2>
+<pre><code class="language-sh">cc-screen-rust uninstall
+</code></pre>
+<p>removes the service and the binary. To also detach the machine from your
+account, hit <strong>Unlink</strong> on its dashboard row (in either order — an unlinked
+machine&#39;s credential simply stops working).</p>
+
+  </main>
+</div>
+<footer class="docs-footer">
+  <span>v0.3.59 — docs track the latest release</span>
+  <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
+</footer>
+</body>
+</html>
