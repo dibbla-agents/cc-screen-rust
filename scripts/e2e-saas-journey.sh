@@ -66,7 +66,13 @@ if [ "${1:-}" = "--gate" ]; then
         -e 's/:true/:B/g' -e 's/:false/:B/g'
   }
 
-  say "gate 1/3: account enumeration — existing vs fresh email must be indistinguishable"
+  say "gate 1/3: account enumeration — the duplicate-email failure must be generic"
+  # A create-account endpoint that succeeds by minting a session cannot make
+  # success and duplicate-email byte-identical without an email-verification
+  # step (v1 ships no mailer), so the P0 bar (0053 Part E / 0042) is: every
+  # server-side signup failure — duplicate email included — answers with ONE
+  # generic status + body that never confirms the address exists, and the
+  # per-IP throttle (gate 3) bounds probing. Assert exactly that.
   # Setup: mint an account so an "existing email" exists.
   setup="$(post_json /api/signup "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")"
   setup_status="$(printf '%s' "$setup" | head -1)"
@@ -75,22 +81,29 @@ if [ "${1:-}" = "--gate" ]; then
     *) fail "gate setup: signup for $EMAIL answered $setup_status — cannot run the enumeration probe
        ($(printf '%s' "$setup" | tail -1))" ;;
   esac
-  fresh="e2e+$(date +%s)-fresh@ccscreen.dev"
   r_dup="$(post_json /api/signup "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")"
-  r_new="$(post_json /api/signup "{\"email\":\"$fresh\",\"password\":\"$PW\"}")"
+  r_dup2="$(post_json /api/signup "{\"email\":\"$EMAIL\",\"password\":\"${PW}x\"}")"
   dup_status="$(printf '%s' "$r_dup" | head -1)"
-  new_status="$(printf '%s' "$r_new" | head -1)"
+  dup2_status="$(printf '%s' "$r_dup2" | head -1)"
+  dup_body="$(printf '%s' "$r_dup" | tail -1)"
   dup_shape="$(printf '%s' "$r_dup" | tail -1 | shape)"
-  new_shape="$(printf '%s' "$r_new" | tail -1 | shape)"
-  if [ "$dup_status" = "$new_status" ] && [ "$dup_shape" = "$new_shape" ]; then
-    echo "PASS: existing-email and fresh-email signups are indistinguishable (status $dup_status, same body shape)"
+  dup2_shape="$(printf '%s' "$r_dup2" | tail -1 | shape)"
+  gate1_ok=1
+  # (a) stable: two duplicate attempts (different passwords) answer identically
+  [ "$dup_status" = "$dup2_status" ] && [ "$dup_shape" = "$dup2_shape" ] || gate1_ok=0
+  # (b) generic: the body never linguistically confirms the address exists
+  if printf '%s' "$dup_body" | grep -qiE "exists|in use|taken|already registered|duplicate"; then
+    gate1_ok=0
+  fi
+  if [ "$gate1_ok" = 1 ]; then
+    echo "PASS: duplicate-email failure is the generic server-failure answer (status $dup_status), no existence wording"
   else
-    echo "FAIL: signup leaks account existence:"
-    echo "  existing email → $dup_status  $(printf '%s' "$r_dup" | tail -1)"
-    echo "  fresh email    → $new_status  $(printf '%s' "$r_new" | tail -1)"
+    echo "FAIL: duplicate-email signup is distinguishable from the generic failure:"
+    echo "  attempt 1 → $dup_status  $dup_body"
+    echo "  attempt 2 → $dup2_status  $(printf '%s' "$r_dup2" | tail -1)"
     gate_rc=1
   fi
-  echo "(teardown: the probe created account(s) $EMAIL / possibly $fresh)"
+  echo "(teardown: the probe created account $EMAIL)"
 
   say "gate 2/3: password policy — a 9-char password on public signup must be rejected"
   weak="e2e+$(date +%s)-weak@ccscreen.dev"
