@@ -36,7 +36,7 @@ has a copy button). **GitHub** has the source and releases.
 ## Notes
 
 - The page itself is static and public. Accounts live on the hosted hub at
-  app.ccscreen.dev (signing up there is free during the beta); self-hosting
+  app.ccscreen.dev (there's a free plan, no card required); self-hosting
   needs no account at all.
 - The canonical source for this content lives in `site/web/` of the
   [cc-screen-rust repository](https://github.com/dibbla-agents/cc-screen-rust);

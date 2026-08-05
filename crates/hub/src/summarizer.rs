@@ -107,9 +107,11 @@ impl Summarizer {
 
     /// Per-user pre-check: would another call fit `user`'s ceiling? Commits the
     /// reservation when it fits. A tiny concurrent overshoot is acceptable for an
-    /// abuse cap. Always true when no per-user cap is set or `user` is None.
-    fn try_reserve_user(&self, user: Option<&str>) -> bool {
-        let (Some(budget), Some(user)) = (self.user_budget_usd, user) else { return true };
+    /// abuse cap. Always true when the resolved `budget` is `None` or `user` is
+    /// None. The caller passes the RESOLVED ceiling (proposal 0058 A4: min of the
+    /// plan budget and the config `user_budget_usd`), not `self.user_budget_usd`.
+    fn try_reserve_user(&self, user: Option<&str>, budget: Option<f64>) -> bool {
+        let (Some(budget), Some(user)) = (budget, user) else { return true };
         let cap_micros = (budget * 1_000_000.0) as u64;
         let mut m = self.per_user_micros.lock().unwrap();
         let spent = m.entry(user.to_string()).or_insert(0);
@@ -128,21 +130,40 @@ impl Summarizer {
     /// Gate + (if allowed) call Haiku. Never panics; failures are logged and
     /// mapped to [`Outcome::Failed`] so the uplink reader keeps running.
     pub async fn summarize(&self, inputs: &[String], tail: &str) -> Outcome {
-        self.summarize_for(None, inputs, tail).await
+        self.summarize_for(None, None, inputs, tail).await
+    }
+
+    /// Resolve the effective per-user ceiling (proposal 0058 A4): the config
+    /// `user_budget_usd` is both a **fallback** (used when the plan column is
+    /// `None`) and a **hard cap** (the min when both are set). `None` from both →
+    /// no per-user cap.
+    fn effective_user_budget(&self, plan_budget_usd: Option<f64>) -> Option<f64> {
+        match (plan_budget_usd, self.user_budget_usd) {
+            (Some(p), Some(c)) => Some(p.min(c)),
+            (Some(p), None) => Some(p),
+            (None, c) => c,
+        }
     }
 
     /// Like [`summarize`], but also charges the per-tenant ceiling (§10.6.2) when
-    /// `owner` is `Some` and a per-user budget is configured. Both the fleet-wide
-    /// and the per-user cap must have room. Single-tenant passes `None` → only the
-    /// fleet budget applies, exactly as before.
-    pub async fn summarize_for(&self, owner: Option<&str>, inputs: &[String], tail: &str) -> Outcome {
+    /// `owner` is `Some`. `plan_budget_usd` is the caller-resolved per-plan ceiling
+    /// (proposal 0058 A4); it is combined with the config value (min, config as
+    /// fallback) before the reservation. Single-tenant passes `None`/`None` → only
+    /// the fleet budget applies, exactly as before.
+    pub async fn summarize_for(
+        &self,
+        owner: Option<&str>,
+        plan_budget_usd: Option<f64>,
+        inputs: &[String],
+        tail: &str,
+    ) -> Outcome {
         let Some(key) = self.api_key.as_deref() else { return Outcome::Declined };
         if !self.enabled {
             return Outcome::Declined;
         }
         // Per-user ceiling first (so a maxed-out tenant never touches the fleet
         // tally), then the fleet-wide budget.
-        if !self.try_reserve_user(owner) {
+        if !self.try_reserve_user(owner, self.effective_user_budget(plan_budget_usd)) {
             tracing::warn!("summary: user {:?} over per-user budget; declining", owner);
             return Outcome::Declined;
         }
@@ -195,19 +216,32 @@ mod tests {
 
     #[test]
     fn per_user_gate_isolates_tenants() {
-        // One call's worth per user; the fleet budget is uncapped.
+        // One call's worth per user; the fleet budget is uncapped. The ceiling is
+        // now passed in explicitly (proposal 0058 A4).
         let micros = EST_CALL_MICROS as f64 / 1_000_000.0;
         let s = Summarizer::new(true, Some("k".into()), "m".into(), None, Some(micros));
+        let cap = Some(micros);
         // alice spends her allowance; her second call is refused…
-        assert!(s.try_reserve_user(Some("alice")));
-        assert!(!s.try_reserve_user(Some("alice")), "alice is now capped");
+        assert!(s.try_reserve_user(Some("alice"), cap));
+        assert!(!s.try_reserve_user(Some("alice"), cap), "alice is now capped");
         // …but bob is unaffected (per-tenant isolation).
-        assert!(s.try_reserve_user(Some("bob")));
-        // No owner / no per-user budget → always reserves.
-        assert!(s.try_reserve_user(None));
+        assert!(s.try_reserve_user(Some("bob"), cap));
+        // No owner / no ceiling → always reserves.
+        assert!(s.try_reserve_user(None, cap));
+        assert!(s.try_reserve_user(Some("carol"), None));
+    }
+
+    #[test]
+    fn effective_user_budget_takes_min_and_falls_back() {
+        // Config set: it is a fallback (plan None → config) and a hard cap (min).
+        let s = Summarizer::new(true, Some("k".into()), "m".into(), None, Some(1.0));
+        assert_eq!(s.effective_user_budget(None), Some(1.0), "plan NULL → config fallback");
+        assert_eq!(s.effective_user_budget(Some(2.0)), Some(1.0), "config caps a bigger plan");
+        assert_eq!(s.effective_user_budget(Some(0.25)), Some(0.25), "smaller plan wins the min");
+        // No config: the plan value applies as-is, or uncapped when both are None.
         let s2 = Summarizer::new(true, Some("k".into()), "m".into(), None, None);
-        assert!(s2.try_reserve_user(Some("alice")));
-        assert!(s2.try_reserve_user(Some("alice")));
+        assert_eq!(s2.effective_user_budget(Some(0.25)), Some(0.25));
+        assert_eq!(s2.effective_user_budget(None), None, "both None → uncapped");
     }
 
     #[tokio::test]

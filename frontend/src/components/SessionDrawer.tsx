@@ -97,6 +97,9 @@ interface Props {
   // (proposal 0056 B2), threaded through to CreateSession.
   plan?: MePlan;
   supportEmail?: string;
+  // Whether Stripe billing is configured (proposal 0058 C2) — flips the create
+  // form's 402 card action from a mailto to a checkout button.
+  billing?: boolean;
   // A one-shot machine seed (proposal 0056 A1/A2): when set, the drawer opens
   // straight into create mode pre-scoped to that machine, then reports it
   // consumed. Only the main drawer instance receives it.
@@ -134,6 +137,7 @@ export type PaneSwitcherProps = Pick<
   | "multiTenant"
   | "plan"
   | "supportEmail"
+  | "billing"
 >;
 
 // A navigable item the keyboard cursor can land on (proposal 0011, generalized
@@ -206,6 +210,7 @@ export default function SessionDrawer({
   multiTenant = false,
   plan,
   supportEmail,
+  billing,
   createSeed,
   onSeedConsumed,
 }: Props) {
@@ -549,6 +554,7 @@ export default function SessionDrawer({
           recentDirs={recentDirs}
           plan={plan}
           supportEmail={supportEmail}
+          billing={billing}
           onBack={() => {
             setMode("list");
             setSeedMachine(null);

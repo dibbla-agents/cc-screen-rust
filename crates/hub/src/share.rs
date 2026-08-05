@@ -60,6 +60,18 @@ pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
+    // Plan gate (proposal 0058 A3): creating shares/invites is a paid capability;
+    // receiving is not — inbox/accept/decline/received/leave/revoke and the
+    // invite-link read stay ungated. 402 mirrors the session-cap gate; no "LIMIT:"
+    // prefix (that only exists to cross the Store trait's anyhow boundary).
+    if !hub.limits_for(&actor).await.can_create_shares {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            "Sharing your machines is a Pro feature. You can still accept shares others send you."
+                .to_string(),
+        )
+            .into_response();
+    }
     let session = req.session.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let kind = if session.is_some() { "session" } else { "agent" };
 

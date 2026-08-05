@@ -51,6 +51,9 @@ interface Props {
   // Absent on single-tenant — the card still renders a generic cap message.
   plan?: MePlan;
   supportEmail?: string;
+  // Whether Stripe billing is configured on this hub (proposal 0058 C2) — flips
+  // the session-cap 402 card's action from a mailto to a checkout button.
+  billing?: boolean;
 }
 
 function basename(p: string): string {
@@ -90,6 +93,7 @@ export default function CreateSession({
   onInstallTool,
   plan,
   supportEmail,
+  billing,
 }: Props) {
   const [tools, setTools] = useState<Tool[]>([]);
   const [tool, setTool] = useState<string>("");
@@ -464,7 +468,7 @@ export default function CreateSession({
       {err && <div className="border-b border-edge/40 px-3 py-1.5 text-[12px] text-red-400">{err}</div>}
       {limitHit && (
         <div className="border-b border-edge/40 px-3 pb-2">
-          <LimitCard plan={plan} what="sessions" support={supportEmail} />
+          <LimitCard plan={plan} what="sessions" support={supportEmail} billing={billing} />
         </div>
       )}
 

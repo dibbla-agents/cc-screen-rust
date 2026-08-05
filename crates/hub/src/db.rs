@@ -108,6 +108,65 @@ pub trait Store: Send + Sync {
     /// plan isn't one of the `plan_limits` rows.
     async fn set_plan(&self, email: &str, plan: &str) -> anyhow::Result<()>;
 
+    // ── billing (proposal 0058 Part B) ─────────────────────────────────────────
+    /// Record a Stripe event id for exactly-once processing (`INSERT … ON
+    /// CONFLICT(id) DO NOTHING`). Returns `rows_affected`: 1 for the first
+    /// delivery, 0 for a replay. Standalone (reconcile/tests); the webhook uses
+    /// [`Store::billing_process_event`] so the insert shares the state change's
+    /// transaction.
+    async fn billing_event_insert(&self, id: &str, payload_hash: &str, received_at: i64) -> anyhow::Result<u64>;
+
+    /// `(billing_customer_id, billing_subscription_id)` for a user — the checkout
+    /// (reuse a known customer) and portal (require one) handlers read this.
+    async fn billing_ids(&self, user_id: &str) -> (Option<String>, Option<String>);
+
+    /// `(plan_status, current_period_end)` for a user — surfaced by `/api/me`
+    /// (proposal 0058 B4). `(None, None)` when never subscribed.
+    async fn billing_status(&self, user_id: &str) -> (Option<String>, Option<i64>);
+
+    /// Resolve a Stripe customer id (`cus_…`) to its local `user_id` via the
+    /// `idx_users_billing_customer` index. `None` if unmapped (a checkout event or
+    /// reconcile heals that).
+    async fn user_by_billing_customer(&self, customer_id: &str) -> Option<String>;
+
+    /// The single billing writer (proposal 0058 B3). Applies current subscription
+    /// truth to `users`, guarded like [`Store::set_plan`] so a stale plan can never
+    /// strand a user:
+    /// - `plan = Some("pro")`: activate/keep the paid plan; stamps
+    ///   `prior_plan = COALESCE(prior_plan, <current plan>)` on first activation.
+    /// - `plan = None`: restore `COALESCE(prior_plan,'free')` (the terminal /
+    ///   cancel path); `prior_plan` is never touched.
+    ///
+    /// `subscription_id = None` clears the stored id (cancel); `customer_id = None`
+    /// leaves the stored customer id untouched (kept for resubscribe). Used by the
+    /// nightly reconcile; the webhook goes through [`Store::billing_process_event`].
+    async fn apply_subscription_state(
+        &self,
+        user_id: &str,
+        plan: Option<&str>,
+        status: &str,
+        subscription_id: Option<&str>,
+        customer_id: Option<&str>,
+        period_end: Option<i64>,
+    ) -> anyhow::Result<()>;
+
+    /// Atomic webhook processing (proposal 0058 B3): ONE transaction = the
+    /// idempotency insert (`INSERT … ON CONFLICT DO NOTHING`) + the optional state
+    /// change. Returns `Duplicate` (ack, no change) when the event id was already
+    /// recorded; `Applied` otherwise. On any failure the whole transaction rolls
+    /// back — including the idempotency insert — so Stripe's retry reprocesses.
+    async fn billing_process_event(
+        &self,
+        id: &str,
+        payload_hash: &str,
+        received_at: i64,
+        apply: Option<SubApply>,
+    ) -> anyhow::Result<EventOutcome>;
+
+    /// Every user carrying billing state, for the nightly reconcile (both
+    /// directions). Small; runs once a day.
+    async fn billing_rows_for_reconcile(&self) -> Vec<BillingRow>;
+
     // ── sharing grants (proposal 0039) ─────────────────────────────────────────
     /// Every `shares` row relevant to building `user_id`'s [`Visibility`]: those
     /// granting INTO them (`grantee_user_id = user_id`) and those they issued OUT of
@@ -282,19 +341,70 @@ pub enum DevicePoll {
 /// A plan's enforced caps (proposal 0001 Phase 4). Resolved from `plan_limits`
 /// joined on `users.plan`; falls back to [`PlanLimits::default`] if the plan row
 /// is missing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Eq` is dropped from the derive (proposal 0058 A2): `summary_user_budget_usd`
+// is an `f64`, which isn't `Eq`. Only tests compare `PlanLimits`, and they assert
+// individual fields.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanLimits {
     /// The plan's name (`users.plan`), surfaced by `/api/me` (proposal 0056 B1).
     pub plan: String,
     pub max_agents: i64,
     pub max_concurrent_sessions: i64,
+    /// Whether this plan may CREATE shares/invites (proposal 0058 A3). Receiving
+    /// shares is never gated. `DEFAULT 1` on the column keeps hand-tuned custom
+    /// plans at the capability they effectively had.
+    pub can_create_shares: bool,
+    /// Per-plan per-user summarizer ceiling in USD (proposal 0058 A4). `None` =
+    /// fall back to `CCHUB_SUMMARY_USER_BUDGET`; the config value is also a hard
+    /// cap (min of plan + config when both are set).
+    pub summary_user_budget_usd: Option<f64>,
 }
 impl Default for PlanLimits {
     fn default() -> Self {
-        // Mirrors the seeded 'free' row, so an unknown/missing plan is merely
-        // conservative, never unbounded.
-        PlanLimits { plan: "free".into(), max_agents: 10, max_concurrent_sessions: 50 }
+        // The NEW free row (proposal 0058 A2), load-bearing: a missing/unknown
+        // plan must never out-entitle free, so the default caps and capabilities
+        // are exactly free's (2 machines, 5 sessions, no sharing, $0.25 summary
+        // budget), never something more generous.
+        PlanLimits {
+            plan: "free".into(),
+            max_agents: 2,
+            max_concurrent_sessions: 5,
+            can_create_shares: false,
+            summary_user_budget_usd: Some(0.25),
+        }
     }
+}
+
+/// The result of atomic webhook processing (proposal 0058 B3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventOutcome {
+    /// The event id was new; the state change (if any) was applied.
+    Applied,
+    /// The event id was already recorded; nothing changed (a replay). Ack 200.
+    Duplicate,
+}
+
+/// The subscription state to apply in one webhook transaction (proposal 0058 B3),
+/// mirroring [`Store::apply_subscription_state`]'s parameters. `plan = None` is the
+/// terminal/cancel path (restore `COALESCE(prior_plan,'free')`).
+#[derive(Debug, Clone)]
+pub struct SubApply {
+    pub user_id: String,
+    pub plan: Option<String>,
+    pub status: String,
+    pub subscription_id: Option<String>,
+    pub customer_id: Option<String>,
+    pub period_end: Option<i64>,
+}
+
+/// One user's billing mirror, for the nightly reconcile (proposal 0058 B5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingRow {
+    pub user_id: String,
+    pub customer_id: Option<String>,
+    pub subscription_id: Option<String>,
+    pub plan: String,
+    pub plan_status: Option<String>,
 }
 
 /// One of a user's registered agents, for the dashboard (proposal 0001 Phase 3).
@@ -385,7 +495,7 @@ impl SqliteStore {
     }
 
     #[cfg(test)]
-    async fn in_memory() -> Self {
+    pub(crate) async fn in_memory() -> Self {
         // One connection so the `:memory:` db is shared across the pool's calls.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -704,7 +814,8 @@ impl Store for SqliteStore {
 
     async fn limits_for(&self, user_id: &str) -> PlanLimits {
         sqlx::query(
-            "SELECT pl.plan, pl.max_agents, pl.max_concurrent_sessions
+            "SELECT pl.plan, pl.max_agents, pl.max_concurrent_sessions,
+                    pl.can_create_shares, pl.summary_user_budget_usd
                FROM users u JOIN plan_limits pl ON pl.plan = u.plan
               WHERE u.id = ?1",
         )
@@ -718,6 +829,11 @@ impl Store for SqliteStore {
                 plan: r.try_get("plan").ok()?,
                 max_agents: r.try_get("max_agents").ok()?,
                 max_concurrent_sessions: r.try_get("max_concurrent_sessions").ok()?,
+                can_create_shares: r.try_get::<i64, _>("can_create_shares").ok()? != 0,
+                summary_user_budget_usd: r
+                    .try_get::<Option<f64>, _>("summary_user_budget_usd")
+                    .ok()
+                    .flatten(),
             })
         })
         .unwrap_or_default()
@@ -760,6 +876,138 @@ impl Store for SqliteStore {
             .await?;
         anyhow::ensure!(res.rows_affected() > 0, "no such user: {email}");
         Ok(())
+    }
+
+    async fn billing_event_insert(&self, id: &str, payload_hash: &str, received_at: i64) -> anyhow::Result<u64> {
+        let res = sqlx::query(
+            "INSERT INTO billing_events (id, received_at, payload_hash) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(received_at)
+        .bind(payload_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("billing_event_insert: {e}"))?;
+        Ok(res.rows_affected())
+    }
+
+    async fn billing_ids(&self, user_id: &str) -> (Option<String>, Option<String>) {
+        sqlx::query("SELECT billing_customer_id, billing_subscription_id FROM users WHERE id = ?1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| {
+                (
+                    r.try_get::<Option<String>, _>("billing_customer_id").ok().flatten(),
+                    r.try_get::<Option<String>, _>("billing_subscription_id").ok().flatten(),
+                )
+            })
+            .unwrap_or((None, None))
+    }
+
+    async fn billing_status(&self, user_id: &str) -> (Option<String>, Option<i64>) {
+        sqlx::query("SELECT plan_status, current_period_end FROM users WHERE id = ?1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| {
+                (
+                    r.try_get::<Option<String>, _>("plan_status").ok().flatten(),
+                    r.try_get::<Option<i64>, _>("current_period_end").ok().flatten(),
+                )
+            })
+            .unwrap_or((None, None))
+    }
+
+    async fn user_by_billing_customer(&self, customer_id: &str) -> Option<String> {
+        sqlx::query("SELECT id FROM users WHERE billing_customer_id = ?1")
+            .bind(customer_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get("id").ok())
+    }
+
+    async fn apply_subscription_state(
+        &self,
+        user_id: &str,
+        plan: Option<&str>,
+        status: &str,
+        subscription_id: Option<&str>,
+        customer_id: Option<&str>,
+        period_end: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        apply_sub_state(&mut conn, user_id, plan, status, subscription_id, customer_id, period_end).await
+    }
+
+    async fn billing_process_event(
+        &self,
+        id: &str,
+        payload_hash: &str,
+        received_at: i64,
+        apply: Option<SubApply>,
+    ) -> anyhow::Result<EventOutcome> {
+        let mut tx = self.pool.begin().await?;
+        // Idempotency insert — first delivery wins, a replay affects 0 rows.
+        let res = sqlx::query(
+            "INSERT INTO billing_events (id, received_at, payload_hash) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(received_at)
+        .bind(payload_hash)
+        .execute(&mut *tx)
+        .await?;
+        if res.rows_affected() == 0 {
+            // Already processed: commit (nothing changed) and ack.
+            tx.commit().await?;
+            return Ok(EventOutcome::Duplicate);
+        }
+        // The state change shares this transaction: an error here drops `tx`,
+        // rolling back the idempotency insert so Stripe's retry reprocesses.
+        if let Some(a) = apply {
+            apply_sub_state(
+                &mut tx,
+                &a.user_id,
+                a.plan.as_deref(),
+                &a.status,
+                a.subscription_id.as_deref(),
+                a.customer_id.as_deref(),
+                a.period_end,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(EventOutcome::Applied)
+    }
+
+    async fn billing_rows_for_reconcile(&self) -> Vec<BillingRow> {
+        let rows = sqlx::query(
+            "SELECT id, billing_customer_id, billing_subscription_id, plan, plan_status
+               FROM users
+              WHERE billing_customer_id IS NOT NULL OR plan_status IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(BillingRow {
+                    user_id: r.try_get("id").ok()?,
+                    customer_id: r.try_get::<Option<String>, _>("billing_customer_id").ok().flatten(),
+                    subscription_id: r.try_get::<Option<String>, _>("billing_subscription_id").ok().flatten(),
+                    plan: r.try_get("plan").ok()?,
+                    plan_status: r.try_get::<Option<String>, _>("plan_status").ok().flatten(),
+                })
+            })
+            .collect()
     }
 
     async fn visibility_rows(&self, user_id: &str) -> Vec<ShareRow> {
@@ -1423,6 +1671,79 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// The billing state write (proposal 0058 B3), on a caller-supplied connection so
+/// the webhook can run it inside the idempotency transaction and the reconcile can
+/// run it on a pooled connection. See [`Store::apply_subscription_state`] for the
+/// `plan`/`subscription_id`/`customer_id` semantics.
+async fn apply_sub_state(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    plan: Option<&str>,
+    status: &str,
+    subscription_id: Option<&str>,
+    customer_id: Option<&str>,
+    period_end: Option<i64>,
+) -> anyhow::Result<()> {
+    match plan {
+        Some(p) => {
+            // Guard the target plan exists (like set_plan) — a bad price→plan map
+            // can never strand a user on an unknown plan.
+            let known = sqlx::query("SELECT 1 AS x FROM plan_limits WHERE plan = ?1")
+                .bind(p)
+                .fetch_optional(&mut *conn)
+                .await?
+                .is_some();
+            anyhow::ensure!(known, "unknown plan '{p}'");
+            // `prior_plan` and `plan` on the RHS read the row's PRE-update values
+            // (SQLite semantics), so this stamps the plan the user was on when the
+            // subscription first activated — once (COALESCE), never overwritten.
+            sqlx::query(
+                "UPDATE users
+                    SET prior_plan = COALESCE(prior_plan, plan),
+                        plan = ?1,
+                        plan_status = ?2,
+                        billing_subscription_id = ?3,
+                        billing_customer_id = COALESCE(?4, billing_customer_id),
+                        current_period_end = ?5
+                  WHERE id = ?6",
+            )
+            .bind(p)
+            .bind(status)
+            .bind(subscription_id)
+            .bind(customer_id)
+            .bind(period_end)
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+        None => {
+            // Terminal/cancel: restore COALESCE(prior_plan,'free'), guarding a
+            // stale prior_plan against the current plan table. `prior_plan`
+            // untouched; subscription id cleared; customer id kept.
+            sqlx::query(
+                "UPDATE users
+                    SET plan = CASE
+                                 WHEN prior_plan IS NOT NULL
+                                  AND prior_plan IN (SELECT plan FROM plan_limits)
+                                 THEN prior_plan ELSE 'free' END,
+                        plan_status = ?1,
+                        billing_subscription_id = ?2,
+                        billing_customer_id = COALESCE(?3, billing_customer_id),
+                        current_period_end = ?4
+                  WHERE id = ?5",
+            )
+            .bind(status)
+            .bind(subscription_id)
+            .bind(customer_id)
+            .bind(period_end)
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// argon2id PHC string for `pw`.
 fn hash_password(pw: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -1636,6 +1957,173 @@ mod tests {
         // set_plan rejects an unknown plan and an unknown user.
         assert!(s.set_plan("u@x.com", "nope").await.is_err());
         assert!(s.set_plan("ghost@x.com", "pro").await.is_err());
+    }
+
+    // Proposal 0058 A2: the dark-safe migration adds the two columns + the `beta`
+    // grandfather row; `Default` is the new free row; the guarded runbook reprice
+    // touches the seed rows but leaves a hand-tuned row alone.
+    #[tokio::test]
+    async fn plan_repricing_columns_and_beta_row() {
+        let s = SqliteStore::in_memory().await;
+        let u = s.create_user("u@x.com", "password12345").await.unwrap();
+
+        // `Default` equals the new free row (load-bearing: a missing plan can't
+        // out-entitle free).
+        let d = PlanLimits::default();
+        assert_eq!((d.max_agents, d.max_concurrent_sessions), (2, 5));
+        assert!(!d.can_create_shares);
+        assert_eq!(d.summary_user_budget_usd, Some(0.25));
+
+        // Migration 0007 seeded `beta` at 10/50, sharing on, $2.00 summary budget.
+        s.set_plan("u@x.com", "beta").await.unwrap();
+        let beta = s.limits_for(&u).await;
+        assert_eq!((beta.max_agents, beta.max_concurrent_sessions), (10, 50));
+        assert!(beta.can_create_shares);
+        assert_eq!(beta.summary_user_budget_usd, Some(2.00));
+
+        // The 0003 `free` row still carries its old caps here (the reprice is a
+        // runbook one-shot, not in the migration), but the new columns exist with
+        // capability-preserving defaults (can_create_shares=1, budget NULL).
+        s.set_plan("u@x.com", "free").await.unwrap();
+        let free_pre = s.limits_for(&u).await;
+        assert_eq!((free_pre.max_agents, free_pre.max_concurrent_sessions), (10, 50));
+        assert!(free_pre.can_create_shares, "default column preserves capability");
+        assert_eq!(free_pre.summary_user_budget_usd, None, "NULL = env fallback");
+
+        // A hand-tuned free-like custom row must NOT be touched by the guarded
+        // reprice (the UPDATE twin of INSERT OR IGNORE).
+        sqlx::query(
+            "INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions) VALUES ('custom', 3, 7)",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        // Apply the Part D T-0 runbook reprice (guarded on the 0003 seed values).
+        sqlx::query(
+            "UPDATE plan_limits
+                SET max_agents = 2, max_concurrent_sessions = 5,
+                    can_create_shares = 0, summary_user_budget_usd = 0.25
+              WHERE plan = 'free' AND max_agents = 10 AND max_concurrent_sessions = 50",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        s.set_plan("u@x.com", "free").await.unwrap();
+        let free = s.limits_for(&u).await;
+        assert_eq!((free.max_agents, free.max_concurrent_sessions), (2, 5));
+        assert!(!free.can_create_shares);
+        assert_eq!(free.summary_user_budget_usd, Some(0.25));
+
+        // The hand-tuned row is left alone (it never matched 10/50).
+        s.set_plan("u@x.com", "custom").await.unwrap();
+        let custom = s.limits_for(&u).await;
+        assert_eq!((custom.max_agents, custom.max_concurrent_sessions), (3, 7));
+        assert!(custom.can_create_shares, "custom row untouched, default cap kept");
+    }
+
+    // Proposal 0058 Part B: the billing writer + idempotency + prior_plan restore.
+    #[tokio::test]
+    async fn billing_state_machine_and_idempotency() {
+        let s = SqliteStore::in_memory().await;
+        let u = s.create_user("u@x.com", "password12345").await.unwrap();
+        s.set_plan("u@x.com", "beta").await.unwrap();
+
+        // Helper to read the user's raw billing/plan columns.
+        async fn cols(s: &SqliteStore, uid: &str) -> (String, Option<String>, Option<String>, Option<String>, Option<i64>) {
+            let r = sqlx::query(
+                "SELECT plan, plan_status, prior_plan, billing_subscription_id, current_period_end
+                   FROM users WHERE id = ?1",
+            )
+            .bind(uid)
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+            (
+                r.try_get("plan").unwrap(),
+                r.try_get::<Option<String>, _>("plan_status").unwrap(),
+                r.try_get::<Option<String>, _>("prior_plan").unwrap(),
+                r.try_get::<Option<String>, _>("billing_subscription_id").unwrap(),
+                r.try_get::<Option<i64>, _>("current_period_end").unwrap(),
+            )
+        }
+
+        // First delivery of the checkout event: activate pro.
+        let apply = SubApply {
+            user_id: u.clone(),
+            plan: Some("pro".into()),
+            status: "active".into(),
+            subscription_id: Some("sub_1".into()),
+            customer_id: Some("cus_1".into()),
+            period_end: Some(1_800_000_000),
+        };
+        assert_eq!(s.billing_process_event("evt_1", "h1", 1, Some(apply.clone())).await.unwrap(), EventOutcome::Applied);
+        let (plan, status, prior, sub, pend) = cols(&s, &u).await;
+        assert_eq!((plan.as_str(), status.as_deref()), ("pro", Some("active")));
+        assert_eq!(prior.as_deref(), Some("beta"), "prior_plan stamped once to the pre-activation plan");
+        assert_eq!(sub.as_deref(), Some("sub_1"));
+        assert_eq!(pend, Some(1_800_000_000));
+        assert_eq!(s.limits_for(&u).await.max_agents, 100, "pro caps read with no Stripe call");
+        assert_eq!(s.billing_ids(&u).await, (Some("cus_1".into()), Some("sub_1".into())));
+        assert_eq!(s.user_by_billing_customer("cus_1").await.as_deref(), Some(u.as_str()));
+
+        // Replay of the same event id → Duplicate, one row, no state change.
+        assert_eq!(s.billing_process_event("evt_1", "h1", 2, Some(apply)).await.unwrap(), EventOutcome::Duplicate);
+        let n: i64 = sqlx::query("SELECT count(*) AS n FROM billing_events")
+            .fetch_one(&s.pool).await.unwrap().try_get("n").unwrap();
+        assert_eq!(n, 1);
+
+        // Grace: payment_failed keeps the paid plan, only status flips.
+        let pd = SubApply {
+            user_id: u.clone(), plan: Some("pro".into()), status: "past_due".into(),
+            subscription_id: Some("sub_1".into()), customer_id: Some("cus_1".into()), period_end: Some(1_800_000_000),
+        };
+        s.billing_process_event("evt_pd", "h", 3, Some(pd)).await.unwrap();
+        let (plan, status, prior, _, _) = cols(&s, &u).await;
+        assert_eq!((plan.as_str(), status.as_deref()), ("pro", Some("past_due")), "grace: plan unchanged");
+        assert_eq!(prior.as_deref(), Some("beta"), "prior_plan never overwritten");
+
+        // Terminal: subscription.deleted → restore prior_plan (beta), clear sub id,
+        // keep customer id.
+        let del = SubApply {
+            user_id: u.clone(), plan: None, status: "canceled".into(),
+            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None,
+        };
+        s.billing_process_event("evt_del", "h", 4, Some(del)).await.unwrap();
+        let (plan, status, prior, sub, _) = cols(&s, &u).await;
+        assert_eq!((plan.as_str(), status.as_deref()), ("beta", Some("canceled")), "restored to beta, not free");
+        assert_eq!(prior.as_deref(), Some("beta"));
+        assert_eq!(sub, None, "subscription id cleared");
+        assert_eq!(s.billing_ids(&u).await.0.as_deref(), Some("cus_1"), "customer id kept for resubscribe");
+
+        // Out-of-order: a late 'updated' whose re-fetch still says canceled applies
+        // None again → stays beta, no resurrection.
+        let late = SubApply {
+            user_id: u.clone(), plan: None, status: "canceled".into(),
+            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None,
+        };
+        s.billing_process_event("evt_late", "h", 5, Some(late)).await.unwrap();
+        assert_eq!(cols(&s, &u).await.0, "beta", "no resurrection of pro");
+
+        // Standalone idempotency insert (reconcile/test primitive).
+        assert_eq!(s.billing_event_insert("evt_x", "h", 6).await.unwrap(), 1);
+        assert_eq!(s.billing_event_insert("evt_x", "h", 7).await.unwrap(), 0);
+
+        // Unknown-plan guard: a bad price→plan map is refused (tx rolls back).
+        let bad = SubApply {
+            user_id: u.clone(), plan: Some("nope".into()), status: "active".into(),
+            subscription_id: Some("sub_2".into()), customer_id: Some("cus_1".into()), period_end: None,
+        };
+        assert!(s.billing_process_event("evt_bad", "h", 8, Some(bad)).await.is_err());
+        // The rollback also undid the idempotency insert → retry can reprocess.
+        let has_bad: Option<String> = sqlx::query("SELECT id FROM billing_events WHERE id = 'evt_bad'")
+            .fetch_optional(&s.pool).await.unwrap().and_then(|r| r.try_get("id").ok());
+        assert!(has_bad.is_none(), "failed apply rolled back the idempotency insert");
+
+        // Reconcile feed carries the row.
+        let rows = s.billing_rows_for_reconcile().await;
+        assert!(rows.iter().any(|r| r.user_id == u && r.customer_id.as_deref() == Some("cus_1")));
     }
 
     #[tokio::test]

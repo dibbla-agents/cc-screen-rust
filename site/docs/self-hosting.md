@@ -107,8 +107,10 @@ You get public signup (email/password, optionally Google OAuth), per-user
 machine enrollment — the hub serves its own `/install.sh` and `/install.ps1`
 with its URL baked in, and machines are approved at `<your-hub>/activate` —
 plus sharing and per-plan caps. Plans are assigned by hand
-(`cc-screen-hub user plan <email> free|pro|unlimited`); there is no billing
-machinery.
+(`cc-screen-hub user plan <email> free|pro|unlimited`). Same code we run, free
+to self-host — billing ships in the MIT repo behind the `multi-tenant` feature
+and is simply off without Stripe keys; paying for the hosted hub is paying to
+not run it yourself.
 
 ## Docker
 

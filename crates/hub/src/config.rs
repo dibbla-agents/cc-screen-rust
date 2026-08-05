@@ -123,6 +123,10 @@ pub fn load() -> HubConfig {
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|&b| b > 0.0);
+    // Per-user summarizer ceiling. Since proposal 0058 A4 this is BOTH the
+    // fallback (used when a plan's `summary_user_budget_usd` column is NULL) AND a
+    // hard cap (the effective ceiling is min(plan, config) when both are set), so
+    // it stays the fleet operator's safety knob even once per-plan budgets exist.
     let summary_user_budget_usd = std::env::var("CCHUB_SUMMARY_USER_BUDGET")
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())

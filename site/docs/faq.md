@@ -6,13 +6,28 @@ description: Short answers — pricing, plans, supported CLIs, phones, privacy, 
 
 # FAQ
 
-## Is it free?
+## What does it cost?
 
-During the beta, yes. Every account starts on the **free** plan — up to 10
-machines and 50 concurrent sessions, which is generous on purpose. Higher
-plans exist (pro: 100 machines / 500 sessions, and unlimited) and are
-currently enabled manually — if you hit a limit, ask. There is no billing
-machinery today.
+The **Free** plan is free forever — 2 machines, 5 concurrent sessions, no card
+required. **Pro** is $10/month (or $96/year — $8/month) and raises that
+to 10 machines and 50 concurrent sessions, with unlimited sharing. Payments are
+handled by Stripe as merchant of record (the seller is Techier AI Sthlm AB);
+cancel any time from the billing portal.
+
+## What happens when I hit a limit?
+
+New machine approvals or new sessions are declined until you're under the cap —
+the app tells you which cap and offers the upgrade. **Nothing is deleted**:
+existing machines stay enrolled, running sessions keep running, your files are
+never touched. Same on downgrade or a failed payment: caps apply to *new*
+activity only.
+
+## I signed up during the beta — what changes?
+
+Nothing, unless you want it to. Beta accounts moved to the **beta** plan: the
+same 10 machines / 50 concurrent sessions you had, still free, and it stays
+that way. If you'd like to support the project (and get Pro), the founder price
+— $5/month, locked for as long as you stay subscribed — is claimable until <date>.
 
 ## Which coding CLIs are supported?
 
@@ -79,4 +94,6 @@ nothing.
 The code lives at
 [github.com/dibbla-agents/cc-screen-rust](https://github.com/dibbla-agents/cc-screen-rust).
 The agent, hub, and terminal client are Rust; the web app is React, embedded
-into the binaries so there's nothing separate to deploy.
+into the binaries so there's nothing separate to deploy. Billing ships open in
+the same MIT repo — it's simply off without Stripe keys, so a self-hosted hub
+behaves exactly as the hosted one did before payments existed.

@@ -566,6 +566,72 @@ async fn signup_throttled() {
     assert!(other.status().is_success(), "other sources keep signing up");
 }
 
+/// 0058 A3: creating shares is plan-gated (402 for a no-share plan), receiving is
+/// not (the gated user still sees + accepts invites), and a Pro/beta plan shares
+/// as before.
+#[tokio::test]
+async fn share_creation_is_plan_gated_receiving_is_not() {
+    use sqlx::Row;
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+
+    // `free` defaults to can_create_shares=1 (the migration is dark-safe), so seed
+    // an explicit no-share plan and put alice on it.
+    sqlx::query(
+        "INSERT INTO plan_limits (plan, max_agents, max_concurrent_sessions, can_create_shares) \
+         VALUES ('noshare58', 2, 5, 0)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.set_plan("alice@x.com", "noshare58").await.unwrap();
+
+    // Alice can't create a share → 402 with the message; no artifact created.
+    let denied = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "laptop" })).await;
+    assert_eq!(denied.status(), reqwest::StatusCode::PAYMENT_REQUIRED);
+    assert!(denied.text().await.unwrap().contains("Pro feature"));
+    let count = |t: &str, s: &Arc<SqliteStore>| {
+        let q = format!("SELECT count(*) AS n FROM {t}");
+        let pool = s.pool().clone();
+        async move { sqlx::query(&q).fetch_one(&pool).await.unwrap().try_get::<i64, _>("n").unwrap() }
+    };
+    assert_eq!(count("share_invites", &store).await, 0, "no share_invites row");
+    assert_eq!(count("email_invites", &store).await, 0, "no email_invites row");
+
+    // Receiving is NOT gated: bob (default free) invites alice; she sees + accepts.
+    let created = post_json(&client, &base, &bob, "/api/shares",
+        serde_json::json!({ "grantee_email": "alice@x.com", "machine": "laptop" })).await;
+    assert!(created.status().is_success(), "bob (free) creates fine ({})", created.status());
+    let inbox = get_json(&client, &base, &alice, "/api/shares/inbox").await;
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "gated user still receives");
+    let id = inbox[0]["id"].as_str().unwrap().to_string();
+    let accepted = post_json(&client, &base, &alice, &format!("/api/shares/{id}/accept"), serde_json::json!({})).await;
+    assert!(accepted.status().is_success(), "gated user can accept ({})", accepted.status());
+
+    // On beta (can_create_shares=1) alice shares again.
+    store.set_plan("alice@x.com", "beta").await.unwrap();
+    let ok = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "laptop" })).await;
+    assert!(ok.status().is_success(), "beta can share ({})", ok.status());
+}
+
+/// 0058 acceptance 11 (graceful absence): with no STRIPE_* env, `/api/me` reports
+/// `billing:false`, plan facts still resolve, and no subscription status leaks.
+#[tokio::test]
+async fn billing_absent_reports_false_and_plan_still_works() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let me = get_json(&client, &base, &alice, "/api/me").await;
+    assert_eq!(me["billing"], serde_json::Value::Bool(false), "no Stripe env → billing:false");
+    assert!(me["plan"]["name"].is_string(), "user plan still resolves");
+    assert!(me["plan"].get("status").is_none(), "no subscription → status omitted");
+    assert!(me["plan"].get("periodEnd").is_none(), "no subscription → periodEnd omitted");
+}
+
 /// 0053 Part E item 3: public signup requires a 12-character password.
 #[tokio::test]
 async fn password_min_12() {

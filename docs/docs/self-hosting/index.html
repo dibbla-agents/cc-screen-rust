@@ -212,8 +212,10 @@ CCHUB_PUBLIC_URL=https://cc.your-domain.example   # the canonical origin
 machine enrollment — the hub serves its own <code>/install.sh</code> and <code>/install.ps1</code>
 with its URL baked in, and machines are approved at <code>&lt;your-hub&gt;/activate</code> —
 plus sharing and per-plan caps. Plans are assigned by hand
-(<code>cc-screen-hub user plan &lt;email&gt; free|pro|unlimited</code>); there is no billing
-machinery.</p>
+(<code>cc-screen-hub user plan &lt;email&gt; free|pro|unlimited</code>). Same code we run, free
+to self-host — billing ships in the MIT repo behind the <code>multi-tenant</code> feature
+and is simply off without Stripe keys; paying for the hosted hub is paying to
+not run it yourself.</p>
 <h2 id="docker">Docker</h2>
 <p>Both images are published to GHCR on every release:</p>
 <pre><code class="language-sh">docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the front door

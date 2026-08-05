@@ -259,6 +259,64 @@ pub fn sha256_b64url(s: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()))
 }
 
+/// Lowercase hex SHA-256 of a raw byte slice — the byte-oriented twin of
+/// [`sha256_hex`]. Used by the billing webhook (proposal 0058 B3) to audit-hash a
+/// raw request body (the Stripe signature is computed over the exact bytes).
+pub fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Verify a Stripe webhook `Stripe-Signature` header (proposal 0058 B3).
+///
+/// The header is `t=<unix>,v1=<hex>[,v1=<hex>…]` (Stripe may include multiple
+/// `v1` values during a secret rotation, and other scheme keys like `v0` we
+/// ignore). We require the timestamp to be within `tolerance` seconds of `now`
+/// (replay window), recompute `HMAC-SHA256(secret, "{t}.{body}")`, and
+/// constant-time compare its lowercase-hex against each presented `v1`. Returns
+/// `true` iff the timestamp is fresh and at least one `v1` matches.
+pub fn stripe_signature_ok(header: &str, body: &[u8], secret: &str, now: u64, tolerance: u64) -> bool {
+    let mut ts: Option<u64> = None;
+    let mut v1s: Vec<&str> = Vec::new();
+    for part in header.split(',') {
+        let Some((k, v)) = part.trim().split_once('=') else { continue };
+        match k.trim() {
+            "t" => ts = v.trim().parse::<u64>().ok(),
+            "v1" => v1s.push(v.trim()),
+            _ => {}
+        }
+    }
+    let Some(t) = ts else { return false };
+    if v1s.is_empty() {
+        return false;
+    }
+    // Replay window: |now - t| <= tolerance (abs, so a skewed-forward clock still
+    // rejects a far-future timestamp).
+    let delta = now.abs_diff(t);
+    if delta > tolerance {
+        return false;
+    }
+    // signed_payload = "{t}.{body}"
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(t.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected = mac.finalize().into_bytes();
+    let expected_hex = {
+        let mut s = String::with_capacity(64);
+        for b in expected {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    v1s.iter().any(|v1| ct_eq(v1, &expected_hex))
+}
+
 /// Decode a base64url (no-pad) string — e.g. a JWT segment. Trailing `=` padding
 /// (some encoders add it) is tolerated. `None` on malformed input.
 pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
@@ -547,6 +605,63 @@ mod tests {
     #[test]
     fn generated_tokens_differ() {
         assert_ne!(generate_token(), generate_token());
+    }
+
+    #[test]
+    fn sha256_hex_bytes_matches_str() {
+        // The byte twin agrees with the str form on identical input.
+        assert_eq!(sha256_hex_bytes(b"hello"), sha256_hex("hello"));
+        // Known vector for the empty input.
+        assert_eq!(
+            sha256_hex_bytes(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    // Compute a valid Stripe signature the way Stripe does, so the verifier round-trips.
+    fn stripe_sig(secret: &str, t: u64, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(t.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        let mut hex = String::new();
+        for b in mac.finalize().into_bytes() {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        format!("t={t},v1={hex}")
+    }
+
+    #[test]
+    fn stripe_signature_verifies_and_rejects() {
+        let secret = "whsec_testsecret";
+        let body = br#"{"id":"evt_1","type":"invoice.paid"}"#;
+        let now = 1_700_000_000u64;
+        let header = stripe_sig(secret, now, body);
+        // Correctly signed + fresh → ok.
+        assert!(stripe_signature_ok(&header, body, secret, now, 300));
+        // Wrong secret → rejected.
+        assert!(!stripe_signature_ok(&header, body, "whsec_other", now, 300));
+        // Tampered body → rejected.
+        assert!(!stripe_signature_ok(&header, br#"{"id":"evt_2"}"#, secret, now, 300));
+        // Stale timestamp (>tolerance) → rejected even though the mac matches its t.
+        assert!(!stripe_signature_ok(&header, body, secret, now + 301, 300));
+        // Just inside the window → accepted.
+        assert!(stripe_signature_ok(&header, body, secret, now + 300, 300));
+        // Malformed headers → rejected.
+        assert!(!stripe_signature_ok("garbage", body, secret, now, 300));
+        assert!(!stripe_signature_ok(&format!("v1={}", "0".repeat(64)), body, secret, now, 300));
+    }
+
+    #[test]
+    fn stripe_signature_accepts_multiple_v1() {
+        let secret = "whsec_testsecret";
+        let body = br#"{"ok":true}"#;
+        let now = 1_700_000_000u64;
+        // A rotation-style header: one bogus v1 and the real one.
+        let real = stripe_sig(secret, now, body);
+        let hex = real.split_once("v1=").unwrap().1;
+        let header = format!("t={now},v1={},v1={hex}", "a".repeat(64));
+        assert!(stripe_signature_ok(&header, body, secret, now, 300));
     }
 
     #[cfg(unix)]

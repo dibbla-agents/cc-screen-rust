@@ -25,6 +25,10 @@ pub mod account;
 /// Share-invite lifecycle endpoints (proposal 0040) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod share;
+/// Stripe self-serve billing (proposal 0058 Part B) — multi-tenant only, and its
+/// routes only register when `billing::is_configured()` (STRIPE_* env present).
+#[cfg(feature = "multi-tenant")]
+pub mod billing;
 pub mod handlers;
 pub mod registry;
 pub mod service;
@@ -145,6 +149,20 @@ pub fn build_router(hub: HubState) -> Router {
         // Email-invite landing read (proposal 0056 C4): unauthenticated (the
         // token is the capability; exempted in require_client_auth), throttled.
         .route("/api/invite/:token", get(share::invite_info));
+
+    // Stripe billing (proposal 0058 Part B): register only when configured, so an
+    // unconfigured hub 404s these paths (the handlers also re-check config as
+    // defense in depth). The webhook is cookie-gate-exempt (its Stripe-Signature
+    // HMAC is the auth) — see `handlers::require_client_auth`.
+    #[cfg(feature = "multi-tenant")]
+    let router = if billing::is_configured() {
+        router
+            .route("/api/billing/checkout", post(billing::checkout))
+            .route("/api/billing/portal", post(billing::portal))
+            .route("/api/billing/webhook", post(billing::webhook))
+    } else {
+        router
+    };
 
     // The embedded PWA (exempt from auth — it's the app shell).
     router

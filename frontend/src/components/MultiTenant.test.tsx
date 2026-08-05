@@ -24,8 +24,8 @@ import { approveDevice, listAgents } from "../api";
 
 const plan: MePlan = { name: "free", maxAgents: 10, maxSessions: 50, agents: 10 };
 
-describe("LimitCard (proposal 0056 Part B)", () => {
-  it("renders the machine-cap card with plan name, cap, and the upgrade mailto", () => {
+describe("LimitCard (proposals 0056 Part B / 0058 C2)", () => {
+  it("renders the mailto-primary card on a self-hosted hub (billing off)", () => {
     const html = renderToStaticMarkup(<LimitCard plan={plan} what="machines" support="erik@dibbla.com" />);
     expect(html).toContain("Plan limit reached");
     expect(html).toContain("free");
@@ -34,7 +34,25 @@ describe("LimitCard (proposal 0056 Part B)", () => {
     expect(html).toContain("Unlink a machine");
     expect(html).toContain("mailto:erik@dibbla.com?subject=cc-screen%20plan%20upgrade%20(machines)");
     expect(html).toContain("Request an upgrade");
-    expect(html).toContain("free during the beta");
+    // No checkout on a hub without Stripe configured.
+    expect(html).not.toContain("Upgrade to Pro");
+  });
+
+  it("renders a checkout button (mailto demoted) on a billing-enabled hub", () => {
+    const html = renderToStaticMarkup(
+      <LimitCard plan={plan} what="machines" support="erik@dibbla.com" billing />
+    );
+    expect(html).toContain("Upgrade to Pro");
+    expect(html).toContain("Nothing is deleted at a limit");
+    // The mailto survives as a quiet secondary "Questions? Email us" link.
+    expect(html).toContain("Questions? Email us");
+    expect(html).toContain("mailto:erik@dibbla.com");
+  });
+
+  it("offers the founder price to a beta user inside the window (billing on)", () => {
+    const beta: MePlan = { name: "beta", maxAgents: 10, maxSessions: 50, agents: 10 };
+    const html = renderToStaticMarkup(<LimitCard plan={beta} what="machines" billing />);
+    expect(html).toContain("$5/mo founder price");
   });
 
   it("renders the session-cap card and stays useful with no plan / no support", () => {

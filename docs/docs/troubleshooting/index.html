@@ -122,11 +122,12 @@ running, and reconnects with backoff the moment it can. Sessions re-attach by
 themselves. If it stays offline, check that the machine is actually up and
 that the background service is running (<code>systemctl --user status cc-screen-rust</code> on Linux).</p>
 <h2 id="machine-limit-reached-for-your-plan">&quot;Machine limit reached for your plan&quot;</h2>
-<p>You hit your plan&#39;s cap (free: 10 machines, 50 concurrent sessions). The app
-shows which cap you hit and your current plan. Unlink a machine (or stop a
-session) you no longer need, or request an upgrade — plans are free during
-the beta and upgrades are handled manually, so it&#39;s a short email, not a
-checkout.</p>
+<p>You hit your plan&#39;s cap. The app shows which cap you hit and your current plan,
+and offers the upgrade right there — checkout to Pro happens in-app. Or unlink a
+machine (or stop a session) you no longer need. <strong>Nothing is deleted</strong> when you
+hit a limit: existing machines stay enrolled, running sessions keep running, and
+your files are never touched — the cap only blocks <em>new</em> machines and sessions
+until you&#39;re back under it.</p>
 <h2 id="assistants-are-outdated">Assistants are outdated</h2>
 <p>Use the <strong>Update</strong> button on the machine&#39;s dashboard row — it updates the
 CLIs first (a failed update leaves the machine untouched), then gracefully

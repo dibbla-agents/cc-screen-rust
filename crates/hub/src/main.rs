@@ -55,6 +55,17 @@ MULTI-TENANT (SaaS) MODE
   GOOGLE_OAUTH_CLIENT_ID / _SECRET   enable "Sign in with Google"
   CCHUB_OAUTH_ONLY=1     disable password signup/login (Google only)
 
+  Stripe self-serve billing (proposal 0058) — OFF unless these are set. With no
+  STRIPE_* env the /api/billing/* routes 404, /api/me reports billing:false, and
+  no reconcile task spawns (a self-hosted hub is exactly today's hub):
+  STRIPE_SECRET_KEY          restricted key (Checkout+Portal write, Subscriptions read)
+  STRIPE_WEBHOOK_SECRET      signing secret for /api/billing/webhook (whsec_…)
+  STRIPE_PRICE_PRO_MONTHLY / STRIPE_PRICE_PRO_ANNUAL   the two Pro price ids
+  STRIPE_PRICE_PRO_FOUNDER   optional $5/mo founder price (beta cohort, until…)
+  STRIPE_FOUNDER_DEADLINE    optional unix-seconds cutoff for the founder offer
+  STRIPE_MANAGED_PAYMENTS=1  opt-in: Stripe Managed Payments (merchant of record);
+                             requires MoR activated on the Stripe account
+
 SETUP
   1. On the hub box:   cc-screen-hub install --password PW --agents 'laptop:T1,server:T2'
   2. On each machine:  cc-screen-rust install --hub https://HUB:8840 --hub-token T1 --machine-id laptop
@@ -293,6 +304,23 @@ async fn main() {
                 store.share_sweep().await;
             }
         });
+    }
+
+    // Nightly billing reconcile (proposal 0058 B5): the webhook is at-least-once,
+    // so this restores the invariant every 24h. Only when Stripe is configured —
+    // an unconfigured hub spawns no task at all (graceful absence).
+    #[cfg(feature = "multi-tenant")]
+    if cc_screen_hub::billing::is_configured() {
+        if let Some(store) = hub.store() {
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+                tick.tick().await; // consume the immediate first tick
+                loop {
+                    tick.tick().await;
+                    cc_screen_hub::billing::reconcile(store.clone()).await;
+                }
+            });
+        }
     }
 
     let app = build_router(hub);

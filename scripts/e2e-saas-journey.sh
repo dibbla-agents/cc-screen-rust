@@ -156,7 +156,7 @@ say "2/4: the copy-paste one-liner on a clean box (containerized Linux leg)"
 # alive whatever the installer exits with (its final service step needs systemd,
 # which a container doesn't have — the agent is started by hand in step 4).
 docker run -d --name "$MACHINE" debian:stable-slim sh -c \
-  "apt-get update -qq && apt-get install -y -qq curl ca-certificates procps >/dev/null \
+  "apt-get update -qq && apt-get install -y -qq curl ca-certificates procps xz-utils >/dev/null \
    && curl -fsSL '$HUB/install.sh' | sh -s -- '$MACHINE'; sleep 600" >/dev/null
 
 say "3/4: scrape the device code the installer prints, approve it as $EMAIL"

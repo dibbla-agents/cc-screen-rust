@@ -49,7 +49,7 @@ export function HowItWorks() {
         <Rung
           n={1}
           title="Create an account"
-          note="Email + password or Google. Free during the beta — no card."
+          note="Email + password or Google. Free plan — no card."
         >
           <a
             href={APP}

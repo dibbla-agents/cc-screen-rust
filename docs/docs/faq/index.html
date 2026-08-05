@@ -90,12 +90,23 @@
   </aside>
   <main class="docs-content">
 <h1 id="faq">FAQ</h1>
-<h2 id="is-it-free">Is it free?</h2>
-<p>During the beta, yes. Every account starts on the <strong>free</strong> plan — up to 10
-machines and 50 concurrent sessions, which is generous on purpose. Higher
-plans exist (pro: 100 machines / 500 sessions, and unlimited) and are
-currently enabled manually — if you hit a limit, ask. There is no billing
-machinery today.</p>
+<h2 id="what-does-it-cost">What does it cost?</h2>
+<p>The <strong>Free</strong> plan is free forever — 2 machines, 5 concurrent sessions, no card
+required. <strong>Pro</strong> is $10/month (or $96/year — $8/month) and raises that
+to 10 machines and 50 concurrent sessions, with unlimited sharing. Payments are
+handled by Stripe as merchant of record (the seller is Techier AI Sthlm AB);
+cancel any time from the billing portal.</p>
+<h2 id="what-happens-when-i-hit-a-limit">What happens when I hit a limit?</h2>
+<p>New machine approvals or new sessions are declined until you&#39;re under the cap —
+the app tells you which cap and offers the upgrade. <strong>Nothing is deleted</strong>:
+existing machines stay enrolled, running sessions keep running, your files are
+never touched. Same on downgrade or a failed payment: caps apply to <em>new</em>
+activity only.</p>
+<h2 id="i-signed-up-during-the-beta-what-changes">I signed up during the beta — what changes?</h2>
+<p>Nothing, unless you want it to. Beta accounts moved to the <strong>beta</strong> plan: the
+same 10 machines / 50 concurrent sessions you had, still free, and it stays
+that way. If you&#39;d like to support the project (and get Pro), the founder price
+— $5/month, locked for as long as you stay subscribed — is claimable until <date>.</p>
 <h2 id="which-coding-clis-are-supported">Which coding CLIs are supported?</h2>
 <p><strong>Claude Code</strong> (<code>claude</code>), <strong>Codex</strong> (<code>codex</code>), <strong>Gemini CLI</strong> (<code>gemini</code>),
 and <strong>Kimi</strong> (<code>kimi</code>) — plus a plain <strong>shell</strong> session, which is just your
@@ -144,7 +155,9 @@ nothing.</p>
 <p>The code lives at
 <a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.
 The agent, hub, and terminal client are Rust; the web app is React, embedded
-into the binaries so there&#39;s nothing separate to deploy.</p>
+into the binaries so there&#39;s nothing separate to deploy. Billing ships open in
+the same MIT repo — it&#39;s simply off without Stripe keys, so a self-hosted hub
+behaves exactly as the hosted one did before payments existed.</p>
 
   </main>
 </div>

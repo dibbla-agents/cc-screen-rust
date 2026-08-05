@@ -55,11 +55,12 @@ cc-screen-rust` on Linux).
 
 ## "Machine limit reached for your plan"
 
-You hit your plan's cap (free: 10 machines, 50 concurrent sessions). The app
-shows which cap you hit and your current plan. Unlink a machine (or stop a
-session) you no longer need, or request an upgrade — plans are free during
-the beta and upgrades are handled manually, so it's a short email, not a
-checkout.
+You hit your plan's cap. The app shows which cap you hit and your current plan,
+and offers the upgrade right there — checkout to Pro happens in-app. Or unlink a
+machine (or stop a session) you no longer need. **Nothing is deleted** when you
+hit a limit: existing machines stay enrolled, running sessions keep running, and
+your files are never touched — the cap only blocks *new* machines and sessions
+until you're back under it.
 
 ## Assistants are outdated
 

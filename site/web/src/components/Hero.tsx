@@ -25,7 +25,7 @@ export function Hero() {
               href={APP}
               className="inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-accent px-5 py-[0.68rem] text-center font-semibold text-[#0b111a] shadow-[0_8px_24px_-8px_rgba(56,189,248,0.5)] transition hover:-translate-y-px hover:brightness-110 sm:w-auto"
             >
-              Sign up — free during beta
+              Sign up free — no card
             </a>
             <a
               href="#how"

@@ -14,9 +14,11 @@ import {
   listReceivedShares,
   loginEmail,
   logout,
+  openBillingPortal,
   revokeShare,
   rotateAgent,
   signup,
+  startCheckout,
   unlinkAgent,
   ApiError,
   type AgentInfo,
@@ -118,42 +120,200 @@ const primaryBtn =
 const secondaryBtn =
   "w-full rounded-lg border border-edge px-3.5 py-3 text-sm font-medium text-slate-200 transition hover:border-accent hover:text-accent";
 
-// ── Plan-limit card (proposal 0056 Part B) — one component, two mounts: the
-// /activate error slot (what="machines") and the create form (what="sessions").
-// Honest about manual billing: the action is a mailto to the operator, never a
-// checkout.
+// Founder-offer window (proposal 0058 D1): a `beta`-plan user gets the $5/mo
+// locked founder price until this date. Client-side gating is cosmetic (the copy
+// only) — the price actually offered is decided server-side at checkout.
+const FOUNDER_DEADLINE = Date.parse("2026-10-01");
+
+// ── Plan-limit card (proposal 0056 Part B, 0058 C2) — one component, two mounts:
+// the /activate error slot (what="machines") and the create form (what="sessions").
+// On a billing-enabled hub the primary action is Stripe checkout; a self-hosted
+// hub (billing off) renders exactly today's mailto-primary card.
 export function LimitCard({
   plan,
   what,
   support,
+  billing = false,
 }: {
   plan?: MePlan;
   what: "machines" | "sessions";
   support?: string | null;
+  billing?: boolean;
 }) {
   const cap = what === "machines" ? plan?.maxAgents : plan?.maxSessions;
   const subject = encodeURIComponent(`cc-screen plan upgrade (${what})`);
+  const founder = plan?.name === "beta" && Date.now() < FOUNDER_DEADLINE;
+  const [checkoutErr, setCheckoutErr] = useState<string | null>(null);
+
+  const body = (
+    <p className="text-xs text-slate-300">
+      Your <span className="text-amber">{plan?.name ?? "current"}</span> plan allows{" "}
+      {cap ?? "a limited number of"} {what === "machines" ? "machines" : "concurrent sessions"}.
+      {what === "machines" &&
+        " Unlink a machine you no longer use, or upgrade — the code on the box keeps polling, so approving again just works."}
+    </p>
+  );
+
+  // Self-hosted hubs (no Stripe): the action stays a mailto to the operator.
+  if (!billing) {
+    return (
+      <div className="mt-3 rounded-lg border border-amber/30 bg-amber/10 p-3 text-left">
+        <div className="mb-1 text-[11px] uppercase tracking-wider text-amber">Plan limit reached</div>
+        {body}
+        {support && (
+          <a
+            href={`mailto:${support}?subject=${subject}`}
+            className="mt-2 inline-block rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber hover:bg-amber/10"
+          >
+            Request an upgrade
+          </a>
+        )}
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          Nothing is deleted at a limit — upgrades are switched on by a human, usually the same day.
+        </p>
+      </div>
+    );
+  }
+
+  // Billing-enabled: checkout is the primary action; the mailto survives as a
+  // quiet secondary link.
   return (
     <div className="mt-3 rounded-lg border border-amber/30 bg-amber/10 p-3 text-left">
       <div className="mb-1 text-[11px] uppercase tracking-wider text-amber">Plan limit reached</div>
-      <p className="text-xs text-slate-300">
-        Your <span className="text-amber">{plan?.name ?? "current"}</span> plan allows{" "}
-        {cap ?? "a limited number of"} {what === "machines" ? "machines" : "concurrent sessions"}.
-        {what === "machines" &&
-          " Unlink a machine you no longer use, or ask for a bigger plan — the code on the box keeps polling, so approving again just works."}
-      </p>
+      {body}
+      <button
+        type="button"
+        onClick={() => {
+          setCheckoutErr(null);
+          startCheckout("pro-monthly").catch((e) =>
+            setCheckoutErr(e instanceof Error ? e.message : "Couldn't start checkout")
+          );
+        }}
+        className={`${primaryBtn} mt-3 min-h-11`}
+      >
+        {founder ? "Upgrade — $5/mo founder price" : "Upgrade to Pro"}
+      </button>
+      {checkoutErr && <div className="mt-2 text-[11px] text-claude">{checkoutErr}</div>}
       {support && (
         <a
           href={`mailto:${support}?subject=${subject}`}
-          className="mt-2 inline-block rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber hover:bg-amber/10"
+          className="mt-2 inline-block text-[11px] text-slate-400 underline hover:text-slate-200"
         >
-          Request an upgrade
+          Questions? Email us
         </a>
       )}
       <p className="mt-1.5 text-[11px] text-slate-500">
-        Plans are free during the beta — upgrades are switched on by a human, usually the same day.
+        Nothing is deleted at a limit — new machines and sessions unblock the moment you're under the cap.
       </p>
     </div>
+  );
+}
+
+// ── Dashboard plan card (proposal 0058 C3) — plan name + status badges, the
+// machine meter, the sessions cap, and one action (upgrade → checkout, or manage
+// → portal). Renders nothing when billing isn't configured on the hub.
+function PlanCard({
+  me,
+  billingPending,
+}: {
+  me: MeInfo;
+  billingPending: "pending" | "slow" | null;
+}) {
+  const [err, setErr] = useState<string | null>(null);
+  if (!me.billing) return null;
+  const plan = me.plan;
+  const status = plan?.status;
+  const subscribed = status === "active" || status === "past_due";
+  const periodEnd = plan?.periodEnd;
+  const used = plan?.agents ?? 0;
+  const cap = plan?.maxAgents ?? 0;
+  const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+  const fmtDate = (t: number) =>
+    new Date(t * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  const planLabel = plan?.name ? plan.name.charAt(0).toUpperCase() + plan.name.slice(1) : "Free";
+  const go = (fn: () => Promise<void>) => {
+    setErr(null);
+    fn().catch((e) => setErr(e instanceof Error ? e.message : "Something went wrong"));
+  };
+
+  return (
+    <Window path="~/plan" className="mb-4">
+      <div className="mb-4 flex items-center gap-2">
+        <h2 className="font-mono text-base font-semibold text-slate-100">{planLabel} plan</h2>
+        {status === "past_due" && (
+          <span className="rounded border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber">
+            payment failed
+          </span>
+        )}
+        {status === "canceled" && periodEnd && (
+          <span className="rounded border border-edge px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
+            until {fmtDate(periodEnd)}
+          </span>
+        )}
+      </div>
+
+      {status === "past_due" && (
+        <p className="mb-3 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-[11px] text-amber">
+          Your last payment didn't go through. You keep full Pro access for about 7 days while we retry —
+          update your card to stay on Pro.
+        </p>
+      )}
+
+      {billingPending === "pending" && (
+        <p className="mb-3 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11px] text-accent">
+          Payment received — activating your Pro plan…
+        </p>
+      )}
+      {billingPending === "slow" && (
+        <p className="mb-3 rounded-lg border border-edge px-3 py-2 text-[11px] text-slate-400">
+          Taking longer than usual — your payment is safe; this page updates itself
+          {me.supportEmail ? (
+            <>
+              , or email <span className="text-slate-300">{me.supportEmail}</span>
+            </>
+          ) : null}
+          .
+        </p>
+      )}
+
+      <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
+        <span>Machines</span>
+        <span className="font-mono text-slate-300">
+          {used} / {cap}
+        </span>
+      </div>
+      <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-bar">
+        <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+      </div>
+      <p className="mb-4 text-xs text-slate-400">
+        Up to <span className="text-slate-300">{plan?.maxSessions ?? 0}</span> concurrent sessions.
+      </p>
+
+      {err && <div className="mb-2 text-[11px] text-claude">{err}</div>}
+
+      {subscribed ? (
+        <button type="button" onClick={() => go(openBillingPortal)} className={`${primaryBtn} min-h-11`}>
+          Manage billing
+        </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => go(() => startCheckout("pro-monthly"))}
+            className={`${primaryBtn} min-h-11`}
+          >
+            Upgrade to Pro
+          </button>
+          <button
+            type="button"
+            onClick={() => go(() => startCheckout("pro-annual"))}
+            className="mt-2 w-full text-center text-[11px] text-slate-400 underline hover:text-slate-200"
+          >
+            or $8/mo billed annually
+          </button>
+        </>
+      )}
+    </Window>
   );
 }
 
@@ -322,6 +482,7 @@ export function ActivatePage({
   email,
   plan,
   support,
+  billing = false,
   onDone,
   onInstall,
   onStartSession,
@@ -331,6 +492,9 @@ export function ActivatePage({
   /// plan-limit card when approve answers 402 (proposal 0056 B2).
   plan?: MePlan;
   support?: string | null;
+  /// Whether Stripe billing is configured (proposal 0058) — flips the 402
+  /// card's action from a mailto to a checkout button.
+  billing?: boolean;
   onDone: () => void;
   /// Open the assistant install/update dialog for a machine that just enrolled
   /// short of CLIs (proposal 0050 F3) — the catch-all for "I forgot the flag".
@@ -458,7 +622,7 @@ export function ActivatePage({
                     // Machine cap (402) → the plan-limit card, not an error
                     // line (proposal 0056 B2). The enrollment code keeps
                     // polling, so approving again after an unlink just works.
-                    <LimitCard plan={plan} what="machines" support={support} />
+                    <LimitCard plan={plan} what="machines" support={support} billing={billing} />
                   ) : (
                     <div className="mt-3 text-center text-xs text-claude">{result.error}</div>
                   ))}
@@ -818,6 +982,7 @@ export function Dashboard({
   onLoggedOut,
   onUpdateAssistants,
   onStartSession,
+  billingPending = null,
 }: {
   me: MeInfo;
   onClose: () => void;
@@ -826,6 +991,9 @@ export function Dashboard({
   onUpdateAssistants?: (machine: string, tools?: string[]) => void;
   /// Per-machine entry into the create flow (proposal 0056 A2).
   onStartSession?: (machine: string) => void;
+  /// Checkout-return state (proposal 0058 C4): drives the plan card's
+  /// "activating…" notice. null when not returning from Stripe checkout.
+  billingPending?: "pending" | "slow" | null;
 }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
@@ -939,6 +1107,10 @@ export function Dashboard({
           )}
         </Window>
 
+        {/* Plan & billing (proposal 0058 C3) — renders nothing on a hub without
+            Stripe configured. Above the fold, under the machines it caps. */}
+        <PlanCard me={me} billingPending={billingPending} />
+
         {/* Sharing — who has access to what, and take it back */}
         <SharedCard />
 
@@ -948,10 +1120,22 @@ export function Dashboard({
           {/* Cheap cap preemption (proposal 0056 B2): learn about the machine
               cap BEFORE running an installer on a box. Live agent count. */}
           {me.plan && agents !== null && agents.length >= me.plan.maxAgents && (
-            <p className="mb-2 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-[11px] text-amber">
-              Your {me.plan.name} plan is at its machine limit ({me.plan.maxAgents}) — a new box can't be
-              approved until you unlink one{me.supportEmail ? " or request an upgrade" : ""}.
-            </p>
+            <div className="mb-2 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2">
+              <p className="text-[11px] text-amber">
+                Your {me.plan.name} plan is at its machine limit ({me.plan.maxAgents}) — a new box can't be
+                approved until you unlink one
+                {me.billing ? " or upgrade to Pro" : me.supportEmail ? " or request an upgrade" : ""}.
+              </p>
+              {me.billing && (
+                <button
+                  type="button"
+                  onClick={() => startCheckout("pro-monthly").catch(() => {})}
+                  className="mt-2 inline-flex min-h-11 items-center rounded-md bg-amber px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110"
+                >
+                  Upgrade to Pro
+                </button>
+              )}
+            </div>
           )}
           <p className="mb-3 text-xs text-slate-400">
             Name the machine, then paste the generated command on that box (macOS, Linux, or

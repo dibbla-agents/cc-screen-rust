@@ -195,11 +195,26 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     Ok((AgentMsg::SummaryRequest { session, content_hash, inputs, tail, .. }, _)) => {
                         let summary = hub.summary.clone();
                         let to_agent = conn.to_agent().clone();
+                        let hub2 = hub.clone();
                         // Charge this tenant's per-user metering ceiling (§10.6.2);
                         // single-tenant (owner OWNER) only hits the fleet budget.
                         let owner = hub.multi_tenant().then(|| user_id.clone());
                         tokio::spawn(async move {
-                            let (headline, detail) = match summary.summarize_for(owner.as_deref(), &inputs, &tail).await {
+                            // Resolve the per-plan summary ceiling (proposal 0058
+                            // A4) in the spawned task — one indexed lookup per
+                            // request, off the uplink read loop. cfg-split because
+                            // HubState::limits_for is multi-tenant-only.
+                            #[cfg(feature = "multi-tenant")]
+                            let plan_budget = match owner.as_deref() {
+                                Some(uid) => hub2.limits_for(uid).await.summary_user_budget_usd,
+                                None => None,
+                            };
+                            #[cfg(not(feature = "multi-tenant"))]
+                            let plan_budget = {
+                                let _ = &hub2;
+                                None
+                            };
+                            let (headline, detail) = match summary.summarize_for(owner.as_deref(), plan_budget, &inputs, &tail).await {
                                 crate::summarizer::Outcome::Ok(s) => (Some(s.headline), Some(s.detail)),
                                 _ => (None, None),
                             };

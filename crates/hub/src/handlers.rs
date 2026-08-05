@@ -137,23 +137,40 @@ pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
+                // Billing status for the plan card (proposal 0058 B4). `status` and
+                // `periodEnd` are OMITTED when absent (no subscription) — the
+                // contract the frontend agent renders against.
+                let (status, period_end) = match hub.store() {
+                    Some(s) => s.billing_status(&user_id).await,
+                    None => (None, None),
+                };
+                let mut plan = serde_json::Map::new();
+                plan.insert("name".into(), json!(limits.plan));
+                plan.insert("maxAgents".into(), json!(limits.max_agents));
+                plan.insert("maxSessions".into(), json!(limits.max_concurrent_sessions));
+                plan.insert("agents".into(), json!(agents));
+                if let Some(st) = status {
+                    plan.insert("status".into(), json!(st));
+                }
+                if let Some(pe) = period_end {
+                    plan.insert("periodEnd".into(), json!(pe));
+                }
                 return Json(json!({
                     "multiTenant": true, "googleEnabled": google, "passwordLogin": password,
                     "authenticated": true, "userId": user_id, "email": email,
-                    "plan": {
-                        "name": limits.plan,
-                        "maxAgents": limits.max_agents,
-                        "maxSessions": limits.max_concurrent_sessions,
-                        "agents": agents,
-                    },
+                    "plan": plan,
                     "supportEmail": support,
+                    "billing": billing_enabled(),
                 }))
                 .into_response();
             }
         }
     }
-    Json(json!({ "multiTenant": multi, "googleEnabled": google, "passwordLogin": password, "authenticated": false }))
-        .into_response()
+    Json(json!({
+        "multiTenant": multi, "googleEnabled": google, "passwordLogin": password,
+        "authenticated": false, "billing": billing_enabled(),
+    }))
+    .into_response()
 }
 
 #[cfg(feature = "multi-tenant")]
@@ -162,6 +179,18 @@ fn google_enabled() -> bool {
 }
 #[cfg(not(feature = "multi-tenant"))]
 fn google_enabled() -> bool {
+    false
+}
+
+/// Whether Stripe self-serve billing is configured (proposal 0058 B4) — the
+/// `billing` flag `/api/me` returns so the PWA renders checkout vs the mailto
+/// fallback. Always false without the `multi-tenant` feature.
+#[cfg(feature = "multi-tenant")]
+fn billing_enabled() -> bool {
+    crate::billing::is_configured()
+}
+#[cfg(not(feature = "multi-tenant"))]
+fn billing_enabled() -> bool {
     false
 }
 
@@ -845,6 +874,11 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
     // only exists in the multi-tenant build, so the exemption is gated with it.
     #[cfg(feature = "multi-tenant")]
     let exempt = exempt || path.starts_with("/api/invite/");
+    // The Stripe webhook (proposal 0058 B2) authenticates via its Stripe-Signature
+    // HMAC (verified in the handler), not a session cookie — and Stripe sends no
+    // Origin header, so the origin check above passes it through.
+    #[cfg(feature = "multi-tenant")]
+    let exempt = exempt || path == "/api/billing/webhook";
 
     // Multi-tenant (proposal 0001 §4.1): identity comes from the session cookie,
     // not the shared secret. A gated request without a valid session is refused

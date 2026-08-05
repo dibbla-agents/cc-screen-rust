@@ -133,6 +133,13 @@ export interface MePlan {
   maxSessions: number;
   // How many machines the account currently has registered.
   agents: number;
+  // Subscription status (proposal 0058 B1): absent = no subscription; "active"
+  // paying; "past_due" payment failed but in grace (full Pro limits); "canceled"
+  // downgraded. Only present on a billing-enabled hub.
+  status?: "active" | "past_due" | "canceled";
+  // Current billing period end, unix epoch seconds (proposal 0058). Drives the
+  // "until <date>" note on a cancel-at-period-end subscription. Absent otherwise.
+  periodEnd?: number;
 }
 
 export interface MeInfo {
@@ -147,6 +154,10 @@ export interface MeInfo {
   plan?: MePlan;
   // The operator's support address (CCHUB_SUPPORT_EMAIL) for the upgrade mailto.
   supportEmail?: string | null;
+  // Whether Stripe billing is configured on this hub (proposal 0058 B4). Absent
+  // or false on a self-hosted hub — the client renders the mailto fallback and
+  // no checkout buttons. The JSON field name is exactly `billing`.
+  billing?: boolean;
 }
 
 // An HTTP failure that keeps its status code, so callers can branch on e.g. a
@@ -164,6 +175,34 @@ export async function getMe(): Promise<MeInfo> {
   const r = await fetch("/api/me");
   if (!r.ok) throw new Error(`me: ${r.status}`);
   return r.json();
+}
+
+// ── Billing (proposal 0058 Part B/C) ────────────────────────────────────────
+// Only present when the hub reports `billing: true`. Both routes are cookie-
+// authed and return a URL we navigate to full-page (never window.open/_blank —
+// an installed PWA must return into scope; see 0058 Mobile/touch).
+
+// startCheckout opens a Stripe Checkout session for the chosen price. The
+// founder price is decided server-side, so the client always posts the plain
+// "pro-monthly"/"pro-annual". Redirects on success; throws ApiError otherwise.
+export async function startCheckout(price: "pro-monthly" | "pro-annual"): Promise<void> {
+  const r = await fetch("/api/billing/checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ price }),
+  });
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `checkout: ${r.status}`);
+  const { url } = (await r.json()) as { url: string };
+  window.location.assign(url);
+}
+
+// openBillingPortal sends the subscriber to Stripe's hosted portal (update card,
+// switch plan, cancel). 409 when the user has no billing account yet.
+export async function openBillingPortal(): Promise<void> {
+  const r = await fetch("/api/billing/portal", { method: "POST" });
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `portal: ${r.status}`);
+  const { url } = (await r.json()) as { url: string };
+  window.location.assign(url);
 }
 
 // Multi-tenant login: email + password (verified as the user's argon2 password).

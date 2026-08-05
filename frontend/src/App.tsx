@@ -149,6 +149,10 @@ export default function App() {
   // machines dashboard; single-tenant keeps the shared-secret LoginScreen.
   const [me, setMe] = useState<MeInfo | null>(null);
   const [showDash, setShowDash] = useState(false);
+  // Checkout return (proposal 0058 C4): null = not returning from Stripe;
+  // "pending" = webhook not landed yet, plan card shows "activating…"; "slow" =
+  // past the 30s budget, degrade to the honest "your payment is safe" copy.
+  const [billingPending, setBillingPending] = useState<"pending" | "slow" | null>(null);
   // A one-shot seed for the drawer's create mode (proposal 0056 A1/A2): set by
   // "Start your first session" (/activate) and a machine row's "New session",
   // consumed by SessionDrawer, which opens straight into create pre-scoped to
@@ -661,6 +665,57 @@ export default function App() {
       })
       .catch(() => setAuthed(true));
   }, []);
+
+  // Checkout return (proposal 0058 C4): /billing/success lands on the Dashboard
+  // and polls for the entitlement flip; /billing/cancel just opens the Dashboard.
+  // Runs once on mount — the SPA fallback serves both paths (no hub routing).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = window.location.pathname;
+    if (p === "/billing/success") {
+      window.history.replaceState({}, "", "/");
+      setShowDash(true);
+      setBillingPending("pending");
+    } else if (p === "/billing/cancel") {
+      window.history.replaceState({}, "", "/");
+      setShowDash(true);
+    }
+  }, []);
+
+  // Entitlement-flip watcher (0058 C4): the webhook typically lands in 1–5s and
+  // flips plan.status to "active" — clear the "activating…" notice when it does.
+  useEffect(() => {
+    if (billingPending !== null && me?.plan?.status === "active") {
+      setBillingPending(null);
+    }
+  }, [billingPending, me]);
+
+  // Poll /api/me every 2s for up to 30s after returning from checkout, plus once
+  // whenever the tab becomes visible (an installed PWA the OS froze during the
+  // Stripe hop). Past 30s we stop the cadence and degrade the copy to "slow".
+  // Depends only on the null↔non-null transition so refetches don't reset the
+  // 30s budget; the visibilitychange listener stays for the "slow" phase too.
+  const billingActive = billingPending !== null;
+  useEffect(() => {
+    if (!billingActive) return;
+    const started = Date.now();
+    const iv = window.setInterval(() => {
+      if (Date.now() - started >= 30_000) {
+        setBillingPending((cur) => (cur === "pending" ? "slow" : cur));
+        window.clearInterval(iv);
+        return;
+      }
+      refetchMe();
+    }, 2000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") refetchMe();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [billingActive, refetchMe]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1890,6 +1945,9 @@ export default function App() {
     multiTenant: !!me?.multiTenant,
     plan: me?.plan,
     supportEmail: me?.supportEmail ?? undefined,
+    // Whether checkout is available (proposal 0058 C2): flips the session-cap
+    // 402 card from a mailto to a Stripe checkout button.
+    billing: me?.billing ?? false,
   };
 
   // The session switcher, built once and rendered in one of two places:
@@ -1978,6 +2036,7 @@ export default function App() {
           email={me.email}
           plan={me.plan}
           support={me.supportEmail}
+          billing={me.billing}
           onDone={() => {
             window.history.replaceState({}, "", "/");
             setShowDash(true);
@@ -1999,6 +2058,7 @@ export default function App() {
       return (
         <Dashboard
           me={me}
+          billingPending={billingPending}
           // Per-machine entry into the assistant update (0049): the dashboard is
           // a full-screen view, so hand back to the terminal with the flow open
           // and scoped to that machine.
