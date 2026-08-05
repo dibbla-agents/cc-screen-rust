@@ -15,7 +15,7 @@ use cc_screen_auth::Auth;
 use cc_screen_hub::test_support::{sess, spawn_scriptable_agent, start_hub, FakeAgentHandle};
 use cc_screen_protocol::hub::Cmd;
 use cc_screen_protocol::SessionInfo;
-use cc_screen_tui::app::{App, AppMsg, RunOpts};
+use cc_screen_tui::app::{App, AppMsg};
 use cc_screen_tui::client::Rest;
 use cc_screen_tui::config::Config;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -53,6 +53,22 @@ impl Harness {
         isolate_config();
         let rest = Rest::new(&format!("http://{hub}"), false, token).expect("rest");
         let mut app = App::new(rest, Config::default());
+        let rx = app.take_rx();
+        app.init().await;
+        let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        app.draw(&mut term).unwrap();
+        Harness { app, rx, term }
+    }
+
+    /// Boot with a `ccs <session>` direct-attach query armed (0059 C2). The raw
+    /// query is handed to the app, which resolves it via `App::resolve_attach`
+    /// against the freshly-refreshed session list during `init()` — booting
+    /// straight into the attached grid instead of the action menu.
+    async fn boot_attached(hub: &str, cols: u16, rows: u16, query: &str) -> Harness {
+        isolate_config();
+        let rest = Rest::new(&format!("http://{hub}"), false, None).expect("rest");
+        let mut app = App::new(rest, Config::default());
+        app.set_start_attach(query.into());
         let rx = app.take_rx();
         app.init().await;
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
@@ -190,7 +206,7 @@ impl Harness {
         let mut out = String::new();
         for y in 0..area.height {
             for x in 0..area.width {
-                out.push_str(buf.get(x, y).symbol());
+                out.push_str(buf[(x, y)].symbol());
             }
             out.push('\n');
         }
@@ -296,6 +312,32 @@ async fn attach_round_trip_shows_snapshot_and_echoes_input() {
     assert!(
         h.pump_until(|t| t.contains("SNAP:boxA:alphax")).await,
         "the echoed 'x' should render after the snapshot; got:\n{}",
+        h.text()
+    );
+}
+
+// ── 2b. Direct attach (`ccs <session>`) ─────────────────────────────────────
+
+/// 0059 C2: booting with a positional session query (`ccs al`, a unique prefix)
+/// resolves to `alpha` and lands straight in the attached grid — the pane shows
+/// the agent's snapshot and the action menu is NOT open (no "New session" row).
+#[tokio::test]
+async fn direct_attach_by_prefix_boots_into_grid() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent =
+        spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    // "al" is a unique prefix of alpha (beta doesn't start with it).
+    let mut h = Harness::boot_attached(&hub, 100, 30, "al").await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await,
+        "direct-attach should boot straight into alpha's grid; got:\n{}",
+        h.text()
+    );
+    // The action menu (its "New session" row) must NOT be showing — we skipped it.
+    assert!(
+        !h.text().contains("New session"),
+        "direct attach must bypass the action menu; got:\n{}",
         h.text()
     );
 }

@@ -35,6 +35,85 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Why a `ccs <session>` direct-attach query (0059 C2) couldn't be resolved to a
+/// single session. `Ambiguous` carries the human-readable candidate labels
+/// (`machine/name`, or just `name` in single-agent mode) so the CLI can print
+/// them to stderr before exiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachError {
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+/// Case-insensitive subsequence test: do `query`'s chars appear, in order, in
+/// `hay`? The last (fuzzy) tier of `resolve_attach`.
+fn fuzzy_subseq(hay: &str, query: &str) -> bool {
+    let mut q = query.chars().flat_map(char::to_lowercase).peekable();
+    for h in hay.chars().flat_map(char::to_lowercase) {
+        match q.peek() {
+            Some(&qc) if qc == h => {
+                q.next();
+            }
+            _ => {}
+        }
+        if q.peek().is_none() {
+            return true;
+        }
+    }
+    q.peek().is_none()
+}
+
+/// Display label for a session in ambiguity messages: `machine/name` on a hub,
+/// bare `name` for a single unnamed agent.
+fn attach_label(s: &SessionInfo) -> String {
+    if s.machine.is_empty() {
+        s.name.clone()
+    } else {
+        format!("{}/{}", s.machine, s.name)
+    }
+}
+
+/// Resolve a `ccs <session>` positional query (0059 C2) to a single
+/// `(name, machine)` target. Precedence, first tier with any match wins:
+///   1. exact `machine/name`
+///   2. exact `name`
+///   3. unique `name` prefix
+///   4. unique fuzzy (case-insensitive subsequence) `name` match
+/// Exactly one hit in the winning tier ⇒ `Ok`; more than one ⇒ `Ambiguous` (the
+/// candidates); no hit in any tier ⇒ `NotFound`. Pure — unit-tested below and
+/// reused by both the CLI pre-flight (`main.rs`) and `App::start_in_menu`.
+pub fn resolve_attach(sessions: &[SessionInfo], query: &str) -> Result<(String, String), AttachError> {
+    let pick = |hits: &[&SessionInfo]| -> Option<Result<(String, String), AttachError>> {
+        match hits {
+            [] => None,
+            [one] => Some(Ok((one.name.clone(), one.machine.clone()))),
+            many => Some(Err(AttachError::Ambiguous(many.iter().map(|s| attach_label(s)).collect()))),
+        }
+    };
+
+    // 1. exact machine/name (only when the query carries a slash).
+    if let Some((machine, name)) = query.split_once('/') {
+        let hits: Vec<&SessionInfo> =
+            sessions.iter().filter(|s| s.machine == machine && s.name == name).collect();
+        if let Some(r) = pick(&hits) {
+            return r;
+        }
+    }
+    // 2. exact name.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| s.name == query).collect();
+    if let Some(r) = pick(&hits) {
+        return r;
+    }
+    // 3. unique name prefix.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| s.name.starts_with(query)).collect();
+    if let Some(r) = pick(&hits) {
+        return r;
+    }
+    // 4. unique fuzzy (subsequence) name match.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| fuzzy_subseq(&s.name, query)).collect();
+    pick(&hits).unwrap_or(Err(AttachError::NotFound))
+}
+
 /// Everything the event loop reacts to.
 pub enum AppMsg {
     Term(Event),
@@ -427,6 +506,11 @@ pub struct App {
     rx: Option<mpsc::Receiver<AppMsg>>,
     should_quit: bool,
     pending_refresh: bool,
+    /// A `ccs <session>` direct-attach query (0059 C2), if given. Resolved against
+    /// the freshly-refreshed session list in `start_in_menu`: on a hit the app
+    /// boots straight into the grid attached to that session (no action menu); a
+    /// resolve miss falls back to the default menu boot.
+    start_attach_query: Option<String>,
 
     // ── ready-session notifications (0018) ──────────────────────────────────
     /// Sessions that crossed the gated busy→waiting edge and are still ready,
@@ -489,6 +573,7 @@ impl App {
             rx: Some(rx),
             should_quit: false,
             pending_refresh: false,
+            start_attach_query: None,
             toast: Vec::new(),
             toast_until: None,
             is_focused: true,
@@ -500,6 +585,16 @@ impl App {
     /// crossterm `EventStream` / ticker (see `RunOpts`).
     pub fn tx(&self) -> mpsc::Sender<AppMsg> {
         self.tx.clone()
+    }
+
+    /// Arm `ccs <session>` direct-attach (0059 C2): `query` is resolved against the
+    /// session list at boot (`start_in_menu`), attaching box 0 straight into the
+    /// grid instead of opening the action menu. `main.rs` sets the raw query it
+    /// already pre-flighted for exit codes; `App` re-resolves via the same pure
+    /// `resolve_attach`, so a miss (e.g. the session vanished) degrades to the
+    /// default menu boot rather than erroring.
+    pub fn set_start_attach(&mut self, query: String) {
+        self.start_attach_query = Some(query);
     }
 
     pub async fn run<B: Backend>(self, term: &mut Terminal<B>) -> Result<()> {
@@ -1240,6 +1335,17 @@ impl App {
     /// New session / Quit still work, and clearing the empty box falls back to
     /// the switcher).
     fn start_in_menu(&mut self) {
+        // Direct-attach (0059 C2): `ccs <session>` boots straight into the grid
+        // attached to the resolved session, skipping the action menu. `main.rs`
+        // already pre-flighted the query for the exit-code UX; we re-resolve here
+        // against the freshly-refreshed list (same data, same pure function) so a
+        // late miss falls back to the default menu boot instead of a blank grid.
+        if let Some(query) = self.start_attach_query.take() {
+            if let Ok((name, machine)) = resolve_attach(&self.sessions, &query) {
+                self.fill_box(0, name, machine); // → Grid mode, box 0, no menu
+                return;
+            }
+        }
         match self.sessions.first() {
             Some(first) => {
                 let (name, machine) = (first.name.clone(), first.machine.clone());
@@ -1690,6 +1796,70 @@ mod tests {
             color: None,
             label: None,
         }
+    }
+
+    /// Like `sess`, but pins the session's machine (for hub / multi-machine cases).
+    fn sess_on(name: &str, machine: &str) -> SessionInfo {
+        let mut s = sess(name);
+        s.machine = machine.into();
+        s
+    }
+
+    #[test]
+    fn resolve_attach_exact_name() {
+        let list = vec![sess("alpha"), sess("beta")];
+        assert_eq!(resolve_attach(&list, "alpha"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_machine_slash_name() {
+        // Same name on two machines: the bare name is ambiguous, but the
+        // machine/name form disambiguates to one.
+        let list = vec![sess_on("web", "boxA"), sess_on("web", "boxB")];
+        assert_eq!(resolve_attach(&list, "boxB/web"), Ok(("web".into(), "boxB".into())));
+        assert!(matches!(resolve_attach(&list, "web"), Err(AttachError::Ambiguous(_))));
+    }
+
+    #[test]
+    fn resolve_attach_unique_prefix() {
+        let list = vec![sess("alpha"), sess("beta")];
+        // "al" is a unique prefix of alpha (not a prefix of beta).
+        assert_eq!(resolve_attach(&list, "al"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_unique_fuzzy() {
+        let list = vec![sess("alpha"), sess("gamma")];
+        // "aph" is neither a prefix nor a substring, but is a subsequence of alpha
+        // (a·l·p·h·a) and of nothing else.
+        assert_eq!(resolve_attach(&list, "aph"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_ambiguous_lists_candidates() {
+        // "a" prefixes both alpha and apex → ambiguous, with both labelled.
+        let list = vec![sess("alpha"), sess("apex")];
+        match resolve_attach(&list, "a") {
+            Err(AttachError::Ambiguous(c)) => {
+                assert!(c.contains(&"alpha".to_string()) && c.contains(&"apex".to_string()), "{c:?}");
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_attach_missing_is_not_found() {
+        let list = vec![sess("alpha"), sess("beta")];
+        assert_eq!(resolve_attach(&list, "zzz"), Err(AttachError::NotFound));
+        // Even an empty list is NotFound, never a panic.
+        assert_eq!(resolve_attach(&[], "alpha"), Err(AttachError::NotFound));
+    }
+
+    #[test]
+    fn resolve_attach_exact_name_beats_prefix_of_another() {
+        // Exact "al" wins outright even though it also prefixes "album".
+        let list = vec![sess("al"), sess("album")];
+        assert_eq!(resolve_attach(&list, "al"), Ok(("al".into(), String::new())));
     }
 
     #[test]

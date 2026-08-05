@@ -41,4 +41,11 @@ pub struct Cli {
     /// Accept invalid TLS certificates (for an ad-hoc self-signed `wss`).
     #[arg(long)]
     pub insecure: bool,
+
+    /// Session to attach on start (0059 C2): `ccs alpha` boots straight into the
+    /// grid attached to that session instead of the action menu. Accepts an exact
+    /// `machine/name`, an exact `name`, a unique name prefix, or a unique fuzzy
+    /// match. Ambiguous prints the candidates and exits 2; not found exits 1.
+    #[arg(value_name = "SESSION")]
+    pub attach: Option<String>,
 }

@@ -31,8 +31,39 @@ async fn main() -> Result<()> {
 
     let rest = client::Rest::new(&server, cli.insecure, token)?;
 
+    // `ccs <session>` direct-attach pre-flight (0059 C2). Resolve BEFORE entering
+    // the alt-screen so any error is visible on the normal screen with a real exit
+    // code: not found → 1, ambiguous → 2 (candidates on stderr). On success we hand
+    // the raw query to the app, which re-resolves it against the same list at boot.
+    // (A session name equal to `update`/`uninstall` is unreachable here — those are
+    // consumed as bare positionals above — so a collision can't hijack this path.)
+    if let Some(query) = cli.attach.clone() {
+        let sessions = rest.sessions().await.unwrap_or_else(|e| {
+            let first = e.to_string().lines().next().unwrap_or("").to_string();
+            eprintln!("ccs: couldn't list sessions from {server}: {first}");
+            std::process::exit(1);
+        });
+        match app::resolve_attach(&sessions, &query) {
+            Ok(_) => {}
+            Err(app::AttachError::NotFound) => {
+                eprintln!("ccs: no session matches '{query}'");
+                std::process::exit(1);
+            }
+            Err(app::AttachError::Ambiguous(cands)) => {
+                eprintln!("ccs: '{query}' is ambiguous — {} candidates:", cands.len());
+                for c in &cands {
+                    eprintln!("  {c}");
+                }
+                std::process::exit(2);
+            }
+        }
+    }
+
     let mut term = term::enter()?;
-    let app = app::App::new(rest, cfg);
+    let mut app = app::App::new(rest, cfg);
+    if let Some(query) = cli.attach {
+        app.set_start_attach(query);
+    }
     let res = app.run(&mut term).await;
     // Always restore the terminal, even if the app loop errored.
     let _ = term::restore();
