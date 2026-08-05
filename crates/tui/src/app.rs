@@ -11,8 +11,9 @@ use anyhow::Result;
 use cc_screen_protocol::{CreateReq, MachineInfo, SessionInfo, ToolInfo};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
+use ratatui::backend::Backend;
 use ratatui::layout::Rect;
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
@@ -22,7 +23,6 @@ use crate::input;
 use crate::layout::{self, Layout};
 use crate::pane::{ConnState, Pane, WsOut};
 use crate::ready::{self, ReadyEdge};
-use crate::term::Tui;
 use crate::ui;
 
 /// How long a foreground ready-toast (0018 §3) stays up before the 1 s ticker
@@ -442,6 +442,23 @@ pub struct App {
     is_focused: bool,
 }
 
+/// Which real-terminal side effects `App::run_with` starts. Production passes the
+/// default (both on); e2e tests pass both off and drive the loop synthetically
+/// through `App::tx()` (proposal 0059 B2).
+#[derive(Clone, Copy, Debug)]
+pub struct RunOpts {
+    /// Spawn the crossterm `EventStream` reader task (real keyboard/mouse/resize).
+    pub spawn_term_events: bool,
+    /// Spawn the 1 s ticker that drives `AppMsg::Tick` (poll refresh, toast expiry).
+    pub spawn_ticker: bool,
+}
+
+impl Default for RunOpts {
+    fn default() -> Self {
+        Self { spawn_term_events: true, spawn_ticker: true }
+    }
+}
+
 impl App {
     pub fn new(rest: Rest, cfg: Config) -> Self {
         let (tx, rx) = mpsc::channel(512);
@@ -478,11 +495,63 @@ impl App {
         }
     }
 
-    pub async fn run(mut self, term: &mut Tui) -> Result<()> {
-        let mut rx = self.rx.take().expect("run() called once");
-        self.spawn_term_events();
-        self.spawn_ticker();
+    /// Clone the app's message sender. Tests drive the loop by pushing synthetic
+    /// `AppMsg`s (keys, ticks, resizes) onto this channel instead of a real
+    /// crossterm `EventStream` / ticker (see `RunOpts`).
+    pub fn tx(&self) -> mpsc::Sender<AppMsg> {
+        self.tx.clone()
+    }
 
+    pub async fn run<B: Backend>(self, term: &mut Terminal<B>) -> Result<()> {
+        self.run_with(term, RunOpts::default()).await
+    }
+
+    /// The event loop, generic over the ratatui backend so an e2e test can run it
+    /// against a `TestBackend` (proposal 0059 B2). `opts` gates the real-terminal
+    /// side effects (the crossterm event stream + the 1 s ticker) so a test owns
+    /// the stimulus and feeds the loop deterministically via `tx()`.
+    pub async fn run_with<B: Backend>(mut self, term: &mut Terminal<B>, opts: RunOpts) -> Result<()> {
+        let mut rx = self.take_rx();
+        if opts.spawn_term_events {
+            self.spawn_term_events();
+        }
+        if opts.spawn_ticker {
+            self.spawn_ticker();
+        }
+
+        self.init().await;
+        self.draw(term)?;
+
+        while let Some(msg) = rx.recv().await {
+            self.handle_msg(msg).await;
+            while let Ok(m) = rx.try_recv() {
+                self.handle_msg(m).await;
+            }
+            if self.should_quit {
+                break;
+            }
+            self.draw(term)?;
+        }
+        Ok(())
+    }
+
+    // ── driver pieces, shared by `run_with` and the e2e harness (0059 B3) ────────
+    //
+    // A bin-only loop can't be single-stepped from a test. Splitting it into
+    // `take_rx` / `init` / `handle_msg` / `draw` lets `tests/e2e.rs` push a
+    // synthetic `AppMsg`, drain the channel, redraw a `TestBackend`, and assert on
+    // the buffer — while production still runs the exact same pieces in `run_with`.
+
+    /// Take the app's receiver (once). Production's `run_with` owns it; a test owns
+    /// it so it can drain pane/create/tool messages between synthetic stimuli.
+    pub fn take_rx(&mut self) -> mpsc::Receiver<AppMsg> {
+        self.rx.take().expect("take_rx()/run() called once")
+    }
+
+    /// One-time async startup: resolve the server root, probe for a hub, load the
+    /// default machine's tools, do the first session refresh, and pick the initial
+    /// screen. No terminal side effects (no `spawn_*`) — those are `run_with`'s.
+    pub async fn init(&mut self) {
         if let Ok((home, machine)) = self.rest.root_info().await {
             self.home = home;
             self.self_machine = machine;
@@ -499,24 +568,26 @@ impl App {
         // fetch them for the machine the form will default to.
         self.tools = self.rest.tools(&self.default_machine_name()).await.unwrap_or_default();
 
-        self.sync_area(term);
         self.refresh().await;
         self.start_in_menu();
-        term.draw(|f| self.render(f))?;
+    }
 
-        while let Some(msg) = rx.recv().await {
-            self.handle(msg).await;
-            while let Ok(m) = rx.try_recv() {
-                self.handle(m).await;
-            }
-            if self.should_quit {
-                break;
-            }
-            self.sync_area(term);
-            self.relayout();
-            term.draw(|f| self.render(f))?;
-        }
+    /// Handle one message (a key/tick/resize, or a pane/create/tools async result).
+    pub async fn handle_msg(&mut self, msg: AppMsg) {
+        self.handle(msg).await;
+    }
+
+    /// Re-pin the layout to the current terminal size and repaint one frame.
+    pub fn draw<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<()> {
+        self.sync_area(term);
+        self.relayout();
+        term.draw(|f| self.render(f))?;
         Ok(())
+    }
+
+    /// Whether the loop has been asked to quit (a test checks this after `q`).
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
     }
 
     fn spawn_term_events(&self) {
@@ -552,7 +623,7 @@ impl App {
         });
     }
 
-    fn sync_area(&mut self, term: &Tui) {
+    fn sync_area<B: Backend>(&mut self, term: &Terminal<B>) {
         if let Ok(sz) = term.size() {
             self.area = (sz.width, sz.height);
         }

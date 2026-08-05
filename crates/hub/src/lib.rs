@@ -33,6 +33,12 @@ pub mod summarizer;
 pub mod uplink_server;
 pub mod watch_ws;
 
+// In-process hub + fake-agent doubles for e2e tests (proposal 0059 B1). Behind a
+// feature so a normal hub build never compiles them; consumed by the hub's own
+// `tests/e2e.rs` and, as a dev-dependency, by the `ccs` TUI e2e harness.
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use axum::routing::{get, post};
 use axum::Router;
 

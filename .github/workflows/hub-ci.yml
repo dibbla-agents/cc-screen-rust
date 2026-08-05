@@ -26,7 +26,10 @@ jobs:
         run: cd frontend && npm ci && npm run build
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `test-support` compiles the in-process hub + fake-agent doubles (0059 B1)
+      # that crates/hub/tests/e2e.rs now consumes; without it that suite is gated
+      # out (compiles to nothing). It stays off for a normal hub build.
       - name: Test (default single-tenant build)
-        run: cargo test -p cc-screen-hub
+        run: cargo test -p cc-screen-hub --features test-support
       - name: Test (multi-tenant SaaS build)
-        run: cargo test -p cc-screen-hub --features multi-tenant
+        run: cargo test -p cc-screen-hub --features multi-tenant,test-support

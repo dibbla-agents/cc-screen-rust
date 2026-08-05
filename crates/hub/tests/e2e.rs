@@ -6,171 +6,26 @@
 //! the machine-tagged session list, and the auth boundary — all without a real
 //! PTY agent. Everything binds `127.0.0.1:0` (ephemeral) and uses a temp config
 //! dir, so it's hermetic and parallel-safe.
+//!
+//! The in-process hub + fake-agent doubles now live in `cc_screen_hub::test_support`
+//! (proposal 0059 B1) so the `ccs` TUI e2e harness can drive a real `App` against
+//! the *same* wire-contract double. This file is the first consumer, proving the
+//! hoist is behaviour-neutral — hence the whole module is gated on the feature that
+//! compiles the doubles.
+#![cfg(feature = "test-support")]
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use cc_screen_auth::Auth;
-use cc_screen_hub::{build_router, registry::Registry, state::HubState};
+use cc_screen_hub::test_support::{
+    await_machine, connect, read_until, send, spawn_fake_agent, spawn_fake_agent_marked, start_hub,
+};
 use cc_screen_protocol::hub::{
-    decode_frame, encode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_ASSISTANT_INSTALL, CAP_ASSISTANT_UPDATE,
-    HUB_PROTO_VERSION,
+    decode_frame, AgentMsg, CmdResult, HubMsg, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
-
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
-
-/// Start the hub on an ephemeral port; return its `host:port`.
-async fn start_hub(client_auth: Auth, agent_tokens: &[(&str, &str)]) -> String {
-    let tokens: HashMap<String, String> =
-        agent_tokens.iter().map(|(m, t)| (m.to_string(), t.to_string())).collect();
-    let tmp = std::env::temp_dir().join(format!("ccr-hub-e2e-{}-{}", std::process::id(), agent_tokens.len()));
-    let _ = std::fs::create_dir_all(&tmp);
-    let hub = HubState {
-        registry: Registry::new(),
-        agent_tokens: Arc::new(tokens),
-        allow_open_uplink: false,
-        client_auth,
-        origin: cc_screen_auth::OriginPolicy::default(),
-        login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),
-        config_dir: tmp.clone(),
-        push: Arc::new(cc_screen_push::Push::new(&tmp)),
-        bulk: Default::default(),
-        summary: Arc::new(cc_screen_hub::summarizer::Summarizer::disabled()),
-        tenancy: cc_screen_hub::state::Tenancy::Single,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = build_router(hub);
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("{addr}")
-}
-
-fn sess(name: &str) -> SessionInfo {
-    SessionInfo {
-        name: name.into(),
-        tool: "shell".into(),
-        short: name.into(),
-        attached: false,
-        activity: 0,
-        last_input_at: 0,
-        busy_since: 0,
-        busy_until: 0,
-        preview: String::new(),
-        waiting: false,
-        skip_permissions: None,
-        cwd: String::new(),
-        machine: String::new(),
-        headline: None,
-        detail: None,
-        color: None,
-        label: None,
-    }
-}
-
-async fn connect(url: &str, token: Option<&str>) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
-    let mut req = url.into_client_request().unwrap();
-    if let Some(t) = token {
-        req.headers_mut()
-            .insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {t}")).unwrap());
-    }
-    tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws)
-}
-
-async fn send(ws: &mut Ws, msg: &AgentMsg, payload: &[u8]) {
-    ws.send(Message::Binary(encode_frame(msg, payload))).await.unwrap();
-}
-
-/// Spawn a fake agent that registers `machine_id`, advertises one session, and
-/// answers attaches with an RIS snapshot then echoes input as output.
-async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, session: &str) {
-    let url = format!("ws://{hub}/agent/ws");
-    let mut ws = connect(&url, token).await.expect("agent connects");
-    send(
-        &mut ws,
-        &AgentMsg::Register {
-            proto: HUB_PROTO_VERSION,
-            machine_id: machine_id.into(),
-            hostname: machine_id.into(),
-            agent_version: "test".into(),
-            tools: vec![],
-            caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_ASSISTANT_INSTALL.to_string()],
-        },
-        b"",
-    )
-    .await;
-    send(&mut ws, &AgentMsg::Sessions { sessions: vec![sess(session)] }, b"").await;
-
-    tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws.next().await {
-            let Message::Binary(buf) = msg else { continue };
-            let Ok((hub_msg, payload)) = decode_frame::<HubMsg>(&buf) else { continue };
-            match hub_msg {
-                HubMsg::Attach { ch, .. } => {
-                    // Snapshot first (RIS-prefixed), exactly like a real agent.
-                    send(&mut ws, &AgentMsg::Snapshot { ch }, b"\x1bcHELLO_FROM_AGENT").await;
-                }
-                HubMsg::Input { ch } => {
-                    // Echo the client's input back as output.
-                    let bytes = payload.to_vec();
-                    send(&mut ws, &AgentMsg::Output { ch }, &bytes).await;
-                }
-                // Control ops: answer the two assistant-update ops (0049) with a
-                // canned job snapshot so the relay + gating can be asserted
-                // without a real updater; everything else is a bare Ok.
-                HubMsg::Command { req, cmd } => {
-                    let result = match cmd {
-                        // The job id echoes `install_missing` so a test can assert
-                        // the flag survived the UpdateBody → Cmd hop (0050 D4) —
-                        // a silently-dropped one is exactly the "believed it
-                        // installed" failure the capability gate exists to stop.
-                        Cmd::UpdateAssistants { install_missing, .. } => CmdResult::Json(
-                            serde_json::to_value(UpdateJob {
-                                id: format!("install={install_missing}"),
-                                phase: "done".into(),
-                                ..Default::default()
-                            })
-                            .unwrap(),
-                        ),
-                        Cmd::UpdateStatus => CmdResult::Json(
-                            serde_json::to_value(UpdateJob { phase: "done".into(), ..Default::default() }).unwrap(),
-                        ),
-                        _ => CmdResult::Ok,
-                    };
-                    send(&mut ws, &AgentMsg::Reply { req, result }, b"").await;
-                }
-                HubMsg::Ping => send(&mut ws, &AgentMsg::Pong, b"").await,
-                _ => {}
-            }
-        }
-    });
-}
-
-/// Read binary WS frames until one satisfies `pred` (or time out).
-async fn read_until<F: Fn(&[u8]) -> bool>(ws: &mut Ws, pred: F) -> bool {
-    for _ in 0..50 {
-        match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-            Ok(Some(Ok(Message::Binary(b)))) => {
-                if pred(&b) {
-                    return true;
-                }
-            }
-            Ok(Some(Ok(_))) => continue,
-            _ => return false,
-        }
-    }
-    false
-}
 
 #[tokio::test]
 async fn terminal_relay_snapshot_and_input_through_hub() {
@@ -265,43 +120,6 @@ async fn agent_with_wrong_uplink_token_is_rejected() {
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
     assert!(listed, "the correctly-tokened agent registers");
-}
-
-/// Like `spawn_fake_agent` but the attach snapshot carries the machine id, so a
-/// test can tell *which* agent served an attach — needed to prove routing when
-/// two machines own a session of the same name.
-async fn spawn_fake_agent_marked(hub: &str, machine_id: &str, session: &str) {
-    let url = format!("ws://{hub}/agent/ws");
-    let mut ws = connect(&url, None).await.expect("agent connects");
-    let mid = machine_id.to_string();
-    send(
-        &mut ws,
-        &AgentMsg::Register {
-            proto: HUB_PROTO_VERSION,
-            machine_id: mid.clone(),
-            hostname: mid.clone(),
-            agent_version: "test".into(),
-            tools: vec![],
-            caps: vec![CAP_ASSISTANT_UPDATE.to_string()],
-        },
-        b"",
-    )
-    .await;
-    send(&mut ws, &AgentMsg::Sessions { sessions: vec![sess(session)] }, b"").await;
-    tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws.next().await {
-            let Message::Binary(buf) = msg else { continue };
-            let Ok((hub_msg, _)) = decode_frame::<HubMsg>(&buf) else { continue };
-            match hub_msg {
-                HubMsg::Attach { ch, .. } => {
-                    let snap = format!("\x1bcSNAP_{mid}");
-                    send(&mut ws, &AgentMsg::Snapshot { ch }, snap.as_bytes()).await;
-                }
-                HubMsg::Ping => send(&mut ws, &AgentMsg::Pong, b"").await,
-                _ => {}
-            }
-        }
-    });
 }
 
 /// Two machines, each owning a session of the SAME name. This is the exact case
@@ -628,17 +446,4 @@ async fn asking_an_update_only_agent_to_install_is_501() {
     // The plan route needs the install capability too.
     let resp = reqwest::get(format!("http://{hub}/api/assistants/plan?machine=updateonly")).await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
-}
-
-/// Wait for the uplink to register before routing anything to it.
-async fn await_machine(hub: &str) {
-    for _ in 0..50 {
-        let m: Vec<serde_json::Value> =
-            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
-        if !m.is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(40)).await;
-    }
-    panic!("no machine registered");
 }

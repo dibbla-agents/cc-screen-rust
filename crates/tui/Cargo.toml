@@ -31,3 +31,14 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+[dev-dependencies]
+# The e2e harness (proposal 0059 B3/B4) drives a real `App` against an in-process
+# hub built from the SAME wire-contract doubles the hub's own suite uses — hoisted
+# into cc_screen_hub::test_support (B1). Pulling the hub in with `test-support`
+# also means `frontend/dist` must exist before `cargo test -p cc-screen-tui`
+# compiles (the hub embeds it via rust-embed) — the tui-ci job builds it first.
+cc-screen-hub = { path = "../hub", features = ["test-support"] }
+cc-screen-auth = { path = "../auth" }
+# B4 PTY smoke: boot the real `ccs` binary inside a pty pair and read its screen.
+portable-pty = "0.8"

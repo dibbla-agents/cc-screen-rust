@@ -1,20 +1,13 @@
 // cc-screen-tui (`ccs`) — terminal client for the cc-screen-rust backend.
 // M1: session switcher (list + navigate). Attach/input/lifecycle land in M2–M4.
-
-mod anchored_backend;
-mod app;
-mod cli;
-mod client;
-mod config;
-mod input;
-mod layout;
-mod pane;
-mod ready;
-mod term;
-mod ui;
+//
+// The modules live in the crate's library (`src/lib.rs`) so the e2e harness can
+// drive a real `App`; this binary is a thin shell over them (proposal 0059 B2).
 
 use anyhow::{Context, Result};
 use clap::Parser;
+
+use cc_screen_tui::{app, cli, client, config, term};
 
 #[tokio::main]
 async fn main() -> Result<()> {
