@@ -15,6 +15,12 @@ dist = true
 name = "ccs"
 path = "src/main.rs"
 
+[features]
+# B4 PTY smoke (proposal 0059): the flaky tier. Quarantined behind a feature so a
+# plain `cargo test -p cc-screen-tui` (the blocking CI job) never runs it; CI runs
+# it as a separate, isolated step: `--features pty-smoke --test pty_smoke`.
+pty-smoke = []
+
 [dependencies]
 cc-screen-protocol = { path = "../protocol" }
 tokio = { version = "1", features = ["full"] }
