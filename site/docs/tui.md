@@ -74,8 +74,9 @@ In the switcher:
 
 Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 
-- `Ctrl-A d` — open the action menu (attach / rename / layout / jump)
+- `Ctrl-A d` — open the action menu (attach / rename / clear / layout)
 - `Ctrl-A` then a digit — switch layout
+- `Ctrl-A g` — jump to a session that just went ready
 - `Ctrl-A [` — enter **scrollback** mode on the focused pane (`PgUp`/`PgDn`,
   `k`/`j`, `g`/`G` top/live, `q`/`Esc` back to live); any printable key in
   normal mode snaps back to live

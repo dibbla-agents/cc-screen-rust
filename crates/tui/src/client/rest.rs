@@ -129,9 +129,16 @@ impl Rest {
         Ok(resp.dirs)
     }
 
-    /// POST /api/sessions/restore — bring back every restorable session.
-    pub async fn restore(&self) -> Result<()> {
-        check(self.http.post(self.urls.rest("/api/sessions/restore")).send().await?)?;
+    /// POST /api/sessions/restore — bring back every restorable session. `machine`
+    /// routes it to the owning hub agent (empty = direct / single machine). Without
+    /// it, a hub with >1 online agent can't disambiguate (no session key to fall
+    /// back on, unlike `delete`) and answers 404 — so the restore silently no-ops.
+    pub async fn restore(&self, machine: &str) -> Result<()> {
+        let mut post = self.http.post(self.urls.rest("/api/sessions/restore"));
+        if !machine.is_empty() {
+            post = post.query(&[("machine", machine)]);
+        }
+        check(post.send().await?)?;
         Ok(())
     }
 

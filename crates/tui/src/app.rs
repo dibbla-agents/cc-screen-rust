@@ -1013,8 +1013,14 @@ impl App {
     fn handle_created(&mut self, res: Result<(String, String), String>) {
         match res {
             Ok((name, machine)) => {
-                self.overlay = Overlay::None;
-                self.grid_overlay = GridOverlay::None;
+                // Only dismiss the new-session overlay this reply belongs to — a slow
+                // create must not wipe a rename/confirm overlay opened meanwhile.
+                if matches!(self.overlay, Overlay::NewSession(_)) {
+                    self.overlay = Overlay::None;
+                }
+                if matches!(self.grid_overlay, GridOverlay::NewForm { .. }) {
+                    self.grid_overlay = GridOverlay::None;
+                }
                 // If the create was launched to fill a box, drop it in there on
                 // the machine we routed it to; otherwise it was a plain switcher
                 // create.
@@ -1348,8 +1354,11 @@ impl App {
     fn restore_all(&mut self) {
         let rest = self.rest.clone();
         let tx = self.tx.clone();
+        // Route to the same agent the restorable list was fetched from (0059 C5) —
+        // a machine-less restore 404s on a multi-agent hub. Mirrors `restorable`.
+        let machine = self.default_machine_name();
         tokio::spawn(async move {
-            let _ = rest.restore().await;
+            let _ = rest.restore(&machine).await;
             let _ = tx.send(AppMsg::Tick).await; // nudge a refresh
         });
         self.status = "restoring…".into();
@@ -1416,7 +1425,13 @@ impl App {
         match res {
             Ok(()) => {
                 // Close whichever rename overlay is open (switcher or grid) + refresh.
-                self.overlay = Overlay::None;
+                // Guard on the overlay *kind*: a slow reply must never clobber a
+                // different overlay the user opened meanwhile (e.g. Esc'd the rename,
+                // then opened New-session / a delete-confirm). Symmetric with the
+                // Err arm and with `handle_created`.
+                if matches!(self.overlay, Overlay::RenameSession(_)) {
+                    self.overlay = Overlay::None;
+                }
                 if matches!(self.grid_overlay, GridOverlay::Rename(_)) {
                     self.grid_overlay = GridOverlay::None;
                 }
@@ -1562,6 +1577,7 @@ impl App {
         let cur = Layout::ALL.iter().position(|&l| l == self.layout).unwrap_or(0);
         self.grid_overlay = GridOverlay::Palette(cur);
         self.prefix_armed = false;
+        self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
     fn key_palette(&mut self, k: KeyEvent) {
@@ -1617,6 +1633,7 @@ impl App {
         let selected = menu_initial(&self.sessions, current.as_deref());
         self.grid_overlay = GridOverlay::Menu { target, selected };
         self.prefix_armed = false;
+        self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
     fn key_menu(&mut self, k: KeyEvent) {
@@ -2451,5 +2468,41 @@ mod tests {
         assert!(subseq.is_some());
         assert_eq!(fuzzy_score("docs", "xyz"), None);
         assert!(fuzzy_score("anything", "").is_some());
+    }
+
+    // Regression (0059 Wave-2 verify): a slow async reply must dismiss only the
+    // overlay it owns. Before the guard, an in-flight rename/create reply landing
+    // after the user Esc'd and opened a *different* overlay would silently wipe it.
+    fn rename_form(name: &str) -> RenameForm {
+        RenameForm { session: name.into(), machine: String::new(), value: name.into(), error: None }
+    }
+
+    #[test]
+    fn labeled_ok_dismisses_only_its_own_overlay() {
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        // A foreign overlay (a delete-confirm) opened after the rename was Esc'd:
+        // a stray SetLabel success must NOT close it.
+        a.overlay = Overlay::Confirm { session: "alpha".into(), graceful: true };
+        a.handle_labeled(Ok(()));
+        assert!(matches!(a.overlay, Overlay::Confirm { .. }), "foreign overlay must survive");
+        // …but it does close its own rename overlay.
+        a.overlay = Overlay::RenameSession(rename_form("alpha"));
+        a.handle_labeled(Ok(()));
+        assert!(matches!(a.overlay, Overlay::None), "rename overlay closes on success");
+    }
+
+    #[test]
+    fn created_ok_does_not_clobber_a_rename_overlay() {
+        let mut a = App::test_fixture(vec![], "");
+        a.overlay = Overlay::RenameSession(rename_form("alpha"));
+        a.handle_created(Ok(("newname".into(), String::new())));
+        assert!(
+            matches!(a.overlay, Overlay::RenameSession(_)),
+            "a rename overlay must survive a stray Created(Ok)"
+        );
+        // Its own new-session overlay still closes.
+        a.overlay = Overlay::NewSession(NewForm::new(String::new(), 0));
+        a.handle_created(Ok(("newname".into(), String::new())));
+        assert!(matches!(a.overlay, Overlay::None), "the new-session overlay closes on success");
     }
 }

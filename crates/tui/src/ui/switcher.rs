@@ -25,7 +25,7 @@ pub fn render(f: &mut Frame, app: &App) {
     render_header(f, rows[0]);
 
     if app.sessions().is_empty() {
-        let hint = Paragraph::new("  no sessions — press q to quit (create lands in M4)")
+        let hint = Paragraph::new("  no sessions · n new · R restore · q quit")
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(hint, rows[1]);
     } else {
