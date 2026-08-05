@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::ui::util::{ago, dir_crumb, truncate};
+use crate::ui::util::{ago, color_token_to_color, dir_crumb, truncate};
 
 const BAR_BG: Color = Color::Rgb(15, 23, 32);
 const SEL_BG: Color = Color::Rgb(30, 41, 59);
@@ -51,14 +51,22 @@ fn render_header(f: &mut Frame, area: ratatui::layout::Rect) {
 }
 
 fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    // Content width available to a row = the list width minus the 2-col
+    // highlight symbol ("▸ ") the List reserves. Used to bound the trailing
+    // headline/preview so a row never wraps (it clips) — holds at 40 cols.
+    let row_width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = app
         .sessions()
         .iter()
         .map(|s| {
+            // A web-set session colour (proposal 0029) tints the attach dot as the
+            // row's accent; absent/unknown token → today's green/grey (no
+            // regression). Display-only: the TUI never sets a colour.
+            let accent = color_token_to_color(s.color.as_deref());
             let (dot, dot_color) = if s.attached {
-                ("●", Color::Green)
+                ("●", accent.unwrap_or(Color::Green))
             } else {
-                ("○", Color::DarkGray)
+                ("○", accent.unwrap_or(Color::DarkGray))
             };
             // `waiting` is the resting state for an idle agent, so we surface the
             // inverse: an amber marker on sessions still producing output. A
@@ -80,13 +88,28 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             ];
             // Badge the one remaining non-default policy state: the rare session
             // launched with normal permission prompts (0014 removed view-only).
+            let mut prefix_cols = 2 + 26 + 8 + 7 + 2; // dot+crumb+tool+ago+work
             if s.skip_permissions == Some(false) {
                 spans.push(Span::styled(
                     "safe ",
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ));
+                prefix_cols += 5;
             }
-            spans.push(Span::styled(truncate(&s.preview, 62), Style::default().fg(Color::Gray)));
+            // Trailing summary: the LLM `headline` (≤6 words, proposal 0059 C4)
+            // when present — rendered dim, so it reads as secondary — else today's
+            // raw `preview`. Bounded to the remaining row width so the line clips
+            // rather than wraps (holds at 40 cols).
+            let avail = row_width.saturating_sub(prefix_cols);
+            if avail > 1 {
+                let (tail, style) = match s.headline.as_deref() {
+                    Some(h) if !h.is_empty() => {
+                        (h, Style::default().fg(Color::Gray).add_modifier(Modifier::DIM))
+                    }
+                    _ => (s.preview.as_str(), Style::default().fg(Color::Gray)),
+                };
+                spans.push(Span::styled(truncate(tail, avail), style));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();

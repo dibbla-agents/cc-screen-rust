@@ -763,6 +763,7 @@ impl App {
                     .collect();
                 let edges = ready::detect_ready_edges(&self.sessions, &list, &mounted, now_secs());
                 self.sessions = list;
+                self.refresh_pane_accents();
                 self.note_ready_edges(edges, &mounted);
                 if self.selected >= self.sessions.len() {
                     self.selected = self.sessions.len().saturating_sub(1);
@@ -1549,9 +1550,25 @@ impl App {
 
         self.remember(&session);
         self.panes[idx] = Some(Pane::new(id, session, machine, cols, rows, out_tx, task));
+        self.refresh_pane_accents();
         self.active = idx;
         self.mode = Mode::Grid;
         self.prefix_armed = false;
+    }
+
+    /// Sync each mounted box's border accent from the current session list's
+    /// web-set colour marks (proposal 0029 / 0059 C4). Display-only: a colour set
+    /// on the phone shows on the next poll; an unmarked/unknown token clears it.
+    fn refresh_pane_accents(&mut self) {
+        for slot in self.panes.iter_mut() {
+            let Some(p) = slot.as_mut() else { continue };
+            let accent = self
+                .sessions
+                .iter()
+                .find(|s| s.name == p.session && s.machine == p.machine)
+                .and_then(|s| ui::util::color_token_to_color(s.color.as_deref()));
+            p.set_accent(accent);
+        }
     }
 
     fn set_layout(&mut self, l: Layout) {

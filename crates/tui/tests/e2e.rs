@@ -20,6 +20,7 @@ use cc_screen_tui::client::Rest;
 use cc_screen_tui::config::Config;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
+use ratatui::style::Color;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
@@ -597,6 +598,57 @@ async fn auth_with_token_lists_and_attaches() {
         "with a token, attach works (WS handshake carries the bearer); got:\n{}",
         h.text()
     );
+}
+
+// ── C4. Switcher shows the LLM headline + web-set colour accent ──────────────
+
+/// A session carrying a web-set `headline` (the LLM ≤6-word summary) and a
+/// `color` mark renders both in the switcher: the headline as dim trailing text,
+/// the mark colour as the attach-dot accent (display-only — the TUI never sets
+/// either). We drop into the full-screen switcher (clear the only box), assert
+/// the headline text is on screen, and assert a dot cell is painted the mapped
+/// `teal` RGB (`TestBackend` text can't show colour, so we read cell *style*).
+#[tokio::test]
+async fn switcher_shows_headline_and_color_accent() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut alpha = sess("alpha");
+    alpha.headline = Some("fix the parser".into());
+    alpha.color = Some("teal".into()); // curated palette token (proposal 0029)
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![alpha, sess("beta")]).await;
+
+    // Make the poll deterministic: wait until the hub advertises alpha (with its
+    // headline/colour) before the client's boot poll runs.
+    await_hub(&hub, None, |list| list.iter().any(|s| s.name == "alpha")).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    // Menu starts on the attached session (index 2); Down×2 → "Clear this box"
+    // (index 2 + 2 sessions). Clearing the only box falls back to the switcher.
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Enter).await;
+
+    // The switcher row surfaces the LLM headline as trailing text.
+    assert!(
+        h.tick_until(|t| t.contains("alpha") && t.contains("fix the parser")).await,
+        "switcher should render the headline; got:\n{}",
+        h.text()
+    );
+
+    // The attach dot for the marked session is painted the mapped teal (the web's
+    // `hsl(175 60% 58%)` → Rgb(84,212,201)). Scan for a dot cell in that colour.
+    let teal = Color::Rgb(84, 212, 201);
+    let buf = h.term.backend().buffer();
+    let area = buf.area;
+    let mut found = false;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buf[(x, y)];
+            if (cell.symbol() == "●" || cell.symbol() == "○") && cell.style().fg == Some(teal) {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "a teal-accented attach dot should be painted; got:\n{}", h.text());
 }
 
 // ── narrow-terminal boot (terminal-environments note) ───────────────────────

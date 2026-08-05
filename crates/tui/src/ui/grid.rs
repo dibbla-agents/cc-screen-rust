@@ -51,10 +51,19 @@ fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, sin
         return;
     }
 
-    let (bs, ts) = if focused {
-        (Style::default().fg(FOCUS), Style::default().fg(FOCUS).add_modifier(Modifier::BOLD))
-    } else {
-        (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray))
+    // A web-set session mark colour (proposal 0029) accents the box border; the
+    // focused box keeps its bold title. Unmarked → today's cyan-focus / dim-grey.
+    // Display-only: the accent is mirrored from the session list, never set here.
+    let accent = pane.and_then(Pane::accent);
+    let (bs, ts) = match (focused, accent) {
+        (true, Some(c)) => {
+            (Style::default().fg(c), Style::default().fg(c).add_modifier(Modifier::BOLD))
+        }
+        (true, None) => {
+            (Style::default().fg(FOCUS), Style::default().fg(FOCUS).add_modifier(Modifier::BOLD))
+        }
+        (false, Some(c)) => (Style::default().fg(c), Style::default().fg(Color::Gray)),
+        (false, None) => (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray)),
     };
     let title = match pane {
         Some(p) => p.title(),

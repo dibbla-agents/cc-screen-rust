@@ -69,6 +69,10 @@ pub struct Pane {
     conn: ConnState,
     out_tx: mpsc::Sender<WsOut>,
     task: JoinHandle<()>,
+    /// The web-set session mark colour (proposal 0029) mapped to a terminal
+    /// colour, kept in sync from the session list so the grid box border can use
+    /// it as an accent. `None` = unmarked → today's default border. Display-only.
+    accent: Option<Color>,
 }
 
 impl Pane {
@@ -94,7 +98,21 @@ impl Pane {
             conn: ConnState::Connecting,
             out_tx,
             task,
+            accent: None,
         }
+    }
+
+    /// The web-set mark colour to accent this box's border with (proposal 0029),
+    /// or `None` when unmarked. Refreshed from the session list, so a colour set
+    /// on the phone shows here on the next poll. Display-only.
+    pub fn accent(&self) -> Option<Color> {
+        self.accent
+    }
+
+    /// Update the mark accent (from the latest session list). Display-only — the
+    /// TUI never sets a colour, it only mirrors what the web stored.
+    pub fn set_accent(&mut self, accent: Option<Color>) {
+        self.accent = accent;
     }
 
     /// The box title: `machine/session` when aggregated through a hub, else just
