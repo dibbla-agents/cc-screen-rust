@@ -625,8 +625,10 @@ async fn switcher_shows_headline_and_color_accent() {
     await_hub(&hub, None, |list| list.iter().any(|s| s.name == "alpha")).await;
 
     let mut h = Harness::boot(&hub, 100, 30).await;
-    // Menu starts on the attached session (index 2); Down×2 → "Clear this box"
-    // (index 2 + 2 sessions). Clearing the only box falls back to the switcher.
+    // Menu starts on the attached session; the focused box holds a session, so the
+    // action menu carries a Rename row (0059 C1) — with 2 sessions "Clear this box"
+    // sits at Down×3. Clearing the only box falls back to the full-screen switcher.
+    h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Enter).await;

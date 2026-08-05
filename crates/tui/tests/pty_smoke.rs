@@ -135,9 +135,11 @@ async fn ccs_boots_attaches_and_quits() {
         decode(&buf.lock().unwrap().clone(), COLS, ROWS)
     );
 
-    // Quit through the action menu: Down×2 highlights "Quit ccs" (Change layout,
-    // New session, alpha, Clear this box, Quit → index 4), Enter selects it.
-    writer.write_all(b"\x1b[B\x1b[B\r").expect("write quit keys");
+    // Quit through the action menu. The focused box holds a session, so the menu
+    // carries a Rename row (0059 C1): [Change layout, New session, alpha, Rename,
+    // Clear this box, Quit]. Selection starts on the attached session (alpha), so
+    // Down×3 highlights "Quit ccs"; Enter selects it.
+    writer.write_all(b"\x1b[B\x1b[B\x1b[B\r").expect("write quit keys");
     writer.flush().ok();
 
     // The process exits cleanly.
