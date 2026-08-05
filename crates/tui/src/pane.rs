@@ -353,6 +353,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn huge_delta_lands_at_top_of_history() {
+        // `g` (top) in keyboard-scroll mode passes a delta far larger than the
+        // history; alacritty clamps it to the oldest available line rather than
+        // overshooting, and the view then shows the very first line.
+        let mut p = pane(20, 5);
+        for i in 0..40 {
+            p.process(format!("LINE_{i}\r\n").as_bytes());
+        }
+        p.scroll(1_000_000); // the SCROLL_TOP delta app.rs sends for `g`
+        let top = p.scroll_offset();
+        assert!(top > 0, "a huge delta scrolls back into history: {top}");
+        assert_eq!(top, p.scroll_offset(), "offset is stable once clamped at the top");
+        let view = render(&p, 20, 5);
+        assert!(view.contains("LINE_0"), "the top view shows the oldest line: {view:?}");
+    }
+
+    #[tokio::test]
     async fn output_while_scrolled_does_not_panic() {
         let mut p = pane(40, 5);
         for i in 0..40 {

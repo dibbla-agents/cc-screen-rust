@@ -651,6 +651,75 @@ async fn switcher_shows_headline_and_color_accent() {
     assert!(found, "a teal-accented attach dot should be painted; got:\n{}", h.text());
 }
 
+// ── keyboard scrollback (0059 C3) ───────────────────────────────────────────
+
+/// `^A [` enters keyboard-scroll mode on the focused pane; PgUp pages back into
+/// real scrollback (the fake agent echoes input as output, so many `Ctrl+J`
+/// line-feeds build >1 screen of history), the statusbar's `⇡ scrollback N`
+/// indicator tracks the offset, and `q` snaps back to live (offset 0, indicator
+/// gone). Input never reaches the encoder while scrolling.
+#[tokio::test]
+async fn keyboard_scrollback_pages_and_returns_to_live() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    // A short pane (rows-1 == 9) so a handful of line-feeds already overflows one
+    // screen and spills into scrollback. Wide enough that the left `scrollback`
+    // indicator and the right-aligned scroll-key hint don't overlap in the bar.
+    let mut h = Harness::boot(&hub, 100, 10).await;
+    h.key(KeyCode::Esc).await; // close the start menu → the pane shows
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    // Build >1 screen of history: 30 numbered lines. Ctrl+J encodes to `\n`
+    // (0x0a), which the agent echoes back as output; each line-feed past the
+    // bottom pushes a line into alacritty's scrollback.
+    for i in 0..30 {
+        h.type_str(&format!("LN{i}")).await;
+        h.ctrl('j').await; // line feed
+    }
+    // Wait until the newest line has been echoed and rendered (round-trip done).
+    assert!(
+        h.pump_until(|t| t.contains("LN29")).await,
+        "the echoed lines should render live; got:\n{}",
+        h.text()
+    );
+    // Live: no scrollback indicator yet.
+    assert!(!h.text().contains("scrollback"), "live view has no indicator; got:\n{}", h.text());
+
+    // Enter scroll mode: ^A [ . The indicator appears (marks the mode) even before
+    // paging.
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('[')).await;
+    assert!(
+        h.pump_until(|t| t.contains("scrollback")).await,
+        "entering scroll mode shows the ⇡ scrollback indicator; got:\n{}",
+        h.text()
+    );
+    // Just entered — still at the live bottom, so the indicator reads offset 0.
+    assert!(h.text().contains("scrollback 0"), "scroll mode starts live; got:\n{}", h.text());
+    let live_view = h.text();
+
+    // PgUp pages back a full screen: the offset climbs above 0 (no longer
+    // `scrollback 0`) and the view changes (the newest line scrolls out).
+    h.key(KeyCode::PageUp).await;
+    assert!(
+        h.pump_until(|t| t.contains("scrollback") && !t.contains("scrollback 0")).await,
+        "PgUp pages back — the offset should climb above 0; got:\n{}",
+        h.text()
+    );
+    let paged_view = h.text();
+    assert_ne!(live_view, paged_view, "the paged view differs from the live view");
+    assert!(!paged_view.contains("LN29"), "the newest line scrolled off; got:\n{paged_view}");
+
+    // `q` returns to live: the offset resets to 0 and the indicator disappears.
+    h.key(KeyCode::Char('q')).await;
+    assert!(
+        h.pump_until(|t| !t.contains("scrollback") && t.contains("LN29")).await,
+        "q snaps back to the live bottom (indicator gone, newest line shown); got:\n{}",
+        h.text()
+    );
+}
+
 // ── narrow-terminal boot (terminal-environments note) ───────────────────────
 
 #[tokio::test]

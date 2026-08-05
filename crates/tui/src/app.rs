@@ -470,6 +470,10 @@ impl NewForm {
 }
 
 const MOUSE_STEP: isize = 3;
+/// `g` (top) in keyboard-scroll mode: a delta far larger than any history
+/// (alacritty caps scrollback at 10 000 lines) so the view lands on the oldest
+/// line. `Pane::scroll` clamps to `[0, history]`.
+const SCROLL_TOP: isize = 1_000_000;
 
 pub struct App {
     rest: Rest,
@@ -502,6 +506,10 @@ pub struct App {
     area: (u16, u16),
     prefix: (KeyCode, KeyModifiers),
     prefix_armed: bool,
+    /// Keyboard-scroll mode on the focused pane (0059 C3), entered with `^A [`.
+    /// While set, `key_grid` routes navigation keys to `Pane::scroll[_to_live]`
+    /// instead of the input encoder; `q`/`Esc`/`G` clear it back to live.
+    scroll_mode: bool,
     tx: mpsc::Sender<AppMsg>,
     rx: Option<mpsc::Receiver<AppMsg>>,
     should_quit: bool,
@@ -569,6 +577,7 @@ impl App {
             area: (80, 24),
             prefix,
             prefix_armed: false,
+            scroll_mode: false,
             tx,
             rx: Some(rx),
             should_quit: false,
@@ -1268,6 +1277,10 @@ impl App {
             3 => return self.key_grid_newform(k),
             _ => {}
         }
+        // Keyboard-scroll mode captures navigation keys for the focused pane.
+        if self.scroll_mode {
+            return self.key_scroll(k);
+        }
         if self.prefix_armed {
             self.prefix_armed = false;
             if self.is_prefix(k) {
@@ -1276,6 +1289,7 @@ impl App {
             }
             match k.code {
                 KeyCode::Char('d') => self.open_menu(self.active),
+                KeyCode::Char('[') => self.enter_scroll_mode(), // 0059 C3: scroll mode
                 KeyCode::Char('x') => self.kill_focused(),
                 KeyCode::Char('g') => self.jump_ready(), // 0018: go to ready session(s)
                 KeyCode::Char('l') | KeyCode::Char(' ') => self.open_palette(),
@@ -1516,6 +1530,43 @@ impl App {
         }
     }
 
+    // ── keyboard scrollback (0059 C3) ────────────────────────────────────────
+    /// Enter tmux-shaped scroll mode on the focused pane (`^A [`). A no-op when
+    /// the focused box is empty — there's nothing to scroll.
+    fn enter_scroll_mode(&mut self) {
+        if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some() {
+            self.scroll_mode = true;
+        }
+    }
+
+    /// Route a key while the focused pane is in keyboard-scroll mode. tmux-shaped:
+    /// `PgUp`/`PgDn` or `Ctrl+U`/`Ctrl+D` page, `k`/`j` line-step, `g`/`G`
+    /// top/live, `q`/`Esc` return to live. Nothing here reaches the input encoder;
+    /// scroll is visual-only (input still targets the live session). Every other
+    /// key is swallowed — the mode is modal until an explicit exit.
+    fn key_scroll(&mut self, k: KeyEvent) {
+        let page = self.box_size(self.active).1 as isize; // one screen = pane rows
+        let Some(p) = self.panes.get_mut(self.active).and_then(|x| x.as_mut()) else {
+            self.scroll_mode = false; // the pane vanished — drop back to live
+            return;
+        };
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('G') => {
+                p.scroll_to_live();
+                self.scroll_mode = false;
+            }
+            KeyCode::Char('g') => p.scroll(SCROLL_TOP), // jump to the oldest line
+            KeyCode::PageUp => p.scroll(page),
+            KeyCode::PageDown => p.scroll(-page),
+            KeyCode::Char('u') if ctrl => p.scroll(page),
+            KeyCode::Char('d') if ctrl => p.scroll(-page),
+            KeyCode::Char('k') => p.scroll(1),
+            KeyCode::Char('j') => p.scroll(-1),
+            _ => {}
+        }
+    }
+
     // ── attach / fill / layout ───────────────────────────────────────────────
     fn attach(&mut self) {
         let Some(s) = self.sessions.get(self.selected) else {
@@ -1554,6 +1605,7 @@ impl App {
         self.active = idx;
         self.mode = Mode::Grid;
         self.prefix_armed = false;
+        self.scroll_mode = false; // a fresh attach starts live
     }
 
     /// Sync each mounted box's border accent from the current session list's
@@ -1721,6 +1773,7 @@ impl App {
                     self.active,
                     &self.prefix_label(),
                     self.prefix_armed,
+                    self.scroll_mode,
                     self.toast_text().as_deref(),
                 );
                 match &self.grid_overlay {

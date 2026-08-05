@@ -27,6 +27,10 @@ pub fn render(
     count: usize,
     prefix_label: &str,
     prefix_armed: bool,
+    // Keyboard-scroll mode on the focused pane (0059 C3). When set, the
+    // scrollback indicator shows even at offset 0 (marking the mode) and the
+    // right segment lists the scroll keys.
+    scroll_mode: bool,
     // The ready-session toast (0018 §3); when present it takes the bar's
     // right-aligned segment in place of the key hints.
     toast: Option<&str>,
@@ -48,7 +52,7 @@ pub fn render(
             ));
             left.push(Span::styled(format!("  {state_txt}"), Style::default().fg(state_col)));
             left.push(Span::styled(format!("  {cols}×{rows}"), Style::default().fg(Color::DarkGray)));
-            if p.scroll_offset() > 0 {
+            if scroll_mode || p.scroll_offset() > 0 {
                 left.push(Span::styled(
                     format!("  ⇡ scrollback {}", p.scroll_offset()),
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -81,6 +85,10 @@ pub fn render(
         Some(t) => Line::from(Span::styled(
             t.to_string(),
             Style::default().fg(Color::Black).bg(TOAST_BG).add_modifier(Modifier::BOLD),
+        )),
+        None if scroll_mode => Line::from(Span::styled(
+            "PgUp/PgDn ^U/^D · k/j · g/G · q live  ".to_string(),
+            Style::default().fg(Color::Yellow),
         )),
         None => {
             let hint = if count > 1 {
