@@ -7,6 +7,15 @@ track (proposal 0054).
 - **`web/`** — the source: a **Vite + React + TypeScript + Tailwind** app.
   External URLs (app, site, docs, GitHub) live in one place:
   `web/src/urls.ts`.
+- **Design-language contract (proposal 0057).** The site deliberately mirrors
+  the product app's own look so signing up feels like walking deeper into the
+  same room. `web/src/index.css`'s `@theme` tokens (`bar`/`panel`/`edge`/
+  `accent`/`amber`, the slate text ramp, the per-tool hues) mirror
+  `frontend/tailwind.config.js` — **if the app's tokens move, move these with
+  them.** The only green left is `--color-live` (a running session). Motion
+  (the live hero panel, the ambient backdrop, the one `Reveal` scroll system)
+  reuses the app's own keyframes and is fully gated behind
+  `prefers-reduced-motion`.
 - **`../docs`** — the build output, committed so **GitHub Pages** can serve it
   (from `/docs` on `main`) at the custom domain `ccscreen.dev`
   (`web/public/CNAME` → `docs/CNAME`). The `docs/docs/` subtree is **owned by

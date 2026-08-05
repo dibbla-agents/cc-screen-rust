@@ -1,84 +1,58 @@
 import { APP } from "../urls";
-import { TitleBar } from "./ui";
-
-type Session = {
-  name: string;
-  repo: string;
-  act: string;
-  typing?: boolean;
-};
-
-const SESSIONS: Session[] = [
-  { name: "claude", repo: "~/app", act: "building the login flow" },
-  { name: "gemini", repo: "~/api", act: "refactoring the endpoints" },
-  { name: "codex", repo: "~/web", act: "writing the tests" },
-  { name: "kimi", repo: "~/docs", act: "tidying the README", typing: true },
-];
-
-function SessionRow({ name, repo, act, typing }: Session) {
-  return (
-    <li className="grid grid-cols-[1.2ch_7ch_auto_1fr] items-center gap-[0.8ch] py-[0.34rem] text-dim">
-      <span className="live-dot size-[7px] rounded-full bg-green" />
-      <b className="font-bold text-ink">{name}</b>
-      <span className="text-green-soft">{repo}</span>
-      <span className="truncate">
-        {act}
-        {typing && (
-          <span className="caret ml-[3px] inline-block h-[1em] w-[7px] -translate-y-px bg-green align-middle" />
-        )}
-      </span>
-    </li>
-  );
-}
+import { Eyebrow } from "./ui";
+import { HeroSim } from "./HeroSim";
 
 export function Hero() {
   return (
-    <section className="mx-auto max-w-[820px] px-6 pb-16 pt-20">
-      <p className="mb-5 font-mono text-[0.8rem] tracking-[0.03em] text-green">
-        // always-on AI coding agents · built in rust
-      </p>
-      <h1 className="max-w-[17ch] font-mono text-[clamp(1.9rem,5vw,3rem)] font-bold leading-[1.1] tracking-[-0.03em]">
-        Your coding agents, running <span className="text-green-soft">24/7</span> —
-        and always a tap away.
-      </h1>
-      <p className="mt-5 max-w-[56ch] text-[1.08rem] text-dim">
-        For developers who run Claude, Codex, Gemini or Kimi all day — and don't
-        want to be at the desk they run on. See what your agents did, cowork on
-        their files, keep the conversation going from wherever you are.
-      </p>
+    <section className="mx-auto max-w-[1080px] px-6 pb-20 pt-16 sm:pt-20">
+      <div className="grid items-center gap-10 md:grid-cols-12 md:gap-12">
+        {/* headline + copy + CTAs (left on ≥md, 7 cols) */}
+        <div className="md:col-span-7">
+          <Eyebrow>always-on AI coding agents · built in rust</Eyebrow>
+          <h1 className="mt-5 max-w-[17ch] font-display text-[clamp(2.2rem,5.5vw,3.6rem)] font-bold leading-[1.05] tracking-[-0.02em] text-ink">
+            Your coding agents, running{" "}
+            <span className="text-accent">24/7</span> — and always a tap away.
+          </h1>
+          <p className="mt-5 max-w-[56ch] text-[1.08rem] text-dim">
+            For developers who run Claude, Codex, Gemini or Kimi all day — and
+            don't want to be at the desk they run on. See what your agents did,
+            cowork on their files, keep the conversation going from wherever you
+            are.
+          </p>
 
-      <div className="mt-9 overflow-hidden rounded-[10px] border border-line bg-surface">
-        <TitleBar label="cc-screen — 4 agents running" />
-        <ul className="list-none px-4 pb-3.5 pt-4 font-mono text-[0.82rem]">
-          {SESSIONS.map((s) => (
-            <SessionRow key={s.name} {...s} />
-          ))}
-        </ul>
+          <div className="mt-9 flex flex-col gap-2.5 sm:flex-row sm:flex-wrap">
+            <a
+              href={APP}
+              className="inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-accent px-5 py-[0.68rem] text-center font-semibold text-[#0b111a] shadow-[0_8px_24px_-8px_rgba(56,189,248,0.5)] transition hover:-translate-y-px hover:brightness-110 sm:w-auto"
+            >
+              Sign up — free during beta
+            </a>
+            <a
+              href="#how"
+              className="inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-line px-5 py-[0.68rem] text-center font-mono text-[0.85rem] text-ink transition-colors duration-150 hover:border-accent hover:text-accent sm:w-auto"
+            >
+              How it works
+            </a>
+          </div>
+          <p className="mt-3 font-mono text-[0.78rem] text-faint">
+            No card. Your code stays on your machines — the hub only relays.{" "}
+            <a
+              className="underline transition-colors hover:text-accent"
+              href="#self-host"
+            >
+              Prefer to self-host?
+            </a>
+          </p>
+          <p className="mt-6 font-mono text-[0.78rem] text-faint">
+            Anthropic · Google · OpenAI · Kimi — your pick, all at once.
+          </p>
+        </div>
+
+        {/* the live product panel (below CTAs on mobile, right on ≥md, 5 cols) */}
+        <div className="md:col-span-5">
+          <HeroSim />
+        </div>
       </div>
-
-      <p className="mt-7 flex flex-wrap gap-2.5">
-        <a
-          href={APP}
-          className="w-full rounded-lg bg-green px-5 py-[0.68rem] text-center font-mono text-[0.85rem] font-bold text-[#06120a] transition-colors hover:bg-green-soft sm:w-auto"
-        >
-          Sign up — free during beta
-        </a>
-        <a
-          href="#how"
-          className="w-full rounded-lg border border-line px-5 py-[0.68rem] text-center font-mono text-[0.85rem] text-ink transition-colors hover:border-green hover:text-green-soft sm:w-auto"
-        >
-          How it works
-        </a>
-      </p>
-      <p className="mt-3 font-mono text-[0.78rem] text-faint">
-        No card. Your code stays on your machines — the hub only relays.{" "}
-        <a className="underline hover:text-green-soft" href="#self-host">
-          Prefer to self-host?
-        </a>
-      </p>
-      <p className="mt-6 font-mono text-[0.78rem] text-faint">
-        Anthropic · Google · OpenAI · Kimi — your pick, all at once.
-      </p>
     </section>
   );
 }

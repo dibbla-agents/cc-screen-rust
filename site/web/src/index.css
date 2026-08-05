@@ -1,22 +1,33 @@
 @import "tailwindcss";
 
-/* ── design tokens (the dibbla.com palette) ────────────────────────────────
-   Exposed as Tailwind theme vars, so they become utilities: bg-bg, text-dim,
-   border-line, text-green-soft, font-mono, … */
+/* ── design tokens ─────────────────────────────────────────────────────────
+   Source of truth: cc-screen-rust/frontend/tailwind.config.js:6-18 (+ the
+   frontend index.css ink ramp). This marketing site deliberately mirrors the
+   product's own design language — if the app's tokens move, move these with
+   them. Exposed as Tailwind theme vars, so they become utilities:
+   bg-bg, bg-surface, bg-card, border-line, text-dim, text-accent, … */
 @theme {
-  --color-bg: #060e09;
-  --color-surface: #0a1510;
-  --color-card: rgba(118, 179, 96, 0.055);
-  --color-line: rgba(118, 179, 96, 0.2);
-  --color-line-soft: rgba(118, 179, 96, 0.12);
-  --color-ink: #edf3ea;
-  --color-dim: #9db098;
-  --color-faint: #5f7060;
-  --color-green: #76b360;
-  --color-green-soft: #8ac471;
-  --color-green-light: #a4d48f;
+  --color-bg: #0b111a;              /* one step below the app's bar          */
+  --color-surface: #0f1720;        /* = bar: screenshots sit on their own bg */
+  --color-card: #161e29;           /* = panel                               */
+  --color-line: #243042;           /* = edge                                */
+  --color-line-soft: rgba(36, 48, 66, 0.55);
+  --color-ink: #eef0f3;            /* = --cc-ink-strong                     */
+  --color-dim: #94a3b8;            /* slate-400 — secondary text            */
+  --color-faint: #64748b;          /* slate-500 — muted text                */
+  --color-accent: #38bdf8;         /* the brand accent (cyan)               */
+  --color-accent-soft: #7dd3fc;    /* sky-300 — hover ramp                  */
+  --color-amber: #f5b942;
+  --color-live: #34d399;           /* emerald-400 — "session running"       */
+  /* per-tool hues — frontend/src/util.ts:22-37 */
+  --color-claude: #d97757;
+  --color-gemini: #4f9bff;
+  --color-codex: #8fd17a;
+  --color-kimi: #7c8cff;
+  --color-shell: #94a3b8;
 
   --font-sans: "Hanken Grotesk", system-ui, sans-serif;
+  --font-display: "Schibsted Grotesk", "Hanken Grotesk", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -26,12 +37,6 @@
   }
   body {
     background-color: var(--color-bg);
-    background-image: radial-gradient(
-      56rem 30rem at 50% -10rem,
-      rgba(118, 179, 96, 0.12),
-      transparent 70%
-    );
-    background-repeat: no-repeat;
     color: var(--color-ink);
     font-family: var(--font-sans);
     line-height: 1.62;
@@ -45,23 +50,76 @@
   }
 }
 
-/* the two tiny animated flourishes — a pulsing "live" dot and a blinking caret */
+/* ── ambient backdrop (Part C2) — imported from the app's auth screen ────────
+   The 34px engineering grid + a top cyan glow (both static, ::before) and one
+   very slow drifting second glow (::after). A fine SVG-noise grain rides the
+   ::before at ~2.5% opacity to kill banding on the glows. All fixed +
+   pointer-events:none so nothing scrolls or intercepts clicks. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E"),
+    radial-gradient(120% 60% at 50% -10%, rgba(56, 189, 248, 0.13), transparent 60%),
+    linear-gradient(rgba(36, 48, 66, 0.35) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(36, 48, 66, 0.35) 1px, transparent 1px);
+  background-size: 140px 140px, 100% 100%, 34px 34px, 34px 34px;
+  background-repeat: repeat, no-repeat, repeat, repeat;
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(46% 38% at 72% 62%, rgba(56, 189, 248, 0.1), transparent 60%);
+  animation: ccs-drift 40s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+/* ── motion keyframes (Part C) — the app's own vocabulary, recalibrated ──────
+   frontend/src/components/MultiTenant.tsx:40-48 (mt-blink/mt-rise/mt-pulse/
+   mt-scan). transform/opacity only; nothing animates per scroll-frame. */
 @keyframes ccs-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(118, 179, 96, 0.5);
-  }
-  70% {
-    box-shadow: 0 0 0 6px rgba(118, 179, 96, 0);
-  }
+  0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(118, 179, 96, 0);
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(52, 211, 153, 0);
   }
 }
 @keyframes ccs-blink {
-  50% {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
     opacity: 0;
   }
 }
+@keyframes ccs-scan {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+@keyframes ccs-drift {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(-6%, 4%);
+  }
+}
+
+/* The live "session running" dot (emerald halo) and the typing caret. */
 .live-dot {
   animation: ccs-pulse 2.2s ease-out infinite;
 }
@@ -69,12 +127,53 @@
   animation: ccs-blink 1.1s steps(1) infinite;
 }
 
+/* The scanline sweep runs ONLY inside the hero panel (page-wide it's noise). */
+.hero-scanline {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.04;
+}
+.hero-scanline::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 33%;
+  background: var(--color-accent);
+  animation: ccs-scan 7s linear infinite;
+}
+
+/* ── scroll-reveal (Part C3) — one primitive, applied by the useReveal hook ──
+   The hidden state lives inside @media (prefers-reduced-motion: no-preference)
+   so no-JS / reduced-motion / pre-hydration readers always see content at rest
+   — content is never hidden from anyone. Per-child stagger via --stagger-i. */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 0.55s cubic-bezier(0.2, 0.8, 0.2, 1),
+      transform 0.55s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition-delay: calc(var(--stagger-i, 0) * 70ms);
+  }
+  .reveal.is-in {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
   }
   .live-dot,
-  .caret {
+  .caret,
+  .hero-scanline::before {
+    animation: none;
+  }
+  body::after {
     animation: none;
   }
 }

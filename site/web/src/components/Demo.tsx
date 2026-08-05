@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { TitleBar } from "./ui";
+import { TitleBar, Eyebrow, SectionHeading } from "./ui";
 // Vite inlines the asciinema v2 cast as a string (?raw). The recording replays
 // the installer's real output lines — enroll.rs / install-machine.sh strings —
 // with the curl/download chatter simplified. A few KB of text, no player dep.
@@ -93,12 +93,12 @@ function Player() {
         <button
           type="button"
           onClick={play}
-          className="absolute inset-x-0 bottom-0 top-[38px] flex cursor-pointer flex-col items-center justify-center gap-2 bg-[rgba(6,14,9,0.55)] transition-colors hover:bg-[rgba(6,14,9,0.4)]"
+          className="absolute inset-x-0 bottom-0 top-[42px] flex cursor-pointer flex-col items-center justify-center gap-2 bg-[rgba(11,17,26,0.55)] transition-colors hover:bg-[rgba(11,17,26,0.4)]"
         >
-          <span className="flex size-14 items-center justify-center rounded-full border border-green bg-[rgba(6,14,9,0.85)] pl-1 text-[1.2rem] text-green">
+          <span className="flex size-14 items-center justify-center rounded-full border border-accent bg-[rgba(11,17,26,0.85)] pl-1 text-[1.2rem] text-accent">
             ▶
           </span>
-          <span className="font-mono text-[0.78rem] text-green-soft">
+          <span className="font-mono text-[0.78rem] text-accent-soft">
             watch the install (15s)
           </span>
         </button>
@@ -108,7 +108,7 @@ function Player() {
         <button
           type="button"
           onClick={play}
-          className="absolute bottom-2.5 right-2.5 cursor-pointer rounded-md border border-line bg-[rgba(6,14,9,0.85)] px-3 py-1.5 font-mono text-[0.72rem] text-dim transition-colors hover:border-green hover:text-green-soft"
+          className="absolute bottom-2.5 right-2.5 cursor-pointer rounded-md border border-line bg-[rgba(11,17,26,0.85)] px-3 py-1.5 font-mono text-[0.72rem] text-dim transition-colors hover:border-accent hover:text-accent"
         >
           ↻ replay
         </button>
@@ -143,23 +143,18 @@ export function Demo() {
   }, []);
 
   return (
-    <section
-      id="demo"
-      className="mx-auto max-w-[820px] border-t border-line-soft px-6 py-16"
-    >
-      <p className="mb-3 font-mono text-[0.76rem] tracking-[0.04em] text-green">
-        ▸ demo
-      </p>
-      <h2 className="font-mono text-[clamp(1.35rem,3vw,1.8rem)] font-bold tracking-[-0.02em]">
+    <section id="demo" className="mx-auto max-w-[1080px] px-6 py-24">
+      <Eyebrow>demo</Eyebrow>
+      <SectionHeading className="mt-3 max-w-[20ch]">
         Watch a machine come online.
-      </h2>
+      </SectionHeading>
       <p className="mt-4 max-w-[62ch] text-[1.02rem] text-dim">
         The one-liner from your dashboard, end to end: install, check the coding
         assistants, print the code, approve — connected.
       </p>
       <div
         ref={boxRef}
-        className="mt-8 aspect-[16/9] w-full overflow-hidden rounded-[10px] border border-line bg-black/40 sm:aspect-[2/1]"
+        className="mt-8 aspect-[16/9] w-full max-w-[900px] overflow-hidden rounded-xl border border-line bg-surface sm:aspect-[2/1]"
       >
         {visible && <Player />}
       </div>

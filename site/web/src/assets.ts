@@ -5,14 +5,15 @@
 // Each entry carries its intrinsic pixel size; we feed those to width/height on
 // the <img> so the browser reserves the right box before the image loads (no
 // layout shift) and every device frame stays aligned.
+//
+// The redesign (0057 Tour) uses five shots. mobile-editor / web-new-session /
+// tui-layouts stay on disk for docs use but are no longer imported here, so
+// Vite doesn't bundle them into the page.
 import mobileSessions from "./assets/img/mobile-sessions.png";
 import mobileAgent from "./assets/img/mobile-agent.png";
 import mobileFiles from "./assets/img/mobile-files.png";
-import mobileEditor from "./assets/img/mobile-editor.png";
 import webCowork from "./assets/img/web-cowork.png";
-import webNewSession from "./assets/img/web-new-session.png";
 import tuiGrid from "./assets/img/tui-grid.png";
-import tuiLayouts from "./assets/img/tui-layouts.png";
 
 export type Shot = {
   src: string;
@@ -40,34 +41,16 @@ export const shots = {
     h: 1565,
     alt: "The file tree of a project, browsed from a phone, with per-file download buttons.",
   },
-  mobileEditor: {
-    src: mobileEditor,
-    w: 920,
-    h: 1580,
-    alt: "A Markdown file rendered for reading on a phone, with word count and read time.",
-  },
   webCowork: {
     src: webCowork,
     w: 1700,
     h: 999,
     alt: "The browser app showing a file tree, a rendered Markdown file, and the live agent terminal side by side.",
   },
-  webNewSession: {
-    src: webNewSession,
-    w: 880,
-    h: 1154,
-    alt: "The New session dialog: pick a folder, choose Claude, Kimi, Gemini, Codex or a shell, and create.",
-  },
   tuiGrid: {
     src: tuiGrid,
     w: 1700,
     h: 1064,
     alt: "The ccs terminal client with four agent panes in a quad grid and a box menu open.",
-  },
-  tuiLayouts: {
-    src: tuiLayouts,
-    w: 1700,
-    h: 1034,
-    alt: "The ccs layout palette: single, stack, columns, left-L, right-L and quad.",
   },
 } satisfies Record<string, Shot>;

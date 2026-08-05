@@ -1,16 +1,21 @@
-import { useState, type ReactNode } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type { Shot } from "../assets";
 
-/* ── window/terminal title bar — the three traffic-light dots + a label ─────── */
+/* ── window/terminal title bar — the app's traffic-light dots + a label ──────
+   Dots tinted claude/amber/codex like the auth card (MultiTenant.tsx:75-80). */
 export function TitleBar({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-[7px] border-b border-line-soft px-3.5 py-2.5">
-      <i className="size-2.5 rounded-full bg-green" />
-      <i className="size-2.5 rounded-full bg-[#1c2a20]" />
-      <i className="size-2.5 rounded-full bg-[#1c2a20]" />
-      <span className="ml-1 truncate font-mono text-[0.73rem] text-faint">
-        {label}
-      </span>
+    <div className="flex items-center gap-2 border-b border-line bg-surface/60 px-4 py-2.5">
+      <span className="size-3 rounded-full bg-claude/80" />
+      <span className="size-3 rounded-full bg-amber/80" />
+      <span className="size-3 rounded-full bg-codex/80" />
+      <span className="ml-1 truncate font-mono text-xs text-faint">{label}</span>
     </div>
   );
 }
@@ -19,7 +24,8 @@ type Fit = "width" | "height";
 
 /* A slim phone bezel. `fit="height"` makes it size to its parent's height (used
    in galleries to line every device up on a shared baseline); the default sizes
-   to width (a single hero/feature shot capped by max-width). */
+   to width (a single hero/feature shot capped by max-width). On the new `bg`
+   the screenshot's own `#0f1720` reads as a glowing native window. */
 export function Phone({
   shot,
   fit = "width",
@@ -33,10 +39,10 @@ export function Phone({
 }) {
   return (
     <div
-      className={`relative ${fit === "height" ? "h-full w-auto" : "w-full"} rounded-[26px] border border-line bg-surface p-[7px] shadow-[0_18px_48px_-22px_rgba(0,0,0,0.85),inset_0_0_0_1px_rgba(118,179,96,0.05)] ${className}`}
+      className={`relative ${fit === "height" ? "h-full w-auto" : "w-full"} rounded-[26px] border border-line bg-surface p-[7px] shadow-[0_24px_64px_-32px_rgba(0,0,0,0.8)] transition-colors duration-150 hover:border-accent/40 ${className}`}
     >
       {/* speaker notch */}
-      <span className="absolute left-1/2 top-3.5 z-[2] h-1 w-9 -translate-x-1/2 rounded-[3px] bg-[rgba(118,179,96,0.22)]" />
+      <span className="absolute left-1/2 top-3.5 z-[2] h-1 w-9 -translate-x-1/2 rounded-[3px] bg-line" />
       <img
         src={shot.src}
         width={shot.w}
@@ -63,7 +69,7 @@ export function Window({
 }) {
   return (
     <div
-      className={`flex flex-col overflow-hidden rounded-[10px] border border-line bg-surface shadow-[0_18px_48px_-24px_rgba(0,0,0,0.85)] ${fit === "height" ? "h-full w-auto" : "w-full"} ${className}`}
+      className={`flex flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_24px_64px_-32px_rgba(0,0,0,0.8)] transition-colors duration-150 hover:border-accent/40 ${fit === "height" ? "h-full w-auto" : "w-full"} ${className}`}
     >
       <TitleBar label={label} />
       <div
@@ -115,10 +121,11 @@ export function Shot({
 }
 
 /* A terminal command block with a copy button. Shared by the 3-step SaaS flow
-   (HowItWorks) and the self-host guide (Start). */
+   (HowItWorks) and the self-host hand-off (Start). Boxed because it is a
+   terminal — the one place a box is honest. */
 export function Cmd({ clip, children }: { clip: string; children: ReactNode }) {
   return (
-    <div className="relative mb-2.5 rounded-lg border border-line-soft bg-black/25 px-3.5 py-2.5">
+    <div className="relative mb-2.5 rounded-lg border border-line bg-surface px-3.5 py-2.5">
       <pre className="overflow-x-auto">
         <code className="font-mono text-[0.83rem] leading-[1.7] whitespace-pre">
           {children}
@@ -131,33 +138,120 @@ export function Cmd({ clip, children }: { clip: string; children: ReactNode }) {
 
 /* The shell prompt glyph in front of a Cmd. */
 export const Prompt = () => (
-  <span className="mr-[0.6ch] select-none text-green">$</span>
+  <span className="mr-[0.6ch] select-none text-accent">$</span>
 );
 
-/* A numbered step card — the ①②③ pattern used by HowItWorks and Start. */
-export function Step({
-  badge,
-  title,
-  note,
+/* ── Eyebrow (A2) — the app's section-label idiom, with the brand `›` glyph ── */
+export function Eyebrow({
   children,
-  after,
+  className = "",
 }: {
-  badge: string;
-  title: string;
-  note: string;
   children: ReactNode;
-  after?: ReactNode;
+  className?: string;
 }) {
   return (
-    <div className="rounded-[10px] border border-line bg-card p-6">
-      <h3 className="flex items-center gap-[0.6ch] font-mono text-[0.98rem] font-bold">
-        <span className="text-green">{badge}</span> {title}
-      </h3>
-      <p className="my-3 text-[0.88rem] text-dim">{note}</p>
+    <p
+      className={`font-mono text-[11px] uppercase tracking-[0.25em] text-faint ${className}`}
+    >
+      <span className="text-accent">›</span> {children}
+    </p>
+  );
+}
+
+/* ── SectionHeading — the one expressive voice: a display grotesk, not mono ── */
+export function SectionHeading({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <h2
+      className={`font-display text-[clamp(1.5rem,3.2vw,2.1rem)] font-bold leading-[1.12] tracking-[-0.02em] text-ink ${className}`}
+    >
       {children}
-      {after !== undefined && (
-        <p className="mt-3 text-[0.86rem] text-faint">{after}</p>
-      )}
+    </h2>
+  );
+}
+
+/* ── ToolBadge (A/B2) — the app's uppercase tool pill in the tool's own hue ──
+   frontend/src/App.tsx:2067 idiom, hues from frontend/src/util.ts:22-37. */
+const TOOL_BG: Record<string, string> = {
+  claude: "bg-claude",
+  gemini: "bg-gemini",
+  codex: "bg-codex",
+  kimi: "bg-kimi",
+  shell: "bg-shell",
+};
+export function ToolBadge({
+  tool,
+  className = "",
+}: {
+  tool: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold uppercase leading-none text-surface ${TOOL_BG[tool] ?? "bg-line"} ${className}`}
+    >
+      {tool}
+    </span>
+  );
+}
+
+/* ── useReveal / Reveal (C3) — one scroll-reveal primitive for the whole page.
+   The hidden state is applied by this hook (not default CSS), so no-JS,
+   pre-hydration and reduced-motion readers always see content at rest. The CSS
+   itself also lives inside prefers-reduced-motion:no-preference as a second
+   guarantee. Per-child stagger is set via the `--stagger-i` custom property. */
+export function useReveal<T extends HTMLElement = HTMLDivElement>() {
+  const ref = useRef<T>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const reduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    if (reduced || !("IntersectionObserver" in window)) return; // render at rest
+    el.classList.add("reveal");
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            el.classList.add("is-in");
+            obs.disconnect();
+            return;
+          }
+        }
+      },
+      { threshold: 0.15 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return ref;
+}
+
+export function Reveal({
+  i = 0,
+  className = "",
+  style,
+  children,
+}: {
+  i?: number;
+  className?: string;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  const ref = useReveal<HTMLDivElement>();
+  return (
+    <div
+      ref={ref}
+      className={className}
+      style={{ ...style, "--stagger-i": i } as CSSProperties}
+    >
+      {children}
     </div>
   );
 }
@@ -188,8 +282,8 @@ export function CopyButton({ text }: { text: string }) {
       onClick={copy}
       className={`absolute right-2 top-2 cursor-pointer rounded-md border px-2.5 py-1 font-mono text-[0.68rem] transition-colors ${
         done
-          ? "border-green-light text-green-light"
-          : "border-line bg-[rgba(118,179,96,0.06)] text-dim hover:border-green hover:text-green-soft"
+          ? "border-accent text-accent"
+          : "border-line bg-card text-dim hover:border-accent hover:text-accent"
       }`}
     >
       {label}
