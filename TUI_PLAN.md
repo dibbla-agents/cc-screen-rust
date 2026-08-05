@@ -29,8 +29,12 @@ fast-follow.
 - **Transport: existing wire contract, zero backend changes.** REST for the
   session list + lifecycle, one WebSocket per attached session for the byte
   stream + input/resize.
-- **No auth.** The backend is tailnet-only by design; "remote" means another
-  tailnet host. The client takes one base URL and derives `ws`/`wss` from it.
+- **Auth: opt-in static token.** The backend is tailnet-only by design
+  ("remote" means another tailnet host), but the client/hub gate is real when
+  enabled: `ccs` presents `Authorization: Bearer <token>` from `--token` /
+  `CCS_API_TOKEN` / `CCWEB_API_TOKEN` / config. The client takes one base URL
+  and derives `ws`/`wss` from it. (This line used to read "No auth" — drift;
+  corrected. A device-code login flow for SaaS users is future work, see 0059.)
 - **v1 scope cut vs the web app:** no file editor / download / PDF / upload /
   clipboard-image / multi-pane. Pure terminal + session management.
 
@@ -234,8 +238,18 @@ suites all pass; every milestone also has a live PTY smoke test. Run it with
 ### Deferred (out of v1)
 - **`--insecure` for `wss`**: honored on the HTTP side (reqwest); the WebSocket
   side does `ws`/valid-`wss` only.
-- A restorable *picker* (restore-all is wired; the per-session list isn't).
-- `ccs attach <session>` direct-attach flag (the switcher covers it).
+- ~~A restorable *picker*~~ — **shipped in the 0059 parity package** (switcher
+  `R` on an empty list opens the picker; restore itself stays all-or-nothing
+  server-side — per-session selective restore still needs a backend endpoint).
+- ~~`ccs attach <session>` direct-attach flag~~ — **shipped in 0059** (`ccs
+  <session>`: exact `machine/name` → exact name → unique prefix → unique fuzzy).
+
+> **Current status / role: see proposal 0059** (`cc-screen-saas` docs) — the TUI
+> is kept at *session-management parity* with the web client (rename, direct
+> attach, keyboard scrollback, summary headlines, restorable picker all landed
+> there, each with an e2e test), with a documented **anti-scope** (no file
+> editor / sharing / billing / login UI). 0059 also added the TUI↔hub e2e
+> harness (`crates/tui/tests/e2e.rs`) that runs in blocking Linux CI.
 
 ## M5 — Multi-pane grid (next) — design locked
 
@@ -323,7 +337,9 @@ the practical ≤4-box arrangements; revisit only if they prove limiting.
 
 ## Deferred (explicitly out of v1)
 
-Mouse forwarding into the pane, in-pane scrollback / copy mode, the grid (M5),
+Mouse forwarding into the pane, in-pane **copy mode / selection** (keyboard
+*scrollback* shipped in 0059 via `Ctrl-A [`; copy mode — selection + cursor —
+stays deferred, host Shift-drag is the copy story), the grid (M5 — shipped),
 file/editor/upload/clipboard/PDF, a named-server picker UI, and any SSE/WS push
 for the session list (polling is fine).
 ```

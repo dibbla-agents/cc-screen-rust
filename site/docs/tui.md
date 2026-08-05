@@ -11,6 +11,11 @@ machine's agent directly, if you self-host without a hub). A session
 switcher, a multi-pane grid with real scrollback, tmux-style keys — your
 whole fleet without leaving the terminal.
 
+Why not just `tmux`? tmux attaches you to one machine you can already reach;
+`ccs` attaches you to *every* machine your hub can — over a single
+outbound-only uplink, with agent-aware ready notifications — no inbound SSH
+and no per-machine tmux sockets.
+
 ![Four sessions in the ccs grid](../img/tui-grid.png)
 
 ## Install
@@ -49,15 +54,31 @@ ccs --server http://hub:8840 --token …   # your own hub (all machines)
 ## Using it
 
 `ccs` opens in the **switcher**: every machine's sessions in one list, each
-tagged with its machine, plus create / kill / restore actions. Pick sessions
-into the **grid** — the same six layouts as the web app, and panes from
-different machines can sit side by side. Each pane is a full terminal
-emulator with multi-thousand-line scrollback.
+tagged with its machine and its latest one-line summary, plus create / kill /
+rename / restore actions. Pick sessions into the **grid** — the same six
+layouts as the web app, and panes from different machines can sit side by
+side. Each pane is a full terminal emulator with multi-thousand-line
+scrollback.
+
+Jump straight to a session — handy from a script or muscle memory:
+
+```sh
+ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
+```
+
+In the switcher:
+
+- `↑`/`↓` or `j`/`k` move · `Enter` attach · `n` new · `x`/`e` kill · `r` refresh
+- `R` — **rename** the selected session (when the list is empty, `R` opens the
+  **restorable-session picker** to bring sessions back after a redeploy)
 
 Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 
-- `Ctrl-A d` — open the menu
+- `Ctrl-A d` — open the action menu (attach / rename / layout / jump)
 - `Ctrl-A` then a digit — switch layout
+- `Ctrl-A [` — enter **scrollback** mode on the focused pane (`PgUp`/`PgDn`,
+  `k`/`j`, `g`/`G` top/live, `q`/`Esc` back to live); any printable key in
+  normal mode snaps back to live
 - click or move spatially to focus panes
 
 Everything else you type goes straight to the focused session's PTY.
