@@ -1,7 +1,7 @@
 //! Centered modal overlays for the switcher: a kill/exit confirm and the
 //! new-session form.
 
-use cc_screen_protocol::SessionInfo;
+use cc_screen_protocol::{RestorableSession, SessionInfo};
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
@@ -53,6 +53,88 @@ pub fn confirm(f: &mut Frame, title: &str, body: &str) {
     ])
     .alignment(Alignment::Center);
     f.render_widget(p, inner);
+}
+
+/// What the rename overlay (0059 C1) needs to render.
+pub struct RenameView<'a> {
+    /// The session's identity name, shown read-only for context.
+    pub current: &'a str,
+    /// The edited display label (empty = will clear the label → slug fallback).
+    pub value: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// The rename-session overlay: a read-only identity line + one free-text field
+/// seeded with the current display name, mirroring the new-session text-field look.
+pub fn rename_session(f: &mut Frame, v: &RenameView) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" session  ", dim),
+            Span::styled(v.current.to_string(), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" name  ", dim),
+            Span::raw(v.value.to_string()),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+    ];
+    if let Some(e) = v.error {
+        lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
+    }
+    lines.push(Line::from(Span::styled(
+        " enter save · empty clears label · esc cancel",
+        dim,
+    )));
+    let h = lines.len() as u16 + 2;
+    let inner = panel(f, centered(f.area(), 60, h), " rename session ");
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// What the restorable-session picker (0059 C5) needs to render. `selected` is
+/// parallel to `items` (per-row checkbox); `cursor` is the highlighted row.
+pub struct RestoreView<'a> {
+    pub items: &'a [RestorableSession],
+    pub selected: &'a [bool],
+    pub cursor: usize,
+}
+
+/// The restorable-session picker: a checklist of the sessions a redeploy left
+/// recorded-but-not-running. Toggles are a preview of what restore-all brings back
+/// (restore is all-or-nothing server-side — see `App::submit_restore_picker`).
+pub fn restore_picker(f: &mut Frame, v: &RestoreView) {
+    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let gray = Style::default().fg(Color::Gray);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, item) in v.items.iter().enumerate() {
+        let cur = i == v.cursor;
+        let checked = v.selected.get(i).copied().unwrap_or(false);
+        let marker = if cur { "▸" } else { " " };
+        let check = if checked { "[x]" } else { "[ ]" };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{check} "), if checked { accent } else { dim }),
+            Span::styled(
+                format!("{:<20} ", truncate(&item.short, 20)),
+                if cur { accent } else { gray },
+            ),
+            Span::styled(format!("{:<8} ", truncate(&item.tool, 8)), Style::default().fg(Color::Cyan)),
+            Span::styled(truncate(&item.dir, 26), dim),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " space toggle · a all · enter restore · esc cancel",
+        dim,
+    )));
+
+    let h = lines.len() as u16 + 2;
+    let inner = panel(f, centered(f.area(), 68, h), " restore sessions ");
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub struct NewSessionView<'a> {
@@ -264,6 +346,8 @@ pub struct MenuView<'a> {
     pub selected: usize,
     pub box_num: usize,
     pub box_count: usize,
+    /// Whether the box holds a session — gates the Rename row (0059 C1).
+    pub can_rename: bool,
 }
 
 fn menu_marker(sel: bool) -> Span<'static> {
@@ -353,8 +437,15 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
         }
     }
     lines.push(sep());
-    lines.push(action(2 + n, "✕", "Clear this box"));
-    lines.push(action(3 + n, "⏻", "Quit ccs"));
+    // Rename sits between the session list and Clear this box, but only when the
+    // box holds a session (0059 C1) — matching `app::menu_items(_, can_rename)`.
+    let mut flat = 2 + n;
+    if v.can_rename {
+        lines.push(action(flat, "✎", "Rename session"));
+        flat += 1;
+    }
+    lines.push(action(flat, "✕", "Clear this box"));
+    lines.push(action(flat + 1, "⏻", "Quit ccs"));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(" ↑↓ move · ⏎ select · esc cancel", dim)));
 
@@ -408,7 +499,7 @@ mod tests {
         let list = vec![sess("claude-a"), sess("codex-b")];
         // selected = 2 → the first session is highlighted.
         let s = render_to(72, 18, |f| {
-            grid_menu(f, &MenuView { sessions: &list, selected: 2, box_num: 2, box_count: 4 })
+            grid_menu(f, &MenuView { sessions: &list, selected: 2, box_num: 2, box_count: 4, can_rename: false })
         });
         assert!(s.contains("box 2/4"), "{s}");
         assert!(s.contains("Change layout"), "{s}");
@@ -429,11 +520,11 @@ mod tests {
         let mut ready = sess("ready");
         ready.waiting = true;
         let s = render_to(72, 16, |f| {
-            grid_menu(f, &MenuView { sessions: &[busy], selected: 1, box_num: 1, box_count: 1 })
+            grid_menu(f, &MenuView { sessions: &[busy], selected: 1, box_num: 1, box_count: 1, can_rename: false })
         });
         assert!(s.contains('●'), "busy row should show the working marker: {s}");
         let s = render_to(72, 16, |f| {
-            grid_menu(f, &MenuView { sessions: &[ready], selected: 1, box_num: 1, box_count: 1 })
+            grid_menu(f, &MenuView { sessions: &[ready], selected: 1, box_num: 1, box_count: 1, can_rename: false })
         });
         assert!(!s.contains('●'), "ready/waiting row should not show the working marker: {s}");
     }
@@ -441,7 +532,7 @@ mod tests {
     #[test]
     fn grid_menu_empty_still_shows_actions() {
         let s = render_to(72, 14, |f| {
-            grid_menu(f, &MenuView { sessions: &[], selected: 1, box_num: 1, box_count: 1 })
+            grid_menu(f, &MenuView { sessions: &[], selected: 1, box_num: 1, box_count: 1, can_rename: false })
         });
         assert!(s.contains("no sessions"), "{s}");
         assert!(s.contains("New session"), "{s}");

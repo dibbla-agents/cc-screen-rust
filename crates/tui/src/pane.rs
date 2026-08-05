@@ -115,15 +115,9 @@ impl Pane {
         self.accent = accent;
     }
 
-    /// The box title: `machine/session` when aggregated through a hub, else just
-    /// the session name.
-    pub fn title(&self) -> String {
-        if self.machine.is_empty() {
-            self.session.clone()
-        } else {
-            format!("{}/{}", self.machine, self.session)
-        }
-    }
+    // (`Pane::title()` was removed in 0059 C1+C5 — the grid resolves a box's title
+    // from the live session list at render time so a rename shows without
+    // re-attaching; see `ui::grid::pane_title`.)
 
     /// Feed a chunk of PTY output into the emulator. A chunk that *starts* with
     /// the RIS reset is a fresh (re)attach snapshot / lagged-resync /

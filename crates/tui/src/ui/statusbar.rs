@@ -10,6 +10,8 @@ use ratatui::{
     Frame,
 };
 
+use cc_screen_protocol::SessionInfo;
+
 use crate::layout::Layout;
 use crate::pane::{ConnState, Pane};
 
@@ -22,6 +24,9 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     focused: Option<&Pane>,
+    // The live session list, so the focused box's name reflects an operator rename
+    // (0059 C1) — resolved by identity, falling back to the pane's session name.
+    sessions: &[SessionInfo],
     layout: Layout,
     active: usize,
     count: usize,
@@ -46,8 +51,13 @@ pub fn render(
                 ConnState::Open => ("● live", Color::Green),
                 ConnState::Closed => ("✕ closed", Color::Red),
             };
+            let name = sessions
+                .iter()
+                .find(|s| s.name == p.session && s.machine == p.machine)
+                .map(crate::app::display_name)
+                .unwrap_or(p.session.as_str());
             left.push(Span::styled(
-                format!(" {} ", p.session),
+                format!(" {name} "),
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
             left.push(Span::styled(format!("  {state_txt}"), Style::default().fg(state_col)));

@@ -1,7 +1,9 @@
 //! Thin async REST client over the `/api/*` endpoints.
 
 use anyhow::{Context, Result};
-use cc_screen_protocol::{CreateReq, CreateResp, DeleteReq, MachineInfo, SessionInfo, ToolInfo};
+use cc_screen_protocol::{
+    CreateReq, CreateResp, DeleteReq, MachineInfo, RestorableSession, SessionInfo, ToolInfo,
+};
 use serde::Deserialize;
 
 use super::url::ServerUrls;
@@ -130,6 +132,32 @@ impl Rest {
     /// POST /api/sessions/restore — bring back every restorable session.
     pub async fn restore(&self) -> Result<()> {
         check(self.http.post(self.urls.rest("/api/sessions/restore")).send().await?)?;
+        Ok(())
+    }
+
+    /// GET /api/sessions/restorable — the sessions a redeploy left recorded but not
+    /// running (proposal 0059 C5). `machine` routes it to a hub agent (empty = the
+    /// single/owning agent). Feeds the restorable-session picker.
+    pub async fn restorable(&self, machine: &str) -> Result<Vec<RestorableSession>> {
+        let mut get = self.http.get(self.urls.rest("/api/sessions/restorable"));
+        if !machine.is_empty() {
+            get = get.query(&[("machine", machine)]);
+        }
+        let r = check(get.send().await?)?;
+        Ok(r.json().await?)
+    }
+
+    /// POST /api/session/label — set (`label = Some`) or clear (`label = None`) a
+    /// session's display label (proposal 0035 / 0059 C1). The agent replies with the
+    /// updated `SessionInfo`; we only need success here (a refresh re-reads the
+    /// list). `machine` routes it to a hub agent (empty = direct / single machine).
+    pub async fn set_label(&self, session: &str, label: Option<&str>, machine: &str) -> Result<()> {
+        let mut post = self.http.post(self.urls.rest("/api/session/label"));
+        if !machine.is_empty() {
+            post = post.query(&[("machine", machine)]);
+        }
+        let body = serde_json::json!({ "session": session, "label": label });
+        check(post.json(&body).send().await?)?;
         Ok(())
     }
 

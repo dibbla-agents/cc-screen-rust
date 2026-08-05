@@ -43,7 +43,7 @@ fn render_header(f: &mut Frame, area: ratatui::layout::Rect) {
         ),
         Span::styled("  sessions", Style::default().fg(Color::Gray)),
         Span::styled(
-            "   ↑↓ · ⏎ attach · n new · x kill · e exit · R restore · q quit",
+            "   ↑↓ · ⏎ attach · n new · x kill · e exit · R rename/restore · q quit",
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -73,13 +73,18 @@ fn render_list(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             // glance then shows which agents are working vs done — mirrors the
             // web PWA's "running" badge. (See the server's WORK_GRACE_SECS.)
             let work = if s.waiting { "  " } else { "● " };
+            // Prefer the operator display label (0059 C1) when set; otherwise the
+            // folder breadcrumb (parent/leaf from the live cwd, proposal 0025) so
+            // two same-named sessions in different dirs read apart at a glance —
+            // itself falling back to the slug with no cwd.
+            let named = match s.label.as_deref() {
+                Some(l) if !l.is_empty() => l.to_string(),
+                _ => dir_crumb(&s.cwd, &s.name),
+            };
             let mut spans = vec![
                 Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                 Span::styled(
-                    // Folder breadcrumb (parent/leaf) from the live cwd, so two
-                    // same-named sessions in different dirs read apart at a
-                    // glance (proposal 0025). Falls back to the name with no cwd.
-                    format!("{:<26}", truncate(&dir_crumb(&s.cwd, &s.name), 26)),
+                    format!("{:<26}", truncate(&named, 26)),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{:<8}", truncate(&s.tool, 8)), Style::default().fg(Color::Cyan)),

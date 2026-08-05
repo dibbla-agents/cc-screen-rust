@@ -268,8 +268,10 @@ async fn switcher_shows_tool_and_breadcrumb() {
     let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
 
     let mut h = Harness::boot(&hub, 100, 30).await;
-    // Menu selection starts on the attached session (index 2); Down×2 → "Clear
-    // this box" (index 2 + n = 4). Clearing the only box falls back to the switcher.
+    // Menu selection starts on the attached session (index 2). The attached box
+    // adds a "Rename session" row (0059 C1) between the sessions and Clear, so with
+    // 2 sessions Clear is at index 5 → Down×3. Clearing the only box → switcher.
+    h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Enter).await;
@@ -484,7 +486,9 @@ async fn kill_with_confirm_deletes_and_drops_from_list() {
     let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
 
     let mut h = Harness::boot(&hub, 100, 30).await;
-    // Clear the only box (Down×2 → "Clear this box") to drop into the switcher.
+    // Clear the only box to drop into the switcher. The attached box adds a Rename
+    // row (0059 C1), so with 2 sessions Clear is at index 5 → Down×3.
+    h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Enter).await;
@@ -717,6 +721,152 @@ async fn keyboard_scrollback_pages_and_returns_to_live() {
         h.pump_until(|t| !t.contains("scrollback") && t.contains("LN29")).await,
         "q snaps back to the live bottom (indicator gone, newest line shown); got:\n{}",
         h.text()
+    );
+}
+
+// ── 10. Rename a session (0059 C1) ──────────────────────────────────────────
+
+/// Switcher `R` on a non-empty list renames the selected session: type a label,
+/// Enter → a `Cmd::SetLabel{label:Some(..)}` reaches the agent; after the agent's
+/// next poll advertises the relabelled session, the switcher row shows the label.
+#[tokio::test]
+async fn rename_session_sets_label_and_row_reflects_it() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    // Drop into the full-screen switcher (clear the only box). Attached box adds a
+    // Rename row, so with 2 sessions Clear is at index 5 → Down×3.
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Enter).await;
+    assert!(h.tick_until(|t| t.contains("alpha") && t.contains("beta")).await, "in switcher");
+
+    // Selection starts on the first row (alpha). R → rename overlay, type a label.
+    h.key(KeyCode::Char('R')).await;
+    assert!(h.pump_until(|t| t.contains("rename session")).await, "rename overlay shown");
+    // The field is seeded with the current display name ("alpha") — clear it, then
+    // type the new label.
+    for _ in 0..10 {
+        h.key(KeyCode::Backspace).await;
+    }
+    h.type_str("My Feature").await;
+    h.key(KeyCode::Enter).await;
+
+    // A SetLabel for alpha with the typed label reached the agent through the hub.
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || {
+            a.observed().cmds.iter().any(|c| {
+                matches!(c, Cmd::SetLabel { session, label }
+                    if session == "alpha" && label.as_deref() == Some("My Feature"))
+            })
+        })
+        .await,
+        "a SetLabel{{alpha, Some(\"My Feature\")}} should reach the agent; saw: {:?}",
+        agent.observed().cmds
+    );
+
+    // Emulate the agent's post-rename poll (it mutated its copy but doesn't auto-push
+    // a fresh Sessions), then assert the switcher row shows the display label.
+    let mut relabelled = sess("alpha");
+    relabelled.label = Some("My Feature".into());
+    agent.set_sessions(vec![relabelled, sess("beta")]);
+    await_hub(&hub, None, |list| {
+        list.iter().any(|s| s.name == "alpha" && s.label.as_deref() == Some("My Feature"))
+    })
+    .await;
+    assert!(
+        h.tick_until(|t| t.contains("My Feature")).await,
+        "the switcher row should render the new display label; got:\n{}",
+        h.text()
+    );
+}
+
+/// Submitting an empty rename clears the label — the client sends `label: None`.
+#[tokio::test]
+async fn rename_session_empty_value_clears_label() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    // Boot with a session that already carries a label, so clearing is meaningful.
+    let mut labelled = sess("alpha");
+    labelled.label = Some("Old Label".into());
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![labelled]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    // 1 session, attached box → menu is [layout, new, alpha(2), rename(3), clear(4),
+    // quit]; from the initial alpha selection Down×2 reaches Clear → switcher.
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Enter).await;
+    assert!(h.tick_until(|t| t.contains("Old Label")).await, "switcher shows the current label");
+
+    h.key(KeyCode::Char('R')).await;
+    assert!(h.pump_until(|t| t.contains("rename session")).await, "rename overlay shown");
+    // The field is seeded with "Old Label" — clear it, then submit empty.
+    for _ in 0..20 {
+        h.key(KeyCode::Backspace).await;
+    }
+    h.key(KeyCode::Enter).await;
+
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || {
+            a.observed().cmds.iter().any(|c| {
+                matches!(c, Cmd::SetLabel { session, label } if session == "alpha" && label.is_none())
+            })
+        })
+        .await,
+        "an empty submit should send SetLabel{{alpha, None}}; saw: {:?}",
+        agent.observed().cmds
+    );
+}
+
+// ── 11. Restorable-session picker (0059 C5) ─────────────────────────────────
+
+/// Switcher `R` on an EMPTY session list opens the restorable picker: it fetches
+/// the restorable set (a `Cmd::Restorable` reaches the agent), lists the two
+/// restorable sessions, and Enter fires an all-or-nothing `Cmd::Restore`.
+#[tokio::test]
+async fn restorable_picker_lists_and_restores() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    // No live sessions → the switcher is empty, so R opens the picker (not rename).
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    // With no sessions the app boots into the grid with the action menu open on an
+    // empty box (menu_initial → New session). Down → "Clear this box"; Enter clears
+    // the only box, which falls back to the (empty) full-screen switcher.
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.tick_until(|t| t.contains("no sessions")).await,
+        "reach the empty switcher; got:\n{}",
+        h.text()
+    );
+
+    // R on the empty list → fetch restorable + open the picker.
+    h.key(KeyCode::Char('R')).await;
+    assert!(
+        h.pump_until(|t| t.contains("restore-me") && t.contains("restore-too")).await,
+        "the restorable picker should list both restorable sessions; got:\n{}",
+        h.text()
+    );
+    // The fetch was a Cmd::Restorable routed to the agent.
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || a.observed().cmds.iter().any(|c| matches!(c, Cmd::Restorable))).await,
+        "a Restorable probe should reach the agent; saw: {:?}",
+        agent.observed().cmds
+    );
+
+    // Enter restores (all-or-nothing) → a Cmd::Restore reaches the agent.
+    h.key(KeyCode::Enter).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || a.observed().cmds.iter().any(|c| matches!(c, Cmd::Restore))).await,
+        "Enter in the picker should fire an all-or-nothing Restore; saw: {:?}",
+        agent.observed().cmds
     );
 }
 

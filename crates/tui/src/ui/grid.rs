@@ -2,6 +2,7 @@
 //! name; the focused box gets an accent border. `Single` keeps the clean
 //! borderless full-screen look. A shared bottom bar shows the focused box.
 
+use cc_screen_protocol::SessionInfo;
 use ratatui::{
     layout::{Alignment, Constraint, Layout as RLayout, Rect},
     style::{Color, Modifier, Style},
@@ -22,6 +23,10 @@ pub fn render(
     f: &mut Frame,
     layout: Layout,
     panes: &[Option<Pane>],
+    // The live session list, so a pane's title picks up an operator rename on the
+    // next poll (0059 C1) — the box holds the identity name, the label is resolved
+    // here at render time.
+    sessions: &[SessionInfo],
     active: usize,
     prefix_label: &str,
     prefix_armed: bool,
@@ -34,17 +39,40 @@ pub fn render(
     let single = !bordered(layout);
     for (i, rect) in tiles(layout, body).into_iter().enumerate() {
         let pane = panes.get(i).and_then(|p| p.as_ref());
-        render_box(f, rect, pane, i == active, single);
+        render_box(f, rect, pane, sessions, i == active, single);
     }
 
     let focused = panes.get(active).and_then(|p| p.as_ref());
     statusbar::render(
-        f, rows[1], focused, layout, active, panes.len(), prefix_label, prefix_armed, scroll_mode,
-        toast,
+        f, rows[1], focused, sessions, layout, active, panes.len(), prefix_label, prefix_armed,
+        scroll_mode, toast,
     );
 }
 
-fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, single: bool) {
+/// A pane's box title: `machine/label` when aggregated through a hub, else the
+/// label — resolving the operator display name (0059 C1) by identity from the
+/// session list, falling back to the pane's session name when it isn't listed.
+fn pane_title(p: &Pane, sessions: &[SessionInfo]) -> String {
+    let base = sessions
+        .iter()
+        .find(|s| s.name == p.session && s.machine == p.machine)
+        .map(crate::app::display_name)
+        .unwrap_or(p.session.as_str());
+    if p.machine.is_empty() {
+        base.to_string()
+    } else {
+        format!("{}/{}", p.machine, base)
+    }
+}
+
+fn render_box(
+    f: &mut Frame,
+    rect: Rect,
+    pane: Option<&Pane>,
+    sessions: &[SessionInfo],
+    focused: bool,
+    single: bool,
+) {
     if single {
         match pane {
             Some(p) => f.render_widget(p, rect),
@@ -68,7 +96,7 @@ fn render_box(f: &mut Frame, rect: Rect, pane: Option<&Pane>, focused: bool, sin
         (false, None) => (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray)),
     };
     let title = match pane {
-        Some(p) => p.title(),
+        Some(p) => pane_title(p, sessions),
         None => "empty".to_string(),
     };
     let block = Block::default()
@@ -106,7 +134,7 @@ mod tests {
     async fn quad_shows_titles_hints_and_bar() {
         let panes = vec![Some(dummy(1, "shell-a")), None, None, None];
         let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        t.draw(|f| render(f, Layout::Quad, &panes, 0, "^A", false, false, None)).unwrap();
+        t.draw(|f| render(f, Layout::Quad, &panes, &[], 0, "^A", false, false, None)).unwrap();
         let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("shell-a"), "filled box title: {s:?}");
         assert!(s.contains("for menu"), "empty box hint: {s:?}");
