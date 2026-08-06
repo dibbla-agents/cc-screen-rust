@@ -887,3 +887,235 @@ async fn narrow_boot_lists_without_panic() {
         h.text()
     );
 }
+
+// ── proposal 0060: `ccs activate` — device sign-in against the SaaS hub ───────
+//
+// These drive the real activate poll loop (`cc_screen_tui::actions`) against
+// the real multi-tenant hub router (`start_hub_multi`), with the "browser side"
+// played by the harness (scrape the pending code, POST approve with a login
+// cookie) — the exact shape scripts/e2e-saas-journey.sh proves against prod.
+
+use cc_screen_hub::test_support::{start_hub_multi, MultiHub};
+use cc_screen_tui::actions::{self, ActivateError};
+
+fn base_url(hub: &MultiHub) -> String {
+    format!("http://{}", hub.addr)
+}
+
+/// The happy path (acceptance 1): code → approve from a "phone" → the token
+/// lands, the email is echoed, and the Bearer then sees exactly the user's own
+/// scope — while the other tenant's world stays invisible.
+#[tokio::test]
+async fn activate_happy_path_scopes_and_revokes() {
+    let hub = start_hub_multi().await;
+    let (_alice, alice_cookie) = hub.user_with_cookie("alice@x.com").await;
+
+    // Browser side: wait for the code, approve it.
+    let approver = {
+        let hub = hub.clone();
+        let cookie = alice_cookie.clone();
+        tokio::spawn(async move {
+            let code = hub.pending_user_code().await.expect("a pending code appears");
+            assert_eq!(hub.approve(&cookie, &code).await, 200, "approve succeeds");
+        })
+    };
+
+    // Terminal side: the real poll loop (no browser auto-open in tests).
+    let mut out = Vec::new();
+    let a = actions::run_activate(&base_url(&hub), false, "alice@testbox", false, &mut out)
+        .await
+        .expect("activate completes");
+    approver.await.unwrap();
+    assert_eq!(a.email, "alice@x.com", "the account email is echoed");
+    let printed = String::from_utf8_lossy(&out);
+    // The code prints BEFORE the URL, and the token itself never prints.
+    let code_pos = printed.find("one-time code").expect("code line");
+    let url_pos = printed.find("/activate").expect("url line");
+    assert!(code_pos < url_pos, "code before URL:\n{printed}");
+    assert!(!printed.contains(&a.token), "the token never reaches the screen");
+
+    // The minted Bearer lights up the client surface, scoped to alice: bob's
+    // registered machine must be invisible (acceptance 7).
+    let (bob, bob_cookie) = hub.user_with_cookie("bob@x.com").await;
+    let uplink = {
+        use cc_screen_hub::db::Store as _;
+        let (t, _aid) = hub.store.upsert_agent(&bob, "bobbox").await.unwrap();
+        t
+    };
+    spawn_scriptable_agent(&hub.addr, "bobbox", Some(&uplink), vec![sess("beta")]).await;
+    let http = reqwest::Client::new();
+    // Wait until bob himself can see his machine (cookie view), so the uplink
+    // is definitely registered before asserting alice's blindness.
+    let mut bob_sees = false;
+    for _ in 0..100 {
+        let v: serde_json::Value = http
+            .get(format!("{}/api/machines", base_url(&hub)))
+            .header("cookie", &bob_cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if v.as_array().is_some_and(|a| !a.is_empty()) {
+            bob_sees = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(bob_sees, "bob's agent registers");
+    let alice_view: serde_json::Value = http
+        .get(format!("{}/api/machines", base_url(&hub)))
+        .bearer_auth(&a.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(alice_view.as_array().map(|v| v.len()), Some(0), "alice's token can't see bob's machine");
+
+    // `ccs logout`'s server half: self-revoke, then the old token 401s.
+    let revoke = http
+        .post(format!("{}/api/client-tokens/revoke-self", base_url(&hub)))
+        .bearer_auth(&a.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(revoke.status().is_success());
+    let after = http
+        .get(format!("{}/api/sessions", base_url(&hub)))
+        .bearer_auth(&a.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status().as_u16(), 401, "revocation is immediate");
+}
+
+/// A client token presented on the agent uplink must never register a machine
+/// (the other half of acceptance 7's cross-credential test).
+#[tokio::test]
+async fn client_token_rejected_on_agent_uplink() {
+    let hub = start_hub_multi().await;
+    let (_alice, cookie) = hub.user_with_cookie("alice@x.com").await;
+
+    // Mint a client token via the raw wire (fast path, no poll loop).
+    let http = reqwest::Client::new();
+    let code: serde_json::Value = http
+        .post(format!("{}/api/device/client/code", base_url(&hub)))
+        .json(&serde_json::json!({ "label": "x" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hub.approve(&cookie, code["user_code"].as_str().unwrap()).await, 200);
+    let tok: serde_json::Value = http
+        .post(format!("{}/api/device/client/token", base_url(&hub)))
+        .json(&serde_json::json!({ "device_code": code["device_code"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_token = tok["client_token"].as_str().unwrap();
+
+    // Present it as an uplink credential: registration must not land.
+    use cc_screen_hub::test_support::{connect, send};
+    use cc_screen_protocol::hub::{AgentMsg, HUB_PROTO_VERSION};
+    if let Ok(mut ws) = connect(&format!("ws://{}/agent/ws", hub.addr), Some(client_token)).await {
+        send(
+            &mut ws,
+            &AgentMsg::Register {
+                proto: HUB_PROTO_VERSION,
+                machine_id: "ghost".into(),
+                hostname: "ghost".into(),
+                agent_version: "test".into(),
+                tools: vec![],
+                caps: vec![],
+            },
+            b"",
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let v: serde_json::Value = http
+        .get(format!("{}/api/machines", base_url(&hub)))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v.as_array().map(|a| a.len()), Some(0), "a client token never registers a machine");
+}
+
+/// Denied and expired codes end the flow with the clean exit-1 errors (C2/C4).
+#[tokio::test]
+async fn activate_denied_and_expired_paths() {
+    // Denied.
+    let hub = start_hub_multi().await;
+    let denier = {
+        let hub = hub.clone();
+        tokio::spawn(async move { hub.deny_pending().await })
+    };
+    let mut out = Vec::new();
+    let err = actions::run_activate(&base_url(&hub), false, "x", false, &mut out)
+        .await
+        .map(|_| ())
+        .expect_err("denied flow errors");
+    denier.await.unwrap();
+    assert!(matches!(err, ActivateError::Denied), "got {err:?}");
+    assert_eq!(err.exit_code(), 1);
+
+    // Expired.
+    let hub = start_hub_multi().await;
+    let expirer = {
+        let hub = hub.clone();
+        tokio::spawn(async move { hub.expire_pending().await })
+    };
+    let mut out = Vec::new();
+    let err = actions::run_activate(&base_url(&hub), false, "x", false, &mut out)
+        .await
+        .map(|_| ())
+        .expect_err("expired flow errors");
+    expirer.await.unwrap();
+    assert!(matches!(err, ActivateError::Expired), "got {err:?}");
+    assert!(err.message().contains("ccs activate"), "expiry names the retry command");
+}
+
+/// The degradation matrix (C4/acceptance 6): a single-tenant hub says
+/// "static token" (exit 2); a pre-0060 multi-tenant hub says "too old" (exit 2).
+#[tokio::test]
+async fn activate_degrades_on_single_tenant_and_old_hubs() {
+    // Single-tenant: the /api/me probe short-circuits before any device call.
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut out = Vec::new();
+    let err = actions::run_activate(&format!("http://{hub}"), false, "x", false, &mut out)
+        .await
+        .map(|_| ())
+        .expect_err("single-tenant refuses");
+    assert!(matches!(err, ActivateError::SingleTenant), "got {err:?}");
+    assert_eq!(err.exit_code(), 2);
+    assert!(err.message().contains("api_token"), "points at the static-token path");
+
+    // Pre-0060 multi-tenant hub: multiTenant:true but no client device routes.
+    let app = axum::Router::new().route(
+        "/api/me",
+        axum::routing::get(|| async { axum::Json(serde_json::json!({ "multiTenant": true })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut out = Vec::new();
+    let err = actions::run_activate(&format!("http://{addr}"), false, "x", false, &mut out)
+        .await
+        .map(|_| ())
+        .expect_err("pre-0060 hub refuses");
+    assert!(matches!(err, ActivateError::HubTooOld), "got {err:?}");
+    assert_eq!(err.exit_code(), 2);
+    assert!(err.message().contains("update"), "points at updating the hub");
+}

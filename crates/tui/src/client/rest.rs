@@ -23,7 +23,7 @@ struct DirsResp {
 }
 
 const AUTH_MSG: &str =
-    "server requires auth — set `api_token` in ~/.config/cc-screen-tui/config.toml or pass --token";
+    "server requires auth — run `ccs activate` to log in, or set `api_token` in ~/.config/cc-screen-tui/config.toml / pass --token";
 
 /// Turn a 401 into a clear, actionable message instead of reqwest's terse
 /// "HTTP status 401"; otherwise bubble other 4xx/5xx as usual.

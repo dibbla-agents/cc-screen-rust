@@ -68,19 +68,45 @@ pub trait Store: Send + Sync {
     /// device-approve handler later.
     async fn upsert_agent(&self, user_id: &str, machine_id: &str) -> anyhow::Result<(String, String)>;
 
-    // ── RFC-8628 device flow (proposal 0001 §6–8) ──────────────────────────────
+    // ── RFC-8628 device flow (proposal 0001 §6–8; client kind: proposal 0060) ──
     /// Mint + store a pending enrollment for a headless host (`/api/device/code`).
     async fn device_create(&self, device_id: &str, machine_id: &str) -> anyhow::Result<DeviceCode>;
 
-    /// A host's poll (`/api/device/token`). Handles lazy expiry, `slow_down`
-    /// throttling, and single-use delivery of the approved token.
-    async fn device_poll(&self, device_code: &str) -> DevicePoll;
+    /// Mint + store a pending **terminal-client** enrollment (proposal 0060 B2,
+    /// `/api/device/client/code`). `label` is the client-suggested display name
+    /// ("erik@orchid"); no device identity is needed — the flow is one-shot.
+    async fn device_create_client(&self, label: &str) -> anyhow::Result<DeviceCode>;
+
+    /// A host's poll (`/api/device/token` / `/api/device/client/token`). Handles
+    /// lazy expiry, `slow_down` throttling, and single-use delivery of the
+    /// approved token. `kind` scopes the lookup ('agent' | 'client') so a code
+    /// minted for one flow can never be redeemed through the other's endpoint —
+    /// a cross-kind poll answers `Expired` (uniform, non-leaking).
+    async fn device_poll(&self, device_code: &str, kind: &str) -> DevicePoll;
 
     /// A logged-in browser approves a pending code (`/api/device/approve`), binding
-    /// it to `user_id`, minting the agent's token, and parking the plaintext for the
-    /// host's next poll. Returns the bound `machine_id`. Errors if the code is
-    /// unknown/expired/already used.
-    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String>;
+    /// it to `user_id`, minting the credential (an agent uplink token or a 0060
+    /// client token, per the row's `kind`), and parking the plaintext for the
+    /// poller's next poll. Errors if the code is unknown/expired/already used.
+    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<DeviceApproval>;
+
+    // ── terminal-client tokens (proposal 0060 B3/B4) ───────────────────────────
+    /// Resolve a presented client token (by its sha256 hash) to its owning
+    /// `user_id` — the Bearer half of the client auth gate. Touches
+    /// `last_used_at`, throttled to ~1/min so the hot path stays read-mostly.
+    async fn user_by_client_token_hash(&self, hash: &str) -> Option<String>;
+
+    /// A user's minted client tokens (never the hashes' preimages), newest first —
+    /// the account page's "Terminal clients" list.
+    async fn list_client_tokens(&self, user_id: &str) -> Vec<ClientTokenRow>;
+
+    /// Revoke one client token by row id, owner-scoped. True if a row went away;
+    /// the next request with that token 401s.
+    async fn delete_client_token(&self, user_id: &str, id: &str) -> bool;
+
+    /// Revoke the client token whose hash this is (`ccs logout`'s server half —
+    /// the token authenticates its own revocation, no cookie needed).
+    async fn delete_client_token_by_hash(&self, hash: &str) -> bool;
 
     /// Reap expired (and approved-but-never-claimed) enrollments. Cheap; run on a
     /// timer.
@@ -277,6 +303,29 @@ pub enum DevicePoll {
     Expired,
     Denied,
     Approved { token: String, agent_id: String },
+    /// A `kind='client'` enrollment came back approved (proposal 0060): the
+    /// one-time client-token handover plus the account email (echoed so the
+    /// terminal can confirm *which* account it signed into).
+    ApprovedClient { token: String, email: String },
+}
+
+/// What `/api/device/approve` bound (proposal 0060 B6): the enrollment's kind
+/// ('agent' | 'client') and its display label (the machine name resp. the
+/// client label), so the /activate page can say what was just approved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceApproval {
+    pub kind: String,
+    pub label: String,
+}
+
+/// One row of a user's minted terminal-client tokens (proposal 0060 B4). Only
+/// metadata — the token itself exists in plaintext exactly once, at handover.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClientTokenRow {
+    pub id: String,
+    pub label: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
 }
 
 /// A plan's enforced caps (proposal 0001 Phase 4). Resolved from `plan_limits`
@@ -363,6 +412,37 @@ impl SqliteStore {
         .bind(inv.session_name.as_deref())
         .execute(&self.pool)
         .await;
+    }
+
+    /// The shared insert behind both `device_create` (kind 'agent') and
+    /// `device_create_client` (kind 'client'): one pending enrollment row, one
+    /// code vocabulary, one approve page.
+    async fn device_insert(&self, device_id: &str, machine_id: &str, kind: &str) -> anyhow::Result<DeviceCode> {
+        let device_code = cc_screen_auth::generate_token();
+        let display = gen_user_code();
+        let stored = normalize_user_code(&display);
+        let expires_at = now_secs() as i64 + DEVICE_CODE_TTL;
+        sqlx::query(
+            "INSERT INTO device_enrollments
+               (device_code, user_code, device_id, machine_id, status, interval, expires_at, kind)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7)",
+        )
+        .bind(&device_code)
+        .bind(&stored)
+        .bind(device_id)
+        .bind(machine_id)
+        .bind(DEVICE_POLL_INTERVAL)
+        .bind(expires_at)
+        .bind(kind)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("device_create: {e}"))?;
+        Ok(DeviceCode {
+            device_code,
+            user_code_display: display,
+            interval: DEVICE_POLL_INTERVAL,
+            expires_in: DEVICE_CODE_TTL,
+        })
     }
 
     /// Guard a share insert: the agent must exist and be owned by `owner_user_id`,
@@ -550,43 +630,27 @@ impl Store for SqliteStore {
     }
 
     async fn device_create(&self, device_id: &str, machine_id: &str) -> anyhow::Result<DeviceCode> {
-        let device_code = cc_screen_auth::generate_token();
-        let display = gen_user_code();
-        let stored = normalize_user_code(&display);
-        let expires_at = now_secs() as i64 + DEVICE_CODE_TTL;
-        sqlx::query(
-            "INSERT INTO device_enrollments
-               (device_code, user_code, device_id, machine_id, status, interval, expires_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
-        )
-        .bind(&device_code)
-        .bind(&stored)
-        .bind(device_id)
-        .bind(machine_id)
-        .bind(DEVICE_POLL_INTERVAL)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("device_create: {e}"))?;
-        Ok(DeviceCode {
-            device_code,
-            user_code_display: display,
-            interval: DEVICE_POLL_INTERVAL,
-            expires_in: DEVICE_CODE_TTL,
-        })
+        self.device_insert(device_id, machine_id, "agent").await
     }
 
-    async fn device_poll(&self, device_code: &str) -> DevicePoll {
+    async fn device_create_client(&self, label: &str) -> anyhow::Result<DeviceCode> {
+        // No stable device identity for a one-shot terminal sign-in — a random
+        // placeholder satisfies the NOT NULL column; the label rides machine_id.
+        self.device_insert(&cc_screen_auth::generate_token(), label, "client").await
+    }
+
+    async fn device_poll(&self, device_code: &str, kind: &str) -> DevicePoll {
         let now = now_secs() as i64;
         let Ok(Some(row)) = sqlx::query(
-            "SELECT status, agent_id, uplink_token, expires_at, last_polled_at, interval
-               FROM device_enrollments WHERE device_code = ?1",
+            "SELECT status, agent_id, user_id, uplink_token, expires_at, last_polled_at, interval
+               FROM device_enrollments WHERE device_code = ?1 AND kind = ?2",
         )
         .bind(device_code)
+        .bind(kind)
         .fetch_optional(&self.pool)
         .await
         else {
-            return DevicePoll::Expired; // unknown ⇒ treat as expired
+            return DevicePoll::Expired; // unknown (incl. cross-kind) ⇒ treat as expired
         };
         let expires_at: i64 = row.try_get("expires_at").unwrap_or(0);
         if expires_at < now {
@@ -615,11 +679,24 @@ impl Store for SqliteStore {
             Ok("approved") => {
                 let token: Option<String> = row.try_get("uplink_token").ok();
                 let agent_id: Option<String> = row.try_get("agent_id").ok();
+                let user_id: Option<String> = row.try_get("user_id").ok();
                 // Single-use: hand the parked token over exactly once, then delete.
                 let _ = sqlx::query("DELETE FROM device_enrollments WHERE device_code = ?1")
                     .bind(device_code)
                     .execute(&self.pool)
                     .await;
+                if kind == "client" {
+                    // 0060: the parked plaintext is a client token; echo the
+                    // account email so the terminal confirms the right account.
+                    let email = match user_id {
+                        Some(uid) => self.user_email(&uid).await.unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    return match token {
+                        Some(token) => DevicePoll::ApprovedClient { token, email },
+                        None => DevicePoll::Expired,
+                    };
+                }
                 match (token, agent_id) {
                     (Some(token), Some(agent_id)) => DevicePoll::Approved { token, agent_id },
                     _ => DevicePoll::Expired,
@@ -629,11 +706,11 @@ impl Store for SqliteStore {
         }
     }
 
-    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String> {
+    async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<DeviceApproval> {
         let now = now_secs() as i64;
         let code = normalize_user_code(user_code);
         let row = sqlx::query(
-            "SELECT device_code, machine_id FROM device_enrollments
+            "SELECT device_code, machine_id, kind FROM device_enrollments
               WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2",
         )
         .bind(&code)
@@ -643,6 +720,37 @@ impl Store for SqliteStore {
         .ok_or_else(|| anyhow::anyhow!("unknown or expired code"))?;
         let device_code: String = row.try_get("device_code")?;
         let machine_id: String = row.try_get("machine_id")?;
+        let kind: String = row.try_get("kind").unwrap_or_else(|_| "agent".into());
+
+        if kind == "client" {
+            // 0060: a terminal sign-in mints a per-user client token — no machine
+            // plan cap, no agents row. Park the plaintext for the one poll pickup.
+            let token = cc_screen_auth::generate_token();
+            sqlx::query(
+                "INSERT INTO client_tokens (id, user_id, label, token_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(cc_screen_auth::generate_token())
+            .bind(user_id)
+            .bind(&machine_id)
+            .bind(cc_screen_auth::sha256_hex(&token))
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("device_approve (client token): {e}"))?;
+            sqlx::query(
+                "UPDATE device_enrollments
+                    SET status = 'approved', user_id = ?1, uplink_token = ?2
+                  WHERE device_code = ?3",
+            )
+            .bind(user_id)
+            .bind(&token)
+            .bind(&device_code)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("device_approve: {e}"))?;
+            return Ok(DeviceApproval { kind, label: machine_id });
+        }
 
         // Plan gate (§8.3): a genuinely NEW machine past the cap is refused; a
         // re-enroll of an existing label reuses its row and doesn't count. The
@@ -672,7 +780,68 @@ impl Store for SqliteStore {
         .execute(&self.pool)
         .await
         .map_err(|e| anyhow::anyhow!("device_approve: {e}"))?;
-        Ok(machine_id)
+        Ok(DeviceApproval { kind, label: machine_id })
+    }
+
+    async fn user_by_client_token_hash(&self, hash: &str) -> Option<String> {
+        let row = sqlx::query("SELECT id, user_id, last_used_at FROM client_tokens WHERE token_hash = ?1")
+            .bind(hash)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        let id: String = row.try_get("id").ok()?;
+        let user_id: String = row.try_get("user_id").ok()?;
+        // Touch last_used_at, throttled to ~1/min so the hot path is read-mostly.
+        let now = now_secs() as i64;
+        let last: Option<i64> = row.try_get("last_used_at").ok().flatten();
+        if last.map_or(true, |l| now - l >= 60) {
+            let _ = sqlx::query("UPDATE client_tokens SET last_used_at = ?1 WHERE id = ?2")
+                .bind(now)
+                .bind(&id)
+                .execute(&self.pool)
+                .await;
+        }
+        Some(user_id)
+    }
+
+    async fn list_client_tokens(&self, user_id: &str) -> Vec<ClientTokenRow> {
+        let rows = sqlx::query(
+            "SELECT id, label, created_at, last_used_at FROM client_tokens
+              WHERE user_id = ?1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(ClientTokenRow {
+                    id: r.try_get("id").ok()?,
+                    label: r.try_get("label").ok()?,
+                    created_at: r.try_get("created_at").ok()?,
+                    last_used_at: r.try_get::<Option<i64>, _>("last_used_at").ok().flatten(),
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_client_token(&self, user_id: &str, id: &str) -> bool {
+        sqlx::query("DELETE FROM client_tokens WHERE id = ?1 AND user_id = ?2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    async fn delete_client_token_by_hash(&self, hash: &str) -> bool {
+        sqlx::query("DELETE FROM client_tokens WHERE token_hash = ?1")
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
     }
 
     async fn list_agents(&self, user_id: &str) -> Vec<AgentRow> {
@@ -1663,10 +1832,10 @@ mod tests {
         let code = s.device_create("dev-1", "laptop").await.unwrap();
         assert!(code.user_code_display.contains('-'), "display is grouped");
         // First poll (no prior poll) is Pending; an immediate second is throttled.
-        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::Pending);
-        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::SlowDown);
+        assert_eq!(s.device_poll(&code.device_code, "agent").await, DevicePoll::Pending);
+        assert_eq!(s.device_poll(&code.device_code, "agent").await, DevicePoll::SlowDown);
         // Unknown code ⇒ treated as expired.
-        assert_eq!(s.device_poll("nope").await, DevicePoll::Expired);
+        assert_eq!(s.device_poll("nope", "agent").await, DevicePoll::Expired);
     }
 
     // The headline: approve binds the code to the tenant and the host claims the
@@ -1679,20 +1848,78 @@ mod tests {
         let code = s.device_create("dev-1", "laptop").await.unwrap();
 
         // Approve case/dash-insensitively → binds to alice's "laptop".
-        let machine = s.device_approve(&alice, &code.user_code_display.to_lowercase()).await.unwrap();
-        assert_eq!(machine, "laptop");
+        let approved = s.device_approve(&alice, &code.user_code_display.to_lowercase()).await.unwrap();
+        assert_eq!(approved, DeviceApproval { kind: "agent".into(), label: "laptop".into() });
 
         // First poll (last_polled NULL ⇒ not throttled) yields the token once.
-        let (token, agent_id) = match s.device_poll(&code.device_code).await {
+        let (token, agent_id) = match s.device_poll(&code.device_code, "agent").await {
             DevicePoll::Approved { token, agent_id } => (token, agent_id),
             other => panic!("expected Approved, got {other:?}"),
         };
         assert_eq!(s.resolve_agent("laptop", Some(&token)).await, Some((alice, agent_id)));
         // Single-use: the row is gone, so a repeat poll is Expired.
-        assert_eq!(s.device_poll(&code.device_code).await, DevicePoll::Expired);
+        assert_eq!(s.device_poll(&code.device_code, "agent").await, DevicePoll::Expired);
 
         // A bad/unknown code can't be approved.
         assert!(s.device_approve("someone", "ZZZZ-ZZZZ").await.is_err());
+    }
+
+    // Proposal 0060: the terminal-client flow mints a per-user client token —
+    // hash at rest, one-time handover, revocable, and NEVER interchangeable with
+    // an agent uplink token (the two-credential invariant).
+    #[tokio::test]
+    async fn client_device_flow_mints_revocable_client_token() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let code = s.device_create_client("alice@orchid").await.unwrap();
+
+        // Cross-kind polls are uniform dead ends: the client code on the agent
+        // endpoint (and vice versa) reads as Expired, never a token.
+        assert_eq!(s.device_poll(&code.device_code, "agent").await, DevicePoll::Expired);
+
+        let approved = s.device_approve(&alice, &code.user_code_display).await.unwrap();
+        assert_eq!(approved, DeviceApproval { kind: "client".into(), label: "alice@orchid".into() });
+        // No agents row was created — a client sign-in consumes no machine slot.
+        assert_eq!(s.agent_count(&alice).await, 0);
+
+        let (token, email) = match s.device_poll(&code.device_code, "client").await {
+            DevicePoll::ApprovedClient { token, email } => (token, email),
+            other => panic!("expected ApprovedClient, got {other:?}"),
+        };
+        assert_eq!(email, "alice@x.com");
+        // Single-use handover: the row is gone.
+        assert_eq!(s.device_poll(&code.device_code, "client").await, DevicePoll::Expired);
+
+        // The token resolves alice through the CLIENT resolver only. The uplink
+        // resolver must reject it (a client token can't impersonate a machine).
+        let hash = cc_screen_auth::sha256_hex(&token);
+        assert_eq!(s.user_by_client_token_hash(&hash).await.as_deref(), Some(alice.as_str()));
+        assert_eq!(s.resolve_agent("alice@orchid", Some(&token)).await, None);
+        // …and an uplink token never resolves as a client credential.
+        let (uplink, _aid) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        assert_eq!(s.user_by_client_token_hash(&cc_screen_auth::sha256_hex(&uplink)).await, None);
+
+        // Listed with its label (metadata only), last_used_at stamped by the resolve.
+        let rows = s.list_client_tokens(&alice).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "alice@orchid");
+        assert!(rows[0].last_used_at.is_some());
+
+        // Owner-scoped delete: bob can't revoke alice's token; alice can.
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        assert!(!s.delete_client_token(&bob, &rows[0].id).await);
+        assert!(s.delete_client_token(&alice, &rows[0].id).await);
+        assert_eq!(s.user_by_client_token_hash(&hash).await, None, "revoked immediately");
+
+        // Self-revoke by hash (`ccs logout`): mint another, revoke by its hash.
+        let code2 = s.device_create_client("alice@ssh").await.unwrap();
+        s.device_approve(&alice, &code2.user_code_display).await.unwrap();
+        let token2 = match s.device_poll(&code2.device_code, "client").await {
+            DevicePoll::ApprovedClient { token, .. } => token,
+            other => panic!("expected ApprovedClient, got {other:?}"),
+        };
+        assert!(s.delete_client_token_by_hash(&cc_screen_auth::sha256_hex(&token2)).await);
+        assert!(!s.delete_client_token_by_hash(&cc_screen_auth::sha256_hex(&token2)).await);
     }
 
     // Proposal 0039: share inserts are owner-scoped + idempotent; visibility_rows

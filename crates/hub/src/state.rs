@@ -197,21 +197,70 @@ impl HubState {
         }
     }
 
-    /// Poll a device code; single-tenant resolves to `Expired` (no flow).
+    /// Mint a pending **terminal-client** enrollment (proposal 0060 B2); `None`
+    /// in single-tenant.
     #[cfg(feature = "multi-tenant")]
-    pub async fn device_poll(&self, device_code: &str) -> crate::db::DevicePoll {
+    pub async fn device_create_client(&self, label: &str) -> Option<crate::db::DeviceCode> {
         match &self.tenancy {
-            Tenancy::Single => crate::db::DevicePoll::Expired,
-            Tenancy::Multi(store) => store.device_poll(device_code).await,
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.device_create_client(label).await.ok(),
         }
     }
 
-    /// Approve a pending code for `user_id`; returns the bound `machine_id`.
+    /// Poll a device code of `kind`; single-tenant resolves to `Expired` (no flow).
     #[cfg(feature = "multi-tenant")]
-    pub async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<String> {
+    pub async fn device_poll(&self, device_code: &str, kind: &str) -> crate::db::DevicePoll {
+        match &self.tenancy {
+            Tenancy::Single => crate::db::DevicePoll::Expired,
+            Tenancy::Multi(store) => store.device_poll(device_code, kind).await,
+        }
+    }
+
+    /// Approve a pending code for `user_id`; returns what was bound (kind + label).
+    #[cfg(feature = "multi-tenant")]
+    pub async fn device_approve(&self, user_id: &str, user_code: &str) -> anyhow::Result<crate::db::DeviceApproval> {
         match &self.tenancy {
             Tenancy::Single => anyhow::bail!("not a multi-tenant hub"),
             Tenancy::Multi(store) => store.device_approve(user_id, user_code).await,
+        }
+    }
+
+    // ── terminal-client tokens (proposal 0060 B3/B4) ───────────────────────────
+    /// Resolve a presented client Bearer token (by hash) to its user. `None` in
+    /// single-tenant — the static-token `Auth` gate handles Bearer there.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn user_by_client_token_hash(&self, hash: &str) -> Option<UserId> {
+        match &self.tenancy {
+            Tenancy::Single => None,
+            Tenancy::Multi(store) => store.user_by_client_token_hash(hash).await,
+        }
+    }
+
+    /// A user's minted client tokens (the account page's "Terminal clients").
+    #[cfg(feature = "multi-tenant")]
+    pub async fn list_client_tokens(&self, user_id: &str) -> Vec<crate::db::ClientTokenRow> {
+        match &self.tenancy {
+            Tenancy::Single => Vec::new(),
+            Tenancy::Multi(store) => store.list_client_tokens(user_id).await,
+        }
+    }
+
+    /// Revoke one client token by id (owner-scoped). `false` in single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn delete_client_token(&self, user_id: &str, id: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.delete_client_token(user_id, id).await,
+        }
+    }
+
+    /// Revoke the client token whose hash this is (`ccs logout`). `false` in
+    /// single-tenant.
+    #[cfg(feature = "multi-tenant")]
+    pub async fn delete_client_token_by_hash(&self, hash: &str) -> bool {
+        match &self.tenancy {
+            Tenancy::Single => false,
+            Tenancy::Multi(store) => store.delete_client_token_by_hash(hash).await,
         }
     }
 

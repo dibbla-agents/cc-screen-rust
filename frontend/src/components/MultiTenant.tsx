@@ -9,7 +9,9 @@ import {
   approveDevice,
   getInviteInfo,
   leaveShare,
+  deleteClientToken,
   listAgents,
+  listClientTokens,
   listOutbox,
   listReceivedShares,
   loginEmail,
@@ -20,6 +22,7 @@ import {
   unlinkAgent,
   ApiError,
   type AgentInfo,
+  type ClientTokenInfo,
   type InviteInfo,
   type MeInfo,
   type MePlan,
@@ -341,15 +344,24 @@ export function ActivatePage({
 }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; machine?: string; limit?: boolean; error?: string } | null>(null);
+  const [result, setResult] = useState<{
+    ok: boolean;
+    machine?: string;
+    kind?: string;
+    label?: string;
+    limit?: boolean;
+    error?: string;
+  } | null>(null);
   const [missing, setMissing] = useState<string[]>([]);
   const ready = code.replace(/[^A-Z0-9]/gi, "").length === 8;
 
   // The agent dials in a moment AFTER approval, so its tool list isn't in the
   // registry the instant we land here. Poll briefly, then say nothing rather
   // than guess — an absent line is the correct outcome on a complete machine.
+  // A terminal sign-in (kind 'client', proposal 0060) registers no machine, so
+  // there is nothing to poll for.
   useEffect(() => {
-    if (!result?.ok || !result.machine) return;
+    if (!result?.ok || !result.machine || result.kind === "client") return;
     const machine = result.machine;
     let tries = 0;
     let stop = false;
@@ -383,7 +395,26 @@ export function ActivatePage({
       <div className="w-full max-w-md">
         <Wordmark />
         <Window path="~/activate">
-          {result?.ok ? (
+          {result?.ok && result.kind === "client" ? (
+            // A terminal sign-in (proposal 0060 B6): no machine enrolled, no
+            // plan slot consumed — the terminal picks its token up by itself.
+            <div className="py-4 text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-amber/40 bg-amber/10 text-2xl text-amber">
+                ✓
+              </div>
+              <h2 className="font-mono text-base font-semibold text-slate-100">
+                Terminal signed in
+              </h2>
+              <p className="mx-auto mt-2 max-w-xs text-sm text-slate-400">
+                <span className="text-amber">{result.label || "Your terminal"}</span> is now connected to
+                your account. You can close this page — <code className="font-mono text-xs">ccs</code> picks
+                it up by itself. Revoke it anytime under “Terminal clients” on this dashboard.
+              </p>
+              <button onClick={onDone} className={`${primaryBtn} mt-6`}>
+                Done
+              </button>
+            </div>
+          ) : result?.ok ? (
             <div className="py-4 text-center">
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-amber/40 bg-amber/10 text-2xl text-amber">
                 ✓
@@ -434,11 +465,13 @@ export function ActivatePage({
             </div>
           ) : (
             <>
-              <h2 className="mb-1 font-mono text-base font-semibold text-slate-100">Connect a machine</h2>
+              <h2 className="mb-1 font-mono text-base font-semibold text-slate-100">Connect a device</h2>
               <p className="mb-5 text-sm text-slate-400">
-                On the headless box you ran{" "}
-                <code className="rounded bg-bar px-1.5 py-0.5 font-mono text-xs text-accent">--enroll</code>. Type the
-                code it printed below{email ? <> — approving as <span className="text-slate-300">{email}</span></> : null}.
+                On a headless box you ran{" "}
+                <code className="rounded bg-bar px-1.5 py-0.5 font-mono text-xs text-accent">--enroll</code>, or in a
+                terminal you ran{" "}
+                <code className="rounded bg-bar px-1.5 py-0.5 font-mono text-xs text-accent">ccs activate</code>. Type
+                the code it printed below{email ? <> — approving as <span className="text-slate-300">{email}</span></> : null}.
               </p>
               <form onSubmit={submit}>
                 <input
@@ -463,7 +496,7 @@ export function ActivatePage({
                     <div className="mt-3 text-center text-xs text-claude">{result.error}</div>
                   ))}
                 <button type="submit" disabled={busy || !ready} className={`${primaryBtn} mt-5`}>
-                  {busy ? "Approving…" : "Approve machine"}
+                  {busy ? "Approving…" : "Approve"}
                 </button>
               </form>
             </>
@@ -713,6 +746,66 @@ function subjectTitle(machine: string | undefined | null, session?: string | nul
 // The ~/shared dashboard card: "Shared by you" (revoke/cancel) and "Shared with
 // you" (leave). Polls on the dashboard cadence so accepted/declined invites flip
 // without a manual reload.
+// ── Terminal clients (proposal 0060 B4) — every `ccs activate` sign-in, with
+// per-token revoke. Metadata only; the token itself existed in plaintext
+// exactly once, at handover. Renders nothing while the list is empty.
+function TerminalClientsCard() {
+  const [tokens, setTokens] = useState<ClientTokenInfo[] | null>(null);
+
+  const reload = () => listClientTokens().then(setTokens).catch(() => setTokens([]));
+  useEffect(() => {
+    reload();
+    const t = setInterval(reload, 8000);
+    return () => clearInterval(t);
+  }, []);
+
+  if (!tokens?.length) return null;
+
+  const ago = (secs?: number | null) => {
+    if (!secs) return "never used";
+    const d = Math.max(0, Math.floor(Date.now() / 1000 - secs));
+    if (d < 90) return "just now";
+    if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+    if (d < 172800) return `${Math.floor(d / 3600)} h ago`;
+    return `${Math.floor(d / 86400)} d ago`;
+  };
+
+  return (
+    <Window path="~/terminal-clients" className="mb-4">
+      <h2 className="mb-1 font-mono text-base font-semibold text-slate-100">Terminal clients</h2>
+      <p className="mb-3 text-xs text-slate-500">
+        Terminals signed in with <code className="font-mono text-slate-400">ccs activate</code>. Revoking one
+        logs that terminal out immediately.
+      </p>
+      <ul className="space-y-2">
+        {tokens.map((t) => (
+          <li
+            key={t.id}
+            className="flex items-center justify-between gap-3 rounded-xl border border-edge bg-bar/40 px-3.5 py-2.5"
+          >
+            <div className="min-w-0">
+              <div className="truncate font-mono text-sm text-slate-200">{t.label}</div>
+              <div className="text-[11px] text-slate-500">
+                added {new Date(t.createdAt * 1000).toLocaleDateString()} · {ago(t.lastUsedAt)}
+              </div>
+            </div>
+            <button
+              onClick={async () => {
+                if (!window.confirm(`Sign out ${t.label}? It loses access immediately.`)) return;
+                await deleteClientToken(t.id);
+                reload();
+              }}
+              className="shrink-0 rounded-lg border border-edge px-3 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+            >
+              Revoke
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Window>
+  );
+}
+
 function SharedCard() {
   const [outbox, setOutbox] = useState<ShareInvite[] | null>(null);
   const [received, setReceived] = useState<ReceivedShare[] | null>(null);
@@ -942,6 +1035,11 @@ export function Dashboard({
         {/* Sharing — who has access to what, and take it back */}
         <SharedCard />
 
+        {/* Terminal clients (proposal 0060 B4): every `ccs activate` sign-in,
+            with per-token revoke — the browser-side kill switch. Hidden when
+            empty (most users meet ccs later, if at all). */}
+        <TerminalClientsCard />
+
         {/* Add a machine */}
         <Window path="~/add-machine">
           <h3 className="mb-1 font-mono text-sm font-semibold text-slate-100">Add a machine</h3>
@@ -1057,6 +1155,12 @@ export function Dashboard({
           </div>
           <p className="mt-2 text-[11px] text-slate-600">
             Runs the device-flow enrollment, then installs a background service that reconnects on boot.
+          </p>
+          {/* Proposal 0060 D4: the terminal path, one dim line — ccs is the
+              other client of this same account. */}
+          <p className="mt-3 border-t border-edge pt-2 text-[11px] text-slate-500">
+            Prefer a terminal? <code className="font-mono text-slate-400">curl -fsSL {origin}/ccs.sh | sh</code>{" "}
+            then <code className="font-mono text-slate-400">ccs activate</code> — the same code-approve flow.
           </p>
         </Window>
       </div>

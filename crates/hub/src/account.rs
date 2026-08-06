@@ -166,6 +166,69 @@ pub async fn rotate(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
     }
 }
 
+// ── Terminal-client tokens (proposal 0060 B4) ─────────────────────────────────
+
+/// `GET /api/client-tokens` — the caller's minted terminal-client tokens
+/// (metadata only, never the secrets), for the account page's "Terminal
+/// clients" list. Cookie-authed like the rest of the account surface.
+pub async fn client_tokens_list(State(hub): State<HubState>, headers: HeaderMap) -> Response {
+    let Some(user_id) = hub.client_auth.user_from_cookie(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "login required").into_response();
+    };
+    let out: Vec<_> = hub
+        .list_client_tokens(&user_id)
+        .await
+        .into_iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "label": t.label,
+                "createdAt": t.created_at,
+                "lastUsedAt": t.last_used_at,
+            })
+        })
+        .collect();
+    Json(out).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ClientTokenDeleteReq {
+    id: String,
+}
+
+/// `POST /api/client-tokens/delete` — revoke one of the caller's terminal-client
+/// tokens (owner-scoped; the next request with it 401s). Cookie-authed.
+pub async fn client_tokens_delete(
+    State(hub): State<HubState>,
+    headers: HeaderMap,
+    Json(req): Json<ClientTokenDeleteReq>,
+) -> Response {
+    let Some(user_id) = hub.client_auth.user_from_cookie(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "login required").into_response();
+    };
+    if hub.delete_client_token(&user_id, &req.id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no such token").into_response()
+    }
+}
+
+/// `POST /api/client-tokens/revoke-self` — `ccs logout`'s server half: the
+/// Bearer token authenticates (and names) its own revocation; no cookie needed.
+/// The auth middleware already resolved this Bearer to a user, so reaching here
+/// implies a live client token; deleting by its hash is owner-scoped by
+/// construction.
+pub async fn client_tokens_revoke_self(State(hub): State<HubState>, headers: HeaderMap) -> Response {
+    let Some(bearer) = cc_screen_auth::bearer_token(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "bearer token required").into_response();
+    };
+    if hub.delete_client_token_by_hash(&cc_screen_auth::sha256_hex(bearer)).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, "unknown token").into_response()
+    }
+}
+
 // The owner-scoped sharing surface moved to `share.rs` (proposal 0040): an invite
 // must be accepted before it grants, so creation no longer lands a grant directly.
 // The 0039 grant store (`shares`) is now written only by an accepted invite.

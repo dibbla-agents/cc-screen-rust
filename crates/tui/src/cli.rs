@@ -7,9 +7,11 @@ use clap::Parser;
 /// machine's sessions in one list, each tagged with its machine. Same binary either
 /// way — the hub just aggregates.
 ///
-/// The server URL + token are remembered in ~/.config/cc-screen-tui/config.toml, so
-/// after the first run `ccs` (no args) reconnects. Inside the grid, the prefix key
-/// is Ctrl-A (tmux-style): Ctrl-A d opens the menu, Ctrl-A then a layout digit, etc.
+/// Against a hosted (multi-tenant) hub, sign in once with `ccs activate`. The server
+/// URL is remembered in ~/.config/cc-screen-tui/config.toml and sign-ins/tokens in
+/// the sibling credentials.toml (0600), so after the first run `ccs` (no args)
+/// reconnects. Inside the grid, the prefix key is Ctrl-A (tmux-style): Ctrl-A d
+/// opens the menu, Ctrl-A then a layout digit, etc.
 #[derive(Parser, Debug)]
 #[command(
     name = "ccs",
@@ -17,14 +19,18 @@ use clap::Parser;
     about,
     long_about,
     after_help = "EXAMPLES:\n  \
+        ccs activate                                    # sign in to a hosted hub (device code)\n  \
         ccs --server http://laptop:8839                 # one machine\n  \
-        ccs --server http://hub:8840 --token <tok>      # a hub (all machines)\n  \
-        ccs                                             # reuse the saved server/token\n  \
+        ccs --server http://hub:8840 --token <tok>      # a self-hosted hub (static token)\n  \
+        ccs                                             # reuse the saved server + sign-in\n  \
+        ccs logout                                      # revoke this terminal's sign-in\n  \
         ccs update                                      # fetch the latest ccs build\n  \
         ccs uninstall                                   # remove the ccs binary + config\n\n\
-        Auth: if the server/hub has a gate, pass --token (or set api_token in the\n  \
-        config, or CCS_API_TOKEN / CCWEB_API_TOKEN). The browser uses a login screen;\n  \
-        the TUI uses the token directly."
+        Auth: against a hosted (multi-tenant) hub, run `ccs activate` — approve the\n  \
+        one-time code from any logged-in browser (your phone works). Against a\n  \
+        self-hosted server/hub with a static gate, pass --token (or set api_token in\n  \
+        the config, or CCS_API_TOKEN / CCWEB_API_TOKEN). Sign-ins are stored per hub\n  \
+        in ~/.config/cc-screen-tui/credentials.toml (0600)."
 )]
 pub struct Cli {
     /// Server/hub base URL, e.g. http://laptop:8839 or http://hub:8840. Overrides

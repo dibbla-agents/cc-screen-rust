@@ -580,3 +580,178 @@ async fn password_min_12() {
     let ok = signup_req(&client, &base, "pwtest@x.com", "twelve-chars", "10.56.3.2").await;
     assert!(ok.status().is_success(), "12 chars accepted ({})", ok.status());
 }
+
+// ── proposal 0060: the terminal-client sign-in wire contract ──────────────────
+
+/// A client token from Bearer must light up the whole client surface with the
+/// caller's own scope — and NOTHING else: not the other tenant's sessions, and
+/// never as an uplink credential.
+#[tokio::test]
+async fn client_token_flow_end_to_end() {
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice_cookie = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    // Terminal side: request a code (unauthenticated, distinct path)…
+    let code: serde_json::Value = client
+        .post(format!("http://{base}/api/device/client/code"))
+        .json(&serde_json::json!({ "label": "alice@testbox" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(code["verification_uri"].as_str().unwrap().ends_with("/activate"));
+
+    // …browser side approves with the cookie; the response says WHAT (B6).
+    let approve = post_json(
+        &client,
+        &base,
+        &alice_cookie,
+        "/api/device/approve",
+        serde_json::json!({ "user_code": code["user_code"] }),
+    )
+    .await;
+    assert!(approve.status().is_success(), "approve: {}", approve.status());
+    let approved: serde_json::Value = approve.json().await.unwrap();
+    assert_eq!(approved["kind"], "client");
+    assert_eq!(approved["label"], "alice@testbox");
+
+    // …terminal polls the token endpoint: one-time handover + the account email.
+    let tok: serde_json::Value = client
+        .post(format!("http://{base}/api/device/client/token"))
+        .json(&serde_json::json!({ "device_code": code["device_code"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bearer = tok["client_token"].as_str().expect("client_token").to_string();
+    assert_eq!(tok["email"], "alice@x.com");
+
+    // The Bearer sees exactly alice's scope on REST…
+    let names: Vec<String> = client
+        .get(format!("http://{base}/api/sessions"))
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<SessionInfo>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, vec!["claude-a"], "alice's sessions only");
+
+    // …and on the WS attach handshake (the same middleware gates both).
+    let mut req = format!("ws://{base}/api/ws?session=claude-a").into_client_request().unwrap();
+    req.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap(),
+    );
+    assert!(tokio_tungstenite::connect_async(req).await.is_ok(), "bearer WS attach upgrades");
+
+    // Two-credential invariant, both directions: an *uplink* token presented as
+    // client Bearer is refused…
+    let alice_id = store.user_id_by_email("alice@x.com").await.unwrap();
+    let (uplink, _aid) = store.upsert_agent(&alice_id, "laptop").await.unwrap();
+    let r = client
+        .get(format!("http://{base}/api/sessions"))
+        .bearer_auth(&uplink)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::UNAUTHORIZED, "uplink token is not a client credential");
+    // …and the client token never resolves as an uplink credential.
+    assert!(store.resolve_agent("laptop", Some(&bearer)).await.is_none());
+
+    // The account page lists the terminal client (cookie-authed)…
+    let list = get_json(&client, &base, &alice_cookie, "/api/client-tokens").await;
+    let row = &list.as_array().expect("array")[0];
+    assert_eq!(row["label"], "alice@testbox");
+
+    // …bob can't revoke it…
+    let bob_cookie = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+    let steal = post_json(
+        &client,
+        &base,
+        &bob_cookie,
+        "/api/client-tokens/delete",
+        serde_json::json!({ "id": row["id"] }),
+    )
+    .await;
+    assert_eq!(steal.status(), reqwest::StatusCode::NOT_FOUND, "owner-scoped revoke");
+
+    // …and `ccs logout` (Bearer self-revoke) kills it immediately.
+    let revoke = client
+        .post(format!("http://{base}/api/client-tokens/revoke-self"))
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .unwrap();
+    assert!(revoke.status().is_success());
+    let after = client
+        .get(format!("http://{base}/api/sessions"))
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), reqwest::StatusCode::UNAUTHORIZED, "revoked token 401s at once");
+}
+
+/// A client code redeemed through the *agent* poll endpoint (or vice versa) is
+/// a uniform dead end — a pre-0060 hub's shape can never be tricked into
+/// cross-kind handover.
+#[tokio::test]
+async fn device_flow_kinds_never_cross() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice_cookie = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+
+    let code: serde_json::Value = client
+        .post(format!("http://{base}/api/device/client/code"))
+        .json(&serde_json::json!({ "label": "x" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let approve = post_json(
+        &client,
+        &base,
+        &alice_cookie,
+        "/api/device/approve",
+        serde_json::json!({ "user_code": code["user_code"] }),
+    )
+    .await;
+    assert!(approve.status().is_success());
+
+    // Redeeming the approved CLIENT code through the AGENT endpoint fails
+    // uniformly ("expired_token") and hands over nothing…
+    let cross = client
+        .post(format!("http://{base}/api/device/token"))
+        .json(&serde_json::json!({ "device_code": code["device_code"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = cross.json().await.unwrap();
+    assert_eq!(body["error"], "expired_token");
+
+    // …and the legitimate endpoint still delivers exactly once afterwards (the
+    // cross-kind read didn't consume the row).
+    let tok: serde_json::Value = client
+        .post(format!("http://{base}/api/device/client/token"))
+        .json(&serde_json::json!({ "device_code": code["device_code"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(tok["client_token"].is_string(), "own-kind redeem still works: {tok}");
+}

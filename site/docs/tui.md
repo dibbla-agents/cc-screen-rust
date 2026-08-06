@@ -21,35 +21,65 @@ and no per-machine tmux sockets.
 ## Install
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
+curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 ```
 
-drops `ccs` into `~/.local/bin`. It's a real terminal app — it needs an
-interactive TTY.
+drops `ccs` into `~/.local/bin` and prints the sign-in command. (The generic
+installer, if you'd rather not fetch through the hub:
+`curl --proto '=https' --tlsv1.2 -LsSf
+https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh`.)
+It's a real terminal app — it needs an interactive TTY.
 
-## Connect
+## Connect (hosted — app.ccscreen.dev)
 
 ```sh
-ccs --server https://app.ccscreen.dev --token <token>
+ccs activate
 ```
 
-The server URL and token are remembered in
-`~/.config/cc-screen-tui/config.toml`, so from then on plain `ccs`
-reconnects. The token can also come from `api_token` in that config file or
-the `CCS_API_TOKEN` / `CCWEB_API_TOKEN` environment variables.
+prints a short one-time code and a URL, polls for your approval, and confirms
+the account it signed in as:
 
-This is the *client* token — the credential a browser or script uses to talk
-to the hub — not a machine's uplink credential.
+![ccs activate: the one-time code, the URL, and the signed-in confirmation](../img/ccs-activate.png)
 
-Self-hosting? Point it at your own endpoint instead:
+Open the URL from any logged-in browser — your phone is fine, and it works
+over SSH because nothing has to open on the box itself — type the code, and
+approve. That's it: `✓ Logged in as you@example.com`, and plain `ccs` from
+then on connects as you. Codes expire after 10 minutes; a fresh one is a
+re-run away. It's the same code-approve gesture as enrolling a machine, just
+signing in a *terminal* instead.
+
+![Approving the terminal's code on the /activate page](../img/web-approve-terminal.png)
+
+`ccs logout` signs the terminal out again — it revokes the credential
+server-side and forgets it locally. You can also revoke any terminal from
+the dashboard's **Terminal clients** list.
+
+## Connect (self-hosted)
+
+Point it at your own endpoint with a static token:
 
 ```sh
 ccs --server http://laptop:8839          # one machine's agent, directly
 ccs --server http://hub:8840 --token …   # your own hub (all machines)
 ```
 
+The server URL and token are remembered, so from then on plain `ccs`
+reconnects. This is the *client* token — the credential a browser or script
+uses to talk to the hub (`CCWEB_API_TOKEN` on the server / `--token` on
+`cc-screen-hub install`) — not a machine's uplink credential. A self-hosted
+*multi-tenant* hub supports `ccs activate` too.
+
 (`--insecure` accepts a self-signed certificate for an ad-hoc `wss` setup.)
+
+## Credentials
+
+- Device sign-ins land in `~/.config/cc-screen-tui/credentials.toml` —
+  owner-only (`0600`), keyed per hub, never printed. The server URL lives in
+  `config.toml` next to it.
+- Precedence when several sources exist: `--token` > `CCS_API_TOKEN` >
+  `CCWEB_API_TOKEN` > `credentials.toml` > `api_token` in `config.toml`.
+- Headless/CI use: set `CCS_API_TOKEN` (or pass `--token`) and skip
+  `activate` entirely.
 
 ## Using it
 
@@ -88,6 +118,7 @@ Everything else you type goes straight to the focused session's PTY.
 
 ```sh
 ccs update       # fetch the latest ccs build
+ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 ```

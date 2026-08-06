@@ -48,6 +48,13 @@ a session can do anything your user account can do on that machine.
 - **Your account** authenticates to the hub with a password (or Google) and
   rides a signed session cookie. Headless clients (`ccs`, scripts) use a
   bearer token instead.
+- **Each signed-in terminal** (`ccs activate`) gets its own client token:
+  hashed at rest on the hub, shown to no one (it's handed to the terminal
+  exactly once, over the wire), stored on the client at
+  `~/.config/cc-screen-tui/credentials.toml` (`0600`), and individually
+  revocable — `ccs logout` from the terminal, or **Terminal clients** on the
+  dashboard. It's a *client* credential, distinct from a machine's uplink
+  token; neither is ever accepted in the other's place.
 - **Each machine** has its own uplink credential, minted when you approve its
   enrollment code. It's stored on the machine at
   `~/.config/cc-screen-rust/enroll.json`, written with owner-only (`0600`)

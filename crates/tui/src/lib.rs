@@ -5,6 +5,7 @@
 //! build a real `App` and drive it against an in-process hub (proposal 0059 B2/B3).
 //! A bin-only crate can't be reached from an integration test — hence the lib.
 
+pub mod actions;
 pub mod anchored_backend;
 pub mod app;
 pub mod cli;

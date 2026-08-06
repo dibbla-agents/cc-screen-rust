@@ -44,7 +44,13 @@ anyhow = "1"
 # into cc_screen_hub::test_support (B1). Pulling the hub in with `test-support`
 # also means `frontend/dist` must exist before `cargo test -p cc-screen-tui`
 # compiles (the hub embeds it via rust-embed) — the tui-ci job builds it first.
-cc-screen-hub = { path = "../hub", features = ["test-support"] }
+# 0060 adds `multi-tenant` so the harness can start a real multi-tenant hub
+# (`start_hub_multi`) and drive `ccs activate` end-to-end — the compile cost of
+# sqlx in the TUI's dev graph is accepted and noted (proposal 0060 Wave 0).
+cc-screen-hub = { path = "../hub", features = ["test-support", "multi-tenant"] }
 cc-screen-auth = { path = "../auth" }
 # B4 PTY smoke: boot the real `ccs` binary inside a pty pair and read its screen.
 portable-pty = "0.8"
+# 0060: a hand-rolled "pre-0060 hub" double (answers /api/me, 404s the client
+# device flow) for the degradation-matrix e2e. Already in the dev graph via hub.
+axum = "0.7"

@@ -79,6 +79,134 @@ fn next_salt() -> u64 {
     SALT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A running **multi-tenant** hub double (proposal 0060 Wave 0): the real router
+/// with `Tenancy::Multi` over a throwaway SQLite file, so tests can drive the
+/// device flows, the client-token gate, and per-user visibility end-to-end.
+#[cfg(feature = "multi-tenant")]
+#[derive(Clone)]
+pub struct MultiHub {
+    /// `host:port` of the running hub.
+    pub addr: String,
+    /// The backing store, for seeding users/agents beyond what HTTP exposes.
+    pub store: Arc<crate::db::SqliteStore>,
+    /// The client-auth gate (same secret the hub signs cookies with), so tests
+    /// can mint login cookies without driving `/api/login`.
+    pub auth: Auth,
+}
+
+#[cfg(feature = "multi-tenant")]
+impl MultiHub {
+    /// Create a user and hand back `(user_id, cookie_header_value)` — the shape
+    /// a logged-in browser presents, ready for a `Cookie:` header on
+    /// `/api/device/approve` etc.
+    pub async fn user_with_cookie(&self, email: &str) -> (String, String) {
+        use crate::db::Store as _;
+        let uid = self.store.create_user(email, "password-1234").await.expect("create user");
+        (uid.clone(), self.cookie_for(&uid))
+    }
+
+    /// The `Cookie:` header value for an existing user id.
+    pub fn cookie_for(&self, user_id: &str) -> String {
+        let set = self.auth.issue_cookie_for(user_id, false);
+        // `ccs_session=<value>; Max-Age=…` → keep just the name=value pair.
+        set.split(';').next().unwrap_or_default().to_string()
+    }
+
+    /// Wait (≤5 s) for a pending device enrollment to appear and return its
+    /// stored user code — what a test's "browser side" types into approve.
+    pub async fn pending_user_code(&self) -> Option<String> {
+        use sqlx::Row as _;
+        for _ in 0..100 {
+            let row = sqlx::query("SELECT user_code FROM device_enrollments WHERE status = 'pending'")
+                .fetch_optional(self.store.pool())
+                .await
+                .ok()
+                .flatten();
+            if let Some(r) = row {
+                return r.try_get("user_code").ok();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    /// Approve `user_code` as the browser would: `POST /api/device/approve`
+    /// with the login cookie. Returns the HTTP status.
+    pub async fn approve(&self, cookie: &str, user_code: &str) -> u16 {
+        reqwest::Client::new()
+            .post(format!("http://{}/api/device/approve", self.addr))
+            .header("cookie", cookie)
+            .json(&serde_json::json!({ "user_code": user_code }))
+            .send()
+            .await
+            .map(|r| r.status().as_u16())
+            .unwrap_or(0)
+    }
+
+    /// Flip every pending enrollment to denied (the approve page's "deny" —
+    /// exercised directly since denial has no HTTP surface yet).
+    pub async fn deny_pending(&self) {
+        let code = self.pending_user_code().await;
+        if code.is_some() {
+            let _ = sqlx::query("UPDATE device_enrollments SET status = 'denied' WHERE status = 'pending'")
+                .execute(self.store.pool())
+                .await;
+        }
+    }
+
+    /// Lazily expire every pending enrollment (as if 10 minutes passed).
+    pub async fn expire_pending(&self) {
+        let code = self.pending_user_code().await;
+        if code.is_some() {
+            let _ = sqlx::query("UPDATE device_enrollments SET expires_at = 0 WHERE status = 'pending'")
+                .execute(self.store.pool())
+                .await;
+        }
+    }
+}
+
+/// Start a multi-tenant hub on an ephemeral port (proposal 0060 Wave 0 H1).
+/// Same hermetic posture as [`start_hub`]: temp config dir, temp SQLite file,
+/// parallel-safe. The uplink is gated per-user by the store (agents enroll via
+/// `upsert_agent` / the device flow), and clients authenticate with a login
+/// cookie or a 0060 client token.
+#[cfg(feature = "multi-tenant")]
+pub async fn start_hub_multi() -> MultiHub {
+    let tmp = std::env::temp_dir().join(format!(
+        "ccr-hub-e2e-mt-{}-{}",
+        std::process::id(),
+        next_salt(),
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let db_path = tmp.join("hub.db");
+    let store = Arc::new(
+        crate::db::SqliteStore::connect(&format!("sqlite://{}", db_path.display()))
+            .await
+            .expect("open test store"),
+    );
+    let auth = Auth::load(&tmp, None, None);
+    let hub = HubState {
+        registry: Registry::new(),
+        agent_tokens: Arc::new(HashMap::new()),
+        allow_open_uplink: false,
+        client_auth: auth.clone(),
+        origin: cc_screen_auth::OriginPolicy::default(),
+        login_throttle: Arc::new(cc_screen_auth::LoginThrottle::new()),
+        config_dir: tmp.clone(),
+        push: Arc::new(cc_screen_push::Push::new(&tmp)),
+        bulk: Default::default(),
+        summary: Arc::new(crate::summarizer::Summarizer::disabled()),
+        tenancy: crate::state::Tenancy::Multi(store.clone()),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = crate::build_router(hub);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    MultiHub { addr: format!("{addr}"), store, auth }
+}
+
 /// A minimal `SessionInfo` for `name` (tool `shell`, no marks). Fields are `pub`
 /// on `SessionInfo`, so a caller wanting a headline/color/label just sets them.
 pub fn sess(name: &str) -> SessionInfo {

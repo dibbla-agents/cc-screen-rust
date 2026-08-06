@@ -28,8 +28,39 @@ pub struct CodeReq {
     machine_id: String,
 }
 
+/// How many device codes one source may mint per rolling minute (proposal 0060
+/// B5), across both flows. The per-code slow_down still governs polling; this
+/// bounds the *mint* rate (the pending-row count is already bounded by the
+/// 10-minute lazy expiry). Generous for a human retrying, tight for a script.
+const DEVICE_CODES_PER_MIN: usize = 30;
+
+/// Per-source sliding window for the `code` endpoints — the same shape as
+/// signup's (`account::signup_rate_limited`), with its own bucket.
+fn code_rate_limited(source: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static WINDOWS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+    let mut map = WINDOWS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let now = Instant::now();
+    let cutoff = now - Duration::from_secs(60);
+    if map.len() >= 4096 {
+        map.retain(|_, v| v.iter().any(|t| *t > cutoff));
+    }
+    let hits = map.entry(source.to_string()).or_default();
+    hits.retain(|t| *t > cutoff);
+    if hits.len() >= DEVICE_CODES_PER_MIN {
+        return true;
+    }
+    hits.push(now);
+    false
+}
+
 /// `POST /api/device/code` — the headless host requests a code (unauthenticated).
-pub async fn code(State(hub): State<HubState>, Json(req): Json<CodeReq>) -> Response {
+pub async fn code(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<CodeReq>) -> Response {
+    if code_rate_limited(&cc_screen_auth::source_key(&headers)) {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many codes requested").into_response();
+    }
     if req.device_id.trim().is_empty() || req.machine_id.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "device_id and machine_id required").into_response();
     }
@@ -47,6 +78,55 @@ pub async fn code(State(hub): State<HubState>, Json(req): Json<CodeReq>) -> Resp
 }
 
 #[derive(Deserialize)]
+pub struct ClientCodeReq {
+    /// Client-suggested display label ("erik@orchid"); shown on the approve page
+    /// and the account page's "Terminal clients" list.
+    #[serde(default)]
+    label: String,
+}
+
+/// `POST /api/device/client/code` — a terminal client (`ccs activate`) requests a
+/// sign-in code (unauthenticated; proposal 0060 B2). A **distinct path** from the
+/// machine flow so a pre-0060 hub answers a clean 404 ("too old"), never silently
+/// runs the machine enrollment.
+pub async fn client_code(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<ClientCodeReq>) -> Response {
+    if code_rate_limited(&cc_screen_auth::source_key(&headers)) {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many codes requested").into_response();
+    }
+    let label = req.label.trim();
+    let label = if label.is_empty() { "terminal" } else { label };
+    // Bound the label (it renders on the approve + account pages).
+    let label: String = label.chars().take(64).collect();
+    let Some(c) = hub.device_create_client(&label).await else {
+        return (StatusCode::NOT_IMPLEMENTED, "device flow unavailable").into_response();
+    };
+    Json(json!({
+        "device_code": c.device_code,
+        "user_code": c.user_code_display,
+        "verification_uri": format!("{}/activate", public_base()),
+        "interval": c.interval,
+        "expires_in": c.expires_in,
+    }))
+    .into_response()
+}
+
+/// `POST /api/device/client/token` — the terminal polls (unauthenticated;
+/// proposal 0060 B2). RFC-8628 error codes; the minted **client token** (plus the
+/// account email, so the terminal echoes who it signed in as) exactly once.
+pub async fn client_token(State(hub): State<HubState>, Json(req): Json<TokenReq>) -> Response {
+    match hub.device_poll(&req.device_code, "client").await {
+        DevicePoll::ApprovedClient { token, email } => {
+            Json(json!({ "client_token": token, "email": email })).into_response()
+        }
+        DevicePoll::Pending => err("authorization_pending"),
+        DevicePoll::SlowDown => err("slow_down"),
+        DevicePoll::Denied => err("access_denied"),
+        // A kind-mismatched code resolves Expired in the store (uniform).
+        _ => err("expired_token"),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct TokenReq {
     device_code: String,
 }
@@ -54,14 +134,15 @@ pub struct TokenReq {
 /// `POST /api/device/token` — the host polls (unauthenticated). RFC-8628 error
 /// codes on the 4xx body; the minted token on success.
 pub async fn token(State(hub): State<HubState>, Json(req): Json<TokenReq>) -> Response {
-    match hub.device_poll(&req.device_code).await {
+    match hub.device_poll(&req.device_code, "agent").await {
         DevicePoll::Approved { token, agent_id } => {
             Json(json!({ "uplink_token": token, "agent_id": agent_id })).into_response()
         }
         DevicePoll::Pending => err("authorization_pending"),
         DevicePoll::SlowDown => err("slow_down"),
         DevicePoll::Denied => err("access_denied"),
-        DevicePoll::Expired => err("expired_token"),
+        // Expired, plus a kind-mismatched code (which the store reports Expired).
+        _ => err("expired_token"),
     }
 }
 
@@ -104,11 +185,35 @@ pub async fn approve(State(hub): State<HubState>, headers: HeaderMap, Json(req):
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
     match hub.device_approve(&user_id, &req.user_code).await {
-        Ok(machine_id) => Json(json!({ "machine_id": machine_id })).into_response(),
+        // `machine_id` is kept for pre-0060 frontends; `kind`+`label` (0060 B6)
+        // let the /activate page say WHAT was approved (machine vs terminal).
+        Ok(a) => Json(json!({ "machine_id": a.label, "kind": a.kind, "label": a.label })).into_response(),
         Err(e) => match e.to_string().strip_prefix("LIMIT:") {
             // Plan cap hit → 402 with the human message (the dashboard shows it).
             Some(msg) => (StatusCode::PAYMENT_REQUIRED, msg.to_string()).into_response(),
             None => (StatusCode::NOT_FOUND, "unknown or expired code").into_response(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::code_rate_limited;
+
+    // B5: the per-source window trips after the cap and never bleeds across
+    // sources. (Sources here are synthetic keys — the window is keyed on
+    // whatever `source_key` derives per request.)
+    #[test]
+    fn code_mint_window_is_per_source() {
+        let src = "test-src-a";
+        let mut allowed = 0;
+        for _ in 0..40 {
+            if !code_rate_limited(src) {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, super::DEVICE_CODES_PER_MIN, "cap enforced");
+        assert!(code_rate_limited(src), "still limited within the window");
+        assert!(!code_rate_limited("test-src-b"), "another source is unaffected");
     }
 }
