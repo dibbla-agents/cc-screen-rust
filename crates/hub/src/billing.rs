@@ -65,6 +65,12 @@ pub struct BillingConfig {
     price_team_monthly: Option<String>,
     price_team_annual: Option<String>,
     price_team_founder: Option<String>,
+    /// Optional Billing Portal *configuration* id (`bpc_…`) used for TEAM (org)
+    /// portal sessions (0064 B7): the portal's quantity editing is per-config,
+    /// so the default config keeps Pro quantity locked and offers no Team↔Pro
+    /// cross-grade, while this one enables adjustable quantity (min 3) on the
+    /// Team prices only. Unset → org portals use the account default config.
+    portal_config_team: Option<String>,
     founder_deadline: u64,
     public_url: String,
     /// Stripe Managed Payments (merchant of record). Opt-in via
@@ -93,6 +99,7 @@ impl BillingConfig {
             price_team_monthly: var("STRIPE_PRICE_TEAM_MONTHLY"),
             price_team_annual: var("STRIPE_PRICE_TEAM_ANNUAL"),
             price_team_founder: var("STRIPE_PRICE_TEAM_FOUNDER"),
+            portal_config_team: var("STRIPE_PORTAL_CONFIG_TEAM"),
             founder_deadline,
             public_url,
             managed_payments: matches!(
@@ -231,11 +238,20 @@ async fn create_checkout_session(
 }
 
 /// `POST /v1/billing_portal/sessions` — returns the customer-portal URL.
-async fn create_portal_session(cfg: &BillingConfig, customer_id: &str) -> anyhow::Result<String> {
-    let form = vec![
+/// `configuration` picks a non-default portal config (the Team one, 0064 B7);
+/// `None` = the account's saved default.
+async fn create_portal_session(
+    cfg: &BillingConfig,
+    customer_id: &str,
+    configuration: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut form = vec![
         ("customer".to_string(), customer_id.to_string()),
         ("return_url".to_string(), format!("{}/", cfg.public_url)),
     ];
+    if let Some(c) = configuration {
+        form.push(("configuration".to_string(), c.to_string()));
+    }
     let resp: UrlResp = stripe_post(cfg, "/v1/billing_portal/sessions", &form).await?;
     Ok(resp.url)
 }
@@ -596,6 +612,9 @@ pub async fn portal(State(hub): State<HubState>, headers: HeaderMap, body: Optio
         return (StatusCode::NOT_FOUND, "billing not configured").into_response();
     };
     let b = body.map(|Json(b)| b).unwrap_or_default();
+    // The Team portal config (quantity adjustable, min 3) applies ONLY to org
+    // sessions (0064 B7); user sessions ride the account default.
+    let configuration = if b.org.is_some() { cfg.portal_config_team.clone() } else { None };
     let customer_id = if b.org.is_some() {
         let Some((org, role)) = store.org_for_user(&user).await else {
             return (StatusCode::NOT_FOUND, "no team").into_response();
@@ -613,7 +632,7 @@ pub async fn portal(State(hub): State<HubState>, headers: HeaderMap, body: Optio
     let Some(customer_id) = customer_id else {
         return (StatusCode::CONFLICT, "no billing account — subscribe first").into_response();
     };
-    match create_portal_session(&cfg, &customer_id).await {
+    match create_portal_session(&cfg, &customer_id, configuration.as_deref()).await {
         Ok(url) => (StatusCode::OK, Json(json!({ "url": url }))).into_response(),
         Err(e) => {
             tracing::warn!("billing: portal create failed: {e}");
@@ -920,6 +939,7 @@ mod tests {
             price_team_monthly: Some("price_team_monthly".into()),
             price_team_annual: Some("price_team_annual".into()),
             price_team_founder: Some("price_team_founder".into()),
+            portal_config_team: None,
             founder_deadline: 2_000_000_000,
             public_url: "https://app.example.com".into(),
             managed_payments: false,

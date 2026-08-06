@@ -69,6 +69,9 @@ MULTI-TENANT (SaaS) MODE
                              price ids ($16/seat, $160/seat/yr; proposal 0064) —
                              unset ⇒ Pro-only billing, Team checkout 400s
   STRIPE_PRICE_TEAM_FOUNDER  optional $8/seat founder price (beta-cohort owners)
+  STRIPE_PORTAL_CONFIG_TEAM  optional bpc_… portal configuration for TEAM (org)
+                             portal sessions — quantity adjustable (min 3) on
+                             the Team prices only; unset = account default
   STRIPE_FOUNDER_DEADLINE    optional unix-seconds cutoff for the founder offer
   STRIPE_MANAGED_PAYMENTS=1  opt-in: Stripe Managed Payments (merchant of record);
                              requires MoR activated on the Stripe account
