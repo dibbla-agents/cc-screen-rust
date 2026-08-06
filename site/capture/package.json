@@ -1,0 +1,9 @@
+{
+  "name": "cc-screen-capture",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible screenshot/clip pipeline for the docs and landing page (proposal 0061). The playwright pin must match the remote browser server's minor version — see README.md.",
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

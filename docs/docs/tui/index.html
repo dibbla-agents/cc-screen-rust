@@ -98,7 +98,7 @@ whole fleet without leaving the terminal.</p>
 <code>ccs</code> attaches you to <em>every</em> machine your hub can — over a single
 outbound-only uplink, with agent-aware ready notifications — no inbound SSH
 and no per-machine tmux sockets.</p>
-<p><img src="../img/tui-grid.png" alt="Four sessions in the ccs grid"></p>
+<p><img src="../img/tui-grid.png" alt="The ccs grid — three sessions from the demo fleet in the left-L layout" loading="lazy" /></p>
 <h2 id="install">Install</h2>
 <pre><code class="language-sh">curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 </code></pre>
@@ -112,14 +112,14 @@ It&#39;s a real terminal app — it needs an interactive TTY.</p>
 <p>(or just <code>ccs</code> — with no sign-in yet it runs the activation itself, then
 drops you straight into the switcher). It prints a short one-time code and a
 URL, polls for your approval, and confirms the account it signed in as:</p>
-<p><img src="../img/ccs-activate.png" alt="ccs activate: the one-time code, the URL, and the signed-in confirmation"></p>
+<p><img src="../img/ccs-activate.png" alt="ccs activate: the one-time code, the URL, and the signed-in confirmation" loading="lazy" /></p>
 <p>Open the URL from any logged-in browser — your phone is fine, and it works
 over SSH because nothing has to open on the box itself — type the code, and
 approve. That&#39;s it: <code>✓ Logged in as you@example.com</code>, and plain <code>ccs</code> from
 then on connects as you. Codes expire after 10 minutes; a fresh one is a
 re-run away. It&#39;s the same code-approve gesture as enrolling a machine, just
 signing in a <em>terminal</em> instead.</p>
-<p><img src="../img/web-approve-terminal.png" alt="Approving the terminal&#39;s code on the /activate page"></p>
+<p><img src="../img/web-approve-terminal.png" alt="Approving the terminal's code on the /activate page" loading="lazy" /></p>
 <p><code>ccs logout</code> signs the terminal out again — it revokes the credential
 server-side and forgets it locally. You can also revoke any terminal from
 the dashboard&#39;s <strong>Terminal clients</strong> list.</p>
@@ -146,11 +146,12 @@ owner-only (<code>0600</code>), keyed per hub, never printed. The server URL liv
 </ul>
 <h2 id="using-it">Using it</h2>
 <p><code>ccs</code> opens in the <strong>switcher</strong>: every machine&#39;s sessions in one list, each
-tagged with its machine and its latest one-line summary, plus create / kill /
+with its colour, tool, and latest one-line summary, plus create / kill /
 rename / restore actions. Pick sessions into the <strong>grid</strong> — the same six
 layouts as the web app, and panes from different machines can sit side by
-side. Each pane is a full terminal emulator with multi-thousand-line
-scrollback.</p>
+side, each titled <code>machine/name</code>. Each pane is a full terminal emulator with
+multi-thousand-line scrollback.</p>
+<p><figure><img src="../img/tui-switcher.png" alt="The ccs switcher — every session across the fleet in one list" loading="lazy" /><figcaption>The switcher: session labels, colours, tools, and each one's latest line</figcaption></figure></p>
 <p>Jump straight to a session — handy from a script or muscle memory:</p>
 <pre><code class="language-sh">ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
 </code></pre>
@@ -170,6 +171,7 @@ scrollback.</p>
 normal mode snaps back to live</li>
 <li>click or move spatially to focus panes</li>
 </ul>
+<p><figure><img src="../img/tui-layouts.png" alt="The visual layout palette open over the grid" loading="lazy" /><figcaption>Ctrl-A l opens the layout palette — six layouts, applied live</figcaption></figure></p>
 <p>Everything else you type goes straight to the focused session&#39;s PTY.</p>
 <h2 id="maintenance">Maintenance</h2>
 <pre><code class="language-sh">ccs update       # fetch the latest ccs build

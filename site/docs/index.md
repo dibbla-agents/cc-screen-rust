@@ -24,16 +24,7 @@ Four words carry the whole model:
   in front of all your machines. Each machine dials *out* to the hub and
   registers; you sign in once and see every machine's sessions in one list.
 
-```
-   phone / browser / ccs                  the hub                     your machines
-   ─────────────────────                  ───────                     ─────────────
-        │                                    │                      ┌─ agent (laptop) ── claude, codex …
-        │   one URL (app.ccscreen.dev)       │  ◀── dials out ──────┤
-        └───────────────────────────────────►│  ◀── dials out ──────┼─ agent (server) ── gemini …
-                                             │  ◀── dials out ──────┤
-         relays each request                 │                      └─ agent (pi) ────── kimi …
-         to the owning machine
-```
+![How cc-screen fits together — clients and machines both connect out to the hub](img/docs-topology.svg "Machines dial out to the hub; the hub relays to your phone, browser, or terminal — it owns no terminals and no files.")
 
 The hub owns **no terminals and no files** — it's a registry and a relay. Your
 code, your sessions, and your CLI logins stay on your machines; the hub passes

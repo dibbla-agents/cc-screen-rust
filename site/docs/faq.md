@@ -27,7 +27,8 @@ activity only.
 Nothing, unless you want it to. Beta accounts moved to the **beta** plan: the
 same 10 machines / 50 concurrent sessions you had, still free, and it stays
 that way. If you'd like to support the project (and get Pro), the founder price
-— $5/month, locked for as long as you stay subscribed — is claimable until <date>.
+— $5/month, locked for as long as you stay subscribed — is claimable for a
+limited time while the beta pricing transition runs.
 
 ## Which coding CLIs are supported?
 

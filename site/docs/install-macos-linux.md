@@ -2,6 +2,7 @@
 title: Install on macOS / Linux
 nav: Install — macOS / Linux
 description: What the one-line installer does on macOS and Linux, step by step — and how to update, re-run, and uninstall.
+casts: true
 ---
 
 # Install on macOS / Linux
@@ -16,6 +17,21 @@ curl -fsSL https://app.ccscreen.dev/install.sh | sh -s -- <machine-name> --assis
 If you skip the name, the machine is named after its hostname. The
 [dashboard](https://app.ccscreen.dev) generates this exact command on the
 **Add a machine** card, so you rarely type it by hand.
+
+![The Add a machine card](../img/web-add-machine.png "The dashboard's Add a machine card — name the box, pick the platform tab and the assistants, copy the generated command.")
+
+A real run, end to end (~15 s):
+
+<pre class="cast" data-cast="../media/install.cast">
+  ✓ claude     (Claude Code)  /home/erik/.local/bin/claude
+  ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
+  ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
+  ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+
+  Approved — connecting as 'my-laptop'.
+
+✓ Done — 'my-laptop' is connected and will reconnect automatically.
+</pre>
 
 This page explains what that script actually does, in the order it does it.
 
@@ -53,6 +69,8 @@ The installer prints a short code (like `WDJB-MJHT`) and waits. You approve it
 at [app.ccscreen.dev/activate](https://app.ccscreen.dev/activate) from any
 logged-in browser. Codes live 10 minutes; an expired code is replaced with a
 fresh one automatically.
+
+![Approving an enrollment code on /activate](../img/web-activate.png "The /activate page: type the code, hit Approve, and the machine links to your account.")
 
 On approval the machine receives its own credential, stored at
 `~/.config/cc-screen-rust/enroll.json` with owner-only permissions. It's

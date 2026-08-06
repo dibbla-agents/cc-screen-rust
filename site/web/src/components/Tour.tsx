@@ -1,6 +1,11 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { shots } from "../assets";
-import { Phone, Window, Eyebrow, SectionHeading, Reveal } from "./ui";
+import { Phone, Window, TitleBar, Eyebrow, SectionHeading, Reveal } from "./ui";
+// The one real-UI clip in the Tour (0061 E2): the web-create-session capture,
+// shared byte-for-byte with the docs embed (one manifest entry, N writes).
+import clipWebm from "../assets/demo/web-create-session.webm?url";
+import clipMp4 from "../assets/demo/web-create-session.mp4?url";
+import clipPoster from "../assets/demo/web-create-session-poster.png";
 
 function Beat({
   n,
@@ -18,6 +23,54 @@ function Beat({
       <span className="mb-2 block font-mono text-[0.8rem] text-accent">{n}</span>
       <h3 className="mb-1.5 text-[1.15rem] font-semibold text-ink">{title}</h3>
       <p className="max-w-[46ch] text-[0.97rem] text-dim">{children}</p>
+    </div>
+  );
+}
+
+/* The Tour's one motion slot (0061 E2): the real create-session capture in the
+   same window chrome as the stills. `preload="none"` + poster means zero video
+   bytes until playback; an IntersectionObserver starts/pauses it with the
+   viewport. Under prefers-reduced-motion the observer is never wired at all —
+   the poster is the whole experience (same contract as useReveal above). */
+function ClipWindow({ label }: { label: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const reduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    if (reduced || !("IntersectionObserver" in window)) return; // poster only
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) void el.play().catch(() => {});
+          else el.pause();
+        }
+      },
+      { threshold: 0.35 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return (
+    <div className="flex w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-[0_24px_64px_-32px_rgba(0,0,0,0.8)] transition-colors duration-150 hover:border-accent/40">
+      <TitleBar label={label} />
+      <video
+        ref={videoRef}
+        muted
+        loop
+        playsInline
+        preload="none"
+        poster={clipPoster}
+        width={1280}
+        height={720}
+        className="block h-auto w-full"
+        aria-label="Creating a session: new session, directory search, Claude starting"
+      >
+        <source src={clipWebm} type="video/webm" />
+        <source src={clipMp4} type="video/mp4" />
+      </video>
     </div>
   );
 }
@@ -98,6 +151,16 @@ export function Tour() {
                 </figcaption>
               </figure>
             </div>
+          </Reveal>
+
+          {/* 5 — the real UI moving: one clip, shared with the docs (0061 E2) */}
+          <Reveal className="flex flex-col gap-6">
+            <Beat n="05" title="Zero to a working agent">
+              The whole flow, uncut: new session, find the project folder with
+              the directory search, and Claude is running — under ten
+              seconds, real UI, no speed-ups.
+            </Beat>
+            <ClipWindow label="cc-screen — new session" />
           </Reveal>
         </div>
       </section>

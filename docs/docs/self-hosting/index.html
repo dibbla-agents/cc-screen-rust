@@ -104,6 +104,7 @@ variable turns it on (below).</li>
 </ol>
 <p>Read the <a href="../security/">Security model</a> alongside this page — a hub
 concentrates access to every connected machine, so its auth settings matter.</p>
+<p><figure><img src="../img/docs-topology.svg" alt="Shape 2 — a hub in front of many machines, each dialing out to it" loading="lazy" /><figcaption>Shape 2: your hub is the one address clients talk to; every machine's agent dials out to it, so no machine needs an inbound port.</figcaption></figure></p>
 <h2 id="quick-start-hub-machines">Quick start (hub + machines)</h2>
 <p><strong>1 — Install the hub</strong> on whichever box should be the front door:</p>
 <pre><code class="language-sh">curl --proto &#39;=https&#39; --tlsv1.2 -LsSf \

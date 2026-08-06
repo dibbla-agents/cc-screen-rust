@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
+<script defer src="../docs-cast.js"></script>
 </head>
 <body>
 <header class="docs-header">
@@ -98,6 +99,7 @@ and rejoin at step 3.</p>
 <p>Go to <a href="https://app.ccscreen.dev">app.ccscreen.dev</a> and sign up — email +
 password, or &quot;Continue with Google&quot;. Signing up logs you straight in and lands
 you on your dashboard.</p>
+<p><img src="../img/web-signup.png" alt="The sign-in / create-account screen" loading="lazy" /></p>
 <h2 id="2-connect-a-machine">2. Connect a machine</h2>
 <p>On the computer where your coding agents should run, paste this one command
 (replace <code>&lt;machine-name&gt;</code> with whatever you want to call the box, e.g.
@@ -106,12 +108,23 @@ you on your dashboard.</p>
 </code></pre>
 <p>The dashboard&#39;s <strong>Add a machine</strong> card generates exactly this command for you,
 with the name filled in — copy it from there if you prefer.</p>
+<p><figure><img src="../img/web-add-machine.png" alt="The Add a machine card, Windows tab selected" loading="lazy" /><figcaption>The Add a machine card builds the exact command — macOS/Linux or Windows — with your machine name and assistant choice baked in.</figcaption></figure></p>
 <p>What it does: installs the cc-screen agent into <code>~/.local/bin</code>, installs any
 missing coding assistants for your user (that&#39;s the <code>--assistants</code> flag — no
 sudo, everything under your home directory), and connects the machine to your
 account. Step-by-step detail is in
 <a href="../install-macos-linux/">Install on macOS / Linux</a>.</p>
-<h2 id="3-approve-the-code">3. Approve the code</h2>
+<p>Here&#39;s the one-liner running, end to end (~15 s):</p>
+<pre class="cast" data-cast="../media/install.cast">
+  ✓ claude     (Claude Code)  /home/erik/.local/bin/claude
+  ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
+  ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
+  ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+
+  Approved — connecting as 'my-laptop'.
+
+✓ Done — 'my-laptop' is connected and will reconnect automatically.
+</pre><h2 id="3-approve-the-code">3. Approve the code</h2>
 <p>The installer prints a short code and waits:</p>
 <pre><code>  To connect this machine, open  https://app.ccscreen.dev/activate
   and enter code:  WDJB-MJHT
@@ -121,7 +134,13 @@ account. Step-by-step detail is in
 phone is fine — type the code, and press <strong>Approve machine</strong>. Codes expire
 after 10 minutes; if one does, the installer just prints a fresh one, so
 there&#39;s nothing to redo.</p>
-<p>Approving links the machine to your account. The installer finishes by
+<p><figure><img src="../img/web-activate.png" alt="The /activate approval screen with a code typed in" loading="lazy" /><figcaption>Type the code the installer printed and hit Approve — from any logged-in browser, your phone included.</figcaption></figure></p>
+<p>Here&#39;s the whole handshake in about ten seconds — code typed, machine
+approved, dashboard dot flipping online:</p>
+<figure>
+<video controls muted playsinline preload="none" poster="../media/web-activate-poster.png" width="1280" height="720"><source src="../media/web-activate.webm" type="video/webm" /><source src="../media/web-activate.mp4" type="video/mp4" /></video>
+<figcaption>Approving a machine, end to end — all real, no cuts.</figcaption>
+</figure><p>Approving links the machine to your account. The installer finishes by
 registering a background service, so the machine reconnects by itself after
 every reboot.</p>
 <h2 id="4-start-your-first-session">4. Start your first session</h2>
@@ -131,7 +150,7 @@ Claude) and a project folder, and you&#39;re in a live terminal. You can also do
 it any time from the session list: <strong>New session</strong>, pick the machine, the
 tool, and the directory.</p>
 <p>The machine also appears on your dashboard with a pulsing <strong>online</strong> dot.</p>
-<p><img src="../img/mobile-agent.png" alt="A live Claude session, driven from a phone"></p>
+<p><img src="../img/mobile-agent.png" alt="A live Claude session, driven from a phone" loading="lazy" /></p>
 <h2 id="5-put-it-on-your-phone">5. Put it on your phone</h2>
 <p>Open <a href="https://app.ccscreen.dev">app.ccscreen.dev</a> on your phone and use your
 browser&#39;s <strong>Add to Home Screen</strong>. cc-screen is a PWA: full-screen, an app

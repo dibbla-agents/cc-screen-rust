@@ -33,6 +33,8 @@ jobs:
           test -f docs/docs/index.html
           test -f docs/docs/quickstart/index.html
           test -f docs/docs/docs.css
+          test -f docs/docs/media/install.cast
+          test -f docs/docs/docs-cast.js
 
       - name: Link check
         working-directory: site/web

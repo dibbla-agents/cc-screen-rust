@@ -104,7 +104,7 @@ when you close the tab.</p>
 Gemini, Kimi, or a plain shell), and the working directory (with a
 directory search, so deep project paths are a few keystrokes). Two details
 worth knowing:</p>
-<p><img src="../img/web-new-session.png" alt="Creating a session — tool, directory, options"></p>
+<p><img src="../img/web-new-session.png" alt="Creating a session — tool, directory, options" loading="lazy" /></p>
 <ul>
 <li><strong>Skip permissions</strong> (on by default) launches the CLI with its
 approval-bypass flag — the agent won&#39;t stop to ask before running tools.
@@ -113,18 +113,24 @@ a &quot;safe&quot; badge.</li>
 <li>Sessions survive you. Closing the browser, losing signal, even the machine
 rebooting — the agent resumes its sessions and your panes re-attach.</li>
 </ul>
-<h2 id="the-grid-desktop">The grid (desktop)</h2>
+<p>Here&#39;s the whole flow in one take — new session, directory search, Claude
+booting:</p>
+<figure>
+<video controls muted playsinline preload="none" poster="../media/web-create-session-poster.png" width="1280" height="720"><source src="../media/web-create-session.webm" type="video/webm" /><source src="../media/web-create-session.mp4" type="video/mp4" /></video>
+<figcaption>From "New session" to a running agent in under ten seconds.</figcaption>
+</figure><h2 id="the-grid-desktop">The grid (desktop)</h2>
 <p>On a wide screen you can tile up to six sessions side by side, in six layout
 templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
 from <em>different machines</em> — one grid, your whole fleet. There&#39;s a layout
 palette to switch arrangements, and each pane is a full live terminal.</p>
+<p><figure><img src="../img/web-grid.png" alt="Three live panes with the layout palette open" loading="lazy" /><figcaption>Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.</figcaption></figure></p>
 <h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
 <p>Every machine gets a built-in file browser and editor, confined to that
 machine&#39;s home directory. The tree is live (it follows filesystem changes as
 your agent works), and the editor previews markdown — handy for reading the
 plan or review docs agents produce.</p>
-<p><img src="../img/web-cowork.png" alt="Coworking on a file next to a live session"></p>
-<p><img src="../img/mobile-editor.png" alt="The editor on a phone"></p>
+<p><img src="../img/web-cowork.png" alt="Coworking on a file next to a live session" loading="lazy" /></p>
+<p><img src="../img/mobile-editor.png" alt="The editor on a phone" loading="lazy" /></p>
 <ul>
 <li><strong>Uploads:</strong> drop files (up to 500 MiB) onto a machine from the browser.</li>
 <li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude
@@ -137,6 +143,7 @@ you&#39;d pasted locally.</li>
 <strong>finishes its turn</strong> — the moment it stops working and waits for your input.
 One subscription covers every machine; the machine&#39;s name is in the title. On
 iOS this requires the PWA installed to the home screen.</p>
+<p><figure><img src="../img/mobile-notifications.png" alt="The notification bell in the switcher header" loading="lazy" /><figcaption>The bell lives in the session switcher's header — tap it to enable push for this device (it confirms with a test buzz).</figcaption></figure></p>
 <h2 id="sharing">Sharing</h2>
 <p>Share a whole machine (from its dashboard row) or a single session (from its
 menu) with another person, as <strong>can view</strong> or <strong>can use</strong>:</p>
@@ -164,6 +171,7 @@ re-enroll to come back.</li>
 <li><strong>Add a machine</strong> — generates the install one-liner for macOS/Linux or
 Windows. See the <a href="../quickstart/">Quickstart</a>.</li>
 </ul>
+<p><figure><img src="../img/web-machines.png" alt="The machines dashboard" loading="lazy" /><figcaption>The dashboard: one machine online with '3 missing · Install' waiting, one offline, and the plan card below.</figcaption></figure></p>
 <p>If you hit your plan&#39;s machine or session limit, the app tells you which cap
 you hit and how to request more — see the <a href="../faq/">FAQ</a> on plans.</p>
 

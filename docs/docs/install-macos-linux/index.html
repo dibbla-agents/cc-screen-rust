@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
+<script defer src="../docs-cast.js"></script>
 </head>
 <body>
 <header class="docs-header">
@@ -97,7 +98,18 @@ e.g. <code>my-laptop</code>):</p>
 <p>If you skip the name, the machine is named after its hostname. The
 <a href="https://app.ccscreen.dev">dashboard</a> generates this exact command on the
 <strong>Add a machine</strong> card, so you rarely type it by hand.</p>
-<p>This page explains what that script actually does, in the order it does it.</p>
+<p><figure><img src="../img/web-add-machine.png" alt="The Add a machine card" loading="lazy" /><figcaption>The dashboard's Add a machine card — name the box, pick the platform tab and the assistants, copy the generated command.</figcaption></figure></p>
+<p>A real run, end to end (~15 s):</p>
+<pre class="cast" data-cast="../media/install.cast">
+  ✓ claude     (Claude Code)  /home/erik/.local/bin/claude
+  ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
+  ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
+  ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+
+  Approved — connecting as 'my-laptop'.
+
+✓ Done — 'my-laptop' is connected and will reconnect automatically.
+</pre><p>This page explains what that script actually does, in the order it does it.</p>
 <h2 id="1-the-binary">1. The binary</h2>
 <p>The script downloads the latest <code>cc-screen-rust</code> release for your platform
 (macOS arm64/x64 and Linux are auto-detected) and installs it to
@@ -125,6 +137,7 @@ cc-screen-rust doctor --install --yes     # install everything missing
 at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> from any
 logged-in browser. Codes live 10 minutes; an expired code is replaced with a
 fresh one automatically.</p>
+<p><figure><img src="../img/web-activate.png" alt="Approving an enrollment code on /activate" loading="lazy" /><figcaption>The /activate page: type the code, hit Approve, and the machine links to your account.</figcaption></figure></p>
 <p>On approval the machine receives its own credential, stored at
 <code>~/.config/cc-screen-rust/enroll.json</code> with owner-only permissions. It&#39;s
 scoped to this one machine — see <a href="../security/">Security model</a>.</p>

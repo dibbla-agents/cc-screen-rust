@@ -2,6 +2,7 @@
 title: Quickstart (5 minutes)
 nav: Quickstart
 description: From signup to driving your first coding session from a phone.
+casts: true
 ---
 
 # Quickstart
@@ -17,6 +18,8 @@ Go to [app.ccscreen.dev](https://app.ccscreen.dev) and sign up — email +
 password, or "Continue with Google". Signing up logs you straight in and lands
 you on your dashboard.
 
+![The sign-in / create-account screen](../img/web-signup.png)
+
 ## 2. Connect a machine
 
 On the computer where your coding agents should run, paste this one command
@@ -30,11 +33,26 @@ curl -fsSL https://app.ccscreen.dev/install.sh | sh -s -- <machine-name> --assis
 The dashboard's **Add a machine** card generates exactly this command for you,
 with the name filled in — copy it from there if you prefer.
 
+![The Add a machine card, Windows tab selected](../img/web-add-machine.png "The Add a machine card builds the exact command — macOS/Linux or Windows — with your machine name and assistant choice baked in.")
+
 What it does: installs the cc-screen agent into `~/.local/bin`, installs any
 missing coding assistants for your user (that's the `--assistants` flag — no
 sudo, everything under your home directory), and connects the machine to your
 account. Step-by-step detail is in
 [Install on macOS / Linux](../install-macos-linux/).
+
+Here's the one-liner running, end to end (~15 s):
+
+<pre class="cast" data-cast="../media/install.cast">
+  ✓ claude     (Claude Code)  /home/erik/.local/bin/claude
+  ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
+  ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
+  ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+
+  Approved — connecting as 'my-laptop'.
+
+✓ Done — 'my-laptop' is connected and will reconnect automatically.
+</pre>
 
 ## 3. Approve the code
 
@@ -50,6 +68,16 @@ Open [app.ccscreen.dev/activate](https://app.ccscreen.dev/activate) — on your
 phone is fine — type the code, and press **Approve machine**. Codes expire
 after 10 minutes; if one does, the installer just prints a fresh one, so
 there's nothing to redo.
+
+![The /activate approval screen with a code typed in](../img/web-activate.png "Type the code the installer printed and hit Approve — from any logged-in browser, your phone included.")
+
+Here's the whole handshake in about ten seconds — code typed, machine
+approved, dashboard dot flipping online:
+
+<figure>
+<video controls muted playsinline preload="none" poster="../media/web-activate-poster.png" width="1280" height="720"><source src="../media/web-activate.webm" type="video/webm" /><source src="../media/web-activate.mp4" type="video/mp4" /></video>
+<figcaption>Approving a machine, end to end — all real, no cuts.</figcaption>
+</figure>
 
 Approving links the machine to your account. The installer finishes by
 registering a background service, so the machine reconnects by itself after

@@ -107,20 +107,12 @@ them — it launches, supervises, and reconnects them.</li>
 in front of all your machines. Each machine dials <em>out</em> to the hub and
 registers; you sign in once and see every machine&#39;s sessions in one list.</li>
 </ul>
-<pre><code>   phone / browser / ccs                  the hub                     your machines
-   ─────────────────────                  ───────                     ─────────────
-        │                                    │                      ┌─ agent (laptop) ── claude, codex …
-        │   one URL (app.ccscreen.dev)       │  ◀── dials out ──────┤
-        └───────────────────────────────────►│  ◀── dials out ──────┼─ agent (server) ── gemini …
-                                             │  ◀── dials out ──────┤
-         relays each request                 │                      └─ agent (pi) ────── kimi …
-         to the owning machine
-</code></pre>
+<p><figure><img src="img/docs-topology.svg" alt="How cc-screen fits together — clients and machines both connect out to the hub" loading="lazy" /><figcaption>Machines dial out to the hub; the hub relays to your phone, browser, or terminal — it owns no terminals and no files.</figcaption></figure></p>
 <p>The hub owns <strong>no terminals and no files</strong> — it&#39;s a registry and a relay. Your
 code, your sessions, and your CLI logins stay on your machines; the hub passes
 bytes between your browser and the machine that owns them. (More in
 <a href="security/">Security model</a>.)</p>
-<p><img src="img/mobile-sessions.png" alt="Every machine&#39;s sessions in one switcher, on a phone"></p>
+<p><img src="img/mobile-sessions.png" alt="Every machine's sessions in one switcher, on a phone" loading="lazy" /></p>
 <h2 id="what-it-feels-like">What it feels like</h2>
 <ul>
 <li>Start a Claude Code session on your desktop from the bus, watch it work,

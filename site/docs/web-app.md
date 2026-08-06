@@ -33,12 +33,22 @@ worth knowing:
 - Sessions survive you. Closing the browser, losing signal, even the machine
   rebooting — the agent resumes its sessions and your panes re-attach.
 
+Here's the whole flow in one take — new session, directory search, Claude
+booting:
+
+<figure>
+<video controls muted playsinline preload="none" poster="../media/web-create-session-poster.png" width="1280" height="720"><source src="../media/web-create-session.webm" type="video/webm" /><source src="../media/web-create-session.mp4" type="video/mp4" /></video>
+<figcaption>From "New session" to a running agent in under ten seconds.</figcaption>
+</figure>
+
 ## The grid (desktop)
 
 On a wide screen you can tile up to six sessions side by side, in six layout
 templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
 from *different machines* — one grid, your whole fleet. There's a layout
 palette to switch arrangements, and each pane is a full live terminal.
+
+![Three live panes with the layout palette open](../img/web-grid.png "Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.")
 
 ## Files: browse, edit, cowork
 
@@ -63,6 +73,8 @@ Enable notifications (the bell button) and your phone buzzes when an agent
 **finishes its turn** — the moment it stops working and waits for your input.
 One subscription covers every machine; the machine's name is in the title. On
 iOS this requires the PWA installed to the home screen.
+
+![The notification bell in the switcher header](../img/mobile-notifications.png "The bell lives in the session switcher's header — tap it to enable push for this device (it confirms with a test buzz).")
 
 ## Sharing
 
@@ -93,6 +105,8 @@ The machines dashboard (your account page) is the admin surface:
   re-enroll to come back.
 - **Add a machine** — generates the install one-liner for macOS/Linux or
   Windows. See the [Quickstart](../quickstart/).
+
+![The machines dashboard](../img/web-machines.png "The dashboard: one machine online with '3 missing · Install' waiting, one offline, and the plan card below.")
 
 If you hit your plan's machine or session limit, the app tells you which cap
 you hit and how to request more — see the [FAQ](../faq/) on plans.

@@ -21,6 +21,8 @@ Same binaries, same clients. Three shapes, smallest first:
 Read the [Security model](../security/) alongside this page — a hub
 concentrates access to every connected machine, so its auth settings matter.
 
+![Shape 2 — a hub in front of many machines, each dialing out to it](../img/docs-topology.svg "Shape 2: your hub is the one address clients talk to; every machine's agent dials out to it, so no machine needs an inbound port.")
+
 ## Quick start (hub + machines)
 
 **1 — Install the hub** on whichever box should be the front door:

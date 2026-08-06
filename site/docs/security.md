@@ -24,6 +24,8 @@ connected to it** — that's the product working as designed, and it is exactly
 why you choose who runs your hub. Use the hosted one, or
 [run your own](../self-hosting/); the software is the same.
 
+![Machines dial out to the hub; the hub relays bytes to your clients](../img/docs-topology.svg "Every arrow points at the hub: machines dial out and accept no inbound connections, and what transits the hub is a relayed view — your code and files never leave the machine.")
+
 ## The agents run YOLO — treat the machine accordingly
 
 By default, cc-screen launches the coding CLIs with their approval-bypass

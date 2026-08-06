@@ -77,6 +77,8 @@ restarts nothing).
 - Re-check the permission: the bell button shows whether the subscription is
   active, and has a "send a test" action.
 
+![The notification bell in the switcher header](../img/mobile-notifications.png "The bell lives in the switcher header — it shows whether push is active and can send a test notification.")
+
 ## The page looks stale after an update
 
 The web app is a PWA; after a deploy the service worker can serve the old

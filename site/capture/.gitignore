@@ -1,0 +1,5 @@
+# Credentials and login state for the demo account — never committed.
+/.auth/
+/node_modules/
+# Scratch output (raw videos before post-processing, etc.)
+/out/

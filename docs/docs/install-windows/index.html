@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
+<script defer src="../docs-cast.js"></script>
 </head>
 <body>
 <header class="docs-header">
@@ -94,11 +95,21 @@
 <code>&lt;machine-name&gt;</code>, e.g. <code>my-desktop</code>):</p>
 <pre><code class="language-powershell">irm &quot;https://app.ccscreen.dev/install.ps1?name=&lt;machine-name&gt;&amp;assistants=all&quot; | iex
 </code></pre>
-<p>The <a href="https://app.ccscreen.dev">dashboard</a>&#39;s <strong>Add a machine</strong> card (Windows
+<p>A real run, end to end (~10 s):</p>
+<pre class="cast" data-cast="../media/install-windows.cast">
+  ✓ claude     (Claude Code)  C:\Users\erik\.local\bin\claude.EXE
+  ✓ gemini     (Gemini CLI)  C:\Users\erik\AppData\Roaming\npm\gemini
+  ✓ codex      (Codex CLI)  C:\Users\erik\AppData\Roaming\npm\codex
+
+cc-screen-rust running in --hub-only mode (no local port; reachable via the hub)
+
+OK — 'harebell' is connected and will reconnect automatically.
+</pre><p>The <a href="https://app.ccscreen.dev">dashboard</a>&#39;s <strong>Add a machine</strong> card (Windows
 tab) generates this command with your chosen name filled in. The name and the
 assistant choice ride the URL&#39;s query string because <code>irm … | iex</code> can&#39;t take
 arguments the way <code>sh -s --</code> can; leave <code>?name=</code> off and the machine is named
 after <code>$env:COMPUTERNAME</code>.</p>
+<p><figure><img src="../img/web-add-machine.png" alt="The Add a machine card with the Windows tab selected" loading="lazy" /><figcaption>The Add a machine card (Windows tab): name the box, pick assistants, copy the PowerShell one-liner.</figcaption></figure></p>
 <p>Run it in a regular PowerShell window — <strong>no administrator prompt needed</strong>.
 Everything installs for your user only.</p>
 <h2 id="what-it-does">What it does</h2>

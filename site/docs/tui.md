@@ -16,7 +16,7 @@ Why not just `tmux`? tmux attaches you to one machine you can already reach;
 outbound-only uplink, with agent-aware ready notifications — no inbound SSH
 and no per-machine tmux sockets.
 
-![Four sessions in the ccs grid](../img/tui-grid.png)
+![The ccs grid — three sessions from the demo fleet in the left-L layout](../img/tui-grid.png)
 
 ## Install
 
@@ -85,11 +85,13 @@ uses to talk to the hub (`CCWEB_API_TOKEN` on the server / `--token` on
 ## Using it
 
 `ccs` opens in the **switcher**: every machine's sessions in one list, each
-tagged with its machine and its latest one-line summary, plus create / kill /
+with its colour, tool, and latest one-line summary, plus create / kill /
 rename / restore actions. Pick sessions into the **grid** — the same six
 layouts as the web app, and panes from different machines can sit side by
-side. Each pane is a full terminal emulator with multi-thousand-line
-scrollback.
+side, each titled `machine/name`. Each pane is a full terminal emulator with
+multi-thousand-line scrollback.
+
+![The ccs switcher — every session across the fleet in one list](../img/tui-switcher.png "The switcher: session labels, colours, tools, and each one's latest line")
 
 Jump straight to a session — handy from a script or muscle memory:
 
@@ -112,6 +114,8 @@ Inside the grid the prefix key is **Ctrl-A** (tmux-style):
   `k`/`j`, `g`/`G` top/live, `q`/`Esc` back to live); any printable key in
   normal mode snaps back to live
 - click or move spatially to focus panes
+
+![The visual layout palette open over the grid](../img/tui-layouts.png "Ctrl-A l opens the layout palette — six layouts, applied live")
 
 Everything else you type goes straight to the focused session's PTY.
 

@@ -61,6 +61,85 @@ img {
   border-radius: 12px;
 }
 
+/* figures (markdown images with a title) + video, same treatment as img */
+figure {
+  margin: 1rem 0;
+}
+figcaption {
+  margin-top: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--faint);
+}
+video {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+/* ── the docs cast player (docs-cast.js, 0061 D3) ───────────────────────
+   The authored <pre class="cast"> is the no-JS poster; docs-cast.js wraps it
+   in .cast-box and overlays the play / replay controls. */
+.docs-content pre.cast {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.7;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.cast-box {
+  position: relative;
+}
+.cast-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(11, 17, 26, 0.55);
+  color: var(--accent-soft);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 150ms;
+}
+.cast-play:hover {
+  background: rgba(11, 17, 26, 0.4);
+}
+.cast-play .glyph {
+  display: flex;
+  width: 2.8rem;
+  height: 2.8rem;
+  align-items: center;
+  justify-content: center;
+  padding-left: 0.2rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(11, 17, 26, 0.85);
+  color: var(--accent);
+}
+.cast-replay {
+  position: absolute;
+  bottom: 0.6rem;
+  right: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(11, 17, 26, 0.85);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  transition: color 150ms, border-color 150ms;
+}
+.cast-replay:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 a {
   color: var(--accent);
   text-decoration: none;

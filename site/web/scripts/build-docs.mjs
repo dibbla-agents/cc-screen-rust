@@ -60,6 +60,11 @@ marked.use({
       const text = this.parser.parseInline(tokens);
       return `<h${depth} id="${slugify(text)}">${text}</h${depth}>\n`;
     },
+    // Images lazy-load; a title (`![alt](src "Caption")`) becomes a figcaption.
+    image({ href, title, text }) {
+      const img = `<img src="${esc(href)}" alt="${esc(text)}" loading="lazy" />`;
+      return title ? `<figure>${img}<figcaption>${esc(title)}</figcaption></figure>` : img;
+    },
   },
 });
 
@@ -82,7 +87,7 @@ function navList(current, docsRoot) {
 }
 
 // ── the shell ─────────────────────────────────────────────────────────────────
-function shell({ slug, title, description, content }) {
+function shell({ slug, title, description, content, casts }) {
   const docsRoot = slug === "index" ? "" : "../"; //   → /docs/
   const siteRoot = slug === "index" ? "../" : "../../"; // → /
   const sidebar = navList(slug, docsRoot);
@@ -99,7 +104,7 @@ function shell({ slug, title, description, content }) {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="${docsRoot}docs.css" />
-</head>
+${casts ? `<script defer src="${docsRoot}docs-cast.js"></script>\n` : ""}</head>
 <body>
 <header class="docs-header">
   <a class="wordmark" href="${siteRoot}">cc<span class="dot">·</span>screen</a>
@@ -150,6 +155,7 @@ for (const [slug, { attrs, body }] of pages) {
     title: attrs.title,
     description: attrs.description ?? "",
     content: marked.parse(body),
+    casts: attrs.casts === "true", // front-matter values are strings
   });
   const dir = new URL(slug === "index" ? "./" : `${slug}/`, OUT);
   mkdirSync(dir, { recursive: true });
@@ -157,5 +163,7 @@ for (const [slug, { attrs, body }] of pages) {
 }
 
 cpSync(new URL("img/", SRC), new URL("img/", OUT), { recursive: true });
+cpSync(new URL("media/", SRC), new URL("media/", OUT), { recursive: true }); // clips, casts, posters (0061)
 cpSync(new URL("docs.css", SRC), new URL("docs.css", OUT));
+cpSync(new URL("docs-cast.js", SRC), new URL("docs-cast.js", OUT));
 console.log(`build-docs: emitted ${pages.size} pages → docs/docs/ (v${version})`);

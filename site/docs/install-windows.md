@@ -2,6 +2,7 @@
 title: Install on Windows
 nav: Install — Windows
 description: Connect a Windows machine with one PowerShell command — what it does, the Node.js prerequisite, and how to update.
+casts: true
 ---
 
 # Install on Windows
@@ -13,11 +14,25 @@ One PowerShell command connects a Windows machine to your account (replace
 irm "https://app.ccscreen.dev/install.ps1?name=<machine-name>&assistants=all" | iex
 ```
 
+A real run, end to end (~10 s):
+
+<pre class="cast" data-cast="../media/install-windows.cast">
+  ✓ claude     (Claude Code)  C:\Users\erik\.local\bin\claude.EXE
+  ✓ gemini     (Gemini CLI)  C:\Users\erik\AppData\Roaming\npm\gemini
+  ✓ codex      (Codex CLI)  C:\Users\erik\AppData\Roaming\npm\codex
+
+cc-screen-rust running in --hub-only mode (no local port; reachable via the hub)
+
+OK — 'harebell' is connected and will reconnect automatically.
+</pre>
+
 The [dashboard](https://app.ccscreen.dev)'s **Add a machine** card (Windows
 tab) generates this command with your chosen name filled in. The name and the
 assistant choice ride the URL's query string because `irm … | iex` can't take
 arguments the way `sh -s --` can; leave `?name=` off and the machine is named
 after `$env:COMPUTERNAME`.
+
+![The Add a machine card with the Windows tab selected](../img/web-add-machine.png "The Add a machine card (Windows tab): name the box, pick assistants, copy the PowerShell one-liner.")
 
 Run it in a regular PowerShell window — **no administrator prompt needed**.
 Everything installs for your user only.
