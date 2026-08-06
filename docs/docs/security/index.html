@@ -147,6 +147,29 @@ machine — <strong>Rotate</strong> or <strong>Unlink</strong> on the dashboard 
 and approving one requires a logged-in browser — possession of the code
 alone links a machine to <em>your</em> account only if <em>you</em> approve it.</li>
 </ul>
+<h2 id="teams">Teams</h2>
+<p>Joining a team makes your machines visible to that team — <strong>read-only by
+default</strong>, and the invite states exactly that before you accept. The
+boundaries, honestly:</p>
+<ul>
+<li>Team visibility grants <strong>view-level</strong> access only: teammates see your
+machines and can open your sessions, but <em>control</em> — creating sessions on
+your machine, file uploads, admin actions — always requires an explicit
+&quot;can use&quot; share from you. Team grants run through the same default-deny
+visibility predicate as personal shares; there is no separate, wider code
+path.</li>
+<li><strong>One honest caveat</strong>: &quot;read-level&quot; is a scope, not a keystroke filter. A
+teammate who opens one of your live sessions gets a real terminal — typing
+into it works, exactly as with a personal session share. If a session
+shouldn&#39;t be typed into by teammates, hide that machine from the team.</li>
+<li>The <strong>per-machine opt-out</strong> is yours alone (the &quot;Visible to team&quot; toggle),
+whatever your role — no admin can override it — and every flip lands in
+the team&#39;s <strong>audit log</strong>, alongside joins, invites, removals, and seat
+changes.</li>
+<li>Leaving (or being removed) prunes every team-derived grant in both
+directions immediately; personal shares are untouched. Deleting a team
+erases its membership, invites, grants, and audit history with it.</li>
+</ul>
 <h2 id="transport-when-tls-is-required">Transport: when TLS is required</h2>
 <p>The agent fully trusts whatever answers at its hub URL — once connected, it
 executes what the hub sends. So:</p>
@@ -186,7 +209,7 @@ scope your shares deliberately (&quot;can view&quot; vs &quot;can use&quot;).</l
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.2 — docs track the latest release</span>
+  <span>v0.5.3 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

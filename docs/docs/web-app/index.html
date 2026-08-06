@@ -156,6 +156,39 @@ automatically when they sign up with that email.</li>
 <p>You can see everything shared by you and with you on the dashboard&#39;s
 <strong>Sharing</strong> card, and revoke (or leave) any of it there. Access stops
 immediately on revoke.</p>
+<h3 id="teams">Teams</h3>
+<p>One-off shares scale badly past two people — a <strong>team</strong> replaces them with
+one standing arrangement: everyone on the team automatically sees everyone
+else&#39;s machines and sessions, <strong>view-only</strong>. No per-machine invites, no
+grants to keep in sync when someone gets a new laptop.</p>
+<p>Joining is the consent, and the invite says so before you accept, verbatim:</p>
+<blockquote>
+<p>Joining makes your machines on cc-screen visible to this team (view-only).
+You can hide any machine in settings.</p>
+</blockquote>
+<p>The fine print, in plain words:</p>
+<ul>
+<li><strong>View, not use.</strong> Teammates can open your sessions and watch, but
+creating sessions on your machine — or any admin action on it — still
+requires an explicit &quot;can use&quot; share from you, exactly as before. (Honest
+caveat: an <em>open</em> terminal accepts keystrokes — view-only bounds what a
+teammate can reach, not what a focused terminal does. See the
+<a href="../security/#teams">Security model</a>.)</li>
+<li><strong>Hide any machine.</strong> Every machine of yours has a <strong>Visible to team</strong>
+toggle in the team window — flip it off and that machine drops out of the
+team&#39;s view immediately. The toggle belongs to the machine&#39;s owner alone,
+whatever their role, and every flip is recorded in the team&#39;s audit log.</li>
+<li><strong>Roles.</strong> One <strong>owner</strong> (billing, roles, everything), any number of
+<strong>admins</strong> (invite, remove members), and <strong>members</strong>. Ownership transfers
+explicitly — the owner leaves only after handing the team over.</li>
+<li><strong>Pooled limits.</strong> A team shares one pool: 10 machines and 50 concurrent
+sessions <em>per seat</em>, counted across the whole team rather than per person.
+Every seat gets everything Pro has; &quot;pooled&quot; means a heavy teammate can
+use headroom a light one doesn&#39;t.</li>
+<li><strong>Leaving cuts both ways.</strong> Leave (or be removed) and you stop seeing the
+team&#39;s machines <em>and</em> they stop seeing yours, instantly. Personal shares
+you set up separately survive.</li>
+</ul>
 <h2 id="the-dashboard">The dashboard</h2>
 <p>The machines dashboard (your account page) is the admin surface:</p>
 <ul>
@@ -172,13 +205,27 @@ re-enroll to come back.</li>
 Windows. See the <a href="../quickstart/">Quickstart</a>.</li>
 </ul>
 <p><figure><img src="../img/web-machines.png" alt="The machines dashboard" loading="lazy" /><figcaption>The dashboard: one machine online with '3 missing · Install' waiting, one offline, and the plan card below.</figcaption></figure></p>
+<p>On a team, the dashboard grows a <strong><code>~/team</code> window</strong> — the team&#39;s admin
+surface:</p>
+<ul>
+<li>the <strong>member list</strong> with each person&#39;s role; owners and admins invite by
+email (you get a copyable invite link — cc-screen sends no mail) and
+remove members; the owner changes roles and can transfer ownership.</li>
+<li>your machines&#39; <strong>Visible to team</strong> toggles (yours to flip, whatever your
+role).</li>
+<li>the <strong>seats meter</strong> on the plan card — <code>members / seats</code> — and, for the
+owner or an admin, the seat checkout and the billing portal where seat
+counts change.</li>
+<li>the <strong>audit log</strong> (owners and admins): who joined, who invited whom, every
+visibility flip, seat changes — the team&#39;s history, newest first.</li>
+</ul>
 <p>If you hit your plan&#39;s machine or session limit, the app tells you which cap
 you hit and how to request more — see the <a href="../faq/">FAQ</a> on plans.</p>
 
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.2 — docs track the latest release</span>
+  <span>v0.5.3 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

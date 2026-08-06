@@ -128,6 +128,31 @@ machine (or stop a session) you no longer need. <strong>Nothing is deleted</stro
 hit a limit: existing machines stay enrolled, running sessions keep running, and
 your files are never touched — the cap only blocks <em>new</em> machines and sessions
 until you&#39;re back under it.</p>
+<h2 id="this-team-is-out-of-seats">&quot;This team is out of seats&quot;</h2>
+<p>Accepting the invite would take the team past its paid seat count. The
+team&#39;s <strong>owner or an admin</strong> fixes it — add seats from Billing (the Stripe
+portal), or remove a member to free one. <strong>Nothing was lost</strong>: the invite
+stays valid and the accept simply works once a seat is free.</p>
+<h2 id="team-machine-pool-full-team-session-limit-reached">&quot;Team machine pool full&quot; / &quot;Team session limit reached&quot;</h2>
+<p>Team limits are <strong>pooled</strong>: 10 machines and 50 concurrent sessions per seat,
+counted across the whole team — so you can hit the cap even if <em>you</em> have
+only one machine, because a teammate is using the headroom. Same rule as
+every limit: nothing is deleted; existing machines stay enrolled and running
+sessions keep running. Free the pool (unlink a machine, stop a session,
+anyone&#39;s) or have the owner add seats. Re-enrolling a machine the team
+already has never counts against the pool.</p>
+<h2 id="a-teammate39s-machine-isn39t-visible">A teammate&#39;s machine isn&#39;t visible</h2>
+<p>Three usual causes, in order:</p>
+<ol>
+<li><strong>They hid it.</strong> Each machine has an owner-only &quot;Visible to team&quot; toggle —
+ask them to check the team window.</li>
+<li><strong>Membership isn&#39;t active yet.</strong> An invited-but-not-accepted member sees
+(and shows) nothing — the invite must be accepted, and the team needs a
+free seat for that.</li>
+<li><strong>A freshly enrolled machine hasn&#39;t propagated.</strong> Normally visibility is
+immediate; in the rare miss, a nightly reconcile heals it. If it&#39;s still
+missing the next day, that&#39;s a bug — please report it.</li>
+</ol>
 <h2 id="assistants-are-outdated">Assistants are outdated</h2>
 <p>Use the <strong>Update</strong> button on the machine&#39;s dashboard row — it updates the
 CLIs first (a failed update leaves the machine untouched), then gracefully
@@ -156,7 +181,7 @@ Add your domain to <code>CCWEB_ALLOWED_ORIGINS</code> — see
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.2 — docs track the latest release</span>
+  <span>v0.5.3 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

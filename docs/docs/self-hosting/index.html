@@ -219,6 +219,21 @@ plus sharing and per-plan caps. Plans are assigned by hand
 to self-host — billing ships in the MIT repo behind the <code>multi-tenant</code> feature
 and is simply off without Stripe keys; paying for the hosted hub is paying to
 not run it yourself.</p>
+<h3 id="teams-on-a-self-hosted-hub">Teams on a self-hosted hub</h3>
+<p>Teams (shared visibility, roles, pooled limits, the audit log) are part of
+multi-tenant mode — a hub without <code>CCHUB_DATABASE_URL</code> has no orgs and is
+unchanged. And Team <strong>works fully without Stripe</strong>: seats are just a number
+on the org, set by the operator CLI instead of a subscription — the in-app
+seat checkout simply doesn&#39;t render (<code>billing:false</code>), and everything else
+(invites, joining, visibility, pooled limits, audit) behaves identically.</p>
+<pre><code class="language-sh">cc-screen-hub org create &lt;name&gt; &lt;owner-email&gt;   # make a team (starts at 0 seats)
+cc-screen-hub org seats  &lt;name-or-id&gt; &lt;n&gt;       # set the seat count (activates it)
+cc-screen-hub org info   &lt;name-or-id&gt;           # seats, status, member list
+</code></pre>
+<p>The commands read <code>CCHUB_DATABASE_URL</code>, like <code>cc-screen-hub user …</code>. A team
+with 0 seats is dormant: it exists, but nobody can join and members keep
+their personal plans — so creating one never changes anyone&#39;s entitlements
+until you set seats.</p>
 <h2 id="docker">Docker</h2>
 <p>Both images are published to GHCR on every release:</p>
 <pre><code class="language-sh">docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the front door
@@ -336,11 +351,27 @@ auto-accepts same-origin, raw IPs, <code>localhost</code>, and <code>*.ts.net</c
 </tr>
 <tr>
 <td><code>CCHUB_DATABASE_URL</code></td>
-<td>set → multi-tenant mode (accounts, enrollment, sharing)</td>
+<td>set → multi-tenant mode (accounts, enrollment, sharing, teams)</td>
 </tr>
 <tr>
 <td><code>CCHUB_PUBLIC_URL</code></td>
 <td>the hub&#39;s canonical public origin (used by <code>/activate</code> instructions, OAuth, the served installers)</td>
+</tr>
+<tr>
+<td><code>STRIPE_SECRET_KEY</code> / <code>STRIPE_WEBHOOK_SECRET</code></td>
+<td>multi-tenant only: turn on Stripe self-serve billing. Unset → billing is off and everything else works (plans/seats via the CLI)</td>
+</tr>
+<tr>
+<td><code>STRIPE_PRICE_PRO_MONTHLY</code> / <code>STRIPE_PRICE_PRO_ANNUAL</code></td>
+<td>the Pro price ids (required if billing is on)</td>
+</tr>
+<tr>
+<td><code>STRIPE_PRICE_TEAM_MONTHLY</code> / <code>STRIPE_PRICE_TEAM_ANNUAL</code></td>
+<td>the per-seat Team price ids. <strong>Optional even with billing on</strong>: unset → Pro-only billing, the Team checkout answers 400 and its UI doesn&#39;t render — teams themselves keep working (CLI seats)</td>
+</tr>
+<tr>
+<td><code>STRIPE_PRICE_TEAM_FOUNDER</code></td>
+<td>optional founder-cohort per-seat price (like <code>STRIPE_PRICE_PRO_FOUNDER</code> for Pro)</td>
 </tr>
 <tr>
 <td><code>CCWEB_ALLOWED_ORIGINS</code></td>
@@ -377,7 +408,7 @@ that sets <code>X-Forwarded-Proto: https</code> — the cookie is <code>Secure</
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.2 — docs track the latest release</span>
+  <span>v0.5.3 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
