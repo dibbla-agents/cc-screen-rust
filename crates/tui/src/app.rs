@@ -1657,6 +1657,9 @@ impl App {
             }
             match k.code {
                 KeyCode::Char('d') => self.open_menu(self.active),
+                // 0062: the search-first switcher as the grid's pick-a-session
+                // view for the focused box (type-to-filter, Enter fills it).
+                KeyCode::Char('s') => self.open_switcher_for(self.active),
                 KeyCode::Char('[') => self.enter_scroll_mode(), // 0059 C3: scroll mode
                 KeyCode::Char('x') => self.kill_focused(),
                 KeyCode::Char('g') => self.jump_ready(), // 0018: go to ready session(s)
@@ -1684,6 +1687,22 @@ impl App {
         } else if k.code == KeyCode::Enter {
             self.open_menu(self.active); // empty box → the action menu
         }
+    }
+
+    /// `^A s` (0062): open the full-screen switcher as the grid's
+    /// pick-a-session view, scoped to `target` — type-to-search, Enter fills
+    /// the box (and `Ctrl+N`'s create lands there too, via `fill_target`),
+    /// Esc on an empty query cancels back to the grid. This is the fill-a-box
+    /// invocation the switcher's `fill_target` handling always supported; the
+    /// chord makes it reachable without clearing the box first.
+    fn open_switcher_for(&mut self, target: usize) {
+        self.fill_target = Some(target.min(self.panes.len().saturating_sub(1)));
+        self.grid_overlay = GridOverlay::None;
+        self.prefix_armed = false;
+        self.scroll_mode = false;
+        self.clear_query();
+        self.mode = Mode::Switcher;
+        self.pending_refresh = true;
     }
 
     // ── layout palette ───────────────────────────────────────────────────────
