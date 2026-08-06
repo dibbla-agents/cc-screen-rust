@@ -30,6 +30,9 @@ USAGE
   cc-screen-hub user <add|agent|plan|delete> …
                                        manage multi-tenant accounts (needs
                                        CCHUB_DATABASE_URL; `user --help` for details)
+  cc-screen-hub org <create|seats|info> …
+                                       manage teams/orgs (proposal 0063; needs
+                                       CCHUB_DATABASE_URL; `org --help` for details)
 
 RUN-DIRECTLY FLAGS
   --addr HOST:PORT    bind address (default 127.0.0.1:8840; env CCWEB_ADDR)
@@ -62,6 +65,10 @@ MULTI-TENANT (SaaS) MODE
   STRIPE_WEBHOOK_SECRET      signing secret for /api/billing/webhook (whsec_…)
   STRIPE_PRICE_PRO_MONTHLY / STRIPE_PRICE_PRO_ANNUAL   the two Pro price ids
   STRIPE_PRICE_PRO_FOUNDER   optional $5/mo founder price (beta cohort, until…)
+  STRIPE_PRICE_TEAM_MONTHLY / STRIPE_PRICE_TEAM_ANNUAL   optional Team per-seat
+                             price ids ($16/seat, $160/seat/yr; proposal 0064) —
+                             unset ⇒ Pro-only billing, Team checkout 400s
+  STRIPE_PRICE_TEAM_FOUNDER  optional $8/seat founder price (beta-cohort owners)
   STRIPE_FOUNDER_DEADLINE    optional unix-seconds cutoff for the founder offer
   STRIPE_MANAGED_PAYMENTS=1  opt-in: Stripe Managed Payments (merchant of record);
                              requires MoR activated on the Stripe account
@@ -133,6 +140,68 @@ async fn user_admin(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `cc-screen-hub org create <name> <owner-email>` / `org seats <name-or-id> <n>`
+/// / `org info <name-or-id>` — the founder's pre-billing org tooling (proposal
+/// 0063 B4): what makes the org model shippable and testable BEFORE 0064's
+/// self-serve billing, exactly the manual-plans precedent.
+#[cfg(feature = "multi-tenant")]
+async fn org_admin(args: &[String]) -> anyhow::Result<()> {
+    use cc_screen_hub::db::{SqliteStore, Store};
+    let usage = "usage: cc-screen-hub org create <name> <owner-email>\n       \
+                 cc-screen-hub org seats <name-or-id> <n>   (hand-set the seat count)\n       \
+                 cc-screen-hub org info <name-or-id>\n\
+                 (database via CCHUB_DATABASE_URL, e.g. sqlite:///path/hub.db)";
+    let url = std::env::var("CCHUB_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("set CCHUB_DATABASE_URL\n{usage}"))?;
+    let store = SqliteStore::connect(&url).await?;
+    match args.first().map(String::as_str) {
+        Some("create") => {
+            let (Some(name), Some(email)) = (args.get(1), args.get(2)) else {
+                anyhow::bail!("missing name/owner-email\n{usage}");
+            };
+            let owner = store
+                .user_id_by_email(email)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no such user: {email}"))?;
+            let id = store.org_create(&owner, name).await?;
+            println!("created team '{name}' (id {id}) — owner {email}, 0 seats");
+            println!("activate it with:  cc-screen-hub org seats {id} <n>");
+        }
+        Some("seats") => {
+            let (Some(key), Some(n)) = (args.get(1), args.get(2)) else {
+                anyhow::bail!("missing name-or-id/seats\n{usage}");
+            };
+            let seats: i64 = n.parse().map_err(|_| anyhow::anyhow!("seats must be a number\n{usage}"))?;
+            let org = store
+                .org_by_name_or_id(key)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no such org (or ambiguous name — use the id): {key}"))?;
+            store.org_set_seats(&org.id, seats).await?;
+            store
+                .audit_append(&org.id, None, "org.seats_changed", None, Some(&format!("{{\"seats\":{seats},\"via\":\"cli\"}}")))
+                .await;
+            println!("set '{}' → {seats} seats", org.name);
+        }
+        Some("info") => {
+            let Some(key) = args.get(1) else { anyhow::bail!("missing name-or-id\n{usage}") };
+            let org = store
+                .org_by_name_or_id(key)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no such org (or ambiguous name — use the id): {key}"))?;
+            let members = store.org_members(&org.id).await;
+            println!("team '{}'  (id {})", org.name, org.id);
+            println!("  seats: {}   members: {}   status: {}", org.seat_count, members.len(), org.plan_status.as_deref().unwrap_or("—"));
+            for m in members {
+                println!("  {:8} {}", m.role, m.email);
+            }
+        }
+        _ => anyhow::bail!("{usage}"),
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // `install` / `uninstall` wire up (or tear down) the hub's own service and
@@ -171,6 +240,15 @@ async fn main() {
         Some("user") => {
             if let Err(e) = user_admin(&argv[2..]).await {
                 eprintln!("user: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Org/team tooling (proposal 0063 B4) — same store-backed shape.
+        #[cfg(feature = "multi-tenant")]
+        Some("org") => {
+            if let Err(e) = org_admin(&argv[2..]).await {
+                eprintln!("org: {e}");
                 std::process::exit(1);
             }
             return;
@@ -302,6 +380,23 @@ async fn main() {
                 store.device_sweep().await;
                 // Reap expired pending invites + long-dead terminal rows (0040 §7).
                 store.share_sweep().await;
+                // Org invites ride the same timer (proposal 0063 B2).
+                store.org_invite_sweep().await;
+            }
+        });
+    }
+
+    // Nightly team-share reconcile (proposal 0065 A3): the membership hooks are
+    // the primary mechanism; this is the invariant-restorer for any missed hook.
+    // Independent of Stripe — it runs on every multi-tenant hub.
+    #[cfg(feature = "multi-tenant")]
+    if let Some(store) = hub.store() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                store.team_shares_reconcile().await;
             }
         });
     }

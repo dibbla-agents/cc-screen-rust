@@ -395,6 +395,12 @@ try {
 
   // Session delete: open the drawer and hard-kill the throwaway 'ccwebdel'.
   await page.getByRole("button", { name: "Open sessions" }).click();
+  // Team-tier gating (0065 Part F): the team chip and the ~/team dashboard
+  // window are multi-tenant-org surfaces and must NEVER render against a
+  // single-tenant hub (which is what this smoke targets). Checked here with
+  // the drawer open — the chip's only home — before we mutate the list.
+  const teamChipLeak = await page.getByText("team", { exact: true }).count();
+  const teamWindowLeak = await page.getByText("~/team", { exact: false }).count();
   await page.getByRole("button", { name: "Delete session ccwebdel" }).click();
   await page.getByRole("button", { name: "kill", exact: true }).click();
   await page
@@ -441,6 +447,8 @@ try {
   const pdfInlineOk = api.some((a) => a.startsWith("GET /api/download") && a.includes("inline=1"));
 
   if (errors.length) fail("JS errors present");
+  else if (teamChipLeak > 0 || teamWindowLeak > 0)
+    fail(`team UI leaked into single-tenant (chip=${teamChipLeak}, ~/team window=${teamWindowLeak})`);
   else if (keyCalls < 3) fail(`expected >=3 /api/key calls, got ${keyCalls}`);
   else if (pasteCalls < 1) fail(`expected a /api/paste call, got ${pasteCalls}`);
   else if (!wsOpened) fail("terminal WebSocket never opened");

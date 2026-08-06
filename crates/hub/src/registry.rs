@@ -55,6 +55,11 @@ pub enum Grant {
     Agent,
     /// `kind='session'`: view only these session names; agent-scope is denied.
     Sessions(HashSet<String>),
+    /// `kind='team'` (proposal 0065 A2): VIEW the machine + all its sessions —
+    /// the machine-wide, forward-inclusive version of a session grant (new
+    /// sessions appear without re-materialization). No create, no admin, no
+    /// re-share: `may_use_agent` and `owns_agent` never match it.
+    Team,
 }
 
 /// A multi-tenant caller's resolved visibility: the agents they own (by
@@ -90,6 +95,9 @@ pub struct ShareRow {
     pub session: Option<String>,
     pub owner_peek: bool,
     pub created_at: i64,
+    /// The implying org for a materialized `kind='team'` row (proposal 0065 A1);
+    /// `None` for personal 0039 grants.
+    pub org_id: Option<String>,
 }
 
 impl Visibility {
@@ -106,17 +114,28 @@ impl Visibility {
     pub fn from_rows(user_id: String, rows: Vec<ShareRow>) -> Self {
         let mut v = UserVis { user_id: user_id.clone(), ..Default::default() };
         for r in rows {
-            // Grants INTO this user (on agents someone else owns).
+            // Grants INTO this user (on agents someone else owns). Precedence
+            // when several rows name one agent (0065 A2): Agent ⟩ Team ⟩
+            // Sessions — a personal use-grant supersedes a team view-grant; a
+            // team grant absorbs named-session grants.
             if r.grantee_user_id == user_id && r.owner_user_id != user_id {
                 match r.kind.as_str() {
                     "agent" => {
                         v.grants.insert(r.agent_id.clone(), Grant::Agent);
                     }
+                    "team" => {
+                        match v.grants.get(&r.agent_id) {
+                            Some(Grant::Agent) => {}
+                            _ => {
+                                v.grants.insert(r.agent_id.clone(), Grant::Team);
+                            }
+                        }
+                    }
                     "session" => {
                         if let Some(s) = r.session.clone() {
                             match v.grants.entry(r.agent_id.clone()).or_insert_with(|| Grant::Sessions(HashSet::new())) {
-                                // An agent grant supersedes a session grant — leave it.
-                                Grant::Agent => {}
+                                // An agent/team grant supersedes a session grant — leave it.
+                                Grant::Agent | Grant::Team => {}
                                 Grant::Sessions(set) => {
                                     set.insert(s);
                                 }
@@ -175,7 +194,10 @@ impl Visibility {
         match self {
             Visibility::All => true,
             Visibility::User(v) => {
-                matches!(v.grants.get(&agent.agent_id), Some(Grant::Sessions(set)) if set.contains(session))
+                // A team grant is machine-wide view (0065 A2): any session on the
+                // box, forward-inclusive — new sessions need no re-materialization.
+                matches!(v.grants.get(&agent.agent_id), Some(Grant::Team))
+                    || matches!(v.grants.get(&agent.agent_id), Some(Grant::Sessions(set)) if set.contains(session))
                     || v.shared_back.get(&agent.agent_id).is_some_and(|s| s.contains(session))
             }
         }
@@ -211,6 +233,10 @@ impl Visibility {
                     // Agent-grantee: the owner's sessions + their own (not a third
                     // grantee's).
                     creator == agent.user_id || creator == v.user_id
+                } else if matches!(v.grants.get(aid), Some(Grant::Team)) {
+                    // Team-grantee (0065): the whole box — the fleet dashboard's
+                    // "who is running what" needs every session, whoever made it.
+                    true
                 } else if let Some(Grant::Sessions(set)) = v.grants.get(aid) {
                     // Session-grantee: only the named session(s).
                     set.contains(session)
@@ -559,6 +585,18 @@ impl Registry {
         out
     }
 
+    /// Live sessions on agents *owned by* any of `owners` — the pooled session
+    /// count (proposal 0063 C3). A filtered count over the same in-memory data
+    /// `all_sessions_for` walks, no store round-trip; sessions shared INTO a
+    /// member from outside the org ride someone else's agent and never count.
+    pub fn sessions_count_owned_by(&self, owners: &HashSet<String>) -> i64 {
+        let g = self.inner.lock().unwrap();
+        g.values()
+            .filter(|c| owners.contains(&c.user_id))
+            .map(|c| c.sessions_tagged_raw().len() as i64)
+            .sum()
+    }
+
     /// The machine list for the picker / offline greying (single-tenant).
     pub fn machines(&self) -> Vec<MachineInfo> {
         self.machines_for(&Visibility::All)
@@ -792,6 +830,7 @@ mod tests {
             session: session.map(Into::into),
             owner_peek: peek,
             created_at: 0,
+            org_id: (kind == "team").then(|| "org-1".to_string()),
         }
     }
 
@@ -884,6 +923,71 @@ mod tests {
         let carol = Visibility::user("carol");
         assert!(r.all_sessions_for(&carol).is_empty());
         assert!(r.machines_for(&carol).is_empty());
+    }
+
+    // Proposal 0065 A2: a team grant is machine-wide VIEW — lists the machine,
+    // sees/attaches every session on it (whoever created it), but cannot create,
+    // cannot administer, and a personal agent grant beside it supersedes it.
+    #[test]
+    fn team_grant_is_view_only_machine_wide() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
+        a.set_sessions(vec![sess("claude-a"), sess("claude-bee")]);
+        a.set_creator("claude-bee", "carol"); // a third member created this one
+
+        let bob = Visibility::from_rows("bob".into(), vec![row("t1", "agent-a", "alice", "bob", "team", None, false)]);
+        // Lists the machine and EVERY session on it (the fleet dashboard).
+        assert_eq!(r.machines_for(&bob).len(), 1);
+        let names: HashSet<String> = r.all_sessions_for(&bob).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, HashSet::from(["claude-a".into(), "claude-bee".into()]));
+        // Sees/attaches any existing session — including brand-new names
+        // (forward-inclusive, no re-materialization).
+        assert!(r.resolve_scoped(&bob, "", Some("claude-a")).is_some());
+        assert!(bob.may_see_session(&a, "made-later"));
+        // But cannot USE the agent: machine-scoped and machine-less create both
+        // fail to resolve, and administration is denied.
+        assert!(r.resolve_scoped(&bob, "laptop", None).is_none());
+        assert!(r.resolve_scoped(&bob, "", None).is_none());
+        assert!(!bob.may_use_agent(&a));
+        assert!(!bob.owns_agent(&a));
+
+        // Precedence: a personal agent grant beside the team grant yields
+        // use-level access; a team grant absorbs named-session grants.
+        let bob_up = Visibility::from_rows(
+            "bob".into(),
+            vec![
+                row("t1", "agent-a", "alice", "bob", "team", None, false),
+                row("s1", "agent-a", "alice", "bob", "agent", None, false),
+            ],
+        );
+        assert!(bob_up.may_use_agent(&a), "agent grant supersedes team");
+        let carol = Visibility::from_rows(
+            "carol".into(),
+            vec![
+                row("s2", "agent-a", "alice", "carol", "session", Some("claude-a"), false),
+                row("t2", "agent-a", "alice", "carol", "team", None, false),
+            ],
+        );
+        assert!(carol.may_see_session(&a, "claude-bee"), "team absorbs the session grant");
+        assert!(!carol.may_use_agent(&a));
+    }
+
+    // Proposal 0063 C3: the pooled session counter counts sessions on agents
+    // OWNED BY the member set — a session shared into a member from outside
+    // rides someone else's agent and never counts.
+    #[test]
+    fn sessions_count_owned_by_counts_the_pool() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a", vec![], vec![], dummy_agent());
+        let b = r.register_agent("agent-b", "bob", "box", "b", vec![], vec![], dummy_agent());
+        let c = r.register_agent("agent-c", "carol", "other", "c", vec![], vec![], dummy_agent());
+        a.set_sessions(vec![sess("a1"), sess("a2")]);
+        b.set_sessions(vec![sess("b1")]);
+        c.set_sessions(vec![sess("c1"), sess("c2"), sess("c3")]);
+
+        let team: HashSet<String> = ["alice".to_string(), "bob".to_string()].into();
+        assert_eq!(r.sessions_count_owned_by(&team), 3, "alice's 2 + bob's 1; carol's never count");
+        assert_eq!(r.sessions_count_owned_by(&HashSet::new()), 0);
     }
 
     // Sharing-back: an agent-grantee (bob) shares one of his sessions back to the

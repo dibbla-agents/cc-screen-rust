@@ -69,6 +69,30 @@ a session can do anything your user account can do on that machine.
   and approving one requires a logged-in browser — possession of the code
   alone links a machine to *your* account only if *you* approve it.
 
+## Teams
+
+Joining a team makes your machines visible to that team — **read-only by
+default**, and the invite states exactly that before you accept. The
+boundaries, honestly:
+
+- Team visibility grants **view-level** access only: teammates see your
+  machines and can open your sessions, but *control* — creating sessions on
+  your machine, file uploads, admin actions — always requires an explicit
+  "can use" share from you. Team grants run through the same default-deny
+  visibility predicate as personal shares; there is no separate, wider code
+  path.
+- **One honest caveat**: "read-level" is a scope, not a keystroke filter. A
+  teammate who opens one of your live sessions gets a real terminal — typing
+  into it works, exactly as with a personal session share. If a session
+  shouldn't be typed into by teammates, hide that machine from the team.
+- The **per-machine opt-out** is yours alone (the "Visible to team" toggle),
+  whatever your role — no admin can override it — and every flip lands in
+  the team's **audit log**, alongside joins, invites, removals, and seat
+  changes.
+- Leaving (or being removed) prunes every team-derived grant in both
+  directions immediately; personal shares are untouched. Deleting a team
+  erases its membership, invites, grants, and audit history with it.
+
 ## Transport: when TLS is required
 
 The agent fully trusts whatever answers at its hub URL — once connected, it

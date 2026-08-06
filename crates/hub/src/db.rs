@@ -300,6 +300,92 @@ pub trait Store: Send + Sync {
     /// The inviter's live (unconverted, unexpired) email invites — rendered in
     /// the outbox with status `"invited"` and the email as the counterpart.
     async fn email_invite_outbox(&self, inviter: &str) -> Vec<EmailInviteRow>;
+
+    // ── orgs (proposal 0063) ───────────────────────────────────────────────────
+    /// Create an org with `creator` as its owner (one transaction: orgs insert +
+    /// org_members owner row + audit append). Errors if the creator is already in
+    /// an org (the v1 one-org constraint).
+    async fn org_create(&self, creator: &str, name: &str) -> anyhow::Result<String>;
+    /// The caller's org, if any: (org row, my role). One indexed lookup — the
+    /// org-aware limits_for (0063 C1) and every org handler start here.
+    async fn org_for_user(&self, user_id: &str) -> Option<(OrgRow, String)>;
+    /// One org by id.
+    async fn org_get(&self, org_id: &str) -> Option<OrgRow>;
+    /// CLI lookup: by exact id first, else by (unique) name.
+    async fn org_by_name_or_id(&self, key: &str) -> Option<OrgRow>;
+    /// All members of an org, joined to users for email display.
+    async fn org_members(&self, org_id: &str) -> Vec<OrgMemberRow>;
+    /// Member ids only — the pooled counters (0063 C2/C3) consume this.
+    async fn org_member_ids(&self, org_id: &str) -> Vec<String>;
+    /// Role change (owner-only at the handler; `owner` target transfers ownership
+    /// atomically: exactly one owner row exists at all times).
+    async fn org_set_role(&self, org_id: &str, user_id: &str, role: &str) -> anyhow::Result<()>;
+    /// Remove a member / leave. Refuses to remove the owner (transfer first —
+    /// the error carries the `OWNER:` prefix so the handler answers 409).
+    async fn org_remove_member(&self, org_id: &str, user_id: &str) -> anyhow::Result<()>;
+    /// Hand-set the seat count (`cc-screen-hub org seats`, 0063 B4) — the
+    /// pre-billing path; Stripe writes it via the webhook/reconcile otherwise.
+    async fn org_set_seats(&self, org_id: &str, seats: i64) -> anyhow::Result<()>;
+
+    // Org invites — the share_invites/email_invites shape (0005/0006), org-flavored.
+    /// Create or re-invite (upsert on `(org, email)`): refresh a pending/terminal
+    /// row back to `pending` with a fresh TTL + fresh token; an `accepted` row
+    /// (already a member) is a no-op success. Returns `(id, status, token)`.
+    async fn org_invite_create(&self, org_id: &str, inviter: &str, email: &str, role: &str)
+        -> anyhow::Result<(String, String, String)>;
+    /// Pending, unexpired org invites addressed to this email (the inbox feed).
+    async fn org_invite_inbox(&self, email: &str) -> Vec<OrgInviteRow>;
+    /// An org's sent invites across all statuses (the manage/cancel view).
+    async fn org_invite_outbox(&self, org_id: &str) -> Vec<OrgInviteRow>;
+    /// accept=true inserts the org_members row guarded by the seat gate (0064 B5)
+    /// and the one-org constraint, in the same transaction as the status flip.
+    /// `Err` carries `SEATS:` (→ 402) or `ONEORG:` (→ 409) prefixed messages.
+    async fn org_invite_respond(&self, user_id: &str, id: &str, accept: bool)
+        -> anyhow::Result<ShareOutcome>;
+    async fn org_invite_revoke(&self, org_id: &str, id: &str) -> ShareOutcome;
+    async fn org_invite_by_token(&self, token: &str) -> Option<OrgInviteRow>;
+    /// Called from the main.rs sweep loop beside `share_sweep` (0063 B2).
+    async fn org_invite_sweep(&self);
+
+    // Machine opt-out (0063 §consent) — owner-scoped like delete_agent.
+    async fn set_team_visible(&self, owner_user_id: &str, agent_id: &str, visible: bool) -> bool;
+
+    // Audit (0063 Part D). Fire-and-forget: never fails the mutation it records.
+    async fn audit_append(&self, org_id: &str, actor: Option<&str>, action: &str,
+                          target: Option<&str>, detail: Option<&str>);
+    /// Keyset-paged read, newest first (`before` = an audit row id).
+    async fn audit_page(&self, org_id: &str, before: Option<i64>, limit: i64) -> Vec<AuditRow>;
+
+    // Pooled counters (0063 Part C).
+    /// Machines owned by any of these users (one indexed COUNT over agents).
+    async fn agent_count_for_users(&self, user_ids: &[String]) -> i64;
+
+    /// Is this user in the founder cohort — `plan` OR `prior_plan` is 'beta'?
+    /// The Team founder-price gate reads the ORG OWNER's signal through this
+    /// (0064 B3: a founder who already bought Pro keeps the Team offer).
+    async fn user_founder_cohort(&self, user_id: &str) -> bool;
+
+    // ── org billing (proposal 0064) ────────────────────────────────────────────
+    /// Resolve a Stripe customer id to its org (via idx_orgs_billing_customer).
+    async fn org_by_billing_customer(&self, customer_id: &str) -> Option<String>;
+    /// Every org carrying billing state, for the nightly reconcile.
+    async fn org_billing_rows_for_reconcile(&self) -> Vec<OrgBillingRow>;
+    /// Apply a subscription state to its target (user or org) — the reconcile's
+    /// writer; the webhook goes through [`Store::billing_process_event`].
+    async fn apply_sub(&self, apply: &SubApply) -> anyhow::Result<()>;
+
+    // ── materialized team shares (proposal 0065 Part A) ────────────────────────
+    /// Is this share row a materialized team grant? (share.rs's leave/revoke
+    /// refusal — team rows are managed by membership, not individually.)
+    async fn share_is_team(&self, share_id: &str) -> bool;
+    /// Set-based, idempotent: one `kind='team'` row per (fellow member, visible
+    /// machine) pair for this org (INSERT OR IGNORE over idx_shares_team).
+    async fn team_shares_materialize(&self, org_id: &str);
+    /// The inverse DELETE: every team row of this org no longer implied by
+    /// current membership + opt-out flags.
+    async fn team_shares_prune(&self, org_id: &str);
+    /// Nightly invariant-restorer: materialize + prune for every org.
+    async fn team_shares_reconcile(&self);
 }
 
 /// One `share_invites` row (proposal 0040).
@@ -333,6 +419,71 @@ pub struct EmailInviteRow {
     pub created_at: i64,
     pub expires_at: i64,
     pub converted_at: Option<i64>,
+}
+
+/// One `orgs` row (proposal 0063), including the 0064 billing mirror columns.
+/// `seat_count > 0` is the "active org" gate: a dormant org (never subscribed /
+/// canceled / no CLI seats) confers nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgRow {
+    pub id: String,
+    pub name: String,
+    pub plan: String,
+    pub created_at: i64,
+    pub seat_count: i64,
+    pub billing_customer_id: Option<String>,
+    pub billing_subscription_id: Option<String>,
+    pub plan_status: Option<String>,
+    pub current_period_end: Option<i64>,
+}
+
+/// One org member, joined to users for email display (proposal 0063 A2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgMemberRow {
+    pub user_id: String,
+    pub email: String,
+    pub role: String,
+    pub created_at: i64,
+}
+
+/// One `org_invites` row (proposal 0063 B2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgInviteRow {
+    pub id: String,
+    pub token: String,
+    pub org_id: String,
+    pub inviter_user_id: String,
+    pub email: String,
+    pub role: String,
+    pub status: String,
+    pub created_at: i64,
+    pub responded_at: Option<i64>,
+    pub expires_at: i64,
+}
+
+/// One `audit_log` row (proposal 0063 Part D).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub id: i64,
+    pub org_id: String,
+    pub at: i64,
+    pub actor_user_id: Option<String>,
+    pub action: String,
+    pub target: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// One org's billing mirror, for the nightly reconcile (proposal 0064 B6).
+/// `member_count` rides along so the reconcile can log over-seat orgs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgBillingRow {
+    pub org_id: String,
+    pub customer_id: Option<String>,
+    pub subscription_id: Option<String>,
+    pub plan: String,
+    pub plan_status: Option<String>,
+    pub seat_count: i64,
+    pub member_count: i64,
 }
 
 /// The result of an invite transition — mirrors [`DevicePoll`]'s shape so handlers
@@ -433,17 +584,40 @@ pub enum EventOutcome {
     Duplicate,
 }
 
-/// The subscription state to apply in one webhook transaction (proposal 0058 B3),
-/// mirroring [`Store::apply_subscription_state`]'s parameters. `plan = None` is the
-/// terminal/cancel path (restore `COALESCE(prior_plan,'free')`).
+/// Which entity a subscription entitles (proposal 0064 B4): a user (Pro, the
+/// 0058 shape) or an org (Team). One enum, not a parallel struct, so
+/// [`Store::billing_process_event`]'s single-transaction contract covers both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubTarget {
+    User(String),
+    Org(String),
+}
+
+/// The subscription state to apply in one webhook transaction (proposal 0058 B3,
+/// org-targeted per 0064 B4). `plan = None` is the terminal/cancel path — users
+/// restore `COALESCE(prior_plan,'free')`; orgs zero their `seat_count` (the org
+/// `plan` column stays `'team'`; a zero-seat org confers nothing, 0063 C1).
 #[derive(Debug, Clone)]
 pub struct SubApply {
-    pub user_id: String,
+    pub target: SubTarget,
     pub plan: Option<String>,
     pub status: String,
     pub subscription_id: Option<String>,
     pub customer_id: Option<String>,
     pub period_end: Option<i64>,
+    /// Org targets: the mirrored seat quantity (`items.data[0].quantity`).
+    /// `None` keeps the stored count. Ignored for user targets.
+    pub seat_count: Option<i64>,
+}
+
+impl SubApply {
+    /// Convenience for the 0058-era user-target tests and reconcile paths.
+    pub fn user_id(&self) -> Option<&str> {
+        match &self.target {
+            SubTarget::User(u) => Some(u),
+            SubTarget::Org(_) => None,
+        }
+    }
 }
 
 /// One user's billing mirror, for the nightly reconcile (proposal 0058 B5).
@@ -463,6 +637,9 @@ pub struct AgentRow {
     pub agent_id: String,
     pub machine_id: String,
     pub created_at: i64,
+    /// May this machine be visible to the owner's org (proposal 0063 §consent)?
+    /// Owner-toggled; read by 0065's materializer. Meaningless without an org.
+    pub team_visible: bool,
 }
 
 /// The minted codes a host receives from `/api/device/code`.
@@ -572,6 +749,43 @@ impl SqliteStore {
             .and_then(|r| r.try_get("user_id").ok());
         anyhow::ensure!(owner.as_deref() == Some(owner_user_id), "not your agent");
         Ok(())
+    }
+
+    /// One `plan_limits` row by name (the org branch of `limits_for` reads the
+    /// per-seat 'team' row through this). `None` if unseeded.
+    async fn plan_row(&self, plan: &str) -> Option<PlanLimits> {
+        sqlx::query(
+            "SELECT plan, max_agents, max_concurrent_sessions, can_create_shares,
+                    summary_user_budget_usd
+               FROM plan_limits WHERE plan = ?1",
+        )
+        .bind(plan)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| {
+            Some(PlanLimits {
+                plan: r.try_get("plan").ok()?,
+                max_agents: r.try_get("max_agents").ok()?,
+                max_concurrent_sessions: r.try_get("max_concurrent_sessions").ok()?,
+                can_create_shares: r.try_get::<i64, _>("can_create_shares").ok()? != 0,
+                summary_user_budget_usd: r
+                    .try_get::<Option<f64>, _>("summary_user_budget_usd")
+                    .ok()
+                    .flatten(),
+            })
+        })
+    }
+
+    /// An org invite row by id (internal to the respond/revoke transitions).
+    async fn org_invite_get(&self, id: &str) -> Option<OrgInviteRow> {
+        let row = sqlx::query("SELECT * FROM org_invites WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        org_invite_row(&row)
     }
 
     #[cfg(test)]
@@ -864,20 +1078,46 @@ impl Store for SqliteStore {
 
         // Plan gate (§8.3): a genuinely NEW machine past the cap is refused; a
         // re-enroll of an existing label reuses its row and doesn't count. The
-        // "LIMIT:" prefix lets the handler answer 402 (not 404).
+        // "LIMIT:" prefix lets the handler answer 402 (not 404). For an active-org
+        // member the count is the POOL's (proposal 0063 C2): machines owned by
+        // any org member, against the seat-multiplied cap.
         if !self.has_machine(user_id, &machine_id).await {
             let limits = self.limits_for(user_id).await;
-            if self.agent_count(user_id).await >= limits.max_agents {
-                anyhow::bail!(
-                    "LIMIT:Machine limit reached for your plan ({}). Unlink one or ask for an upgrade.",
-                    limits.max_agents
-                );
+            let pool = match self.org_for_user(user_id).await {
+                Some((org, _)) if org.seat_count > 0 => Some(org),
+                _ => None,
+            };
+            let count = match &pool {
+                Some(org) => {
+                    let ids = self.org_member_ids(&org.id).await;
+                    self.agent_count_for_users(&ids).await
+                }
+                None => self.agent_count(user_id).await,
+            };
+            if count >= limits.max_agents {
+                match pool {
+                    Some(org) => anyhow::bail!(
+                        "LIMIT:Team machine pool full ({} across {} seats). Unlink a machine or add seats.",
+                        limits.max_agents,
+                        org.seat_count
+                    ),
+                    None => anyhow::bail!(
+                        "LIMIT:Machine limit reached for your plan ({}). Unlink one or ask for an upgrade.",
+                        limits.max_agents
+                    ),
+                }
             }
         }
 
         // Mint (or rotate) the agent + its token, then park the plaintext for the
         // host's next poll to claim exactly once.
         let (token, agent_id) = self.upsert_agent(user_id, &machine_id).await?;
+        // New-machine hook (proposal 0065 A3): a member's fresh machine becomes
+        // team-visible without further action. Idempotent set-repair; a no-op for
+        // re-enrolls and org-less users.
+        if let Some((org, _)) = self.org_for_user(user_id).await {
+            self.team_shares_materialize(&org.id).await;
+        }
         sqlx::query(
             "UPDATE device_enrollments
                 SET status = 'approved', user_id = ?1, agent_id = ?2, uplink_token = ?3
@@ -955,17 +1195,20 @@ impl Store for SqliteStore {
     }
 
     async fn list_agents(&self, user_id: &str) -> Vec<AgentRow> {
-        let rows = sqlx::query("SELECT id, machine_id, created_at FROM agents WHERE user_id = ?1 ORDER BY created_at DESC")
-            .bind(user_id)
-            .fetch_all(&self.pool)
-            .await
-            .unwrap_or_default();
+        let rows = sqlx::query(
+            "SELECT id, machine_id, created_at, team_visible FROM agents WHERE user_id = ?1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
         rows.iter()
             .filter_map(|r| {
                 Some(AgentRow {
                     agent_id: r.try_get("id").ok()?,
                     machine_id: r.try_get("machine_id").ok()?,
                     created_at: r.try_get("created_at").ok()?,
+                    team_visible: r.try_get::<i64, _>("team_visible").unwrap_or(1) != 0,
                 })
             })
             .collect()
@@ -982,6 +1225,26 @@ impl Store for SqliteStore {
     }
 
     async fn limits_for(&self, user_id: &str) -> PlanLimits {
+        // Org inheritance (proposal 0063 C1): an ACTIVE org (seat_count > 0)
+        // replaces the member's personal caps with the pooled org caps. The
+        // plan_limits 'team' row stores PER-SEAT contributions; the pool is
+        // row × seats. can_create_shares and the summary budget are per-member
+        // semantics — never multiplied. A dormant org (seat_count = 0) confers
+        // nothing: members keep their personal plans, so creating an org can
+        // never reduce anyone's entitlements.
+        if let Some((org, _role)) = self.org_for_user(user_id).await {
+            if org.seat_count > 0 {
+                if let Some(row) = self.plan_row(&org.plan).await {
+                    return PlanLimits {
+                        plan: row.plan,
+                        max_agents: row.max_agents * org.seat_count,
+                        max_concurrent_sessions: row.max_concurrent_sessions * org.seat_count,
+                        can_create_shares: row.can_create_shares,
+                        summary_user_budget_usd: row.summary_user_budget_usd,
+                    };
+                }
+            }
+        }
         sqlx::query(
             "SELECT pl.plan, pl.max_agents, pl.max_concurrent_sessions,
                     pl.can_create_shares, pl.summary_user_budget_usd
@@ -1030,6 +1293,13 @@ impl Store for SqliteStore {
     }
 
     async fn set_plan(&self, email: &str, plan: &str) -> anyhow::Result<()> {
+        // Org-only plans never land on users (proposal 0063 A1): the 'team' row
+        // stores PER-SEAT contributions and is meaningless without an org's seat
+        // multiplier — `user plan x@y team` would "work" and entitle nothing sane.
+        anyhow::ensure!(
+            plan != "team",
+            "'team' is an org plan — use `cc-screen-hub org seats`, not `user plan`"
+        );
         // Guard the plan exists, so a typo can't strand a user on an unknown plan
         // (which would silently fall back to the conservative default).
         let known = sqlx::query("SELECT 1 AS x FROM plan_limits WHERE plan = ?1")
@@ -1142,19 +1412,67 @@ impl Store for SqliteStore {
         // The state change shares this transaction: an error here drops `tx`,
         // rolling back the idempotency insert so Stripe's retry reprocesses.
         if let Some(a) = apply {
-            apply_sub_state(
-                &mut tx,
-                &a.user_id,
-                a.plan.as_deref(),
-                &a.status,
-                a.subscription_id.as_deref(),
-                a.customer_id.as_deref(),
-                a.period_end,
-            )
-            .await?;
+            match &a.target {
+                SubTarget::User(uid) => {
+                    apply_sub_state(
+                        &mut tx,
+                        uid,
+                        a.plan.as_deref(),
+                        &a.status,
+                        a.subscription_id.as_deref(),
+                        a.customer_id.as_deref(),
+                        a.period_end,
+                    )
+                    .await?;
+                }
+                SubTarget::Org(oid) => {
+                    apply_org_sub_state(
+                        &mut tx,
+                        oid,
+                        a.plan.as_deref(),
+                        &a.status,
+                        a.subscription_id.as_deref(),
+                        a.customer_id.as_deref(),
+                        a.period_end,
+                        a.seat_count,
+                    )
+                    .await?;
+                }
+            }
         }
         tx.commit().await?;
         Ok(EventOutcome::Applied)
+    }
+
+    async fn apply_sub(&self, a: &SubApply) -> anyhow::Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        match &a.target {
+            SubTarget::User(uid) => {
+                apply_sub_state(
+                    &mut conn,
+                    uid,
+                    a.plan.as_deref(),
+                    &a.status,
+                    a.subscription_id.as_deref(),
+                    a.customer_id.as_deref(),
+                    a.period_end,
+                )
+                .await
+            }
+            SubTarget::Org(oid) => {
+                apply_org_sub_state(
+                    &mut conn,
+                    oid,
+                    a.plan.as_deref(),
+                    &a.status,
+                    a.subscription_id.as_deref(),
+                    a.customer_id.as_deref(),
+                    a.period_end,
+                    a.seat_count,
+                )
+                .await
+            }
+        }
     }
 
     async fn billing_rows_for_reconcile(&self) -> Vec<BillingRow> {
@@ -1182,7 +1500,7 @@ impl Store for SqliteStore {
     async fn visibility_rows(&self, user_id: &str) -> Vec<ShareRow> {
         let rows = sqlx::query(
             "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
-                    s.kind, s.session, s.owner_peek, s.created_at
+                    s.kind, s.session, s.owner_peek, s.created_at, s.org_id
                FROM shares s JOIN agents a ON a.id = s.agent_id
               WHERE s.grantee_user_id = ?1 OR a.user_id = ?1",
         )
@@ -1254,11 +1572,14 @@ impl Store for SqliteStore {
     }
 
     async fn shares_by_owner(&self, owner_user_id: &str) -> Vec<ShareRow> {
+        // Team rows are excluded: the outbox is the *personal* "shared by me"
+        // view, and materialized team grants are managed by membership (0065 A4),
+        // not individually revocable rows.
         let rows = sqlx::query(
             "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
-                    s.kind, s.session, s.owner_peek, s.created_at
+                    s.kind, s.session, s.owner_peek, s.created_at, s.org_id
                FROM shares s JOIN agents a ON a.id = s.agent_id
-              WHERE a.user_id = ?1
+              WHERE a.user_id = ?1 AND s.kind != 'team'
               ORDER BY s.created_at DESC",
         )
         .bind(owner_user_id)
@@ -1269,9 +1590,11 @@ impl Store for SqliteStore {
     }
 
     async fn revoke_share(&self, owner_user_id: &str, share_id: &str) -> bool {
+        // Team rows are not individually revocable (0065 A4) — the way out is the
+        // per-machine opt-out or membership change; share.rs answers 409.
         sqlx::query(
             "DELETE FROM shares
-              WHERE id = ?1
+              WHERE id = ?1 AND kind != 'team'
                 AND agent_id IN (SELECT id FROM agents WHERE user_id = ?2)",
         )
         .bind(share_id)
@@ -1481,7 +1804,7 @@ impl Store for SqliteStore {
     async fn shares_to_me(&self, grantee: &str) -> Vec<ShareRow> {
         let rows = sqlx::query(
             "SELECT s.id, s.agent_id, a.user_id AS owner_user_id, s.grantee_user_id,
-                    s.kind, s.session, s.owner_peek, s.created_at
+                    s.kind, s.session, s.owner_peek, s.created_at, s.org_id
                FROM shares s JOIN agents a ON a.id = s.agent_id
               WHERE s.grantee_user_id = ?1
               ORDER BY s.created_at DESC",
@@ -1495,8 +1818,9 @@ impl Store for SqliteStore {
 
     async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool {
         // Resolve the grant (grantee-scoped) so we can settle its invite too.
+        // Team rows never reach here — share.rs refuses them with 409 first.
         let Some(row) = sqlx::query(
-            "SELECT agent_id, kind, session FROM shares WHERE id = ?1 AND grantee_user_id = ?2",
+            "SELECT agent_id, kind, session FROM shares WHERE id = ?1 AND grantee_user_id = ?2 AND kind != 'team'",
         )
         .bind(share_id)
         .bind(grantee)
@@ -1719,6 +2043,656 @@ impl Store for SqliteStore {
         rows.iter().filter_map(email_invite_row).collect()
     }
 
+    // ── orgs (proposal 0063) ───────────────────────────────────────────────────
+
+    async fn org_create(&self, creator: &str, name: &str) -> anyhow::Result<String> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "a team name is required");
+        anyhow::ensure!(name.len() <= 80, "team name too long");
+        anyhow::ensure!(
+            self.org_for_user(creator).await.is_none(),
+            "ONEORG:you're already in a team — leave it before creating another"
+        );
+        let id = cc_screen_auth::generate_token();
+        let now = now_secs() as i64;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO orgs (id, name, plan, created_at) VALUES (?1, ?2, 'team', ?3)")
+            .bind(&id)
+            .bind(name)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        // UNIQUE(user_id) is the one-org race backstop: a concurrent join fails
+        // the insert and rolls the whole org back.
+        sqlx::query(
+            "INSERT INTO org_members (org_id, user_id, role, created_at) VALUES (?1, ?2, 'owner', ?3)",
+        )
+        .bind(&id)
+        .bind(creator)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| anyhow::anyhow!("ONEORG:you're already in a team"))?;
+        tx.commit().await?;
+        self.audit_append(&id, Some(creator), "org.created", None, Some(&format!("{{\"name\":{}}}", serde_json::to_string(name).unwrap_or_default()))).await;
+        Ok(id)
+    }
+
+    async fn org_for_user(&self, user_id: &str) -> Option<(OrgRow, String)> {
+        let row = sqlx::query(
+            "SELECT o.*, m.role AS my_role
+               FROM org_members m JOIN orgs o ON o.id = m.org_id
+              WHERE m.user_id = ?1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        let role: String = row.try_get("my_role").ok()?;
+        Some((org_row(&row)?, role))
+    }
+
+    async fn org_get(&self, org_id: &str) -> Option<OrgRow> {
+        let row = sqlx::query("SELECT * FROM orgs WHERE id = ?1")
+            .bind(org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        org_row(&row)
+    }
+
+    async fn org_by_name_or_id(&self, key: &str) -> Option<OrgRow> {
+        if let Some(org) = self.org_get(key).await {
+            return Some(org);
+        }
+        let rows = sqlx::query("SELECT * FROM orgs WHERE name = ?1 LIMIT 2")
+            .bind(key)
+            .fetch_all(&self.pool)
+            .await
+            .ok()?;
+        match rows.as_slice() {
+            [only] => org_row(only),
+            _ => None, // unknown, or an ambiguous name — the CLI asks for the id
+        }
+    }
+
+    async fn org_members(&self, org_id: &str) -> Vec<OrgMemberRow> {
+        let rows = sqlx::query(
+            "SELECT m.user_id, u.email, m.role, m.created_at
+               FROM org_members m JOIN users u ON u.id = m.user_id
+              WHERE m.org_id = ?1
+              ORDER BY m.created_at ASC",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(OrgMemberRow {
+                    user_id: r.try_get("user_id").ok()?,
+                    email: r.try_get("email").ok()?,
+                    role: r.try_get("role").ok()?,
+                    created_at: r.try_get("created_at").ok()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn org_member_ids(&self, org_id: &str) -> Vec<String> {
+        let rows = sqlx::query("SELECT user_id FROM org_members WHERE org_id = ?1")
+            .bind(org_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter().filter_map(|r| r.try_get("user_id").ok()).collect()
+    }
+
+    async fn org_set_role(&self, org_id: &str, user_id: &str, role: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(matches!(role, "owner" | "admin" | "member"), "unknown role '{role}'");
+        let members = self.org_members(org_id).await;
+        let Some(target) = members.iter().find(|m| m.user_id == user_id) else {
+            anyhow::bail!("no such member");
+        };
+        if role == "owner" {
+            // Ownership transfer: exactly one owner row exists at all times —
+            // demote the current owner and promote the target in one transaction.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("UPDATE org_members SET role = 'admin' WHERE org_id = ?1 AND role = 'owner'")
+                .bind(org_id)
+                .execute(&mut *tx)
+                .await?;
+            let res = sqlx::query(
+                "UPDATE org_members SET role = 'owner' WHERE org_id = ?1 AND user_id = ?2",
+            )
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            anyhow::ensure!(res.rows_affected() == 1, "no such member");
+            tx.commit().await?;
+            return Ok(());
+        }
+        // The owner never gets demoted in place — transfer ownership first, so
+        // there is always exactly one owner.
+        anyhow::ensure!(target.role != "owner", "OWNER:transfer ownership first");
+        sqlx::query("UPDATE org_members SET role = ?1 WHERE org_id = ?2 AND user_id = ?3")
+            .bind(role)
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn org_remove_member(&self, org_id: &str, user_id: &str) -> anyhow::Result<()> {
+        let members = self.org_members(org_id).await;
+        let Some(target) = members.iter().find(|m| m.user_id == user_id) else {
+            anyhow::bail!("no such member");
+        };
+        anyhow::ensure!(target.role != "owner", "OWNER:transfer ownership first");
+        sqlx::query("DELETE FROM org_members WHERE org_id = ?1 AND user_id = ?2")
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        // Membership gone ⇒ their team visibility goes with it, both directions.
+        self.team_shares_prune(org_id).await;
+        Ok(())
+    }
+
+    async fn org_set_seats(&self, org_id: &str, seats: i64) -> anyhow::Result<()> {
+        anyhow::ensure!(seats >= 0, "seats must be ≥ 0");
+        let res = sqlx::query("UPDATE orgs SET seat_count = ?1 WHERE id = ?2")
+            .bind(seats)
+            .bind(org_id)
+            .execute(&self.pool)
+            .await?;
+        anyhow::ensure!(res.rows_affected() > 0, "no such org");
+        Ok(())
+    }
+
+    async fn org_invite_create(
+        &self,
+        org_id: &str,
+        inviter: &str,
+        email: &str,
+        role: &str,
+    ) -> anyhow::Result<(String, String, String)> {
+        anyhow::ensure!(matches!(role, "admin" | "member"), "invite role must be admin or member");
+        let email = normalize_email(email);
+        anyhow::ensure!(!email.is_empty(), "email is required");
+        let now = now_secs() as i64;
+        let expires = now + SHARE_INVITE_TTL;
+
+        // Already a member? No-op success (0040 §4): mint/refresh the row as
+        // accepted so the create response stays uniform (no oracle, 0042).
+        let already_member = match self.user_id_by_email(&email).await {
+            Some(uid) => self.org_member_ids(org_id).await.contains(&uid),
+            None => false,
+        };
+
+        let existing = sqlx::query("SELECT id, token, status FROM org_invites WHERE org_id = ?1 AND email = ?2")
+            .bind(org_id)
+            .bind(&email)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(row) = &existing {
+            let id: String = row.try_get("id")?;
+            let token: String = row.try_get("token")?;
+            let status: String = row.try_get("status")?;
+            if status == "accepted" || already_member {
+                return Ok((id, "accepted".into(), token));
+            }
+            // pending/terminal → (re)offer: refresh to pending with a FRESH token
+            // (the old link dies) and a fresh TTL, like email_invite_create.
+            let token = cc_screen_auth::generate_token();
+            sqlx::query(
+                "UPDATE org_invites
+                    SET status = 'pending', role = ?1, token = ?2, inviter_user_id = ?3,
+                        created_at = ?4, expires_at = ?5, responded_at = NULL
+                  WHERE id = ?6",
+            )
+            .bind(role)
+            .bind(&token)
+            .bind(inviter)
+            .bind(now)
+            .bind(expires)
+            .bind(&id)
+            .execute(&self.pool)
+            .await?;
+            return Ok((id, "pending".into(), token));
+        }
+
+        let id = cc_screen_auth::generate_token();
+        let token = cc_screen_auth::generate_token();
+        let status = if already_member { "accepted" } else { "pending" };
+        sqlx::query(
+            "INSERT INTO org_invites
+                (id, token, org_id, inviter_user_id, email, role, status, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(&id)
+        .bind(&token)
+        .bind(org_id)
+        .bind(inviter)
+        .bind(&email)
+        .bind(role)
+        .bind(status)
+        .bind(now)
+        .bind(expires)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("org_invite_create: {e}"))?;
+        Ok((id, status.into(), token))
+    }
+
+    async fn org_invite_inbox(&self, email: &str) -> Vec<OrgInviteRow> {
+        let email = normalize_email(email);
+        let now = now_secs() as i64;
+        // Lazy expiry, like share_inbox.
+        let _ = sqlx::query(
+            "UPDATE org_invites SET status = 'expired' WHERE status = 'pending' AND expires_at < ?1",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+        let rows = sqlx::query(
+            "SELECT * FROM org_invites WHERE email = ?1 AND status = 'pending' ORDER BY created_at DESC",
+        )
+        .bind(&email)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(org_invite_row).collect()
+    }
+
+    async fn org_invite_outbox(&self, org_id: &str) -> Vec<OrgInviteRow> {
+        let now = now_secs() as i64;
+        let _ = sqlx::query(
+            "UPDATE org_invites SET status = 'expired' WHERE status = 'pending' AND expires_at < ?1",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+        let rows = sqlx::query("SELECT * FROM org_invites WHERE org_id = ?1 ORDER BY created_at DESC")
+            .bind(org_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        rows.iter().filter_map(org_invite_row).collect()
+    }
+
+    async fn org_invite_respond(&self, user_id: &str, id: &str, accept: bool) -> anyhow::Result<ShareOutcome> {
+        let Some(inv) = self.org_invite_get(id).await else {
+            return Ok(ShareOutcome::NotFound);
+        };
+        // Addressed to someone else's email ⇒ 404 (don't leak existence).
+        if self.user_email(user_id).await.as_deref() != Some(inv.email.as_str()) {
+            return Ok(ShareOutcome::NotFound);
+        }
+        let now = now_secs() as i64;
+        let status = if inv.status == "pending" && inv.expires_at < now {
+            let _ = sqlx::query("UPDATE org_invites SET status = 'expired' WHERE id = ?1")
+                .bind(id)
+                .execute(&self.pool)
+                .await;
+            "expired".to_string()
+        } else {
+            inv.status.clone()
+        };
+        let target = if accept { "accepted" } else { "declined" };
+        if status == target {
+            return Ok(ShareOutcome::Ok(status)); // idempotent no-op (0040 §4)
+        }
+        if status != "pending" {
+            return Ok(ShareOutcome::Conflict);
+        }
+
+        if !accept {
+            let _ = sqlx::query(
+                "UPDATE org_invites SET status = 'declined', responded_at = ?1 WHERE id = ?2 AND status = 'pending'",
+            )
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+            self.audit_append(&inv.org_id, Some(user_id), "invite.declined", Some(&inv.email), None).await;
+            return Ok(ShareOutcome::Ok("declined".into()));
+        }
+
+        // One-org check up front for the honest 409; the UNIQUE(user_id)
+        // constraint is the race backstop below.
+        if let Some((org, _)) = self.org_for_user(user_id).await {
+            if org.id == inv.org_id {
+                // Already a member (e.g. a raced double-accept): converge.
+                let _ = sqlx::query("UPDATE org_invites SET status = 'accepted', responded_at = ?1 WHERE id = ?2")
+                    .bind(now)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await;
+                return Ok(ShareOutcome::Ok("accepted".into()));
+            }
+            anyhow::bail!("ONEORG:you're already in another team — leave it first");
+        }
+        let org = self
+            .org_get(&inv.org_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("no such team"))?;
+        if org.seat_count == 0 {
+            // Covers both the dormant pre-billing org and the dead subscription
+            // (0064 A4 zeroes seat_count on subscription.deleted).
+            anyhow::bail!("SEATS:This team has no seats yet. An admin needs to set up billing (or seats) first.");
+        }
+
+        // Accept, in one transaction (0063 A2): the guarded INSERT is the
+        // seat-gate serialization point — the member count is re-checked in the
+        // same statement that inserts, so two accepts racing onto the last seat
+        // can't both land.
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query(
+            "INSERT INTO org_members (org_id, user_id, role, created_at)
+             SELECT ?1, ?2, ?3, ?4
+              WHERE (SELECT count(*) FROM org_members WHERE org_id = ?1)
+                    < (SELECT seat_count FROM orgs WHERE id = ?1)",
+        )
+        .bind(&inv.org_id)
+        .bind(user_id)
+        .bind(&inv.role)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| anyhow::anyhow!("ONEORG:you're already in another team — leave it first"))?;
+        if res.rows_affected() == 0 {
+            anyhow::bail!(
+                "SEATS:This team is out of seats ({}). An admin can add seats from Billing.",
+                org.seat_count
+            );
+        }
+        sqlx::query("UPDATE org_invites SET status = 'accepted', responded_at = ?1 WHERE id = ?2 AND status = 'pending'")
+            .bind(now)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.audit_append(&inv.org_id, Some(user_id), "member.joined", Some(&inv.email), Some(&format!("{{\"role\":\"{}\"}}", inv.role))).await;
+        // Membership activated ⇒ materialize team visibility both directions
+        // (0065 A3). Idempotent set-repair; the nightly reconcile is the backstop.
+        self.team_shares_materialize(&inv.org_id).await;
+        Ok(ShareOutcome::Ok("accepted".into()))
+    }
+
+    async fn org_invite_revoke(&self, org_id: &str, id: &str) -> ShareOutcome {
+        let Some(inv) = self.org_invite_get(id).await else { return ShareOutcome::NotFound };
+        if inv.org_id != org_id {
+            return ShareOutcome::NotFound;
+        }
+        // Forgiving on already-dead rows (0040 §4); an accepted invite is a
+        // member now — removal is its own action, so revoke conflicts.
+        if matches!(inv.status.as_str(), "revoked" | "declined" | "expired") {
+            return ShareOutcome::Ok(inv.status);
+        }
+        if inv.status == "accepted" {
+            return ShareOutcome::Conflict;
+        }
+        let _ = sqlx::query("UPDATE org_invites SET status = 'revoked', responded_at = ?1 WHERE id = ?2")
+            .bind(now_secs() as i64)
+            .bind(id)
+            .execute(&self.pool)
+            .await;
+        ShareOutcome::Ok("revoked".into())
+    }
+
+    async fn org_invite_by_token(&self, token: &str) -> Option<OrgInviteRow> {
+        let now = now_secs() as i64;
+        let row = sqlx::query("SELECT * FROM org_invites WHERE token = ?1 AND expires_at > ?2 AND status = 'pending'")
+            .bind(token)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()??;
+        org_invite_row(&row)
+    }
+
+    async fn org_invite_sweep(&self) {
+        let now = now_secs() as i64;
+        // Flip overdue pending rows, auditing each expiry with a NULL actor.
+        let overdue = sqlx::query(
+            "SELECT id, org_id, email FROM org_invites WHERE status = 'pending' AND expires_at < ?1",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for row in &overdue {
+            let (Ok(id), Ok(org_id), Ok(email)) = (
+                row.try_get::<String, _>("id"),
+                row.try_get::<String, _>("org_id"),
+                row.try_get::<String, _>("email"),
+            ) else {
+                continue;
+            };
+            let _ = sqlx::query("UPDATE org_invites SET status = 'expired' WHERE id = ?1 AND status = 'pending'")
+                .bind(&id)
+                .execute(&self.pool)
+                .await;
+            self.audit_append(&org_id, None, "invite.expired", Some(&email), None).await;
+        }
+        // Hard-delete long-dead terminal rows (keep accepted — membership history).
+        let _ = sqlx::query(
+            "DELETE FROM org_invites
+              WHERE status IN ('declined','revoked','expired')
+                AND COALESCE(responded_at, created_at) < ?1",
+        )
+        .bind(now - SHARE_INVITE_REAP_AFTER)
+        .execute(&self.pool)
+        .await;
+    }
+
+    async fn set_team_visible(&self, owner_user_id: &str, agent_id: &str, visible: bool) -> bool {
+        sqlx::query("UPDATE agents SET team_visible = ?1 WHERE id = ?2 AND user_id = ?3")
+            .bind(visible as i64)
+            .bind(agent_id)
+            .bind(owner_user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    async fn audit_append(
+        &self,
+        org_id: &str,
+        actor: Option<&str>,
+        action: &str,
+        target: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        // Fire-and-forget: the audit log is an accountability trail, not a
+        // ledger — it must never fail or slow the mutation it records (0063 D1).
+        if let Err(e) = sqlx::query(
+            "INSERT INTO audit_log (org_id, at, actor_user_id, action, target, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(org_id)
+        .bind(now_secs() as i64)
+        .bind(actor)
+        .bind(action)
+        .bind(target)
+        .bind(detail)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!("audit_append({action}) failed: {e}");
+        }
+    }
+
+    async fn audit_page(&self, org_id: &str, before: Option<i64>, limit: i64) -> Vec<AuditRow> {
+        let limit = limit.clamp(1, 200);
+        let rows = sqlx::query(
+            "SELECT * FROM audit_log
+              WHERE org_id = ?1 AND (?2 IS NULL OR id < ?2)
+              ORDER BY id DESC LIMIT ?3",
+        )
+        .bind(org_id)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(AuditRow {
+                    id: r.try_get("id").ok()?,
+                    org_id: r.try_get("org_id").ok()?,
+                    at: r.try_get("at").ok()?,
+                    actor_user_id: r.try_get::<Option<String>, _>("actor_user_id").ok().flatten(),
+                    action: r.try_get("action").ok()?,
+                    target: r.try_get::<Option<String>, _>("target").ok().flatten(),
+                    detail: r.try_get::<Option<String>, _>("detail").ok().flatten(),
+                })
+            })
+            .collect()
+    }
+
+    async fn agent_count_for_users(&self, user_ids: &[String]) -> i64 {
+        if user_ids.is_empty() {
+            return 0;
+        }
+        let placeholders = vec!["?"; user_ids.len()].join(",");
+        let sql = format!("SELECT count(*) AS n FROM agents WHERE user_id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in user_ids {
+            q = q.bind(id);
+        }
+        q.fetch_one(&self.pool)
+            .await
+            .ok()
+            .and_then(|r| r.try_get::<i64, _>("n").ok())
+            .unwrap_or(0)
+    }
+
+    async fn user_founder_cohort(&self, user_id: &str) -> bool {
+        sqlx::query("SELECT 1 AS x FROM users WHERE id = ?1 AND (plan = 'beta' OR prior_plan = 'beta')")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    async fn org_by_billing_customer(&self, customer_id: &str) -> Option<String> {
+        sqlx::query("SELECT id FROM orgs WHERE billing_customer_id = ?1")
+            .bind(customer_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get("id").ok())
+    }
+
+    async fn org_billing_rows_for_reconcile(&self) -> Vec<OrgBillingRow> {
+        let rows = sqlx::query(
+            "SELECT o.id, o.billing_customer_id, o.billing_subscription_id, o.plan,
+                    o.plan_status, o.seat_count,
+                    (SELECT count(*) FROM org_members m WHERE m.org_id = o.id) AS member_count
+               FROM orgs o
+              WHERE o.billing_customer_id IS NOT NULL OR o.plan_status IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| {
+                Some(OrgBillingRow {
+                    org_id: r.try_get("id").ok()?,
+                    customer_id: r.try_get::<Option<String>, _>("billing_customer_id").ok().flatten(),
+                    subscription_id: r.try_get::<Option<String>, _>("billing_subscription_id").ok().flatten(),
+                    plan: r.try_get("plan").ok()?,
+                    plan_status: r.try_get::<Option<String>, _>("plan_status").ok().flatten(),
+                    seat_count: r.try_get("seat_count").ok()?,
+                    member_count: r.try_get("member_count").ok()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn share_is_team(&self, share_id: &str) -> bool {
+        sqlx::query("SELECT 1 AS x FROM shares WHERE id = ?1 AND kind = 'team'")
+            .bind(share_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    async fn team_shares_materialize(&self, org_id: &str) {
+        // Cross-join of members × fellow-members' visible agents (0065 A3);
+        // INSERT OR IGNORE rides idx_shares_team. Row count is |members|·|agents|
+        // — tens to low hundreds at the 3–20-seat scale this tier targets.
+        if let Err(e) = sqlx::query(
+            "INSERT OR IGNORE INTO shares (id, agent_id, grantee_user_id, kind, session,
+                                           owner_peek, created_at, org_id)
+             SELECT lower(hex(randomblob(16))), a.id, m.user_id, 'team', NULL, 0, ?1, ?2
+               FROM org_members m
+               JOIN org_members o ON o.org_id = m.org_id
+               JOIN agents a      ON a.user_id = o.user_id AND a.team_visible = 1
+              WHERE m.org_id = ?2 AND m.user_id != o.user_id",
+        )
+        .bind(now_secs() as i64)
+        .bind(org_id)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!("team_shares_materialize({org_id}) failed: {e}");
+        }
+    }
+
+    async fn team_shares_prune(&self, org_id: &str) {
+        // The inverse DELETE: every team row of this org whose (agent, grantee)
+        // pair is no longer implied by current membership + opt-out flags.
+        // Personal 0039 shares (org_id NULL) are untouched by construction.
+        if let Err(e) = sqlx::query(
+            "DELETE FROM shares
+              WHERE kind = 'team' AND org_id = ?1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM org_members m
+                      JOIN org_members o ON o.org_id = m.org_id
+                      JOIN agents a      ON a.user_id = o.user_id AND a.team_visible = 1
+                     WHERE m.org_id = ?1
+                       AND m.user_id = shares.grantee_user_id
+                       AND m.user_id != o.user_id
+                       AND a.id = shares.agent_id
+                )",
+        )
+        .bind(org_id)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!("team_shares_prune({org_id}) failed: {e}");
+        }
+    }
+
+    async fn team_shares_reconcile(&self) {
+        // Nightly invariant-restorer (0065 A3): a missed hook self-heals. Orphan
+        // team rows of a deleted org are already reaped by ON DELETE CASCADE.
+        let orgs: Vec<String> = sqlx::query("SELECT id FROM orgs")
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.try_get("id").ok())
+            .collect();
+        for org_id in orgs {
+            self.team_shares_materialize(&org_id).await;
+            self.team_shares_prune(&org_id).await;
+        }
+    }
+
     async fn share_sweep(&self) {
         let now = now_secs() as i64;
         // Flip overdue pending rows.
@@ -1816,6 +2790,38 @@ fn share_row(r: &sqlx::sqlite::SqliteRow) -> Option<ShareRow> {
         session: r.try_get::<Option<String>, _>("session").ok().flatten().filter(|s| !s.is_empty()),
         owner_peek: r.try_get::<i64, _>("owner_peek").ok()? != 0,
         created_at: r.try_get("created_at").ok()?,
+        org_id: r.try_get::<Option<String>, _>("org_id").ok().flatten(),
+    })
+}
+
+/// Map an `orgs` result row to an [`OrgRow`].
+fn org_row(r: &sqlx::sqlite::SqliteRow) -> Option<OrgRow> {
+    Some(OrgRow {
+        id: r.try_get("id").ok()?,
+        name: r.try_get("name").ok()?,
+        plan: r.try_get("plan").ok()?,
+        created_at: r.try_get("created_at").ok()?,
+        seat_count: r.try_get("seat_count").unwrap_or(0),
+        billing_customer_id: r.try_get::<Option<String>, _>("billing_customer_id").ok().flatten(),
+        billing_subscription_id: r.try_get::<Option<String>, _>("billing_subscription_id").ok().flatten(),
+        plan_status: r.try_get::<Option<String>, _>("plan_status").ok().flatten(),
+        current_period_end: r.try_get::<Option<i64>, _>("current_period_end").ok().flatten(),
+    })
+}
+
+/// Map an `org_invites` result row to an [`OrgInviteRow`].
+fn org_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<OrgInviteRow> {
+    Some(OrgInviteRow {
+        id: r.try_get("id").ok()?,
+        token: r.try_get("token").ok()?,
+        org_id: r.try_get("org_id").ok()?,
+        inviter_user_id: r.try_get("inviter_user_id").ok()?,
+        email: r.try_get("email").ok()?,
+        role: r.try_get("role").ok()?,
+        status: r.try_get("status").ok()?,
+        created_at: r.try_get("created_at").ok()?,
+        responded_at: r.try_get::<Option<i64>, _>("responded_at").ok().flatten(),
+        expires_at: r.try_get("expires_at").ok()?,
     })
 }
 
@@ -1906,6 +2912,76 @@ async fn apply_sub_state(
             .bind(customer_id)
             .bind(period_end)
             .bind(user_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// The org-side billing write (proposal 0064 B4), the `apply_sub_state` twin. A
+/// paid plan mirrors `seat_count` from the re-fetched quantity; the terminal
+/// path zeroes seats (the entitlement gate, 0063 C1) but keeps `plan = 'team'`
+/// (the column is NOT NULL and a zero-seat org confers nothing anyway), clears
+/// the subscription id, and keeps the customer id for resubscribe. Membership
+/// rows are never touched — enforcement compares at creation, never reconciles
+/// what exists (0064 A4).
+#[allow(clippy::too_many_arguments)]
+async fn apply_org_sub_state(
+    conn: &mut sqlx::SqliteConnection,
+    org_id: &str,
+    plan: Option<&str>,
+    status: &str,
+    subscription_id: Option<&str>,
+    customer_id: Option<&str>,
+    period_end: Option<i64>,
+    seat_count: Option<i64>,
+) -> anyhow::Result<()> {
+    match plan {
+        Some(p) => {
+            // Guard the target plan exists (the set_plan/apply_sub_state
+            // convention) — a bad price→plan map can never strand an org.
+            let known = sqlx::query("SELECT 1 AS x FROM plan_limits WHERE plan = ?1")
+                .bind(p)
+                .fetch_optional(&mut *conn)
+                .await?
+                .is_some();
+            anyhow::ensure!(known, "unknown plan '{p}'");
+            sqlx::query(
+                "UPDATE orgs
+                    SET plan = ?1,
+                        plan_status = ?2,
+                        billing_subscription_id = ?3,
+                        billing_customer_id = COALESCE(?4, billing_customer_id),
+                        current_period_end = ?5,
+                        seat_count = COALESCE(?6, seat_count)
+                  WHERE id = ?7",
+            )
+            .bind(p)
+            .bind(status)
+            .bind(subscription_id)
+            .bind(customer_id)
+            .bind(period_end)
+            .bind(seat_count)
+            .bind(org_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                "UPDATE orgs
+                    SET plan_status = ?1,
+                        billing_subscription_id = ?2,
+                        billing_customer_id = COALESCE(?3, billing_customer_id),
+                        current_period_end = ?4,
+                        seat_count = 0
+                  WHERE id = ?5",
+            )
+            .bind(status)
+            .bind(subscription_id)
+            .bind(customer_id)
+            .bind(period_end)
+            .bind(org_id)
             .execute(&mut *conn)
             .await?;
         }
@@ -2220,12 +3296,13 @@ mod tests {
 
         // First delivery of the checkout event: activate pro.
         let apply = SubApply {
-            user_id: u.clone(),
+            target: SubTarget::User(u.clone()),
             plan: Some("pro".into()),
             status: "active".into(),
             subscription_id: Some("sub_1".into()),
             customer_id: Some("cus_1".into()),
             period_end: Some(1_800_000_000),
+            seat_count: None,
         };
         assert_eq!(s.billing_process_event("evt_1", "h1", 1, Some(apply.clone())).await.unwrap(), EventOutcome::Applied);
         let (plan, status, prior, sub, pend) = cols(&s, &u).await;
@@ -2245,8 +3322,9 @@ mod tests {
 
         // Grace: payment_failed keeps the paid plan, only status flips.
         let pd = SubApply {
-            user_id: u.clone(), plan: Some("pro".into()), status: "past_due".into(),
-            subscription_id: Some("sub_1".into()), customer_id: Some("cus_1".into()), period_end: Some(1_800_000_000),
+            target: SubTarget::User(u.clone()), plan: Some("pro".into()), status: "past_due".into(),
+            subscription_id: Some("sub_1".into()), customer_id: Some("cus_1".into()),
+            period_end: Some(1_800_000_000), seat_count: None,
         };
         s.billing_process_event("evt_pd", "h", 3, Some(pd)).await.unwrap();
         let (plan, status, prior, _, _) = cols(&s, &u).await;
@@ -2256,8 +3334,8 @@ mod tests {
         // Terminal: subscription.deleted → restore prior_plan (beta), clear sub id,
         // keep customer id.
         let del = SubApply {
-            user_id: u.clone(), plan: None, status: "canceled".into(),
-            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None,
+            target: SubTarget::User(u.clone()), plan: None, status: "canceled".into(),
+            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None, seat_count: None,
         };
         s.billing_process_event("evt_del", "h", 4, Some(del)).await.unwrap();
         let (plan, status, prior, sub, _) = cols(&s, &u).await;
@@ -2269,8 +3347,8 @@ mod tests {
         // Out-of-order: a late 'updated' whose re-fetch still says canceled applies
         // None again → stays beta, no resurrection.
         let late = SubApply {
-            user_id: u.clone(), plan: None, status: "canceled".into(),
-            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None,
+            target: SubTarget::User(u.clone()), plan: None, status: "canceled".into(),
+            subscription_id: None, customer_id: Some("cus_1".into()), period_end: None, seat_count: None,
         };
         s.billing_process_event("evt_late", "h", 5, Some(late)).await.unwrap();
         assert_eq!(cols(&s, &u).await.0, "beta", "no resurrection of pro");
@@ -2281,8 +3359,8 @@ mod tests {
 
         // Unknown-plan guard: a bad price→plan map is refused (tx rolls back).
         let bad = SubApply {
-            user_id: u.clone(), plan: Some("nope".into()), status: "active".into(),
-            subscription_id: Some("sub_2".into()), customer_id: Some("cus_1".into()), period_end: None,
+            target: SubTarget::User(u.clone()), plan: Some("nope".into()), status: "active".into(),
+            subscription_id: Some("sub_2".into()), customer_id: Some("cus_1".into()), period_end: None, seat_count: None,
         };
         assert!(s.billing_process_event("evt_bad", "h", 8, Some(bad)).await.is_err());
         // The rollback also undid the idempotency insert → retry can reprocess.
@@ -2529,6 +3607,299 @@ mod tests {
         assert!(s.share_outbox(&alice).await.is_empty(), "invite cascaded");
         assert!(s.visibility_rows(&bob).await.is_empty(), "grant cascaded");
         assert!(s.shares_to_me(&bob).await.is_empty(), "received grant cascaded");
+    }
+
+    // ── Proposal 0063: orgs, membership, invites, audit ───────────────────────
+
+    async fn seed_user(s: &SqliteStore, email: &str) -> String {
+        s.create_user(email, "password123456").await.unwrap()
+    }
+
+    /// Owner + an activated 3-seat org, via the public surface (create + CLI
+    /// seats + invite/accept).
+    async fn seed_org(s: &SqliteStore, owner: &str, seats: i64) -> String {
+        let org = s.org_create(owner, "acme").await.unwrap();
+        s.org_set_seats(&org, seats).await.unwrap();
+        org
+    }
+
+    async fn join(s: &SqliteStore, org: &str, inviter: &str, email: &str) -> String {
+        let (id, st, _tok) = s.org_invite_create(org, inviter, email, "member").await.unwrap();
+        assert_eq!(st, "pending");
+        let uid = s.user_id_by_email(email).await.unwrap();
+        match s.org_invite_respond(&uid, &id, true).await.unwrap() {
+            ShareOutcome::Ok(st) => assert_eq!(st, "accepted"),
+            other => panic!("accept failed: {other:?}"),
+        }
+        uid
+    }
+
+    #[tokio::test]
+    async fn org_create_membership_and_one_org_constraint() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        let bob = seed_user(&s, "bob@x.com").await;
+        let org = seed_org(&s, &alice, 3).await;
+
+        let (row, role) = s.org_for_user(&alice).await.expect("alice is a member");
+        assert_eq!((row.id.as_str(), role.as_str()), (org.as_str(), "owner"));
+        assert_eq!(row.seat_count, 3);
+        // One org per user: a second create by alice fails; org.created audited.
+        let err = s.org_create(&alice, "second").await.unwrap_err().to_string();
+        assert!(err.starts_with("ONEORG:"), "got: {err}");
+        let log = s.audit_page(&org, None, 50).await;
+        assert!(log.iter().any(|r| r.action == "org.created"));
+
+        // Invite + accept: bob joins; member.joined + invite rows audited.
+        let bob2 = join(&s, &org, &alice, "bob@x.com").await;
+        assert_eq!(bob2, bob);
+        assert_eq!(s.org_member_ids(&org).await.len(), 2);
+        assert!(s.audit_page(&org, None, 50).await.iter().any(|r| r.action == "member.joined"));
+        // Double-accept converges (idempotent) — find the invite id again.
+        let inv = s.org_invite_outbox(&org).await.into_iter().find(|i| i.email == "bob@x.com").unwrap();
+        assert_eq!(s.org_invite_respond(&bob, &inv.id, true).await.unwrap(), ShareOutcome::Ok("accepted".into()));
+        // Re-invite of a member is a no-op success with status accepted.
+        let (_, st, _) = s.org_invite_create(&org, &alice, "bob@x.com", "member").await.unwrap();
+        assert_eq!(st, "accepted");
+        // Bob (already in an org) can't create or join another.
+        assert!(s.org_create(&bob, "boborg").await.is_err());
+        let carol = seed_user(&s, "carol@x.com").await;
+        let org2 = {
+            // carol makes her own org, invites bob — accept must ONEORG-409.
+            let o2 = s.org_create(&carol, "carols").await.unwrap();
+            s.org_set_seats(&o2, 3).await.unwrap();
+            o2
+        };
+        let (iid, _, _) = s.org_invite_create(&org2, &carol, "bob@x.com", "member").await.unwrap();
+        let err = s.org_invite_respond(&bob, &iid, true).await.unwrap_err().to_string();
+        assert!(err.starts_with("ONEORG:"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn org_roles_transfer_and_removal() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        seed_user(&s, "bob@x.com").await;
+        let org = seed_org(&s, &alice, 5).await;
+        let bob = join(&s, &org, &alice, "bob@x.com").await;
+
+        // Owner can't be removed or demoted in place — transfer first.
+        let err = s.org_remove_member(&org, &alice).await.unwrap_err().to_string();
+        assert!(err.starts_with("OWNER:"));
+        let err = s.org_set_role(&org, &alice, "member").await.unwrap_err().to_string();
+        assert!(err.starts_with("OWNER:"));
+
+        // Transfer: exactly one owner at all times.
+        s.org_set_role(&org, &bob, "owner").await.unwrap();
+        let members = s.org_members(&org).await;
+        assert_eq!(members.iter().filter(|m| m.role == "owner").count(), 1);
+        assert_eq!(members.iter().find(|m| m.user_id == bob).unwrap().role, "owner");
+        assert_eq!(members.iter().find(|m| m.user_id == alice).unwrap().role, "admin");
+
+        // Now alice (admin) can be removed; membership reverts her org lookup.
+        s.org_remove_member(&org, &alice).await.unwrap();
+        assert!(s.org_for_user(&alice).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn org_seat_gate_blocks_over_capacity() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        seed_user(&s, "bob@x.com").await;
+        seed_user(&s, "carol@x.com").await;
+        let org = seed_org(&s, &alice, 2).await; // owner + 1
+        join(&s, &org, &alice, "bob@x.com").await;
+
+        // Third accept (over the 2 seats) → SEATS error, no member row.
+        let (id, _, _) = s.org_invite_create(&org, &alice, "carol@x.com", "member").await.unwrap();
+        let carol = s.user_id_by_email("carol@x.com").await.unwrap();
+        let err = s.org_invite_respond(&carol, &id, true).await.unwrap_err().to_string();
+        assert!(err.starts_with("SEATS:"), "got: {err}");
+        assert_eq!(s.org_member_ids(&org).await.len(), 2);
+        // Freeing a seat admits the next accept with zero billing traffic.
+        let bob = s.user_id_by_email("bob@x.com").await.unwrap();
+        s.org_remove_member(&org, &bob).await.unwrap();
+        assert_eq!(s.org_invite_respond(&carol, &id, true).await.unwrap(), ShareOutcome::Ok("accepted".into()));
+        // A dormant (0-seat) org refuses accepts outright.
+        let dave = seed_user(&s, "dave@x.com").await;
+        s.org_set_seats(&org, 0).await.unwrap();
+        let (id2, _, _) = s.org_invite_create(&org, &alice, "dave@x.com", "member").await.unwrap();
+        let err = s.org_invite_respond(&dave, &id2, true).await.unwrap_err().to_string();
+        assert!(err.starts_with("SEATS:"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn org_pooled_limits_and_machine_gate() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        seed_user(&s, "bob@x.com").await;
+        let org = seed_org(&s, &alice, 3).await;
+        let bob = join(&s, &org, &alice, "bob@x.com").await;
+
+        // 0064 acceptance 1: a member resolves the pooled team caps; the
+        // per-member fields stay unmultiplied.
+        let l = s.limits_for(&bob).await;
+        assert_eq!((l.plan.as_str(), l.max_agents, l.max_concurrent_sessions), ("team", 30, 150));
+        assert!(l.can_create_shares, "sharing is the team product");
+        assert_eq!(l.summary_user_budget_usd, Some(2.00), "per-member, never multiplied");
+
+        // Dormant org → personal plans, unchanged.
+        s.org_set_seats(&org, 0).await.unwrap();
+        assert_eq!(s.limits_for(&bob).await.plan, "free");
+        s.org_set_seats(&org, 2).await.unwrap();
+
+        // Pooled machine gate (0063 C2): tune the per-seat contribution to 1 so
+        // the 2-seat pool caps at 2 machines org-wide.
+        sqlx::query("UPDATE plan_limits SET max_agents = 1 WHERE plan = 'team'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let c1 = s.device_create("d1", "laptop").await.unwrap();
+        s.device_approve(&alice, &c1.user_code_display).await.unwrap();
+        let c2 = s.device_create("d2", "server").await.unwrap();
+        s.device_approve(&alice, &c2.user_code_display).await.unwrap();
+        // Pool full: bob's NEW label 402s even though bob owns zero machines…
+        let c3 = s.device_create("d3", "bobbox").await.unwrap();
+        let err = s.device_approve(&bob, &c3.user_code_display).await.unwrap_err().to_string();
+        assert!(err.starts_with("LIMIT:") && err.contains("Team machine pool"), "got: {err}");
+        // …while a re-enroll of an existing label still rotates fine.
+        let c4 = s.device_create("d4", "laptop").await.unwrap();
+        assert!(s.device_approve(&alice, &c4.user_code_display).await.is_ok());
+
+        // `user plan team` footgun is closed (0063 A1).
+        let err = s.set_plan("bob@x.com", "team").await.unwrap_err().to_string();
+        assert!(err.contains("org plan"), "got: {err}");
+    }
+
+    // ── Proposal 0065 Part A: materialized team shares ────────────────────────
+
+    #[tokio::test]
+    async fn team_shares_materialize_prune_and_optout() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        seed_user(&s, "bob@x.com").await;
+        let (_t, a_laptop) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        let org = seed_org(&s, &alice, 3).await;
+        let bob = join(&s, &org, &alice, "bob@x.com").await;
+
+        // Join materialized both directions: bob sees alice's machine…
+        let bob_rows = s.shares_to_me(&bob).await;
+        assert_eq!(bob_rows.len(), 1);
+        assert_eq!((bob_rows[0].kind.as_str(), bob_rows[0].agent_id.as_str()), ("team", a_laptop.as_str()));
+        assert_eq!(bob_rows[0].org_id.as_deref(), Some(org.as_str()));
+        // …and a machine bob enrolls later appears for alice with no action
+        // (the device_approve hook).
+        let code = s.device_create("d1", "bobbox").await.unwrap();
+        s.device_approve(&bob, &code.user_code_display).await.unwrap();
+        let alice_rows = s.shares_to_me(&alice).await;
+        assert_eq!(alice_rows.len(), 1, "alice sees bob's box via the new-machine hook");
+        // Idempotent: re-materializing adds nothing.
+        s.team_shares_materialize(&org).await;
+        assert_eq!(s.shares_to_me(&bob).await.len(), 1);
+
+        // Team rows are excluded from the personal outbox and not revocable.
+        assert!(s.shares_by_owner(&alice).await.is_empty(), "team rows never show in the outbox");
+        let row_id = s.shares_to_me(&bob).await[0].id.clone();
+        assert!(s.share_is_team(&row_id).await);
+        assert!(!s.revoke_share(&alice, &row_id).await, "team rows are not individually revocable");
+        assert!(!s.leave_grant(&bob, &row_id).await, "and not individually leavable");
+
+        // Opt-out prunes within the action; a personal share on the same agent
+        // survives (org_id discriminates).
+        let personal = s.share_agent(&alice, &a_laptop, &bob, false).await.unwrap();
+        assert!(s.set_team_visible(&alice, &a_laptop, false).await);
+        assert!(!s.set_team_visible(&bob, &a_laptop, false).await, "owner-scoped");
+        s.team_shares_prune(&org).await;
+        let kinds: Vec<String> = s.shares_to_me(&bob).await.into_iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec!["agent".to_string()], "team row pruned, personal share survives");
+        // Flag back on → row returns via materialize.
+        assert!(s.set_team_visible(&alice, &a_laptop, true).await);
+        s.team_shares_materialize(&org).await;
+        assert_eq!(s.shares_to_me(&bob).await.len(), 2);
+        let _ = personal;
+
+        // Member removal prunes exactly that member's org rows, both directions.
+        s.org_remove_member(&org, &bob).await.unwrap();
+        let kinds: Vec<String> = s.shares_to_me(&bob).await.into_iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec!["agent".to_string()], "only the personal share survives removal");
+        assert!(s.shares_to_me(&alice).await.is_empty(), "alice's sight of bob's box gone too");
+
+        // Org deletion cascades everything (0063 A acceptance).
+        sqlx::query("DELETE FROM orgs WHERE id = ?1").bind(&org).execute(&s.pool).await.unwrap();
+        let n: i64 = sqlx::query("SELECT count(*) AS n FROM shares WHERE kind = 'team'")
+            .fetch_one(&s.pool).await.unwrap().try_get("n").unwrap();
+        assert_eq!(n, 0);
+        let n: i64 = sqlx::query("SELECT count(*) AS n FROM audit_log")
+            .fetch_one(&s.pool).await.unwrap().try_get("n").unwrap();
+        assert_eq!(n, 0, "audit dies with the org (CASCADE)");
+    }
+
+    // ── Proposal 0064: org-targeted billing writes ────────────────────────────
+
+    #[tokio::test]
+    async fn org_billing_state_machine() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        let org = s.org_create(&alice, "acme").await.unwrap();
+
+        // checkout.session.completed (re-fetch: active team, quantity 3).
+        let apply = SubApply {
+            target: SubTarget::Org(org.clone()),
+            plan: Some("team".into()),
+            status: "active".into(),
+            subscription_id: Some("sub_t".into()),
+            customer_id: Some("cus_o".into()),
+            period_end: Some(1_900_000_000),
+            seat_count: Some(3),
+        };
+        assert_eq!(s.billing_process_event("evt_t1", "h", 1, Some(apply)).await.unwrap(), EventOutcome::Applied);
+        let row = s.org_get(&org).await.unwrap();
+        assert_eq!((row.plan.as_str(), row.plan_status.as_deref(), row.seat_count), ("team", Some("active"), 3));
+        assert_eq!(s.org_by_billing_customer("cus_o").await.as_deref(), Some(org.as_str()));
+        // A member's limits show the pool with no Stripe call on the read path.
+        assert_eq!(s.limits_for(&alice).await.max_agents, 30);
+        // No `users` writes: alice's personal plan untouched (SQL assert).
+        let plan: String = sqlx::query("SELECT plan FROM users WHERE id = ?1")
+            .bind(&alice).fetch_one(&s.pool).await.unwrap().try_get("plan").unwrap();
+        assert_eq!(plan, "free");
+
+        // Portal quantity bump 3→5 flows in via the updated re-fetch.
+        let bump = SubApply {
+            target: SubTarget::Org(org.clone()),
+            plan: Some("team".into()),
+            status: "active".into(),
+            subscription_id: Some("sub_t".into()),
+            customer_id: Some("cus_o".into()),
+            period_end: Some(1_900_000_000),
+            seat_count: Some(5),
+        };
+        s.billing_process_event("evt_t2", "h", 2, Some(bump)).await.unwrap();
+        assert_eq!(s.org_get(&org).await.unwrap().seat_count, 5);
+
+        // Terminal: seats zeroed, sub id cleared, customer kept, membership
+        // intact, member falls back to the personal plan — zero users writes.
+        let del = SubApply {
+            target: SubTarget::Org(org.clone()),
+            plan: None,
+            status: "canceled".into(),
+            subscription_id: None,
+            customer_id: Some("cus_o".into()),
+            period_end: None,
+            seat_count: Some(0),
+        };
+        s.billing_process_event("evt_t3", "h", 3, Some(del)).await.unwrap();
+        let row = s.org_get(&org).await.unwrap();
+        assert_eq!((row.plan_status.as_deref(), row.seat_count, row.billing_subscription_id), (Some("canceled"), 0, None));
+        assert_eq!(row.billing_customer_id.as_deref(), Some("cus_o"), "kept for resubscribe");
+        assert_eq!(s.org_member_ids(&org).await.len(), 1, "nobody evicted");
+        assert_eq!(s.limits_for(&alice).await.plan, "free", "dormant org confers nothing");
+        // Reconcile feed carries the org (with member_count riding along).
+        let rows = s.org_billing_rows_for_reconcile().await;
+        assert!(rows.iter().any(|r| r.org_id == org && r.member_count == 1));
+        // Founder cohort: plan/prior_plan beta.
+        assert!(!s.user_founder_cohort(&alice).await);
+        s.set_plan("alice@x.com", "beta").await.unwrap();
+        assert!(s.user_founder_cohort(&alice).await);
     }
 
     #[tokio::test]

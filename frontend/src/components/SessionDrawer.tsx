@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type MePlan, type PaneRef, type RestorableSession, type Session } from "../api";
-import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedOwner, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
+import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedEntry, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
 import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -573,11 +573,27 @@ export default function SessionDrawer({
   const renderMachineHeader = (machineId: string, empty = false) => {
     const m = machines.find((x) => x.machine === machineId);
     const label = m?.hostname || machineId || "this machine";
+    // A machine visible to me through a grant carries a quiet suffix — direct
+    // shares say (shared · owner), team-materialized ones (team · owner)
+    // (proposals 0041 §4.3 / 0065 Part B).
+    const grant = sharedEntry(sharedMap ?? null, machineId);
     return (
       <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-bar/95 px-2 pb-1 pt-2 backdrop-blur-sm">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
           {label}
         </span>
+        {grant && (
+          <span
+            className="truncate text-[10px] text-slate-600"
+            title={
+              grant.team
+                ? `visible via ${grant.orgName || "your team"} · owned by ${grant.owner}`
+                : `shared with you by ${grant.owner}`
+            }
+          >
+            ({grant.team ? "team" : "shared"} · {grant.owner})
+          </span>
+        )}
         {m && !m.online && (
           <span className="rounded bg-edge/60 px-1 py-px text-[9px] text-slate-500" title="offline">
             offline
@@ -763,15 +779,23 @@ export default function SessionDrawer({
                   title={statusTitle(status)}
                 />
                 {(() => {
-                  const owner = sharedOwner(sharedMap ?? null, s.machine, s.name);
-                  return owner ? (
+                  // Proposal 0065 Part B: same chip recipe, two variants —
+                  // "shared" for a direct grant, "team" when the visibility is
+                  // materialized from org membership (direct wins when both).
+                  const entry = sharedEntry(sharedMap ?? null, s.machine, s.name);
+                  if (!entry) return null;
+                  const label = entry.team
+                    ? `visible via ${entry.orgName || "your team"} · owned by ${entry.owner}`
+                    : `shared with you by ${entry.owner}`;
+                  return (
                     <span
                       className="shrink-0 rounded border border-accent/25 bg-accent/5 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-accent/80"
-                      title={`shared with you by ${owner}`}
+                      title={label}
+                      aria-label={label}
                     >
-                      shared
+                      {entry.team ? "team" : "shared"}
                     </span>
-                  ) : null;
+                  );
                 })()}
                 {s.skip_permissions === false && (
                   <span

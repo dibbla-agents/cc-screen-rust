@@ -10,7 +10,11 @@ description: Short answers — pricing, plans, supported CLIs, phones, privacy, 
 
 The **Free** plan is free forever — 2 machines, 5 concurrent sessions, no card
 required. **Pro** is $10/month (or $96/year — $8/month) and raises that
-to 10 machines and 50 concurrent sessions, with unlimited sharing. Payments are
+to 10 machines and 50 concurrent sessions, with unlimited sharing. **Team** is
+$16/seat/month (or $160/seat/year), minimum 3 seats: every seat gets
+everything Pro has, the whole team sees each other's sessions automatically,
+and the limits pool — 10 machines and 50 concurrent sessions *per seat*,
+shared across the team. Payments are
 handled by Stripe as merchant of record (the seller is Techier AI Sthlm AB);
 cancel any time from the billing portal.
 
@@ -72,8 +76,29 @@ binaries, no feature gap in the core product. See
 Yes — share a whole machine or a single session, as "can view" or "can use".
 If the invitee has no account yet, you get an invite link to send them; the
 share attaches when they sign up with that email. Revoke any time from the
-dashboard's Sharing card. See
+dashboard's Sharing card. Or skip the one-off shares and start a **team** —
+everyone on it sees everyone's sessions automatically, view-only. See
 [Using the web app → Sharing](../web-app/#sharing).
+
+## How do teams work?
+
+You join by accepting an email invite, and the invite states the deal before
+you do: joining makes your machines visible to the team, **view-only** —
+teammates can watch your sessions, but creating sessions on your machine (or
+anything administrative) still requires an explicit "can use" share from you.
+You can hide any of your machines from the team at any time (the **Visible to
+team** toggle in the team window), and every flip is recorded in the team's
+audit log — which the team's owner and admins can read. Leaving cuts both
+ways: you stop seeing the team's machines and they stop seeing yours,
+immediately. Personal shares survive team membership changes.
+
+## How do team seats work?
+
+Accepting an invite consumes a seat; when the team is full, the next accept
+is refused until someone adds seats (the owner or an admin, from Billing) —
+nothing is lost, the invite just waits. Removing a member frees their seat
+instantly. Reducing the seat count never removes members: if you drop below
+the current member count, the team just can't grow until it's back under.
 
 ## Does it work on phones?
 

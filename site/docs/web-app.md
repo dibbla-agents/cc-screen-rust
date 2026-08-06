@@ -90,6 +90,41 @@ You can see everything shared by you and with you on the dashboard's
 **Sharing** card, and revoke (or leave) any of it there. Access stops
 immediately on revoke.
 
+### Teams
+
+One-off shares scale badly past two people — a **team** replaces them with
+one standing arrangement: everyone on the team automatically sees everyone
+else's machines and sessions, **view-only**. No per-machine invites, no
+grants to keep in sync when someone gets a new laptop.
+
+Joining is the consent, and the invite says so before you accept, verbatim:
+
+> Joining makes your machines on cc-screen visible to this team (view-only).
+> You can hide any machine in settings.
+
+The fine print, in plain words:
+
+- **View, not use.** Teammates can open your sessions and watch, but
+  creating sessions on your machine — or any admin action on it — still
+  requires an explicit "can use" share from you, exactly as before. (Honest
+  caveat: an *open* terminal accepts keystrokes — view-only bounds what a
+  teammate can reach, not what a focused terminal does. See the
+  [Security model](../security/#teams).)
+- **Hide any machine.** Every machine of yours has a **Visible to team**
+  toggle in the team window — flip it off and that machine drops out of the
+  team's view immediately. The toggle belongs to the machine's owner alone,
+  whatever their role, and every flip is recorded in the team's audit log.
+- **Roles.** One **owner** (billing, roles, everything), any number of
+  **admins** (invite, remove members), and **members**. Ownership transfers
+  explicitly — the owner leaves only after handing the team over.
+- **Pooled limits.** A team shares one pool: 10 machines and 50 concurrent
+  sessions *per seat*, counted across the whole team rather than per person.
+  Every seat gets everything Pro has; "pooled" means a heavy teammate can
+  use headroom a light one doesn't.
+- **Leaving cuts both ways.** Leave (or be removed) and you stop seeing the
+  team's machines *and* they stop seeing yours, instantly. Personal shares
+  you set up separately survive.
+
 ## The dashboard
 
 The machines dashboard (your account page) is the admin surface:
@@ -107,6 +142,20 @@ The machines dashboard (your account page) is the admin surface:
   Windows. See the [Quickstart](../quickstart/).
 
 ![The machines dashboard](../img/web-machines.png "The dashboard: one machine online with '3 missing · Install' waiting, one offline, and the plan card below.")
+
+On a team, the dashboard grows a **`~/team` window** — the team's admin
+surface:
+
+- the **member list** with each person's role; owners and admins invite by
+  email (you get a copyable invite link — cc-screen sends no mail) and
+  remove members; the owner changes roles and can transfer ownership.
+- your machines' **Visible to team** toggles (yours to flip, whatever your
+  role).
+- the **seats meter** on the plan card — `members / seats` — and, for the
+  owner or an admin, the seat checkout and the billing portal where seat
+  counts change.
+- the **audit log** (owners and admins): who joined, who invited whom, every
+  visibility flip, seat changes — the team's history, newest first.
 
 If you hit your plan's machine or session limit, the app tells you which cap
 you hit and how to request more — see the [FAQ](../faq/) on plans.

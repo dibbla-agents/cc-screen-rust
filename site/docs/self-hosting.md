@@ -116,6 +116,26 @@ to self-host — billing ships in the MIT repo behind the `multi-tenant` feature
 and is simply off without Stripe keys; paying for the hosted hub is paying to
 not run it yourself.
 
+### Teams on a self-hosted hub
+
+Teams (shared visibility, roles, pooled limits, the audit log) are part of
+multi-tenant mode — a hub without `CCHUB_DATABASE_URL` has no orgs and is
+unchanged. And Team **works fully without Stripe**: seats are just a number
+on the org, set by the operator CLI instead of a subscription — the in-app
+seat checkout simply doesn't render (`billing:false`), and everything else
+(invites, joining, visibility, pooled limits, audit) behaves identically.
+
+```sh
+cc-screen-hub org create <name> <owner-email>   # make a team (starts at 0 seats)
+cc-screen-hub org seats  <name-or-id> <n>       # set the seat count (activates it)
+cc-screen-hub org info   <name-or-id>           # seats, status, member list
+```
+
+The commands read `CCHUB_DATABASE_URL`, like `cc-screen-hub user …`. A team
+with 0 seats is dormant: it exists, but nobody can join and members keep
+their personal plans — so creating one never changes anyone's entitlements
+until you set seats.
+
 ## Docker
 
 Both images are published to GHCR on every release:
@@ -191,8 +211,12 @@ Hub (`~/.config/cc-screen-hub/web.env`):
 | `CCWEB_PASSWORD` / `CCWEB_API_TOKEN` | client auth gate |
 | `CCHUB_AGENT_TOKENS` | per-agent uplink tokens, `machine:token,…` (empty = open) |
 | `CCHUB_ALLOW_OPEN_UPLINK` | `1` → allow an empty `CCHUB_AGENT_TOKENS`. Required for any no-token run, including loopback. Trusted networks/dev only. |
-| `CCHUB_DATABASE_URL` | set → multi-tenant mode (accounts, enrollment, sharing) |
+| `CCHUB_DATABASE_URL` | set → multi-tenant mode (accounts, enrollment, sharing, teams) |
 | `CCHUB_PUBLIC_URL` | the hub's canonical public origin (used by `/activate` instructions, OAuth, the served installers) |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | multi-tenant only: turn on Stripe self-serve billing. Unset → billing is off and everything else works (plans/seats via the CLI) |
+| `STRIPE_PRICE_PRO_MONTHLY` / `STRIPE_PRICE_PRO_ANNUAL` | the Pro price ids (required if billing is on) |
+| `STRIPE_PRICE_TEAM_MONTHLY` / `STRIPE_PRICE_TEAM_ANNUAL` | the per-seat Team price ids. **Optional even with billing on**: unset → Pro-only billing, the Team checkout answers 400 and its UI doesn't render — teams themselves keep working (CLI seats) |
+| `STRIPE_PRICE_TEAM_FOUNDER` | optional founder-cohort per-seat price (like `STRIPE_PRICE_PRO_FOUNDER` for Pro) |
 | `CCWEB_ALLOWED_ORIGINS` | extra allowed browser Origin/Host values, comma-separated |
 | `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with client auth off |
 | `CCWEB_CSP` | override the embedded app's Content-Security-Policy |

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSharedMap, machineAccent, sharedOwner } from "./util";
+import { buildSharedMap, machineAccent, sharedEntry, sharedOwner, sharedVia } from "./util";
 import type { ReceivedShare } from "./api";
 
 // machineAccent backs the per-pane identity bar (proposal 0021). The contract:
@@ -75,5 +75,68 @@ describe("sharedOwner / buildSharedMap", () => {
     ]);
     expect(sharedOwner(map, "laptop", "claude-x")).toBe("sess@x.com");
     expect(sharedOwner(map, "laptop", "claude-y")).toBe("box@x.com");
+  });
+});
+
+// Team-origin grants (proposal 0065 Part B): a materialized team row marks the
+// whole box like an agent grant, but reports "team" via sharedVia and carries
+// the org name for the chip tooltip. A direct grant always wins the owner
+// string; team is reported only when that's all there is.
+describe("sharedVia / team grants", () => {
+  const share = (p: Partial<ReceivedShare>): ReceivedShare => ({
+    id: "x",
+    agentId: "a",
+    machine: "laptop",
+    kind: "agent",
+    permission: "use",
+    ownerEmail: "sam@example.com",
+    createdAt: 0,
+    ...p,
+  });
+  const teamRow = (p: Partial<ReceivedShare> = {}): ReceivedShare =>
+    share({ kind: "team", origin: "team", permission: "view", orgName: "acme-eng", ...p });
+
+  it("returns null for no map / an unshared machine", () => {
+    expect(sharedVia(null, "laptop", "s")).toBeNull();
+    expect(sharedVia(buildSharedMap([]), "laptop")).toBeNull();
+  });
+
+  it("carries the team flag + org name through buildSharedMap", () => {
+    const map = buildSharedMap([teamRow()]);
+    const e = sharedEntry(map, "laptop");
+    expect(e).toEqual({ owner: "sam@example.com", team: true, orgName: "acme-eng" });
+    expect(sharedVia(map, "laptop")).toBe("team");
+    // Any session on the box inherits the machine-wide team visibility.
+    expect(sharedVia(map, "laptop", "claude-x")).toBe("team");
+    expect(sharedOwner(map, "laptop", "claude-x")).toBe("sam@example.com");
+  });
+
+  it("reports 'direct' for an explicit share (origin absent = old hub)", () => {
+    const map = buildSharedMap([share({ kind: "agent" })]);
+    expect(sharedVia(map, "laptop")).toBe("direct");
+    const withOrigin = buildSharedMap([share({ kind: "agent", origin: "direct" })]);
+    expect(sharedVia(withOrigin, "laptop")).toBe("direct");
+  });
+
+  it("lets a direct grant win over a team grant, either insertion order", () => {
+    for (const rows of [
+      [share({ kind: "agent", ownerEmail: "direct@x.com" }), teamRow({ ownerEmail: "team@x.com" })],
+      [teamRow({ ownerEmail: "team@x.com" }), share({ kind: "agent", ownerEmail: "direct@x.com" })],
+    ]) {
+      const map = buildSharedMap(rows);
+      expect(sharedVia(map, "laptop")).toBe("direct");
+      expect(sharedOwner(map, "laptop")).toBe("direct@x.com");
+    }
+  });
+
+  it("keeps a direct session grant 'direct' on a team-visible machine", () => {
+    const map = buildSharedMap([
+      teamRow({ ownerEmail: "team@x.com" }),
+      share({ kind: "session", session: "claude-x", permission: "view", ownerEmail: "sess@x.com" }),
+    ]);
+    expect(sharedVia(map, "laptop", "claude-x")).toBe("direct");
+    expect(sharedOwner(map, "laptop", "claude-x")).toBe("sess@x.com");
+    // The rest of the box stays team-badged.
+    expect(sharedVia(map, "laptop", "claude-y")).toBe("team");
   });
 });

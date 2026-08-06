@@ -28,6 +28,11 @@
 #   HUB                      target hub base URL (default https://app.ccscreen.dev)
 #
 # ── Optional environment ──
+#   STRIPE_PRICE_TEAM_MONTHLY  test-mode Team per-seat price id (price_…). When
+#              set, one ADDITIVE check runs after the six (0065 Part F): team
+#              checkout quantity round-trips (items.data[0].quantity == 3 on the
+#              created subscription). Unset → the check is skipped gracefully;
+#              the six Pro checks are unaffected either way.
 #   CCHUB_DB   path to the hub's SQLite DB (for the criterion-17 "agents rows
 #              intact" SQL assert in step 6). Only reachable when this script runs
 #              ON the hub host; otherwise that sub-assert prints the exact query to
@@ -395,6 +400,61 @@ else
         This user has $agents_before. Enroll machines first (see e2e-saas-journey.sh's docker
         device flow), then a fresh approval must 402. Downgrade+402 path is exercised in the hub
         unit tests (0058 acceptance 5/9); this script asserts the plan-level downgrade above."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7 (additive, 0065 Part F): team checkout quantity round-trips. Runs ONLY when
+# a test-mode Team price is configured — a Pro-only hub skips it gracefully and
+# the six checks above are untouched. Full org/seat behavior is e2e-team.sh's
+# job; this asserts the one Stripe-side fact that script (Stripe-free) cannot:
+# a quantity-3 subscription on the Team price carries quantity 3 at Stripe.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -n "${STRIPE_PRICE_TEAM_MONTHLY:-}" ]; then
+  say "7 (team): team checkout quantity round-trips (seats=3)"
+  # The throwaway user is org-less (fresh account): make them a team owner.
+  torg="$(hub_req POST /api/orgs -b "$JAR" -H 'content-type: application/json' \
+            -d "{\"name\":\"e2e-team-$now\"}")"
+  torg_status="$(printf '%s' "$torg" | head -1)"
+  TORG_ID="$(printf '%s' "$torg" | tail -n +2 | jq -r '.id // empty' 2>/dev/null || true)"
+  if [ "$torg_status" = "200" ] && [ -n "$TORG_ID" ]; then
+    pass "created throwaway org ($TORG_ID)"
+  else
+    badfl "POST /api/orgs answered $torg_status (expected 200 with {id})"
+  fi
+  # The team arm mints a checkout session (owner/admin, seat floor 3).
+  tck="$(hub_req POST /api/billing/checkout -b "$JAR" -H 'content-type: application/json' \
+           -d '{"price":"team-monthly","seats":3}')"
+  tck_status="$(printf '%s' "$tck" | head -1)"
+  tck_url="$(printf '%s' "$tck" | tail -n +2 | jq -r '.url // empty' 2>/dev/null || true)"
+  case "$tck_status" in
+    2*) case "$tck_url" in
+          *stripe.com*) pass "team checkout returned a Stripe URL ($tck_status)" ;;
+          *) badfl "team checkout 2xx but url is not a Stripe URL: $tck_url" ;;
+        esac ;;
+    *) badfl "POST /api/billing/checkout (team-monthly) answered $tck_status (expected 2xx with {url})" ;;
+  esac
+  # The hosted page can't be driven by curl (same as step 2) — build the
+  # equivalent subscription directly with quantity 3 and assert it round-trips.
+  # The customer still carries step 5's failing card; restore the good one first.
+  stripe_api POST "/v1/customers/$CUS" \
+    -d 'invoice_settings[default_payment_method]=pm_card_visa' >/dev/null \
+    || badfl "could not restore the working test card for the team subscription"
+  TEAM_SUB_JSON="$(stripe_api POST /v1/subscriptions \
+                     -d "customer=$CUS" \
+                     -d "items[0][price]=$STRIPE_PRICE_TEAM_MONTHLY" \
+                     -d "items[0][quantity]=3")"
+  TEAM_SUB="$(printf '%s' "$TEAM_SUB_JSON" | jq -r '.id // empty')"
+  team_qty="$(printf '%s' "$TEAM_SUB_JSON" | jq -r '.items.data[0].quantity // empty')"
+  if [ "$team_qty" = "3" ]; then
+    pass "team subscription quantity round-trips (items.data[0].quantity == 3)"
+  else
+    badfl "team quantity did not round-trip: got '$team_qty' (sub=$TEAM_SUB): $(printf '%s' "$TEAM_SUB_JSON" | jq -c '.error // .status' 2>/dev/null)"
+  fi
+  # (The subscription rides the same test clock via $CUS, so the existing
+  # teardown — deleting the clock — cascades it too. The org row is removed
+  # with the account: `cc-screen-hub user delete` on the hub host.)
+else
+  stub "team-checkout quantity check skipped (STRIPE_PRICE_TEAM_MONTHLY unset — Pro-only hub). Set a test-mode Team price id to enable it (0065 Part F)."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

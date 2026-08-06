@@ -1995,11 +1995,17 @@ export default function App() {
     const onActivate = pathname === "/activate";
     // /invite/<token> — the email-invite landing (proposal 0056 C4). Handles
     // its own unauthenticated state (AuthScreen with a hint + prefill).
+    // /org-invite/<token> — the team-invite landing (proposal 0065 C4), the
+    // same component with org-specific copy + the consent line.
     const inviteToken = pathname.startsWith("/invite/") ? pathname.slice("/invite/".length) : "";
-    if (inviteToken) {
+    const orgInviteToken = pathname.startsWith("/org-invite/")
+      ? pathname.slice("/org-invite/".length)
+      : "";
+    if (inviteToken || orgInviteToken) {
       return (
         <InviteLanding
-          token={inviteToken}
+          token={inviteToken || orgInviteToken}
+          org={!!orgInviteToken}
           me={me}
           onAuthed={refetchMe}
           onDone={() => {
@@ -2059,6 +2065,9 @@ export default function App() {
         <Dashboard
           me={me}
           billingPending={billingPending}
+          // Membership changes (join/leave/start a team, proposal 0065 C) flip
+          // the /api/me plan+org blocks — re-read so the cards catch up.
+          onMeChanged={refetchMe}
           // Per-machine entry into the assistant update (0049): the dashboard is
           // a full-screen view, so hand back to the terminal with the flow open
           // and scoped to that machine.
