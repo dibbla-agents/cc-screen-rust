@@ -41,6 +41,31 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Truncate to `max` display *columns* (unicode-width), appending `…` when
+/// cut. Unlike `truncate` above this stays aligned for double-width (CJK)
+/// text, where char count and rendered columns diverge — used by the grid
+/// action menu's fixed columns (0062b) so a wide name can't push the row past
+/// the panel border.
+pub fn truncate_w(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let budget = max.saturating_sub(1); // reserve one column for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 /// The last two segments of an absolute path as a `parent/leaf` breadcrumb
 /// (proposal 0025), falling back to `name` when there's no usable cwd. A far
 /// better disambiguator than the bare leaf for sessions auto-named after the dir
@@ -85,6 +110,17 @@ mod tests {
     fn truncate_marks_cut() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn truncate_w_counts_display_columns() {
+        // ASCII: identical to `truncate`.
+        assert_eq!(truncate_w("hello", 10), "hello");
+        assert_eq!(truncate_w("hello world", 5), "hell…");
+        // CJK chars are 2 columns wide: "画面共有" is 4 chars but 8 columns, so
+        // a 4-column budget holds one char plus the ellipsis.
+        assert_eq!(truncate_w("画面共有", 8), "画面共有");
+        assert_eq!(truncate_w("画面共有", 4), "画…");
     }
 
     #[test]

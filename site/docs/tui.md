@@ -114,6 +114,15 @@ typing the list flattens to ranked order and each row shows its machine
 inline. The selected session's full 2–3 sentence AI summary appears above the
 status bar.
 
+The grid's **action menu** (`Ctrl-A d`) works the same way: start typing and
+the menu filters and re-ranks live — sessions rank exactly like the switcher,
+and the action rows match on aliases too (type "split" for the layout picker,
+"detach" to clear the box, "exit" to quit), with a session name hit always
+winning over an action. The same rules apply: arrows move, `Enter` selects,
+`Esc` clears the query first and closes second, and multi-machine hubs show
+the same hostname headers at rest and machine chips while filtering. Putting
+a session into a box is "`Ctrl-A d`, type 3 letters, Enter".
+
 Because typing searches, the switcher's commands live on Ctrl-chords:
 
 - `↑`/`↓` move · `Enter` attach the selected (top) match
@@ -125,7 +134,10 @@ Because typing searches, the switcher's commands live on Ctrl-chords:
 
 Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 
-- `Ctrl-A d` — open the action menu (attach / rename / clear / layout)
+- `Ctrl-A d` — open the action menu (attach / rename / clear / layout) —
+  search-first, see above
+- `Ctrl-A s` — open the full-screen switcher to pick a session for the
+  focused box
 - `Ctrl-A` then a digit — switch layout
 - `Ctrl-A g` — jump to a session that just went ready
 - `Ctrl-A [` — enter **scrollback** mode on the focused pane (`PgUp`/`PgDn`,

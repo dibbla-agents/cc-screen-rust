@@ -1064,6 +1064,212 @@ async fn switcher_machine_headers_and_chips() {
     );
 }
 
+// ── 13. Search-first grid action menu (proposal 0062b) ──────────────────────
+//
+// The boot flow opens the grid with the ACTION MENU already attached to the
+// first session, so these scenarios start typing straight into the boot menu —
+// the menu mirror of the §12 switcher scenarios.
+
+/// Typing in the menu filters and ranks name > meta: a session whose *name*
+/// matches sorts above one whose *headline* matches, and Enter fills the box
+/// with the top match.
+#[tokio::test]
+async fn menu_type_to_filter_ranks_name_over_meta() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut meta_hit = sess("zzz");
+    meta_hit.headline = Some("findme related work".into());
+    // The meta-hit first: boot attaches box 0 to zzz, so the Enter-fill below
+    // observably switches the pane to findme.
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![meta_hit, sess("findme")]).await;
+    await_hub(&hub, None, |l| l.len() == 2).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    assert!(
+        h.pump_until(|t| t.contains("findme") && t.contains("zzz")).await,
+        "boot menu lists both sessions; got:\n{}",
+        h.text()
+    );
+
+    h.type_str("findme").await;
+    let t = h.text();
+    // The name-tier hit ranks above the headline-only (META-tier) hit. Skip the
+    // query line (it echoes the typed text with the "›" prefix); zzz's row also
+    // contains "findme" via its rendered headline, so if the ranking were wrong
+    // the first "findme" line would BE zzz's row and the assert would fail.
+    let lines: Vec<&str> = t.lines().collect();
+    let name_row = lines
+        .iter()
+        .position(|l| l.contains("findme") && !l.contains('›'))
+        .expect("name row visible");
+    let meta_row = lines.iter().position(|l| l.contains("zzz")).expect("meta row visible");
+    assert!(name_row < meta_row, "name match ranks above meta match:\n{t}");
+
+    // Enter fills the target box with the top-ranked match.
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxA:findme")).await,
+        "Enter fills the box with the top match; got:\n{}",
+        h.text()
+    );
+}
+
+/// Menu Esc is the clear-then-close two-step, and the former command letters
+/// type into the query instead of triggering: `n` must not open the
+/// new-session form and `q` must not quit.
+#[tokio::test]
+async fn menu_esc_clears_then_closes() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    assert!(
+        h.pump_until(|t| t.contains("alpha") && t.contains("beta")).await,
+        "boot menu lists both sessions; got:\n{}",
+        h.text()
+    );
+
+    // Bare letters only type. `n` must not open the new-session form (its
+    // lowercase " new session " title is distinct from the menu's "New session"
+    // action row) and `q` must not quit.
+    h.key(KeyCode::Char('n')).await;
+    assert!(!h.text().contains("new session"), "bare n only types; got:\n{}", h.text());
+    h.key(KeyCode::Char('q')).await;
+    assert!(!h.app.should_quit(), "q must not quit the search-first menu");
+
+    // First Esc: clears the query, the menu stays open with the full list back.
+    h.key(KeyCode::Esc).await;
+    let t = h.text();
+    assert!(
+        t.contains("New session")
+            && t.contains("alpha")
+            && t.contains("beta")
+            && t.contains("type to search"),
+        "Esc with a query only clears it (menu still open, full list back); got:\n{t}"
+    );
+
+    // Second Esc: closes the menu — the attached pane's snapshot shows and the
+    // action rows are gone.
+    h.key(KeyCode::Esc).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxA:alpha") && !t.contains("New session")).await,
+        "Esc on an empty query closes the menu; got:\n{}",
+        h.text()
+    );
+}
+
+/// With two machines the resting menu groups the sessions under hostname
+/// headers (no chips); filtering suppresses the headers and puts the machine
+/// chip on the surviving row, and Enter routes the fill to the owning machine.
+#[tokio::test]
+async fn menu_machine_headers_and_chips() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _a = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+    let _b = spawn_scriptable_agent(&hub, "boxB", None, vec![sess("bravo")]).await;
+    await_hub(&hub, None, |list| {
+        list.iter().any(|s| s.machine == "boxA") && list.iter().any(|s| s.machine == "boxB")
+    })
+    .await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    assert!(
+        h.pump_until(|t| t.contains("alpha") && t.contains("bravo")).await,
+        "boot menu lists both machines' sessions; got:\n{}",
+        h.text()
+    );
+
+    // Resting: per-machine header rows (the fake registers hostname == id) — a
+    // header line holds the hostname alone, not a session name (the pane's
+    // "SNAP:boxA:alpha" line carries both, so it can't satisfy this) — and no
+    // machine chips anywhere.
+    let t = h.text();
+    let lines: Vec<&str> = t.lines().collect();
+    assert!(
+        lines.iter().any(|l| l.contains("boxA") && !l.contains("alpha")),
+        "boxA header row missing:\n{t}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("boxB") && !l.contains("bravo")),
+        "boxB header row missing:\n{t}"
+    );
+    assert!(!t.contains('['), "no machine chips at rest:\n{t}");
+
+    // Filtering: headers suppressed, the surviving row carries the chip.
+    h.type_str("bravo").await;
+    let t = h.text();
+    assert!(t.contains("[boxB]"), "machine chip while filtering:\n{t}");
+    assert!(
+        !t.lines().any(|l| l.contains("boxA") && !l.contains("alpha")),
+        "boxA header suppressed while filtering:\n{t}"
+    );
+    assert!(!t.contains("[boxA]"), "no chip for the filtered-out machine:\n{t}");
+
+    // Enter fills the box with the match, routed to its owning machine.
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxB:bravo")).await,
+        "the fill routes to boxB; got:\n{}",
+        h.text()
+    );
+}
+
+/// The web `ACTION_TERMS` aliases surface action rows from a query: "split" is
+/// an alias of Change layout, and Enter on it opens the layout palette.
+#[tokio::test]
+async fn menu_action_alias_split() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    assert!(h.pump_until(|t| t.contains("alpha")).await, "boot menu open");
+
+    // "split" fuzzy-hits only the Change-layout aliases (not "alpha", not the
+    // other actions), so the ranked list is that single row with the cursor on
+    // it.
+    h.type_str("split").await;
+    let t = h.text();
+    assert!(t.contains("Change layout"), "the alias surfaces Change layout:\n{t}");
+    assert!(!t.contains("New session"), "non-matching action rows drop out:\n{t}");
+
+    // Enter activates it → the layout palette (its own hint line renders).
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("1-6 jump")).await,
+        "Enter on the alias hit opens the layout palette; got:\n{}",
+        h.text()
+    );
+}
+
+/// `^A s` from the attached grid opens the full-screen switcher scoped to the
+/// focused box: type a name, Enter fills that box (commit 5f06041).
+#[tokio::test]
+async fn grid_ctrl_a_s_opens_switcher() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    h.key(KeyCode::Esc).await; // close the boot menu → the attached grid
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    // ^A s → the search-first switcher (its query line shows the placeholder).
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('s')).await;
+    assert!(
+        h.pump_until(|t| t.contains("type to search") && t.contains("alpha") && t.contains("beta"))
+            .await,
+        "the full-screen switcher renders; got:\n{}",
+        h.text()
+    );
+
+    // Type-to-filter + Enter fills the focused box with the match.
+    h.type_str("beta").await;
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxA:beta")).await,
+        "Enter fills the focused box with beta; got:\n{}",
+        h.text()
+    );
+}
+
 // ── narrow-terminal boot (terminal-environments note) ───────────────────────
 
 #[tokio::test]

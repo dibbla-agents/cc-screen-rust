@@ -10,9 +10,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::FormField;
+use crate::app::{FormField, MenuItem, MenuRow};
 use crate::client::DirEntry;
-use crate::ui::util::truncate;
+use crate::ui::util::{dir_crumb, truncate, truncate_w};
 
 const PANEL_BG: Color = Color::Rgb(20, 28, 38);
 
@@ -338,16 +338,23 @@ pub fn layout_palette(f: &mut Frame, highlight: usize) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-/// What the unified grid action menu needs to render. `selected` indexes the
-/// same flat list as `app::menu_items`: 0 = Change layout, 1 = New session,
-/// `2..2+n` = the sessions, `2+n` = Clear this box, `3+n` = Quit.
+/// What the unified grid action menu needs to render (0062b, search-first).
+/// `rows` is the precomputed display list (`App::menu_rows` — resting order or
+/// filtered+ranked); `selected_row` is the ROW index of the selected selectable
+/// row (headers already skipped by the caller). The overlay stays dumb: no
+/// scoring, no App access.
 pub struct MenuView<'a> {
+    pub rows: &'a [MenuRow],
     pub sessions: &'a [SessionInfo],
-    pub selected: usize,
+    /// The menu's type-to-search query (rendered in the query line).
+    pub query: &'a str,
+    pub selected_row: Option<usize>,
+    /// Per-session machine chip text, parallel to `sessions`. Empty slice (or
+    /// an empty string) = no chip; non-empty only while filtering in
+    /// multi-machine hub mode (headers cover the resting state).
+    pub chips: &'a [String],
     pub box_num: usize,
     pub box_count: usize,
-    /// Whether the box holds a session — gates the Rename row (0059 C1).
-    pub can_rename: bool,
 }
 
 fn menu_marker(sel: bool) -> Span<'static> {
@@ -357,14 +364,25 @@ fn menu_marker(sel: bool) -> Span<'static> {
     )
 }
 
+/// The action rows' glyph + label, shared by the resting and filtered lists.
+fn menu_action_face(item: MenuItem) -> (&'static str, &'static str) {
+    match item {
+        MenuItem::ChangeLayout => ("▦", "Change layout"),
+        MenuItem::NewSession => ("✚", "New session"),
+        MenuItem::RenameSession => ("✎", "Rename session"),
+        MenuItem::ClearBox => ("✕", "Clear this box"),
+        MenuItem::Quit => ("⏻", "Quit ccs"),
+    }
+}
+
 /// The unified grid action menu — a centered list over the grid (so the boxes
-/// stay visible). Change layout / New session sit above the session list (the
-/// marker starts on the box's current session), with Clear this box / Quit
-/// below. Reached via `Ctrl-A d` or Enter/click on an empty box.
+/// stay visible), search-first per 0062b. At rest: Change layout / New session
+/// above the (machine-grouped) session list, Rename / Clear this box / Quit
+/// below. Typing filters: the whole ranked list becomes one windowed region.
+/// Reached via `Ctrl-A d` or Enter/click on an empty box.
 pub fn grid_menu(f: &mut Frame, v: &MenuView) {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     const MAX_SESS: usize = 8;
-    let n = v.sessions.len();
-    let shown = n.min(MAX_SESS);
     let sel_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
     let gray = Style::default().fg(Color::Gray);
@@ -374,84 +392,238 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
     let area_w = f.area().width;
     let w = (area_w as u32 * 3 / 4).max(40).min(area_w as u32) as u16;
     let inner_w = w.saturating_sub(2) as usize; // panel borders take one col each side
+    let inner_h = f.area().height.saturating_sub(2) as usize; // …and one row each
 
-    let action = |flat: usize, glyph: &str, label: &str| {
-        let sel = flat == v.selected;
-        Line::from(vec![
-            menu_marker(sel),
-            Span::styled(format!("{glyph}  {label}"), if sel { sel_style } else { gray }),
-        ])
-    };
     // A divider that spans the inner width (inset one column each side).
     let sep = || Line::from(Span::styled(format!(" {} ", "─".repeat(inner_w.saturating_sub(2))), dim));
 
-    // Size the name column to the longest name so names show in full; the tool
-    // column is fixed and the preview takes whatever's left (it's the croppable
-    // one). lead = marker (2) + attached dot (2) + ready marker (2); the two
-    // inter-column gaps add 2 more.
+    // The session rows' display name: the operator label (0059 C1) when set,
+    // else the folder breadcrumb — web `displayName` parity with the switcher.
+    let named = |s: &SessionInfo| match s.label.as_deref() {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => dir_crumb(&s.cwd, &s.name),
+    };
+
+    // Size the name column to the longest display name so names show in full;
+    // the tool column is fixed and the trailing summary takes whatever's left
+    // (it's the croppable one). lead = marker (2) + attached dot (2) + ready
+    // marker (2); the two inter-column gaps add 2 more. All column math is in
+    // display COLUMNS (unicode-width), not chars — a double-width CJK name
+    // would otherwise misalign the tool column and overrun the border.
     const TOOL_W: usize = 7;
     let lead = 6usize;
-    let longest = v.sessions.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
-    let name_cap = inner_w.saturating_sub(lead + 2 + TOOL_W + 8).max(12); // keep ≥8 for preview
+    let longest = v.sessions.iter().map(|s| named(s).width()).max().unwrap_or(0);
+    let name_cap = inner_w.saturating_sub(lead + 2 + TOOL_W + 8).max(12); // keep ≥8 for the tail
     let name_w = longest.clamp(12, name_cap);
     let preview_w = inner_w.saturating_sub(lead + name_w + 2 + TOOL_W);
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(action(0, "▦", "Change layout"));
-    lines.push(action(1, "✚", "New session"));
-    lines.push(sep());
-    if n == 0 {
-        lines.push(Line::from(Span::styled("     no sessions", dim)));
-    } else {
-        // Window the session range around the cursor when it's inside it.
-        let sel_sess = v.selected.checked_sub(2).filter(|&i| i < n);
-        let start = match sel_sess {
-            Some(i) => i.saturating_sub(MAX_SESS - 1).min(n - shown),
+    // Render one display row; `ri` is its index into `v.rows` (what
+    // `selected_row` addresses).
+    let render_row = |ri: usize, row: &MenuRow| -> Line<'static> {
+        let sel = v.selected_row == Some(ri);
+        match row {
+            MenuRow::Action(item) => {
+                let (glyph, label) = menu_action_face(*item);
+                Line::from(vec![
+                    menu_marker(sel),
+                    Span::styled(format!("{glyph}  {label}"), if sel { sel_style } else { gray }),
+                ])
+            }
+            // A per-machine group header (resting multi-machine hub mode) —
+            // non-selectable, styled like the switcher's.
+            MenuRow::Header { label, online } => {
+                let mut spans = vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} ", truncate_w(label, inner_w.saturating_sub(14).max(4))),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if !online {
+                    spans.push(Span::styled(
+                        "· offline",
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                    ));
+                }
+                Line::from(spans)
+            }
+            MenuRow::Session(i) => {
+                let s = &v.sessions[*i];
+                let dot = if s.attached { "●" } else { "○" };
+                // A ready/working indicator (0018 §6), mirroring the switcher:
+                // an amber ● marks a session still producing output, absent
+                // once it's waiting (ready). So the durable menu agrees with
+                // the toast about who is ready — not just who is attached.
+                let work = if s.waiting { "  " } else { "● " };
+                let mut spans = vec![
+                    menu_marker(sel),
+                    Span::styled(
+                        format!("{dot} "),
+                        Style::default().fg(if sel { Color::Cyan } else { Color::DarkGray }),
+                    ),
+                    Span::styled(
+                        work,
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    {
+                        // Width-aware padding: `{:<name_w$}` pads by chars, so a
+                        // CJK name would leave the column ~2x too wide.
+                        let name = truncate_w(&named(s), name_w);
+                        let pad = " ".repeat(name_w.saturating_sub(name.width()));
+                        Span::styled(
+                            format!("{name}{pad} "),
+                            if sel { sel_style } else { gray },
+                        )
+                    },
+                    Span::styled(format!("{:<TOOL_W$} ", truncate(&s.tool, TOOL_W)), dim),
+                ];
+                let mut avail = preview_w;
+                // The inline machine chip (filtering, multi-machine): the group
+                // headers are suppressed, so the row itself says where the
+                // session lives. The chip must FIT the tail budget — clamp it
+                // (12 stays the aesthetic cap) and skip it entirely when there
+                // isn't room for "[x] ", else the row overflows and gets
+                // hard-clipped at the panel border (bracket and summary lost).
+                let chip = v.chips.get(*i).map(String::as_str).unwrap_or("");
+                if !chip.is_empty() && avail >= 6 {
+                    let host = truncate_w(chip, avail.saturating_sub(3).min(12));
+                    avail = avail.saturating_sub(host.width() + 3);
+                    spans.push(Span::styled(format!("[{host}] "), dim));
+                }
+                // Trailing summary (0062 Part C, web-parity emphasis): the LLM
+                // headline in the summary grey; the raw preview fallback
+                // visibly raw — darker + italic; neither → "—".
+                if avail > 1 {
+                    let (tail, style) = match s.headline.as_deref() {
+                        Some(h) if !h.is_empty() => (h, Style::default().fg(Color::Gray)),
+                        _ if !s.preview.is_empty() => (
+                            s.preview.as_str(),
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        ),
+                        _ => ("—", Style::default().fg(Color::DarkGray)),
+                    };
+                    spans.push(Span::styled(truncate_w(tail, avail), style));
+                }
+                Line::from(spans)
+            }
+        }
+    };
+
+    // Window `region` (rows starting at absolute index `base`) to `cap` rows,
+    // keeping the cursor in view — the MAX_SESS windowing generalized to any
+    // contiguous region (the middle at rest, the whole list while filtering).
+    // `sel_line` records the pushed line index of the selected row so the
+    // final render can scroll it into view on a too-short terminal.
+    let windowed = |lines: &mut Vec<Line<'static>>,
+                    sel_line: &mut Option<usize>,
+                    base: usize,
+                    region: &[MenuRow],
+                    cap: usize| {
+        let shown = region.len().min(cap.max(1));
+        let sel = v.selected_row.and_then(|r| r.checked_sub(base)).filter(|&i| i < region.len());
+        let start = match sel {
+            Some(i) => i.saturating_sub(shown.saturating_sub(1)).min(region.len() - shown),
             None => 0,
         };
-        for (i, s) in v.sessions.iter().enumerate().skip(start).take(shown) {
-            let sel = 2 + i == v.selected;
-            let dot = if s.attached { "●" } else { "○" };
-            // A ready/working indicator (0018 §6), mirroring the switcher: an
-            // amber ● marks a session still producing output, absent once it's
-            // waiting (ready). So the durable menu agrees with the toast about
-            // who is ready — not just who is attached.
-            let work = if s.waiting { "  " } else { "● " };
-            let mut spans = vec![
-                menu_marker(sel),
-                Span::styled(
-                    format!("{dot} "),
-                    Style::default().fg(if sel { Color::Cyan } else { Color::DarkGray }),
-                ),
-                Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    format!("{:<name_w$} ", truncate(&s.name, name_w)),
-                    if sel { sel_style } else { gray },
-                ),
-                Span::styled(format!("{:<TOOL_W$} ", truncate(&s.tool, TOOL_W)), dim),
-            ];
-            if preview_w > 0 {
-                spans.push(Span::styled(truncate(&s.preview, preview_w), dim));
+        for (j, row) in region.iter().enumerate().skip(start).take(shown) {
+            if v.selected_row == Some(base + j) {
+                *sel_line = Some(lines.len());
             }
-            lines.push(Line::from(spans));
+            lines.push(render_row(base + j, row));
         }
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line: Option<usize> = None;
+
+    // The query line (mirrors the switcher's `render_query`): the always-visible
+    // search box, truncating from the LEFT so the tail stays visible.
+    let mut qspans = vec![Span::styled(" › ", Style::default().fg(Color::Cyan))];
+    if v.query.is_empty() {
+        qspans.push(Span::styled(
+            "type to search",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ));
+    } else {
+        // Left-truncate by display columns (not chars), so a wide char in the
+        // query can't push the cursor glyph past the border.
+        let avail = inner_w.saturating_sub(5).max(1); // prefix + cursor
+        let chars: Vec<char> = v.query.chars().collect();
+        let mut qw: usize = chars.iter().map(|c| c.width().unwrap_or(0)).sum();
+        let mut start = 0usize;
+        while qw > avail && start < chars.len() {
+            qw -= chars[start].width().unwrap_or(0);
+            start += 1;
+        }
+        let shown: String = chars[start..].iter().collect();
+        qspans.push(Span::styled(shown, Style::default().add_modifier(Modifier::BOLD)));
+        qspans.push(Span::styled("▏", Style::default().fg(Color::Cyan)));
     }
-    lines.push(sep());
-    // Rename sits between the session list and Clear this box, but only when the
-    // box holds a session (0059 C1) — matching `app::menu_items(_, can_rename)`.
-    let mut flat = 2 + n;
-    if v.can_rename {
-        lines.push(action(flat, "✎", "Rename session"));
-        flat += 1;
+    lines.push(Line::from(qspans));
+
+    if v.query.trim().is_empty() {
+        // Resting: the two create-ish actions pinned on top, the (windowed)
+        // session/header region between separators, the tail actions pinned
+        // below — `App::menu_rows` guarantees this shape.
+        let top = 2.min(v.rows.len());
+        let bottom_start = v
+            .rows
+            .iter()
+            .rposition(|r| !matches!(r, MenuRow::Action(_)))
+            .map(|i| i + 1)
+            .unwrap_or(top);
+        // The mid window gets whatever height the fixed chrome (query line,
+        // pinned action groups, separators, footer) leaves — capped at
+        // MAX_SESS for aesthetics — so a short terminal shrinks the session
+        // region instead of clipping the tail actions and the hint off the
+        // panel bottom.
+        let chrome = 1 + top + 2 + (v.rows.len() - bottom_start) + 2;
+        let cap = inner_h.saturating_sub(chrome).clamp(1, MAX_SESS);
+        for (ri, row) in v.rows.iter().enumerate().take(top) {
+            if v.selected_row == Some(ri) {
+                sel_line = Some(lines.len());
+            }
+            lines.push(render_row(ri, row));
+        }
+        lines.push(sep());
+        let mid = &v.rows[top..bottom_start];
+        if mid.is_empty() {
+            lines.push(Line::from(Span::styled("     no sessions", dim)));
+        } else {
+            windowed(&mut lines, &mut sel_line, top, mid, cap);
+        }
+        lines.push(sep());
+        for (ri, row) in v.rows.iter().enumerate().skip(bottom_start) {
+            if v.selected_row == Some(ri) {
+                sel_line = Some(lines.len());
+            }
+            lines.push(render_row(ri, row));
+        }
+    } else if v.rows.is_empty() {
+        lines.push(Line::from(Span::styled("     no matches — esc to clear", dim)));
+    } else {
+        // Filtering: one flat ranked region (actions and sessions interleaved
+        // by score), windowed around the cursor. Height-adaptive like the
+        // resting mid region (chrome here is just the query line + footer).
+        let cap = inner_h.saturating_sub(3).clamp(1, MAX_SESS);
+        windowed(&mut lines, &mut sel_line, 0, v.rows, cap);
     }
-    lines.push(action(flat, "✕", "Clear this box"));
-    lines.push(action(flat + 1, "⏻", "Quit ccs"));
+
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" ↑↓ move · ⏎ select · esc cancel", dim)));
+    lines.push(Line::from(Span::styled(" type to search · ↑↓ · ⏎ select · esc", dim)));
 
     let h = lines.len() as u16 + 2;
     let inner = panel(f, centered(f.area(), w, h), &format!(" box {}/{} ", v.box_num, v.box_count));
-    f.render_widget(Paragraph::new(lines), inner);
+    // Last-resort scroll: `centered` clamps the panel to the terminal, so on a
+    // very short screen lines still fall off the bottom — scroll the SELECTED
+    // row into view rather than leave an invisible row actionable (Enter
+    // resolves through the rows regardless of what's rendered).
+    let view_h = inner.height as usize;
+    let scroll = match sel_line {
+        Some(sl) if view_h > 0 && sl >= view_h => (sl + 1 - view_h) as u16,
+        _ => 0,
+    };
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
 #[cfg(test)]
@@ -494,12 +666,34 @@ mod tests {
         }
     }
 
+    /// The resting row list `App::menu_rows` builds for `sessions` (no headers,
+    /// direct mode, no rename) — the shape the overlay contract relies on.
+    fn resting_rows(n: usize) -> Vec<MenuRow> {
+        let mut rows = vec![MenuRow::Action(MenuItem::ChangeLayout), MenuRow::Action(MenuItem::NewSession)];
+        rows.extend((0..n).map(MenuRow::Session));
+        rows.push(MenuRow::Action(MenuItem::ClearBox));
+        rows.push(MenuRow::Action(MenuItem::Quit));
+        rows
+    }
+
     #[test]
     fn grid_menu_lists_actions_and_sessions() {
         let list = vec![sess("claude-a"), sess("codex-b")];
-        // selected = 2 → the first session is highlighted.
+        let rows = resting_rows(2);
+        // selected_row = 2 → the first session row is highlighted.
         let s = render_to(72, 18, |f| {
-            grid_menu(f, &MenuView { sessions: &list, selected: 2, box_num: 2, box_count: 4, can_rename: false })
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "",
+                    selected_row: Some(2),
+                    chips: &[],
+                    box_num: 2,
+                    box_count: 4,
+                },
+            )
         });
         assert!(s.contains("box 2/4"), "{s}");
         assert!(s.contains("Change layout"), "{s}");
@@ -509,6 +703,7 @@ mod tests {
         assert!(s.contains("claude-a"), "{s}");
         assert!(s.contains("codex-b"), "{s}");
         assert!(s.contains('▸'), "selection marker: {s}");
+        assert!(s.contains("type to search"), "query placeholder: {s}");
     }
 
     #[test]
@@ -519,24 +714,197 @@ mod tests {
         busy.waiting = false;
         let mut ready = sess("ready");
         ready.waiting = true;
-        let s = render_to(72, 16, |f| {
-            grid_menu(f, &MenuView { sessions: &[busy], selected: 1, box_num: 1, box_count: 1, can_rename: false })
-        });
+        let rows = resting_rows(1);
+        fn view<'a>(rows: &'a [MenuRow], list: &'a [SessionInfo]) -> MenuView<'a> {
+            MenuView {
+                rows,
+                sessions: list,
+                query: "",
+                selected_row: Some(1),
+                chips: &[],
+                box_num: 1,
+                box_count: 1,
+            }
+        }
+        let busy = [busy];
+        let s = render_to(72, 16, |f| grid_menu(f, &view(&rows, &busy)));
         assert!(s.contains('●'), "busy row should show the working marker: {s}");
-        let s = render_to(72, 16, |f| {
-            grid_menu(f, &MenuView { sessions: &[ready], selected: 1, box_num: 1, box_count: 1, can_rename: false })
-        });
+        let ready = [ready];
+        let s = render_to(72, 16, |f| grid_menu(f, &view(&rows, &ready)));
         assert!(!s.contains('●'), "ready/waiting row should not show the working marker: {s}");
     }
 
     #[test]
     fn grid_menu_empty_still_shows_actions() {
+        let rows = resting_rows(0);
         let s = render_to(72, 14, |f| {
-            grid_menu(f, &MenuView { sessions: &[], selected: 1, box_num: 1, box_count: 1, can_rename: false })
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &[],
+                    query: "",
+                    selected_row: Some(1),
+                    chips: &[],
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
         });
         assert!(s.contains("no sessions"), "{s}");
         assert!(s.contains("New session"), "{s}");
         assert!(s.contains("Quit ccs"), "{s}");
+    }
+
+    #[test]
+    fn grid_menu_filtering_renders_ranked_rows_query_and_chip() {
+        // Filtering (0062b): the query line shows the typed text, the ranked
+        // rows interleave sessions and actions with no separators pinning, the
+        // session name uses the label/dir-crumb naming, and the machine chip
+        // rides the row.
+        let mut s0 = sess("claude-a");
+        s0.label = Some("My Feature".into());
+        let list = [s0];
+        let rows = vec![MenuRow::Session(0), MenuRow::Action(MenuItem::NewSession)];
+        let chips = vec!["hostA".to_string()];
+        let s = render_to(80, 14, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "fea",
+                    selected_row: Some(0),
+                    chips: &chips,
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("› fea"), "typed query missing: {s}");
+        assert!(s.contains("My Feature"), "label naming missing: {s}");
+        assert!(s.contains("[hostA]"), "machine chip missing: {s}");
+        assert!(s.contains("New session"), "ranked action row missing: {s}");
+        assert!(!s.contains("Change layout"), "dropped rows must not render: {s}");
+    }
+
+    #[test]
+    fn grid_menu_short_terminal_keeps_the_selection_visible() {
+        // 40x10, 8 sessions, cursor on Quit (the pinned tail): the mid window
+        // shrinks to the height the chrome leaves, and the panel scrolls the
+        // selected row into view — an invisible row would still be actionable.
+        let list: Vec<_> = (0..8).map(|i| sess(&format!("sess-{i}"))).collect();
+        let rows = resting_rows(8);
+        let s = render_to(40, 10, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "",
+                    selected_row: Some(rows.len() - 1),
+                    chips: &[],
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("Quit ccs"), "selected tail action visible: {s}");
+        assert!(s.contains('▸'), "selection marker visible: {s}");
+        // Even shorter (30x6): the scroll fallback still brings Quit in view.
+        let s = render_to(30, 6, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "",
+                    selected_row: Some(rows.len() - 1),
+                    chips: &[],
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("Quit ccs"), "scrolled into view: {s}");
+        assert!(s.contains('▸'), "selection marker visible: {s}");
+    }
+
+    #[test]
+    fn grid_menu_chip_clamps_to_the_tail_budget() {
+        // 40 cols with a long name leaves an 8-column tail; the fixed 12-char
+        // chip cap would overflow past the border (losing its bracket), so the
+        // chip clamps to what fits.
+        let list = [sess("a-very-long-session-name")];
+        let rows = vec![MenuRow::Session(0)];
+        let chips = vec!["mac-studio-ubuntu".to_string()];
+        let s = render_to(40, 12, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "q",
+                    selected_row: Some(0),
+                    chips: &chips,
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("[mac-…]"), "clamped chip keeps its closing bracket: {s}");
+    }
+
+    #[test]
+    fn grid_menu_zero_matches_shows_hint() {
+        let list = [sess("claude-a")];
+        let s = render_to(72, 12, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &[],
+                    sessions: &list,
+                    query: "zzz",
+                    selected_row: None,
+                    chips: &[],
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("no matches"), "{s}");
+        assert!(!s.contains("Quit ccs"), "dropped actions must not render: {s}");
+    }
+
+    #[test]
+    fn grid_menu_headers_render_like_the_switcher() {
+        // Resting multi-machine hub mode: non-selectable hostname headers with
+        // the offline marker, between the pinned action groups.
+        let list = [sess("claude-a")];
+        let rows = vec![
+            MenuRow::Action(MenuItem::ChangeLayout),
+            MenuRow::Action(MenuItem::NewSession),
+            MenuRow::Header { label: "hostB".into(), online: false },
+            MenuRow::Session(0),
+            MenuRow::Action(MenuItem::ClearBox),
+            MenuRow::Action(MenuItem::Quit),
+        ];
+        let s = render_to(72, 16, |f| {
+            grid_menu(
+                f,
+                &MenuView {
+                    rows: &rows,
+                    sessions: &list,
+                    query: "",
+                    selected_row: Some(3),
+                    chips: &[],
+                    box_num: 1,
+                    box_count: 1,
+                },
+            )
+        });
+        assert!(s.contains("hostB"), "header missing: {s}");
+        assert!(s.contains("offline"), "offline marker missing: {s}");
     }
 
     #[test]

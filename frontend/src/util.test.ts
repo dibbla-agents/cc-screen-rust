@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSharedMap, machineAccent, sharedOwner } from "./util";
+import { buildSharedMap, fuzzyScore, machineAccent, sharedOwner } from "./util";
 import type { ReceivedShare } from "./api";
 
 // machineAccent backs the per-pane identity bar (proposal 0021). The contract:
@@ -75,5 +75,53 @@ describe("sharedOwner / buildSharedMap", () => {
     ]);
     expect(sharedOwner(map, "laptop", "claude-x")).toBe("sess@x.com");
     expect(sharedOwner(map, "laptop", "claude-y")).toBe("box@x.com");
+  });
+});
+
+// Proposal 0062 — shared ranking test-vectors with the Rust port in the ccs
+// TUI (`crates/tui/src/app.rs`, test `fuzzy_score_web_matches_the_web_scorer`).
+// Same inputs, same exact expected values on both sides, so the two scorers
+// can't drift silently. If you change one scorer, change the other AND both
+// vector sets together.
+//
+// The tier-ordering half of the contract (NAME_TIER=100_000 > PATH_TIER=10_000
+// > META_TIER=0, Rust test `score_session_tiers_name_over_path_over_meta`) has
+// no web-side seam: `scoreItem` and the tier constants are non-exported
+// internals of the SessionDrawer component (a useCallback), and the existing
+// SessionDrawer tests are static-markup renders that can't type a query — so
+// only the fuzzyScore vectors are asserted here.
+describe("fuzzyScore — 0062 parity vectors with the ccs TUI scorer", () => {
+  it("no match / empty inputs", () => {
+    expect(fuzzyScore("xyz", "docs")).toBeNull();
+    expect(fuzzyScore("", "anything")).toBe(0);
+    expect(fuzzyScore("a", "")).toBeNull();
+  });
+
+  it("bonus arithmetic — exact values", () => {
+    // Head-of-string hit: +2 (char) +6 (head) +12 (word start) = 20.
+    expect(fuzzyScore("d", "dev")).toBe(20);
+    // Word-start hit after a separator: +2 +12 = 14.
+    expect(fuzzyScore("d", "my-dev")).toBe(14);
+    // Mid-word hit: just +2.
+    expect(fuzzyScore("e", "dev")).toBe(2);
+    // Contiguous run: "de" on "dev" = 20 + (2 + 4·1) = 26.
+    expect(fuzzyScore("de", "dev")).toBe(26);
+  });
+
+  it("case-insensitive", () => {
+    expect(fuzzyScore("DE", "dev")).toBe(fuzzyScore("de", "dev"));
+  });
+
+  it("a contiguous prefix run beats a scattered mid-word subsequence", () => {
+    expect(fuzzyScore("dev", "development")!).toBeGreaterThan(
+      fuzzyScore("dev", "widevine")!
+    );
+  });
+
+  it("word-start bonuses can make up for a broken run (deliberate tie)", () => {
+    // "dev" ties on "development" (d@head + contiguous e,v) and
+    // "daemon-vault" (d@head, scattered e, v@word-start).
+    expect(fuzzyScore("dev", "development")).toBe(36);
+    expect(fuzzyScore("dev", "daemon-vault")).toBe(36);
   });
 });

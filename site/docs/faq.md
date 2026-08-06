@@ -96,6 +96,8 @@ The switcher became **search-first**: typing now filters the session list, so
 single letters type into the search instead of running commands. The actions
 moved to chords — `Ctrl-N` new, `Ctrl-X` kill, `Ctrl-E` graceful exit,
 `Ctrl-R` rename, `Ctrl-O` restore — and `Esc` clears the search, then quits.
+The same applies inside the grid's action menu (`Ctrl-A d`): `j`/`k` now type
+into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
 [the ccs terminal client](tui.md) for the full map.
 

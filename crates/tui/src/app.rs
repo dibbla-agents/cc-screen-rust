@@ -160,9 +160,11 @@ enum Mode {
 enum GridOverlay {
     None,
     Palette(usize), // highlighted index in Layout::ALL
-    /// The unified action menu for box `target`; `selected` indexes
-    /// `menu_items(sessions.len())`.
-    Menu { target: usize, selected: usize },
+    /// The unified action menu for box `target` — search-first per proposal
+    /// 0062b (the grid analogue of the switcher). `selected` indexes the
+    /// SELECTABLE rows of `menu_rows(_, &query)` (headers skipped); `query` is
+    /// the menu's own type-to-search text (independent of the switcher's).
+    Menu { target: usize, selected: usize, query: String },
     /// Inline new-session form that fills box `target` on submit.
     NewForm { target: usize, form: NewForm },
     /// Rename overlay for the focused box's session (0059 C1), reached from the
@@ -170,13 +172,14 @@ enum GridOverlay {
     Rename(RenameForm),
 }
 
-/// One selectable row of the grid action menu, in visual (top→bottom) order:
-/// Change layout, New session, the sessions, Clear this box, Quit.
+/// An action row of the grid menu, in resting visual order: Change layout and
+/// New session above the sessions, Rename / Clear this box / Quit below.
+/// (Sessions themselves are `MenuRow::Session` — 0062b split them out so the
+/// filtered list can interleave actions and sessions purely by score.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MenuItem {
+pub enum MenuItem {
     ChangeLayout,
     NewSession,
-    Session(usize),
     /// Rename the focused box's session (0059 C1). Present only when the box holds
     /// a session (`can_rename`), between the session list and Clear this box.
     RenameSession,
@@ -184,29 +187,72 @@ enum MenuItem {
     Quit,
 }
 
-/// The selectable menu rows for `session_count` sessions. Length is
-/// `session_count + 4` (+1 more when `can_rename`), so navigation wrapping stays a
-/// plain modulo over the returned length.
-fn menu_items(session_count: usize, can_rename: bool) -> Vec<MenuItem> {
-    let mut v = Vec::with_capacity(session_count + 5);
-    v.push(MenuItem::ChangeLayout);
-    v.push(MenuItem::NewSession);
-    v.extend((0..session_count).map(MenuItem::Session));
-    if can_rename {
-        v.push(MenuItem::RenameSession);
+/// Alias terms that let the menu's action rows surface from a fuzzy query
+/// (proposal 0062b, mirroring the web sidebar's `ACTION_TERMS` — "split" →
+/// Change layout). An action's score is the raw best-over-aliases
+/// `fuzzy_score_web` with NO tier base, so a NAME-tier session hit always
+/// outranks an action, exactly like the web. Invariant (the web's "The label
+/// is matched too"): an action's *rendered* label must be among its aliases —
+/// the TUI labels the layout action "Change layout" where the web says "New
+/// layout", so it carries both.
+fn action_terms(item: MenuItem) -> &'static [&'static str] {
+    match item {
+        MenuItem::NewSession => &["new session", "create", "start"],
+        MenuItem::ChangeLayout => {
+            &["change layout", "new layout", "split", "grid", "tile", "panes"]
+        }
+        MenuItem::RenameSession => &["rename session", "label"],
+        MenuItem::ClearBox => &["clear this box", "detach", "empty"],
+        MenuItem::Quit => &["quit ccs", "exit"],
     }
-    v.push(MenuItem::ClearBox);
-    v.push(MenuItem::Quit);
-    v
 }
 
-/// Initial menu cursor: the box's current session if it's in the list, else the
-/// first session, else New session.
-fn menu_initial(sessions: &[SessionInfo], current: Option<&str>) -> usize {
+/// One display row of the grid action menu (0062b): an action, a per-machine
+/// group header (non-selectable, resting multi-machine hub mode only), or a
+/// session referenced by its index into `App::sessions()`.
+pub enum MenuRow {
+    Action(MenuItem),
+    Header { label: String, online: bool },
+    Session(usize),
+}
+
+/// Number of selectable (non-header) rows — the menu cursor's modulus.
+fn menu_selectable_len(rows: &[MenuRow]) -> usize {
+    rows.iter().filter(|r| !matches!(r, MenuRow::Header { .. })).count()
+}
+
+/// The `nth` selectable row, skipping headers — how every menu action resolves
+/// the cursor, so a header (or a filtered-out row) can never be acted on.
+fn menu_selectable(rows: &[MenuRow], nth: usize) -> Option<&MenuRow> {
+    rows.iter().filter(|r| !matches!(r, MenuRow::Header { .. })).nth(nth)
+}
+
+/// Map the menu cursor (a selectable index) to its row in the display list —
+/// the menu's analogue of `ui::switcher::selected_row`.
+fn menu_selected_row(rows: &[MenuRow], selected: usize) -> Option<usize> {
+    let mut nth = 0usize;
+    for (ri, row) in rows.iter().enumerate() {
+        if !matches!(row, MenuRow::Header { .. }) {
+            if nth == selected {
+                return Some(ri);
+            }
+            nth += 1;
+        }
+    }
+    None
+}
+
+/// Initial menu cursor: the box's current session if it's in the display order,
+/// else the first session, else New session. `order` is the resting session
+/// display order (`grouped_session_order`) — headers don't count, so session
+/// number `i` in that order sits at selectable index `2 + i`.
+fn menu_initial(sessions: &[SessionInfo], order: &[usize], current: Option<&str>) -> usize {
     current
-        .and_then(|name| sessions.iter().position(|s| s.name == name))
+        .and_then(|name| {
+            order.iter().position(|&i| sessions.get(i).is_some_and(|s| s.name == name))
+        })
         .map(|i| 2 + i)
-        .or((!sessions.is_empty()).then_some(2))
+        .or((!order.is_empty()).then_some(2))
         .unwrap_or(1)
 }
 
@@ -473,6 +519,9 @@ const META_TIER: i64 = 0;
 /// subsequence; an empty query scores 0 (matches everything). Kept separate
 /// from `fuzzy_score` above (the dir-autocomplete scorer) because ranking
 /// parity with the web is the contract here — both clients must order the same.
+/// One deliberate divergence: this matches whole Unicode scalars, while the
+/// JS side indexes the haystack per UTF-16 code unit, so an astral-plane query
+/// char (emoji) can never match there — that's a latent web bug, not a spec.
 fn fuzzy_score_web(query: &str, text: &str) -> Option<i64> {
     let q: Vec<char> = query.to_lowercase().chars().collect();
     if q.is_empty() {
@@ -512,9 +561,14 @@ fn fuzzy_score_web(query: &str, text: &str) -> Option<i64> {
 /// The cwd *leaf* is scored as its own PATH field so a folder literally named
 /// the query outranks one that merely contains it as an ancestor.
 /// `machine_label` is the resolved hostname (the header/chip text) so a query
-/// matches a machine by either its id or its display name.
+/// matches a machine by either its id or its display name — a deliberate TUI
+/// extra over the web (which scores only the raw id). It is ONLY searchable
+/// for a real (non-empty) machine id: on a direct agent the id is `""` and the
+/// label is the "this machine" *display* placeholder — scoring it would make
+/// every session match queries like "mac" that the web drops.
 fn score_session(s: &SessionInfo, machine_label: &str, q: &str) -> Option<i64> {
     let cwd_leaf = s.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let machine_label = if s.machine.is_empty() { "" } else { machine_label };
     let fields: [(&str, i64); 10] = [
         (&s.short, NAME_TIER),
         (s.label.as_deref().unwrap_or(""), NAME_TIER),
@@ -967,6 +1021,24 @@ impl App {
                 }
                 if changed {
                     self.after_box_removed();
+                }
+                // 0062b: an open action menu's cursor rides `menu_rows()`, which
+                // can shrink under it on this refresh (sessions ended mid-filter)
+                // — unclamped, the next frame has no highlighted row and Enter
+                // is dead until a navigation key wraps it back. Clamp it like
+                // the switcher's `selected` above. (Runs after the auto-detach
+                // so a menu `after_box_removed` just cleared stays cleared.)
+                if let GridOverlay::Menu { target, selected, query } = &self.grid_overlay {
+                    let (target, selected, query) = (*target, *selected, query.clone());
+                    let len =
+                        menu_selectable_len(&self.menu_rows(self.box_has_session(target), &query));
+                    if selected >= len {
+                        self.grid_overlay = GridOverlay::Menu {
+                            target,
+                            selected: len.saturating_sub(1),
+                            query,
+                        };
+                    }
                 }
                 if matches!(self.mode, Mode::Switcher) {
                     self.status =
@@ -1763,32 +1835,73 @@ impl App {
     fn open_menu(&mut self, target: usize) {
         let target = target.min(self.panes.len().saturating_sub(1));
         let current = self.panes.get(target).and_then(|p| p.as_ref()).map(|p| p.session.clone());
-        let selected = menu_initial(&self.sessions, current.as_deref());
-        self.grid_overlay = GridOverlay::Menu { target, selected };
+        let selected =
+            menu_initial(&self.sessions, &self.grouped_session_order(), current.as_deref());
+        self.grid_overlay = GridOverlay::Menu { target, selected, query: String::new() };
         self.prefix_armed = false;
         self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
+    // Search-first menu keys (0062b), mirroring the switcher's `key_list`: bare
+    // printables type into the query (so `j`/`k` no longer navigate — arrows
+    // do), and every action resolves through the filtered rows at press time.
     fn key_menu(&mut self, k: KeyEvent) {
-        let (target, selected) = match &self.grid_overlay {
-            GridOverlay::Menu { target, selected } => (*target, *selected),
+        let (target, selected, query) = match &self.grid_overlay {
+            GridOverlay::Menu { target, selected, query } => (*target, *selected, query.clone()),
             _ => return,
         };
         let can_rename = self.box_has_session(target);
-        let len = menu_items(self.sessions.len(), can_rename).len();
-        match k.code {
-            KeyCode::Esc => self.grid_overlay = GridOverlay::None,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.grid_overlay = GridOverlay::Menu { target, selected: (selected + len - 1) % len };
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.grid_overlay = GridOverlay::Menu { target, selected: (selected + 1) % len };
-            }
-            KeyCode::Enter => {
-                let item = menu_items(self.sessions.len(), can_rename).get(selected).copied();
-                if let Some(item) = item {
-                    self.activate_menu(target, item);
+        let set = |app: &mut Self, selected: usize, query: String| {
+            app.grid_overlay = GridOverlay::Menu { target, selected, query };
+        };
+        match (k.code, k.modifiers) {
+            // Esc: clear an active query first; on an empty query close the
+            // menu — the web sidebar's clear-then-close two-step.
+            (KeyCode::Esc, _) => {
+                if !query.is_empty() {
+                    set(self, 0, String::new());
+                } else {
+                    self.grid_overlay = GridOverlay::None;
                 }
+            }
+            (KeyCode::Up, _) | (KeyCode::Down, _) => {
+                // Wraps over the *selectable* (possibly filtered) rows; headers
+                // are skipped, so the cursor can never land on one.
+                let len = menu_selectable_len(&self.menu_rows(can_rename, &query));
+                if len == 0 {
+                    return;
+                }
+                let delta = if k.code == KeyCode::Up { len - 1 } else { 1 };
+                set(self, (selected + delta) % len, query);
+            }
+            (KeyCode::Enter, _) => {
+                match menu_selectable(&self.menu_rows(can_rename, &query), selected) {
+                    Some(MenuRow::Session(i)) => {
+                        if let Some(s) = self.sessions.get(*i) {
+                            let (name, machine) = (s.name.clone(), s.machine.clone());
+                            self.grid_overlay = GridOverlay::None;
+                            self.fill_box(target, name, machine);
+                        }
+                    }
+                    Some(&MenuRow::Action(item)) => self.activate_menu(target, item),
+                    _ => {}
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                let mut q = query;
+                q.pop();
+                set(self, 0, q);
+            }
+            // Type-to-search: any printable key (bare or shifted) appends to
+            // the query and re-ranks immediately, cursor snapping to the top.
+            (KeyCode::Char(ch), m)
+                if !m.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
+                let mut q = query;
+                q.push(ch);
+                set(self, 0, q);
             }
             _ => {}
         }
@@ -1802,16 +1915,10 @@ impl App {
 
     fn activate_menu(&mut self, target: usize, item: MenuItem) {
         match item {
-            // Hand off to the existing centered modals.
+            // Hand off to the existing centered modals. (Session rows resolve in
+            // `key_menu` directly — they carry a `sessions` index, not an item.)
             MenuItem::ChangeLayout => self.open_palette(),
             MenuItem::NewSession => self.open_grid_newform(target),
-            MenuItem::Session(i) => {
-                if let Some(s) = self.sessions.get(i) {
-                    let (name, machine) = (s.name.clone(), s.machine.clone());
-                    self.grid_overlay = GridOverlay::None;
-                    self.fill_box(target, name, machine);
-                }
-            }
             MenuItem::RenameSession => self.open_grid_rename(target),
             MenuItem::ClearBox => {
                 self.grid_overlay = GridOverlay::None;
@@ -2110,6 +2217,10 @@ impl App {
     fn after_box_removed(&mut self) {
         if self.panes.iter().all(|p| p.is_none()) {
             self.mode = Mode::Switcher;
+            // Drop any grid modal (`jump_ready` parity): an orphaned menu would
+            // otherwise resurrect — stale query, out-of-range target — the next
+            // time a `fill_box` re-enters Grid mode.
+            self.grid_overlay = GridOverlay::None;
             self.clear_query(); // a fresh switcher entry starts unfiltered
             self.set_layout(Layout::Single);
             self.active = 0;
@@ -2240,16 +2351,40 @@ impl App {
                 match &self.grid_overlay {
                     GridOverlay::None => {}
                     GridOverlay::Palette(hi) => ui::overlay::layout_palette(f, *hi),
-                    GridOverlay::Menu { target, selected } => ui::overlay::grid_menu(
-                        f,
-                        &ui::overlay::MenuView {
-                            sessions: &self.sessions,
-                            selected: *selected,
-                            box_num: *target + 1,
-                            box_count: self.panes.len(),
-                            can_rename: self.box_has_session(*target),
-                        },
-                    ),
+                    GridOverlay::Menu { target, selected, query } => {
+                        let rows = self.menu_rows(self.box_has_session(*target), query);
+                        // Machine chips only while filtering in multi-machine hub
+                        // mode (headers cover the resting state) — precomputed
+                        // here so the overlay stays App-free. Parallel to
+                        // `sessions`; an empty string suppresses the chip.
+                        let chips: Vec<String> =
+                            if !query.trim().is_empty() && self.multi_machine() {
+                                self.sessions
+                                    .iter()
+                                    .map(|s| {
+                                        if s.machine.is_empty() {
+                                            String::new()
+                                        } else {
+                                            self.machine_label(&s.machine)
+                                        }
+                                    })
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                        ui::overlay::grid_menu(
+                            f,
+                            &ui::overlay::MenuView {
+                                rows: &rows,
+                                sessions: &self.sessions,
+                                query,
+                                selected_row: menu_selected_row(&rows, *selected),
+                                chips: &chips,
+                                box_num: *target + 1,
+                                box_count: self.panes.len(),
+                            },
+                        )
+                    }
                     GridOverlay::NewForm { form, .. } => {
                         ui::overlay::new_session(f, &self.new_session_view(form));
                     }
@@ -2322,35 +2457,40 @@ impl App {
         self.machines.iter().find(|m| m.machine == id).is_none_or(|m| m.online)
     }
 
+    /// Session indices in the resting display order: identity for a single
+    /// machine / direct agent, grouped by machine otherwise. Shared by the
+    /// switcher's resting list and the grid action menu (0062b) so both
+    /// surfaces agree on grouping — and independent of either query, so a
+    /// stale switcher filter can't leak into the menu.
+    fn grouped_session_order(&self) -> Vec<usize> {
+        if !self.multi_machine() {
+            return (0..self.sessions.len()).collect();
+        }
+        // Group by machine: known machines in `/api/machines` order, then
+        // any stragglers in first-appearance order. Name order inside a
+        // group rides on `sessions` being name-sorted.
+        let mut order: Vec<&str> = self.machines.iter().map(|m| m.machine.as_str()).collect();
+        for s in &self.sessions {
+            if !order.contains(&s.machine.as_str()) {
+                order.push(&s.machine);
+            }
+        }
+        let mut out = Vec::with_capacity(self.sessions.len());
+        for m in order {
+            out.extend(
+                self.sessions.iter().enumerate().filter(|(_, s)| s.machine == m).map(|(i, _)| i),
+            );
+        }
+        out
+    }
+
     /// Session indices in display order: ranked (name > path > meta, the web's
     /// 0028 tiers) while filtering; resting order (name-sorted, grouped by
     /// machine when `multi_machine`) otherwise. `selected` indexes THIS list.
     pub fn visible_sessions(&self) -> Vec<usize> {
         let q = self.query.trim();
         if q.is_empty() {
-            if !self.multi_machine() {
-                return (0..self.sessions.len()).collect();
-            }
-            // Group by machine: known machines in `/api/machines` order, then
-            // any stragglers in first-appearance order. Name order inside a
-            // group rides on `sessions` being name-sorted.
-            let mut order: Vec<&str> = self.machines.iter().map(|m| m.machine.as_str()).collect();
-            for s in &self.sessions {
-                if !order.contains(&s.machine.as_str()) {
-                    order.push(&s.machine);
-                }
-            }
-            let mut out = Vec::with_capacity(self.sessions.len());
-            for m in order {
-                out.extend(
-                    self.sessions
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, s)| s.machine == m)
-                        .map(|(i, _)| i),
-                );
-            }
-            out
+            self.grouped_session_order()
         } else {
             let mut scored: Vec<(i64, usize)> = self
                 .sessions
@@ -2396,6 +2536,73 @@ impl App {
     /// address a session, so a filtered-out row can never be acted on.
     pub fn selected_session(&self) -> Option<&SessionInfo> {
         self.visible_sessions().get(self.selected).map(|&i| &self.sessions[i])
+    }
+
+    /// The grid action menu's display rows (0062b). Resting (empty/whitespace
+    /// `query`): the two create-ish actions, the sessions in the switcher's
+    /// grouped order (headers interleaved only in multi-machine hub mode), then
+    /// the tail actions — with a single machine this is exactly the pre-0062b
+    /// structure, so session `i` still sits at selectable index `2 + i`.
+    /// Filtering: no headers; sessions score through `score_session` (tiered)
+    /// and actions through their alias terms (untiered), then one stable sort
+    /// interleaves them purely by score — web-sidebar ranking parity.
+    fn menu_rows(&self, can_rename: bool, query: &str) -> Vec<MenuRow> {
+        let q = query.trim();
+        let tail = |rows: &mut Vec<MenuRow>| {
+            if can_rename {
+                rows.push(MenuRow::Action(MenuItem::RenameSession));
+            }
+            rows.push(MenuRow::Action(MenuItem::ClearBox));
+            rows.push(MenuRow::Action(MenuItem::Quit));
+        };
+        if q.is_empty() {
+            let mut rows = Vec::with_capacity(self.sessions.len() + self.machines.len() + 5);
+            rows.push(MenuRow::Action(MenuItem::ChangeLayout));
+            rows.push(MenuRow::Action(MenuItem::NewSession));
+            let headers = self.multi_machine();
+            let mut cur: Option<&str> = None;
+            for i in self.grouped_session_order() {
+                let m = self.sessions[i].machine.as_str();
+                if headers && cur != Some(m) {
+                    rows.push(MenuRow::Header {
+                        label: self.machine_label(m),
+                        online: self.machine_online(m),
+                    });
+                    cur = Some(m);
+                }
+                rows.push(MenuRow::Session(i));
+            }
+            tail(&mut rows);
+            rows
+        } else {
+            // Candidates in resting selectable order, so the stable sort keeps
+            // that relative order for equal scores. Accepted divergence from the
+            // web: its baseItems put New session first, so an exact tie between
+            // the two create-ish actions (e.g. the query "n") orders them
+            // oppositely there — the 0062b spec pins OUR resting order instead.
+            let mut cand: Vec<(i64, MenuRow)> = Vec::new();
+            let action = |cand: &mut Vec<(i64, MenuRow)>, it: MenuItem| {
+                if let Some(sc) = action_terms(it).iter().filter_map(|t| fuzzy_score_web(q, t)).max()
+                {
+                    cand.push((sc, MenuRow::Action(it)));
+                }
+            };
+            action(&mut cand, MenuItem::ChangeLayout);
+            action(&mut cand, MenuItem::NewSession);
+            for i in self.grouped_session_order() {
+                let s = &self.sessions[i];
+                if let Some(sc) = score_session(s, &self.machine_label(&s.machine), q) {
+                    cand.push((sc, MenuRow::Session(i)));
+                }
+            }
+            if can_rename {
+                action(&mut cand, MenuItem::RenameSession);
+            }
+            action(&mut cand, MenuItem::ClearBox);
+            action(&mut cand, MenuItem::Quit);
+            cand.sort_by(|a, b| b.0.cmp(&a.0)); // stable: ties keep resting order
+            cand.into_iter().map(|(_, r)| r).collect()
+        }
     }
 }
 
@@ -2545,56 +2752,188 @@ mod tests {
     }
 
     #[test]
-    fn menu_items_order_and_length() {
-        let it = menu_items(2, false);
-        assert_eq!(it.len(), 6); // 2 sessions + 4 actions
-        assert_eq!(
-            it,
-            vec![
-                MenuItem::ChangeLayout,
-                MenuItem::NewSession,
-                MenuItem::Session(0),
-                MenuItem::Session(1),
-                MenuItem::ClearBox,
-                MenuItem::Quit,
-            ]
-        );
+    fn menu_rows_resting_order_and_length() {
+        let app = App::test_fixture(vec![sess("a"), sess("b")], "");
+        let rows = app.menu_rows(false, "");
+        assert_eq!(rows.len(), 6); // 2 sessions + 4 actions, no headers direct
+        assert!(matches!(rows[0], MenuRow::Action(MenuItem::ChangeLayout)));
+        assert!(matches!(rows[1], MenuRow::Action(MenuItem::NewSession)));
+        assert!(matches!(rows[2], MenuRow::Session(0)));
+        assert!(matches!(rows[3], MenuRow::Session(1)));
+        assert!(matches!(rows[4], MenuRow::Action(MenuItem::ClearBox)));
+        assert!(matches!(rows[5], MenuRow::Action(MenuItem::Quit)));
+        // 0059 C1: a rename-able box inserts a Rename row between the sessions
+        // and Clear this box.
+        let rows = app.menu_rows(true, "");
+        assert_eq!(rows.len(), 7);
+        assert!(matches!(rows[4], MenuRow::Action(MenuItem::RenameSession)));
+        // A whitespace-only query is still the resting list.
+        assert_eq!(app.menu_rows(false, "  ").len(), 6);
         // No sessions still yields the four action rows.
-        assert_eq!(menu_items(0, false).len(), 4);
-        // 0059 C1: a rename-able box inserts a Rename row between the sessions and
-        // Clear this box (so length grows by one, indices after it shift).
-        let it = menu_items(2, true);
-        assert_eq!(it.len(), 7);
-        assert_eq!(
-            it,
-            vec![
-                MenuItem::ChangeLayout,
-                MenuItem::NewSession,
-                MenuItem::Session(0),
-                MenuItem::Session(1),
-                MenuItem::RenameSession,
-                MenuItem::ClearBox,
-                MenuItem::Quit,
-            ]
+        let empty = App::test_fixture(vec![], "");
+        assert_eq!(empty.menu_rows(false, "").len(), 4);
+    }
+
+    #[test]
+    fn menu_rows_headers_only_at_rest_in_multi_machine_mode() {
+        let app = App::test_fixture_hub(
+            vec![sess_on("alpha", "boxA"), sess_on("bravo", "boxB")],
+            vec![machine("boxA", "hostA", true), machine("boxB", "hostB", false)],
+            "",
+        );
+        // Resting: headers interleave at group boundaries; they are not
+        // selectable, so session i still sits at selectable index 2 + i.
+        let rows = app.menu_rows(false, "");
+        assert_eq!(rows.len(), 8); // 2 actions + 2 headers + 2 sessions + 2 actions
+        assert!(matches!(&rows[2], MenuRow::Header { label, online } if label == "hostA" && *online));
+        assert!(matches!(rows[3], MenuRow::Session(0)));
+        assert!(matches!(&rows[4], MenuRow::Header { label, online } if label == "hostB" && !online));
+        assert!(matches!(menu_selectable(&rows, 2), Some(MenuRow::Session(0))));
+        assert!(matches!(menu_selectable(&rows, 3), Some(MenuRow::Session(1))));
+        assert_eq!(menu_selectable_len(&rows), 6);
+        assert_eq!(menu_selected_row(&rows, 2), Some(3)); // skips the header rows
+        // Filtering: NO headers, non-matching rows dropped.
+        let rows = app.menu_rows(false, "bravo");
+        assert!(!rows.iter().any(|r| matches!(r, MenuRow::Header { .. })));
+        assert!(matches!(rows[0], MenuRow::Session(1)));
+    }
+
+    #[test]
+    fn menu_rows_rank_name_tier_sessions_above_action_aliases() {
+        // "split" is an alias of Change layout (web ACTION_TERMS parity), but a
+        // NAME-tier session hit must still outrank it — actions score with no
+        // tier base, exactly like the web sidebar.
+        let app = App::test_fixture(vec![sess("split-api"), sess("other")], "");
+        let rows = app.menu_rows(false, "split");
+        assert!(matches!(rows[0], MenuRow::Session(0)), "name hit first");
+        assert!(
+            rows.iter().any(|r| matches!(r, MenuRow::Action(MenuItem::ChangeLayout))),
+            "the aliased action still surfaces"
+        );
+        // A query matching only an alias surfaces just that action.
+        let rows = app.menu_rows(false, "tile");
+        assert!(matches!(rows[0], MenuRow::Action(MenuItem::ChangeLayout)));
+        assert!(!rows.iter().any(|r| matches!(r, MenuRow::Session(_))));
+        // Rename's aliases only rank when the row exists (can_rename).
+        assert!(app.menu_rows(false, "rename").is_empty());
+        assert!(
+            matches!(app.menu_rows(true, "rename")[0], MenuRow::Action(MenuItem::RenameSession))
+        );
+    }
+
+    #[test]
+    fn menu_rows_rendered_labels_are_always_searchable() {
+        // Web invariant ("The label is matched too"): the label a user is
+        // reading must be an alias. The TUI renders "Change layout" where the
+        // web says "New layout", so it carries both — typing the on-screen
+        // label must never hide the row.
+        let app = App::test_fixture(vec![], "");
+        for (label, item) in [
+            ("change layout", MenuItem::ChangeLayout),
+            ("new session", MenuItem::NewSession),
+            ("clear this box", MenuItem::ClearBox),
+            ("quit ccs", MenuItem::Quit),
+        ] {
+            let rows = app.menu_rows(item == MenuItem::RenameSession, label);
+            assert!(
+                rows.iter().any(|r| matches!(r, MenuRow::Action(i) if *i == item)),
+                "label {label:?} must surface its own row"
+            );
+        }
+        let rows = app.menu_rows(true, "rename session");
+        assert!(rows.iter().any(|r| matches!(r, MenuRow::Action(MenuItem::RenameSession))));
+        // The prefix a user types first ("chan…") already matches.
+        assert!(
+            matches!(app.menu_rows(false, "chan")[0], MenuRow::Action(MenuItem::ChangeLayout))
         );
     }
 
     #[test]
     fn menu_initial_prefers_current_then_first_then_new() {
         let list = vec![sess("a"), sess("b"), sess("c")];
-        assert_eq!(menu_initial(&list, Some("b")), 3); // 2 + index 1
-        assert_eq!(menu_initial(&list, Some("missing")), 2); // falls back to first session
-        assert_eq!(menu_initial(&list, None), 2); // first session
-        assert_eq!(menu_initial(&[], None), 1); // New session when there are none
+        let order = [0usize, 1, 2];
+        assert_eq!(menu_initial(&list, &order, Some("b")), 3); // 2 + index 1
+        assert_eq!(menu_initial(&list, &order, Some("missing")), 2); // falls back to first session
+        assert_eq!(menu_initial(&list, &order, None), 2); // first session
+        assert_eq!(menu_initial(&[], &[], None), 1); // New session when there are none
+        // A grouped (reordered) display order maps through: "b" shown first.
+        assert_eq!(menu_initial(&list, &[1, 0, 2], Some("b")), 2);
     }
 
     #[test]
-    fn menu_navigation_wraps_over_the_whole_list() {
-        // 1 session → [layout, new, session0, clear, quit] = len 5.
-        let len = menu_items(1, false).len();
-        assert_eq!(len, 5);
-        assert_eq!((0 + len - 1) % len, len - 1); // up from the top wraps to Quit
-        assert_eq!((len - 1 + 1) % len, 0); // down from the bottom wraps to the top
+    fn key_menu_types_into_query_and_jk_are_dead() {
+        let mut a = App::test_fixture(vec![sess("alpha"), sess("beta")], "");
+        a.grid_overlay = GridOverlay::Menu { target: 0, selected: 2, query: String::new() };
+        // Former navigation letters now type into the query, cursor snapping to
+        // the top match; nothing activates.
+        for c in ['j', 'k'] {
+            a.key_menu(key(KeyCode::Char(c)));
+        }
+        match &a.grid_overlay {
+            GridOverlay::Menu { selected, query, .. } => {
+                assert_eq!(query, "jk");
+                assert_eq!(*selected, 0, "typing snaps the cursor to the top");
+            }
+            _ => panic!("menu closed by typing"),
+        }
+        // Backspace pops one char.
+        a.key_menu(key(KeyCode::Backspace));
+        assert!(matches!(&a.grid_overlay, GridOverlay::Menu { query, .. } if query == "j"));
+        // Esc two-step: first clears the query (menu stays open)…
+        a.key_menu(key(KeyCode::Esc));
+        assert!(
+            matches!(&a.grid_overlay, GridOverlay::Menu { query, .. } if query.is_empty()),
+            "Esc with a query clears it, keeping the menu open"
+        );
+        // …then closes the menu.
+        a.key_menu(key(KeyCode::Esc));
+        assert!(matches!(a.grid_overlay, GridOverlay::None));
+    }
+
+    #[test]
+    fn key_menu_navigation_wraps_over_the_selectable_rows() {
+        // 1 session, no rename → 5 selectable rows [layout, new, s0, clear, quit].
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.grid_overlay = GridOverlay::Menu { target: 0, selected: 0, query: String::new() };
+        a.key_menu(key(KeyCode::Up));
+        assert!(
+            matches!(&a.grid_overlay, GridOverlay::Menu { selected: 4, .. }),
+            "up from the top wraps to Quit"
+        );
+        a.key_menu(key(KeyCode::Down));
+        assert!(
+            matches!(&a.grid_overlay, GridOverlay::Menu { selected: 0, .. }),
+            "down from the bottom wraps to the top"
+        );
+    }
+
+    #[test]
+    fn after_box_removed_clears_an_orphaned_menu() {
+        // A menu still open when the LAST box empties (session ended
+        // server-side, refresh auto-detach) must not resurrect — stale query,
+        // out-of-range target — on the next grid entry (`jump_ready` parity).
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.grid_overlay = GridOverlay::Menu { target: 3, selected: 0, query: "stale".into() };
+        a.after_box_removed();
+        assert!(matches!(a.mode, Mode::Switcher));
+        assert!(matches!(a.grid_overlay, GridOverlay::None), "the orphaned menu must be dropped");
+    }
+
+    #[test]
+    fn key_menu_enter_resolves_through_the_filtered_rows() {
+        // With the query "exit" the only surviving row is Quit (alias hit), so
+        // Enter at selectable index 0 must quit — proof the press-time rows are
+        // consulted, not the resting indices (where 0 = Change layout).
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.grid_overlay = GridOverlay::Menu { target: 0, selected: 0, query: "exit".into() };
+        a.key_menu(key(KeyCode::Enter));
+        assert!(a.should_quit(), "Enter resolved the filtered Quit row");
+        // Zero matches: Enter is a no-op (nothing selectable).
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.grid_overlay = GridOverlay::Menu { target: 0, selected: 0, query: "zzzz".into() };
+        a.key_menu(key(KeyCode::Enter));
+        assert!(!a.should_quit());
+        assert!(matches!(a.grid_overlay, GridOverlay::Menu { .. }));
     }
 
     fn form() -> NewForm {
@@ -2792,6 +3131,11 @@ mod tests {
         let on_box = sess_on("web", "boxA");
         assert!(score_session(&on_box, "pine", "pine").is_some());
         assert!(score_session(&on_box, "pine", "boxa").is_some());
+        // …but the EMPTY id (direct agent) must not surface via its "this
+        // machine" display placeholder — the web scores the raw id only, so
+        // "mac"/"machine" would otherwise match every direct-mode session.
+        assert_eq!(score_session(&sess("web"), "this machine", "machine"), None);
+        assert_eq!(score_session(&sess("web"), "this machine", "mac"), None);
         // No field matches → filtered out.
         assert_eq!(score_session(&sess("web"), "", "qqq"), None);
     }

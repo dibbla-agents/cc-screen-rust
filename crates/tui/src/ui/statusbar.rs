@@ -102,9 +102,9 @@ pub fn render(
         )),
         None => {
             let hint = if count > 1 {
-                format!("{prefix_label} ←/→ focus · l layout · d menu  ")
+                format!("{prefix_label} ←/→ focus · l layout · d menu · s switcher  ")
             } else {
-                format!("{prefix_label} l layout · d menu  ")
+                format!("{prefix_label} l layout · d menu · s switcher  ")
             };
             Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
         }

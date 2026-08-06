@@ -176,9 +176,12 @@ The main loop intercepts before forwarding to the pane:
 - not in prefix state + key == prefix → enter prefix state.
 - in prefix state + key == prefix → send a **literal** prefix to the pane
   (escape hatch).
-- in prefix state + command: `d` detach → Switcher, `x` kill (confirm), `c`
-  create, `s` open switcher overlay, `?` help. (Digit-switch / `[`/`]` reserved
-  for the grid.)
+- in prefix state + command (the shipped grid bindings — see `key_grid` in
+  `app.rs`): `d` action menu (search-first, 0062b), `s` full-screen switcher
+  scoped to the focused box (0062), `l`/`Space` layout palette, digits
+  jump-apply a layout, arrows move focus, `[` scroll mode (0059 C3), `x` kill
+  the focused session, `g` jump to the ready session(s) (0018). Detach and
+  create live in the `d` menu; there is no `c`/`?` binding.
 - otherwise encode + send.
 
 ### Status bar (`statusbar.rs`)
@@ -187,7 +190,8 @@ Bottom 1 row, drawn by ratatui *outside* the pane rect — so it's rock-solid ev
 when the agent is on the alt-screen (the whole reason for the embedded model).
 Shows: `[claude-myproj]`, tool prefix, `●`live/`○`idle, pane size `80×23`,
 connection state (`connecting…`/`open`/`reconnecting`), right-aligned prefix
-hint `^A ?`.
+hint (`^A l layout · d menu · s switcher`, plus `←/→ focus` in multi-box
+layouts).
 
 ### Terminal guard (`term.rs`)
 
@@ -356,3 +360,9 @@ for the session list (polling is fine).
   headers and chip rows while filtering; the AI `headline` vs raw `preview`
   styling split matches the web and the selected row's `detail` renders in a
   footer. Any key-summary above predating this is superseded.
+  The grid's action menu (`^A d`) got the same treatment: `MenuRow` interleaves
+  action rows (ranked via the web sidebar's `ACTION_TERMS` aliases, no tier
+  base so a name-tier session hit always outranks an action) with
+  `score_session`-ranked sessions, with the switcher's headers/chips/naming
+  and the two-step Esc; `j`/`k` type there too. `^A s` opens the full-screen
+  switcher to fill the focused box.
