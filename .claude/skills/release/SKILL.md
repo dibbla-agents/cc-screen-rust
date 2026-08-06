@@ -12,7 +12,7 @@ user means (ask if ambiguous) — they don't all need doing every time.
 | You want to… | Do this | Touches |
 |---|---|---|
 | Run the new code on the box **you** attach to | `./install.sh` | the systemd `--user` service on port 8839 |
-| Publish the docs site changes | `site/deploy.sh` | the Dibbla `cc-screen` app (the website) |
+| Publish the docs site changes | build `site/web` → commit `docs/` → push main | **GitHub Pages** (ccscreen.dev serves `main:/docs`) |
 | Make `curl … \| sh` install the new version | bump → `./release.sh` | the GitHub Release (the installers serve from `releases/latest`) |
 
 These are decoupled: shipping a release does **not** update your running server, and
@@ -38,17 +38,25 @@ ends the agents momentarily; auto-restore relaunches each with its resume flag.
 
 ## B. Deploy the docs site
 
-The landing/getting-started site (`site/`, a Vite+React app served by a tiny
-axum static server on Dibbla as the `cc-screen` app). **Docs only** — it no longer
-hosts any binaries (those come straight from the GitHub Release), so it's safe to
-deploy from any checkout.
+The landing/getting-started site (`site/`, a Vite+React app) is **GitHub Pages**:
+since proposal 0054, https://ccscreen.dev serves the committed `docs/` tree from
+`main` (Cloudflare apex CNAME → dibbla-agents.github.io, DNS-only). So the deploy
+is a build + commit + push — no Dibbla, no token, no separate hosting step:
 
 ```sh
-cd site && ./deploy.sh "optional commit message"
+( cd site/web && npm install --no-audit --no-fund && npm run build )   # emits → docs/
+git add docs/ && git commit -m "docs: rebuild site" && git push origin main
 ```
 
-It builds `web/` → `../docs` → `public/` and `dibbla deploy`s (zero-downtime
-update). Asset cache-busting is automatic (content-hashed filenames).
+Pages rebuilds within a minute or two of the push. Asset cache-busting is
+automatic (Vite content-hashes every emitted filename). The site hosts **docs
+only** — binaries come straight from the GitHub Release.
+
+**`site/deploy.sh` is NOT the docs deploy anymore.** It updates the *legacy
+Dibbla `cc-screen` app*, which nowadays is only a 301 redirector from the old
+`cc-screen.dibbla.work` alias to ccscreen.dev (see the `SITE_CANONICAL` note in
+the script header). It needs `dibbla` auth and almost never needs running —
+only touch it if the redirector itself must change.
 
 ## C. Cut a new installable release
 
@@ -135,7 +143,9 @@ per-hub with `CCHUB_INSTALLER_PS1_URL` / `CCHUB_INSTALLER_URL`.
 - `install.sh` — build + (re)install the running server's service.
 - `bump.sh` — lockstep version bump (all crates + Cargo.lock).
 - `release.sh` — tag + wait for CI + publish the GitHub release.
-- `site/deploy.sh` — deploy the docs site (docs only; no binaries).
+- `site/web` — the docs-site source; `npm run build` emits `docs/`, which a
+  push to `main` publishes via GitHub Pages (ccscreen.dev).
+- `site/deploy.sh` — legacy Dibbla redirector only (NOT the docs deploy).
 - `crates/protocol/src/lib.rs` — `RELEASE_BASE_URL` (the installer origin the
   `update` subcommands use).
 - `dist-workspace.toml` — cargo-dist config (targets, installers, lockstep versions).
