@@ -135,6 +135,20 @@ pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
             }
         }
     };
+    // Team-history audit (0063 D1): appended ONLY when the actor is an org
+    // member — a team's share activity is org-visible history; a lone user's
+    // sharing stays unlogged, exactly today's behavior.
+    if let Some(store) = hub.store() {
+        if let Some((org, _)) = store.org_for_user(&actor).await {
+            let detail = format!(
+                "{{\"machine\":{},\"kind\":\"{kind}\"}}",
+                serde_json::to_string(&machine_label).unwrap_or_default()
+            );
+            store
+                .audit_append(&org.id, Some(&actor), "share.created", Some(req.grantee_email.trim()), Some(&detail))
+                .await;
+        }
+    }
     (StatusCode::OK, Json(json!({ "id": id, "status": status, "invite_url": invite_url(&token) })))
         .into_response()
 }
@@ -223,7 +237,8 @@ pub async fn received(State(hub): State<HubState>, headers: HeaderMap) -> Respon
     let mut out = Vec::new();
     for row in hub.shares_to_me(&actor).await {
         // Lazy session-liveness: hide a session grant whose session has ended on a
-        // currently-connected agent (best-effort, §6 of 0040).
+        // currently-connected agent (best-effort, §6 of 0040). Team rows are
+        // agent-scoped, so the filter doesn't apply to them (0065 A4).
         if row.kind == "session" {
             if let (Some(agent), Some(name)) = (hub.registry.get(&row.agent_id), row.session.as_deref()) {
                 if !agent.sessions_tagged().iter().any(|s| s.name == name) {
@@ -233,15 +248,24 @@ pub async fn received(State(hub): State<HubState>, headers: HeaderMap) -> Respon
         }
         let owner_email = hub.user_email(&row.owner_user_id).await;
         let machine = hub.registry.get(&row.agent_id).map(|a| a.machine_id.clone());
+        // Team-materialized rows (0065 A4): view-level, badged by origin, with
+        // the implying org's name for the tooltip.
+        let team = row.kind == "team";
+        let org_name = match (team, row.org_id.as_deref(), hub.store()) {
+            (true, Some(oid), Some(store)) => store.org_get(oid).await.map(|o| o.name),
+            _ => None,
+        };
         out.push(json!({
             "id": row.id,
             "agentId": row.agent_id,
             "machine": machine,
             "session": row.session,
             "kind": row.kind,
-            "permission": if row.kind == "session" { "view" } else { "use" },
+            "permission": if row.kind == "agent" { "use" } else { "view" },
             "ownerEmail": owner_email,
             "createdAt": row.created_at,
+            "origin": if team { "team" } else { "direct" },
+            "orgName": org_name,
         }));
     }
     Json(out).into_response()
@@ -271,6 +295,20 @@ pub async fn revoke(State(hub): State<HubState>, headers: HeaderMap, Path(id): P
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
+    // Team rows are managed by membership, never individually (0065 A4): the way
+    // out is the owner's per-machine opt-out or a membership change — an
+    // individual revoke would silently diverge and be resurrected by the nightly
+    // reconcile.
+    #[cfg(feature = "multi-tenant")]
+    if let Some(store) = hub.store() {
+        if store.share_is_team(&id).await {
+            return (
+                StatusCode::CONFLICT,
+                "managed by your team — hide the machine from Settings instead",
+            )
+                .into_response();
+        }
+    }
     match hub.share_revoke(&actor, &id).await {
         ShareOutcome::NotFound => {
             if hub.email_invite_revoke(&actor, &id).await {
@@ -279,7 +317,18 @@ pub async fn revoke(State(hub): State<HubState>, headers: HeaderMap, Path(id): P
                 (StatusCode::NOT_FOUND, "no such invite").into_response()
             }
         }
-        outcome => outcome_to_response(outcome),
+        outcome => {
+            // Team-history audit (0063 D1): a member's share activity is
+            // org-visible; a lone user's sharing stays unlogged, as today.
+            if matches!(outcome, ShareOutcome::Ok(ref s) if s == "revoked") {
+                if let Some(store) = hub.store() {
+                    if let Some((org, _)) = store.org_for_user(&actor).await {
+                        store.audit_append(&org.id, Some(&actor), "share.revoked", Some(&id), None).await;
+                    }
+                }
+            }
+            outcome_to_response(outcome)
+        }
     }
 }
 
@@ -289,6 +338,18 @@ pub async fn leave(State(hub): State<HubState>, headers: HeaderMap, Path(id): Pa
     let Some(actor) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
+    // Team rows refuse individual leave (0065 A4): membership implies them and
+    // the nightly reconcile would just resurrect the row.
+    #[cfg(feature = "multi-tenant")]
+    if let Some(store) = hub.store() {
+        if store.share_is_team(&id).await {
+            return (
+                StatusCode::CONFLICT,
+                "managed by your team — ask the owner to hide this machine, or leave the team",
+            )
+                .into_response();
+        }
+    }
     if hub.leave_grant(&actor, &id).await {
         StatusCode::NO_CONTENT.into_response()
     } else {

@@ -132,37 +132,79 @@ pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
                 // name + caps and the current agent count, plus the operator's
                 // support address (CCHUB_SUPPORT_EMAIL) for the upgrade mailto.
                 let limits = hub.limits_for(&user_id).await;
-                let agents = hub.agent_count(&user_id).await;
                 let support = std::env::var("CCHUB_SUPPORT_EMAIL")
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                // Billing status for the plan card (proposal 0058 B4). `status` and
-                // `periodEnd` are OMITTED when absent (no subscription) — the
-                // contract the frontend agent renders against.
-                let (status, period_end) = match hub.store() {
-                    Some(s) => s.billing_status(&user_id).await,
-                    None => (None, None),
+                // Org membership (proposal 0063 B1): the caller's org, if any —
+                // the minimal contract TeamCard + the audit view render from.
+                let membership = match hub.store() {
+                    Some(s) => s.org_for_user(&user_id).await,
+                    None => None,
                 };
+                let mut org_block: Option<serde_json::Value> = None;
                 let mut plan = serde_json::Map::new();
                 plan.insert("name".into(), json!(limits.plan));
                 plan.insert("maxAgents".into(), json!(limits.max_agents));
                 plan.insert("maxSessions".into(), json!(limits.max_concurrent_sessions));
-                plan.insert("agents".into(), json!(agents));
-                if let Some(st) = status {
-                    plan.insert("status".into(), json!(st));
+                match (&membership, hub.store()) {
+                    (Some((org, role)), Some(store)) => {
+                        let members = store.org_members(&org.id).await;
+                        let owner_email = members.iter().find(|m| m.role == "owner").map(|m| m.email.clone());
+                        org_block = Some(json!({
+                            "id": org.id, "name": org.name, "role": role,
+                            "seats": org.seat_count, "memberCount": members.len(),
+                        }));
+                        if org.seat_count > 0 {
+                            // Pool-governed (proposal 0064 Part C): the plan block
+                            // reports org truth — pooled caps, org-wide machine
+                            // count, plus seats/members/orgId for the seats UI.
+                            let member_ids = store.org_member_ids(&org.id).await;
+                            plan.insert("agents".into(), json!(store.agent_count_for_users(&member_ids).await));
+                            plan.insert("seats".into(), json!(org.seat_count));
+                            plan.insert("members".into(), json!(members.len() as i64));
+                            plan.insert("orgId".into(), json!(org.id));
+                            plan.insert("orgName".into(), json!(org.name));
+                            plan.insert("orgRole".into(), json!(role));
+                            if let Some(oe) = owner_email {
+                                plan.insert("ownerEmail".into(), json!(oe));
+                            }
+                            if let Some(st) = &org.plan_status {
+                                plan.insert("status".into(), json!(st));
+                            }
+                            if let Some(pe) = org.current_period_end {
+                                plan.insert("periodEnd".into(), json!(pe));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                if let Some(pe) = period_end {
-                    plan.insert("periodEnd".into(), json!(pe));
+                // Personal billing facts, byte-for-byte today's shape, whenever
+                // the caller is NOT pool-governed (0064 acceptance 12).
+                if !plan.contains_key("agents") {
+                    plan.insert("agents".into(), json!(hub.agent_count(&user_id).await));
+                    let (status, period_end) = match hub.store() {
+                        Some(s) => s.billing_status(&user_id).await,
+                        None => (None, None),
+                    };
+                    if let Some(st) = status {
+                        plan.insert("status".into(), json!(st));
+                    }
+                    if let Some(pe) = period_end {
+                        plan.insert("periodEnd".into(), json!(pe));
+                    }
                 }
-                return Json(json!({
+                let mut body = json!({
                     "multiTenant": true, "googleEnabled": google, "passwordLogin": password,
                     "authenticated": true, "userId": user_id, "email": email,
                     "plan": plan,
                     "supportEmail": support,
                     "billing": billing_enabled(),
-                }))
-                .into_response();
+                });
+                if let Some(org) = org_block {
+                    body["org"] = org;
+                }
+                return Json(body).into_response();
             }
         }
     }
@@ -277,18 +319,41 @@ pub async fn create(
     Json(req): Json<CreateReq>,
 ) -> Response {
     // Plan gate (proposal 0001 Phase 4): cap concurrent sessions per tenant.
-    // Multi-tenant only; single-tenant has no per-user limits.
+    // Multi-tenant only; single-tenant has no per-user limits. For an active-org
+    // member the count is the POOL's (proposal 0063 C3): live sessions on agents
+    // owned by any org member — sessions shared INTO a member from outside the
+    // org ride someone else's agent and never count.
     #[cfg(feature = "multi-tenant")]
     if let Visibility::User(v) = &scope {
         let uid = &v.user_id;
         let limits = hub.limits_for(uid).await;
-        let current = hub.registry.all_sessions_for(&scope).len() as i64;
-        if current >= limits.max_concurrent_sessions {
-            return (
-                StatusCode::PAYMENT_REQUIRED,
+        let pool = match hub.store() {
+            Some(store) => match store.org_for_user(uid).await {
+                Some((org, _)) if org.seat_count > 0 => {
+                    Some(store.org_member_ids(&org.id).await.into_iter().collect::<HashSet<String>>())
+                }
+                _ => None,
+            },
+            None => None,
+        };
+        let (current, message) = match &pool {
+            Some(members) => {
+                let n = hub.registry.sessions_count_owned_by(members);
+                (
+                    n,
+                    format!(
+                        "Team session limit reached ({} of {} across your team).",
+                        n, limits.max_concurrent_sessions
+                    ),
+                )
+            }
+            None => (
+                hub.registry.all_sessions_for(&scope).len() as i64,
                 format!("Session limit reached for your plan ({}).", limits.max_concurrent_sessions),
-            )
-                .into_response();
+            ),
+        };
+        if current >= limits.max_concurrent_sessions {
+            return (StatusCode::PAYMENT_REQUIRED, message).into_response();
         }
     }
     // A create has no existing session to disambiguate by — route to the chosen
@@ -596,14 +661,42 @@ pub async fn update_status(
     }
 }
 
-// ── Favorites (hub-local: one list for the whole fleet) ───────────────────────
-fn favorites_path(hub: &HubState) -> std::path::PathBuf {
-    hub.config_dir.join("favorites.json")
+// ── Favorites (hub-local; per-tenant in multi-tenant mode) ────────────────────
+// 0042 candidate finding #1: the historical single `config_dir/favorites.json`
+// is correct for a one-operator fleet but a cross-tenant leak on a multi-tenant
+// hub. So the file is keyed by the caller's scope: single-tenant
+// (`Visibility::All`) keeps `favorites.json` byte-for-byte; a multi-tenant
+// caller gets `config_dir/favorites/<user_id>.json`. A pre-existing shared
+// favorites.json on a multi-tenant hub is deliberately NOT migrated — it is a
+// mixed-tenant file, so every user starts empty and the old file is simply
+// never read in multi-tenant mode.
+fn favorites_path_in(config_dir: &std::path::Path, scope: &Visibility) -> Option<std::path::PathBuf> {
+    match scope {
+        Visibility::All => Some(config_dir.join("favorites.json")),
+        Visibility::User(v) => {
+            let uid = v.user_id.as_str();
+            // user_id is an opaque token-safe id, but never trust it as a path
+            // component: [A-Za-z0-9_-] only (rejects separators, dots, empty).
+            if uid.is_empty()
+                || !uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return None;
+            }
+            Some(config_dir.join("favorites").join(format!("{uid}.json")))
+        }
+    }
 }
 
-pub async fn get_favorites(State(hub): State<HubState>) -> Json<Vec<Favorite>> {
-    let list = std::fs::read_to_string(favorites_path(&hub))
-        .ok()
+fn favorites_path(hub: &HubState, scope: &Visibility) -> Option<std::path::PathBuf> {
+    favorites_path_in(&hub.config_dir, scope)
+}
+
+pub async fn get_favorites(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+) -> Json<Vec<Favorite>> {
+    let list = favorites_path(&hub, &scope)
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<Vec<Favorite>>(&s).ok())
         .unwrap_or_default();
     Json(list)
@@ -611,6 +704,7 @@ pub async fn get_favorites(State(hub): State<HubState>) -> Json<Vec<Favorite>> {
 
 pub async fn put_favorites(
     State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
     Json(list): Json<Vec<Favorite>>,
 ) -> Response {
     // Same validation as the agent's store: dedupe by id, cap count + length.
@@ -630,7 +724,16 @@ pub async fn put_favorites(
             break;
         }
     }
-    let path = favorites_path(&hub);
+    // A gated route always carries a real scope; a missing/unsanitizable tenant
+    // id fails closed rather than falling back to a shared file.
+    let Some(path) = favorites_path(&hub, &scope) else {
+        return (StatusCode::FORBIDDEN, "no tenant for favorites").into_response();
+    };
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(&clean).unwrap_or_default();
     match std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)) {
@@ -877,6 +980,9 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
     #[cfg(feature = "multi-tenant")]
     let exempt = exempt
         || path.starts_with("/api/invite/")
+        // The org-invite landing (proposal 0063 B2) is public like its 0056
+        // sibling: the token is the capability, the page renders before login.
+        || path.starts_with("/api/org-invite/")
         || matches!(path.as_str(), "/api/device/client/code" | "/api/device/client/token");
     // The Stripe webhook (proposal 0058 B2) authenticates via its Stripe-Signature
     // HMAC (verified in the handler), not a session cookie — and Stripe sends no
@@ -928,5 +1034,51 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         next.run(req).await
     } else {
         (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // 0042 candidate finding #1: favorites are per-tenant in multi-tenant mode,
+    // and the single-tenant path is byte-for-byte the historical one.
+    #[test]
+    fn favorites_path_is_scope_keyed() {
+        let dir = Path::new("/cfg");
+        // Single-tenant: the historical shared file, unchanged.
+        assert_eq!(
+            favorites_path_in(dir, &Visibility::All),
+            Some(dir.join("favorites.json")),
+        );
+        // Multi-tenant: per-user file under favorites/, keyed by the (opaque,
+        // token-safe) user id.
+        assert_eq!(
+            favorites_path_in(dir, &Visibility::user("u_AbC-123")),
+            Some(dir.join("favorites").join("u_AbC-123.json")),
+        );
+        // Two tenants never share a path.
+        assert_ne!(
+            favorites_path_in(dir, &Visibility::user("alice")),
+            favorites_path_in(dir, &Visibility::user("bob")),
+        );
+        // And no tenant path is the single-tenant shared file (no read of the
+        // legacy mixed-tenant favorites.json in multi-tenant mode).
+        assert_ne!(
+            favorites_path_in(dir, &Visibility::user("alice")),
+            favorites_path_in(dir, &Visibility::All),
+        );
+    }
+
+    // The user id is server-minted, but never trust it as a path component:
+    // anything outside [A-Za-z0-9_-] (and the empty exempt-path scope) fails
+    // closed instead of escaping config_dir or falling back to a shared file.
+    #[test]
+    fn favorites_path_rejects_unsafe_user_ids() {
+        let dir = Path::new("/cfg");
+        for bad in ["", "../evil", "a/b", "a\\b", "a.b", "..", "a b", "a\0b"] {
+            assert_eq!(favorites_path_in(dir, &Visibility::user(bad)), None, "must refuse {bad:?}");
+        }
     }
 }

@@ -7,18 +7,30 @@
 import { useEffect, useRef, useState } from "react";
 import {
   approveDevice,
+  createOrg,
+  createOrgInvite,
   getInviteInfo,
+  getOrg,
+  getOrgInviteInfo,
+  leaveOrg,
   leaveShare,
   deleteClientToken,
   listAgents,
   listClientTokens,
+  listOrgAudit,
   listOutbox,
   listReceivedShares,
   loginEmail,
   logout,
   openBillingPortal,
+  orgInviteInbox,
+  removeOrgMember,
+  respondOrgInvite,
+  revokeOrgInvite,
   revokeShare,
   rotateAgent,
+  setMachineTeamVisible,
+  setOrgMemberRole,
   signup,
   startCheckout,
   unlinkAgent,
@@ -28,6 +40,10 @@ import {
   type InviteInfo,
   type MeInfo,
   type MePlan,
+  type OrgAuditEntry,
+  type OrgInboxInvite,
+  type OrgMember,
+  type OrgMine,
   type ReceivedShare,
   type ShareInvite,
 } from "../api";
@@ -139,7 +155,7 @@ export function LimitCard({
   billing = false,
 }: {
   plan?: MePlan;
-  what: "machines" | "sessions";
+  what: "machines" | "sessions" | "seats";
   support?: string | null;
   billing?: boolean;
 }) {
@@ -147,6 +163,57 @@ export function LimitCard({
   const subject = encodeURIComponent(`cc-screen plan upgrade (${what})`);
   const founder = plan?.name === "beta" && Date.now() < FOUNDER_DEADLINE;
   const [checkoutErr, setCheckoutErr] = useState<string | null>(null);
+
+  // ── Team seat cap (proposal 0065 Part D) — its own branch so the
+  // machines/sessions cards stay pixel-identical. Owner/admin get the portal
+  // (seat changes are portal-driven, 0064); members get the mailto only.
+  if (what === "seats") {
+    const seats = plan?.seats ?? 0;
+    const isOrgAdmin = plan?.orgRole === "owner" || plan?.orgRole === "admin";
+    return (
+      <div className="mt-3 rounded-lg border border-amber/30 bg-amber/10 p-3 text-left">
+        <div className="mb-1 text-[11px] uppercase tracking-wider text-amber">Plan limit reached</div>
+        <p className="text-xs text-slate-300">
+          {seats > 0 ? (
+            <>
+              Your team's <span className="text-amber">{seats}</span> seats are all in use.
+            </>
+          ) : (
+            <>Your team is out of seats.</>
+          )}{" "}
+          {isOrgAdmin
+            ? "Add seats and the invite goes through the moment one is free."
+            : `Ask ${plan?.ownerEmail || "your team owner"} to add seats.`}
+        </p>
+        {billing && isOrgAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              setCheckoutErr(null);
+              openBillingPortal(plan?.orgId ? { org: plan.orgId } : undefined).catch((e) =>
+                setCheckoutErr(e instanceof Error ? e.message : "Couldn't open the billing portal")
+              );
+            }}
+            className={`${primaryBtn} mt-3 min-h-11`}
+          >
+            Add seats
+          </button>
+        )}
+        {checkoutErr && <div className="mt-2 text-[11px] text-claude">{checkoutErr}</div>}
+        {support && (
+          <a
+            href={`mailto:${support}?subject=${subject}`}
+            className="mt-2 inline-block text-[11px] text-slate-400 underline hover:text-slate-200"
+          >
+            Questions? Email us
+          </a>
+        )}
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          Nothing is lost at a limit — pending invites can simply be sent again.
+        </p>
+      </div>
+    );
+  }
 
   const body = (
     <p className="text-xs text-slate-300">
@@ -234,6 +301,14 @@ function PlanCard({
   const fmtDate = (t: number) =>
     new Date(t * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   const planLabel = plan?.name ? plan.name.charAt(0).toUpperCase() + plan.name.slice(1) : "Free";
+  // Team state (proposal 0065 Part D): pooled caps arrive pre-computed on
+  // /api/me; the seats meter sits above the machines meter; billing actions are
+  // owner/admin-only (portal-driven seat changes, 0064).
+  const isTeam = plan?.name === "team";
+  const orgAdmin = plan?.orgRole === "owner" || plan?.orgRole === "admin";
+  const seatUsed = plan?.members ?? 0;
+  const seatCap = plan?.seats ?? 0;
+  const seatPct = seatCap > 0 ? Math.min(100, Math.round((seatUsed / seatCap) * 100)) : 0;
   const go = (fn: () => Promise<void>) => {
     setErr(null);
     fn().catch((e) => setErr(e instanceof Error ? e.message : "Something went wrong"));
@@ -242,7 +317,14 @@ function PlanCard({
   return (
     <Window path="~/plan" className="mb-4">
       <div className="mb-4 flex items-center gap-2">
-        <h2 className="font-mono text-base font-semibold text-slate-100">{planLabel} plan</h2>
+        <h2 className="font-mono text-base font-semibold text-slate-100">
+          {isTeam ? "Team plan" : `${planLabel} plan`}
+        </h2>
+        {isTeam && plan?.orgName && (
+          <span className="min-w-0 truncate rounded border border-accent/25 bg-accent/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-accent/80">
+            {plan.orgName}
+          </span>
+        )}
         {status === "past_due" && (
           <span className="rounded border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber">
             payment failed
@@ -279,6 +361,21 @@ function PlanCard({
         </p>
       )}
 
+      {/* Seats meter (team only, proposal 0065 D) — above machines, same bar. */}
+      {isTeam && (
+        <>
+          <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
+            <span>Seats</span>
+            <span className="font-mono text-slate-300">
+              {seatUsed} / {seatCap}
+            </span>
+          </div>
+          <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full bg-bar">
+            <div className="h-full rounded-full bg-accent" style={{ width: `${seatPct}%` }} />
+          </div>
+        </>
+      )}
+
       <div className="mb-1 flex items-center justify-between text-xs text-slate-400">
         <span>Machines</span>
         <span className="font-mono text-slate-300">
@@ -289,12 +386,27 @@ function PlanCard({
         <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
       </div>
       <p className="mb-4 text-xs text-slate-400">
-        Up to <span className="text-slate-300">{plan?.maxSessions ?? 0}</span> concurrent sessions.
+        Up to <span className="text-slate-300">{plan?.maxSessions ?? 0}</span> concurrent sessions
+        {isTeam ? " — pooled across your team" : ""}.
       </p>
 
       {err && <div className="mb-2 text-[11px] text-claude">{err}</div>}
 
-      {subscribed ? (
+      {isTeam ? (
+        orgAdmin ? (
+          <button
+            type="button"
+            onClick={() => go(() => openBillingPortal(plan?.orgId ? { org: plan.orgId } : undefined))}
+            className={`${primaryBtn} min-h-11`}
+          >
+            Manage billing
+          </button>
+        ) : (
+          <p className="text-center text-[11px] text-slate-500">
+            Billing is managed by {plan?.ownerEmail || "your team owner"}.
+          </p>
+        )
+      ) : subscribed ? (
         <button type="button" onClick={() => go(openBillingPortal)} className={`${primaryBtn} min-h-11`}>
           Manage billing
         </button>
@@ -839,6 +951,7 @@ function GrantRow({
   title,
   sub,
   badge,
+  extra,
   actionLabel,
   confirmText,
   onConfirm,
@@ -847,12 +960,17 @@ function GrantRow({
   title: string;
   sub: React.ReactNode;
   badge?: string;
-  actionLabel: string;
-  confirmText: string;
-  onConfirm: () => Promise<void>;
+  // Optional inline control before the action (proposal 0065 C2's role select).
+  extra?: React.ReactNode;
+  // Action is optional (proposal 0065): a read-only row (an audit line, a
+  // member you can't remove) renders without the destructive button.
+  actionLabel?: string;
+  confirmText?: string;
+  onConfirm?: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const actionable = !!actionLabel && !!onConfirm;
   return (
     <li className="mt-rise rounded-xl border border-edge bg-bar/50 p-3.5">
       <div className="flex items-center gap-3">
@@ -866,14 +984,17 @@ function GrantRow({
             {badge}
           </span>
         )}
-        <button
-          onClick={() => setConfirming(true)}
-          className="shrink-0 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
-        >
-          {actionLabel}
-        </button>
+        {extra}
+        {actionable && (
+          <button
+            onClick={() => setConfirming(true)}
+            className="shrink-0 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+          >
+            {actionLabel}
+          </button>
+        )}
       </div>
-      {confirming && (
+      {confirming && actionable && (
         <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-claude/30 bg-claude/10 px-3 py-2.5">
           <span className="text-xs text-slate-300">{confirmText}</span>
           <div className="flex shrink-0 gap-2">
@@ -885,7 +1006,7 @@ function GrantRow({
               onClick={async () => {
                 setBusy(true);
                 try {
-                  await onConfirm();
+                  await onConfirm?.();
                 } finally {
                   setBusy(false);
                   setConfirming(false);
@@ -990,6 +1111,13 @@ function SharedCard() {
     (i) => i.status === "pending" || i.status === "accepted" || i.status === "invited"
   );
   const loading = outbox === null || received === null;
+  // Team-materialized rows (proposal 0065 Part B) are EXCLUDED from the grant
+  // list — their Leave action is refused server-side, and dozens of
+  // unactionable rows are noise. One summary line stands in; the TeamCard
+  // (~/team) is the management surface.
+  const receivedDirect = (received ?? []).filter((r) => r.origin !== "team");
+  const teamRows = (received ?? []).filter((r) => r.origin === "team");
+  const teamOwners = new Set(teamRows.map((r) => r.ownerEmail || r.agentId)).size;
 
   return (
     <Window path="~/shared" className="mb-4">
@@ -1029,33 +1157,780 @@ function SharedCard() {
         </ul>
       )}
 
-      {received && received.length > 0 && (
+      {received && (receivedDirect.length > 0 || teamRows.length > 0) && (
         <>
           <div className="mb-2 mt-5 flex items-center justify-between">
             <h3 className="text-xs uppercase tracking-wider text-slate-500">Shared with you</h3>
-            <span className="text-[11px] text-slate-500">{received.length}</span>
+            {receivedDirect.length > 0 && (
+              <span className="text-[11px] text-slate-500">{receivedDirect.length}</span>
+            )}
           </div>
-          <ul className="space-y-2">
-            {received.map((r) => (
-              <GrantRow
-                key={r.id}
-                dot="bg-accent"
-                title={subjectTitle(r.machine, r.session)}
-                sub={
-                  <>
-                    from {r.ownerEmail || "—"} · {r.permission === "view" ? "can view" : "can use"}
-                  </>
-                }
-                actionLabel="Leave"
-                confirmText={`Leave ${subjectTitle(r.machine, r.session)}? You'll lose access until re-invited.`}
-                onConfirm={async () => {
-                  await leaveShare(r.id);
-                  reload();
+          {receivedDirect.length > 0 && (
+            <ul className="space-y-2">
+              {receivedDirect.map((r) => (
+                <GrantRow
+                  key={r.id}
+                  dot="bg-accent"
+                  title={subjectTitle(r.machine, r.session)}
+                  sub={
+                    <>
+                      from {r.ownerEmail || "—"} · {r.permission === "view" ? "can view" : "can use"}
+                    </>
+                  }
+                  actionLabel="Leave"
+                  confirmText={`Leave ${subjectTitle(r.machine, r.session)}? You'll lose access until re-invited.`}
+                  onConfirm={async () => {
+                    await leaveShare(r.id);
+                    reload();
+                  }}
+                />
+              ))}
+            </ul>
+          )}
+          {teamRows.length > 0 && (
+            <p className="mt-2 text-[11px] text-slate-500">
+              via your team: {teamRows.length} machine{teamRows.length === 1 ? "" : "s"} from{" "}
+              {teamOwners} teammate{teamOwners === 1 ? "" : "s"} — managed in{" "}
+              <span className="font-mono text-slate-400">~/team</span>
+            </p>
+          )}
+        </>
+      )}
+    </Window>
+  );
+}
+
+// ── Teams (proposals 0063/0065) ──────────────────────────────────────────────
+
+// The founder-approved team prices (2026-08-06): $16/seat/mo · $160/seat/yr,
+// minimum 3 seats. Client-side numbers are display math only — the server
+// resolves the actual price and clamps seats to max(3, N, memberCount).
+const TEAM_SEAT_MIN = 3;
+const TEAM_MONTHLY_PER_SEAT = 16;
+const TEAM_ANNUAL_PER_SEAT = 160;
+
+// The seat picker (proposal 0065 Part D): a stepper (min 3, default 3), a
+// monthly/annual toggle, and live total math on the submit button. Checkout
+// navigation is full-page via startCheckout (never window.open — the
+// installed-PWA return rule).
+function SeatPicker({
+  busy = false,
+  submitPrefix,
+  onSubmit,
+}: {
+  busy?: boolean;
+  /// "Start a team" / "Activate" — the live total is appended.
+  submitPrefix: string;
+  onSubmit: (price: "team-monthly" | "team-annual", seats: number) => void;
+}) {
+  const [seats, setSeats] = useState(TEAM_SEAT_MIN);
+  const [cycle, setCycle] = useState<"monthly" | "annual">("monthly");
+  const total =
+    cycle === "monthly" ? `$${TEAM_MONTHLY_PER_SEAT * seats}/mo` : `$${TEAM_ANNUAL_PER_SEAT * seats}/yr`;
+  const stepBtn =
+    "flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-edge bg-bar font-mono text-base text-slate-200 transition hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40";
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setSeats((n) => Math.max(TEAM_SEAT_MIN, n - 1))}
+          disabled={seats <= TEAM_SEAT_MIN}
+          aria-label="Fewer seats"
+          className={stepBtn}
+        >
+          −
+        </button>
+        <div className="min-w-0 flex-1 text-center">
+          <div className="font-mono text-lg font-semibold text-slate-100">{seats}</div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500">
+            seats (min {TEAM_SEAT_MIN})
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setSeats((n) => n + 1)}
+          aria-label="More seats"
+          className={stepBtn}
+        >
+          +
+        </button>
+      </div>
+      <div className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-edge bg-bar p-1 text-center text-xs font-medium">
+        {(
+          [
+            ["monthly", `$${TEAM_MONTHLY_PER_SEAT}/seat/mo`],
+            ["annual", `$${TEAM_ANNUAL_PER_SEAT}/seat/yr`],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setCycle(key)}
+            className={`min-h-11 rounded-md py-1.5 transition ${
+              cycle === key ? "bg-accent text-bar" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onSubmit(cycle === "monthly" ? "team-monthly" : "team-annual", seats)}
+        className={`${primaryBtn} min-h-11`}
+      >
+        {busy ? "…" : `${submitPrefix} — ${total}`}
+      </button>
+    </div>
+  );
+}
+
+// The org-invite form (proposal 0065 C3) — the ShareForm skeleton against
+// POST /api/orgs/invites: email in, ONE success state for both arms (account or
+// not — no account-existence oracle) with the copyable /org-invite link as the
+// centerpiece. A 402 seat-cap answer renders the seats LimitCard beneath.
+function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"member" | "admin">("member");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [seatsFull, setSeatsFull] = useState(false);
+  const [done, setDone] = useState<{ email: string; inviteUrl: string | null } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const to = email.trim();
+    if (busy || !to) return;
+    setBusy(true);
+    setError(null);
+    setSeatsFull(false);
+    try {
+      const r = await createOrgInvite(to, role);
+      // A relative link (no CCHUB_PUBLIC_URL) resolves against this origin.
+      setDone({
+        email: to,
+        inviteUrl: r.inviteUrl ? new URL(r.inviteUrl, window.location.origin).toString() : null,
+      });
+      onInvited();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 402) setSeatsFull(true);
+      else setError(err instanceof Error ? err.message : "Could not send the invite.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="rounded-lg border border-amber/30 bg-amber/10 px-3 py-2.5 text-xs text-amber">
+        <div>
+          Invitation created for <span className="font-semibold">{done.email}</span> — they'll see it
+          when they sign in. You can also send them this link:
+        </div>
+        {done.inviteUrl && (
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
+              {done.inviteUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => {
+                if (done.inviteUrl) navigator.clipboard?.writeText(done.inviteUrl);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="shrink-0 rounded-md border border-amber/60 px-2.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+            >
+              {copied ? "Copied!" : "Copy link"}
+            </button>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => {
+            setDone(null);
+            setEmail("");
+            setRole("member");
+          }}
+          className="mt-2 min-h-11 rounded-md px-1.5 py-1 text-[11px] text-slate-400 transition hover:text-slate-200"
+        >
+          Invite another
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit} className="rounded-lg border border-edge bg-bar/60 p-3">
+      <div className="mb-2 font-mono text-xs text-slate-400">Invite a teammate</div>
+      <input
+        type="email"
+        inputMode="email"
+        autoCapitalize="none"
+        autoComplete="off"
+        spellCheck={false}
+        value={email}
+        onChange={(e) => {
+          setEmail(e.target.value);
+          setError(null);
+        }}
+        placeholder="name@example.com"
+        className={inputCls}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <label className="text-[11px] text-slate-500" htmlFor="team-invite-role">
+          Role
+        </label>
+        <select
+          id="team-invite-role"
+          value={role}
+          onChange={(e) => setRole(e.target.value === "admin" ? "admin" : "member")}
+          className="min-h-11 rounded-md border border-edge bg-bar px-2 text-xs text-slate-200 outline-none focus:border-accent"
+        >
+          <option value="member">member</option>
+          <option value="admin">admin</option>
+        </select>
+        <div className="flex-1" />
+        <button
+          type="submit"
+          disabled={busy || !email.trim()}
+          className="min-h-11 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy ? "…" : "Invite"}
+        </button>
+      </div>
+      {error && <div className="mt-2 text-[11px] text-claude">{error}</div>}
+      {seatsFull && (
+        <LimitCard plan={me.plan} what="seats" support={me.supportEmail} billing={me.billing ?? false} />
+      )}
+    </form>
+  );
+}
+
+// The ~/team dashboard window (proposal 0065 Part C): org name + role, the
+// member list (GrantRow), pending invites, the invite form, per-machine
+// team-visibility toggles, and the Leave footer. With no org: pending org
+// invites (accept/decline, with the consent copy) and — on a billing hub — the
+// "Start a team" entry with the Part D seat-picker checkout. Renders nothing
+// for an org-less user on a billing-less hub.
+function TeamCard({ me, onChanged }: { me: MeInfo; onChanged?: () => void }) {
+  const [data, setData] = useState<OrgMine | null | undefined>(undefined);
+  const [inbox, setInbox] = useState<OrgInboxInvite[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [inboxErr, setInboxErr] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [teamName, setTeamName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+
+  const reload = () => {
+    getOrg()
+      .then((d) => setData(d))
+      .catch(() => {});
+    orgInviteInbox()
+      .then(setInbox)
+      .catch(() => {});
+  };
+  useEffect(() => {
+    reload();
+    const t = setInterval(reload, 8000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Accept/decline a pending org invite. A 402 (team out of seats) or 409
+  // (already in a team) surfaces the server's message inline.
+  const respond = async (id: string, accept: boolean) => {
+    setInboxErr(null);
+    try {
+      await respondOrgInvite(id, accept);
+      reload();
+      if (accept) onChanged?.();
+    } catch (e) {
+      setInboxErr(e instanceof Error ? e.message : "Could not respond to the invitation.");
+      reload();
+    }
+  };
+
+  if (data === undefined) return null; // first load — appear quietly when known
+
+  // ── No org ──────────────────────────────────────────────────────────────────
+  if (data === null) {
+    if (inbox.length === 0 && !me.billing) return null;
+    return (
+      <Window path="~/team" className="mb-4">
+        <h2 className="mb-3 font-mono text-base font-semibold text-slate-100">Team</h2>
+        {inbox.length > 0 && (
+          <ul className="mb-3 space-y-2">
+            {inbox.map((i) => (
+              <li key={i.id} className="rounded-xl border border-accent/30 bg-accent/5 p-3.5">
+                <div className="text-sm text-slate-100">
+                  <span className="text-slate-400">{i.inviterEmail || "Someone"}</span> invited you to
+                  join <span className="font-semibold">{i.orgName || "a team"}</span>
+                  {i.role === "admin" ? " as an admin" : ""}
+                </div>
+                {i.consent && <p className="mt-1.5 text-[11px] text-amber">{i.consent}</p>}
+                <div className="mt-2.5 flex justify-end gap-2">
+                  <button
+                    onClick={() => respond(i.id, false)}
+                    className="min-h-11 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+                  >
+                    Decline
+                  </button>
+                  <button
+                    onClick={() => respond(i.id, true)}
+                    className="min-h-11 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110"
+                  >
+                    Join team
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {inboxErr && <div className="mb-3 text-[11px] text-claude">{inboxErr}</div>}
+        {me.billing &&
+          (!starting ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="min-w-0 text-xs text-slate-400">
+                Working with a team? ${TEAM_MONTHLY_PER_SEAT}/seat, min {TEAM_SEAT_MIN} seats — everyone
+                sees everyone's sessions.
+              </p>
+              <button
+                onClick={() => setStarting(true)}
+                className="min-h-11 shrink-0 rounded-lg border border-accent/60 px-3 text-xs font-semibold text-accent transition hover:bg-accent/10"
+              >
+                Start a team
+              </button>
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1.5 block text-[11px] uppercase tracking-wider text-slate-500">
+                Team name
+              </label>
+              <input
+                autoFocus
+                value={teamName}
+                onChange={(e) => {
+                  setTeamName(e.target.value);
+                  setErr(null);
+                }}
+                placeholder="acme-eng"
+                spellCheck={false}
+                autoCapitalize="none"
+                className={`${inputCls} mb-3`}
+              />
+              <SeatPicker
+                busy={busy}
+                submitPrefix="Start a team"
+                onSubmit={async (price, seats) => {
+                  const name = teamName.trim();
+                  if (!name) {
+                    setErr("Give your team a name first.");
+                    return;
+                  }
+                  setBusy(true);
+                  setErr(null);
+                  try {
+                    // Create the org first (0063 B1), then checkout targets it
+                    // (0064 B3). If the checkout hop fails, the dormant org
+                    // remains and this card shows the Activate state next poll.
+                    const { id } = await createOrg(name);
+                    onChanged?.();
+                    await startCheckout(price, { org: id, seats });
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : "Could not start the team.");
+                    reload();
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
               />
+              {err && <div className="mt-2 text-[11px] text-claude">{err}</div>}
+              <button
+                onClick={() => setStarting(false)}
+                className="mt-2 min-h-11 w-full rounded-lg px-3 py-2 text-xs text-slate-400 transition hover:text-slate-200"
+              >
+                Cancel
+              </button>
+            </div>
+          ))}
+      </Window>
+    );
+  }
+
+  // ── Member ──────────────────────────────────────────────────────────────────
+  const { org, myRole, members, invites, machines } = data;
+  const admin = myRole === "owner" || myRole === "admin";
+  const dormant = org.seats === 0;
+  const roleDot = (r: string) => (r === "owner" ? "bg-accent" : r === "admin" ? "bg-amber" : "bg-slate-600");
+
+  const changeRole = async (m: OrgMember, role: string) => {
+    if (role === m.role) return;
+    if (
+      role === "owner" &&
+      !window.confirm(`Transfer ownership of ${org.name} to ${m.email}? You become an admin.`)
+    ) {
+      reload();
+      return;
+    }
+    setErr(null);
+    try {
+      await setOrgMemberRole(m.userId, role);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not change the role.");
+    }
+    reload();
+  };
+
+  const toggleVisible = async (agentId: string, visible: boolean) => {
+    // Optimistic — the checkbox flips at once; reload reconciles.
+    setData((d) =>
+      d
+        ? { ...d, machines: d.machines.map((x) => (x.agentId === agentId ? { ...x, teamVisible: visible } : x)) }
+        : d
+    );
+    setErr(null);
+    try {
+      await setMachineTeamVisible(agentId, visible);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not change the machine's visibility.");
+    }
+    reload();
+  };
+
+  const doLeave = async () => {
+    setErr(null);
+    try {
+      await leaveOrg();
+      setLeaving(false);
+      reload();
+      onChanged?.();
+    } catch (e) {
+      // The last owner gets a 409 with a human message — shown inline.
+      setErr(e instanceof Error ? e.message : "Could not leave the team.");
+      setLeaving(false);
+    }
+  };
+
+  return (
+    <Window path="~/team" className="mb-4">
+      <div className="mb-1 flex items-center gap-2">
+        <h2 className="min-w-0 truncate font-mono text-base font-semibold text-slate-100">{org.name}</h2>
+        <span className="shrink-0 rounded border border-accent/25 bg-accent/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent/80">
+          {myRole}
+        </span>
+      </div>
+      <p className="mb-4 text-xs text-slate-500">
+        {dormant
+          ? "Team created — activate seats to pool your limits and turn on team visibility."
+          : `${org.memberCount} member${org.memberCount === 1 ? "" : "s"} · ${org.seats} seat${
+              org.seats === 1 ? "" : "s"
+            }`}
+      </p>
+
+      {dormant && myRole === "owner" && me.billing && (
+        <div className="mb-4 rounded-lg border border-accent/30 bg-accent/5 p-3">
+          <div className="mb-2 text-[11px] uppercase tracking-wider text-accent">Activate your team</div>
+          <SeatPicker
+            busy={busy}
+            submitPrefix="Activate"
+            onSubmit={async (price, seats) => {
+              setBusy(true);
+              setErr(null);
+              try {
+                await startCheckout(price, { org: org.id, seats });
+              } catch (e) {
+                setErr(e instanceof Error ? e.message : "Couldn't start checkout.");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          />
+        </div>
+      )}
+
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-xs uppercase tracking-wider text-slate-500">Members</h3>
+        <span className="text-[11px] text-slate-500">
+          {members.length}
+          {org.seats > 0 ? ` / ${org.seats}` : ""}
+        </span>
+      </div>
+      <ul className="space-y-2">
+        {members.map((m) => {
+          const self = m.userId === me.userId;
+          const canRemove =
+            !self && (myRole === "owner" ? m.role !== "owner" : myRole === "admin" && m.role === "member");
+          const canSetRole = myRole === "owner" && !self;
+          return (
+            <GrantRow
+              key={m.userId}
+              dot={roleDot(m.role)}
+              title={m.email}
+              sub={
+                <>
+                  joined {timeAgo(m.joinedAt)}
+                  {self ? " · you" : ""}
+                </>
+              }
+              badge={canSetRole ? undefined : m.role}
+              extra={
+                canSetRole ? (
+                  <select
+                    value={m.role}
+                    onChange={(e) => changeRole(m, e.target.value)}
+                    aria-label={`Role for ${m.email}`}
+                    className="min-h-11 shrink-0 rounded-md border border-edge bg-bar px-2 text-xs text-slate-300 outline-none transition focus:border-accent"
+                  >
+                    <option value="member">member</option>
+                    <option value="admin">admin</option>
+                    <option value="owner">owner (transfer)</option>
+                  </select>
+                ) : undefined
+              }
+              actionLabel={canRemove ? "Remove" : undefined}
+              confirmText={`Remove ${m.email}? They lose team visibility immediately.`}
+              onConfirm={
+                canRemove
+                  ? async () => {
+                      setErr(null);
+                      try {
+                        await removeOrgMember(m.userId);
+                      } catch (e) {
+                        setErr(e instanceof Error ? e.message : "Could not remove the member.");
+                      }
+                      reload();
+                    }
+                  : undefined
+              }
+            />
+          );
+        })}
+        {admin &&
+          invites.map((i) => (
+            <GrantRow
+              key={i.id}
+              dot="bg-slate-600"
+              title={i.email}
+              sub={
+                <>
+                  invited {timeAgo(i.createdAt)}
+                  {i.role === "admin" ? " · as admin" : ""}
+                </>
+              }
+              badge="invited"
+              actionLabel="Cancel"
+              confirmText={`Cancel the invitation for ${i.email}?`}
+              onConfirm={async () => {
+                setErr(null);
+                try {
+                  await revokeOrgInvite(i.id);
+                } catch (e) {
+                  setErr(e instanceof Error ? e.message : "Could not cancel the invitation.");
+                }
+                reload();
+              }}
+            />
+          ))}
+      </ul>
+
+      {admin && (
+        <div className="mt-3">
+          <TeamInviteForm me={me} onInvited={reload} />
+        </div>
+      )}
+
+      {machines.length > 0 && (
+        <>
+          <h3 className="mb-1 mt-5 text-xs uppercase tracking-wider text-slate-500">Your machines</h3>
+          <p className="mb-2 text-[11px] text-slate-500">
+            Checked machines are visible to your team (view-only). Uncheck one to hide it.
+          </p>
+          <ul className="space-y-1.5">
+            {machines.map((mc) => (
+              <li key={mc.agentId}>
+                <label className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-lg border border-edge bg-bar/40 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 shrink-0 accent-accent"
+                    checked={mc.teamVisible}
+                    onChange={(e) => toggleVisible(mc.agentId, e.target.checked)}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-sm text-slate-200">
+                    {mc.machine}
+                  </span>
+                  <span className="shrink-0 text-[11px] text-slate-500">
+                    {mc.teamVisible ? "visible to team" : "hidden"}
+                  </span>
+                </label>
+              </li>
             ))}
           </ul>
         </>
+      )}
+
+      <div className="mt-5 border-t border-edge pt-3">
+        {err && <div className="mb-2 text-[11px] text-claude">{err}</div>}
+        {myRole === "owner" ? (
+          <p className="text-[11px] text-slate-500">
+            As the owner you can't leave — transfer ownership to another member first (the role menu on
+            their row).
+          </p>
+        ) : leaving ? (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-claude/30 bg-claude/10 px-3 py-2.5">
+            <span className="text-xs text-slate-300">
+              Leave {org.name}? You lose team visibility both ways.
+            </span>
+            <div className="flex shrink-0 gap-2">
+              <button
+                onClick={() => setLeaving(false)}
+                className="min-h-11 rounded-md px-2 py-1 text-xs text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={doLeave}
+                className="min-h-11 rounded-md bg-claude px-2.5 py-1 text-xs font-semibold text-bar hover:brightness-110"
+              >
+                Leave
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setLeaving(true)}
+            className="min-h-11 rounded-lg border border-edge px-3 py-2 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+          >
+            Leave team
+          </button>
+        )}
+      </div>
+    </Window>
+  );
+}
+
+// Humanize the audit log's dotted action vocabulary (proposal 0063 Part D) into
+// one readable line. Unknown actions fall back to the raw string with the dots
+// spaced out, so a newer hub's events still render legibly.
+function humanizeAudit(e: OrgAuditEntry): string {
+  const actor = e.actorEmail || "system";
+  const t = e.target || "";
+  let detail: Record<string, unknown> = {};
+  if (e.detail) {
+    try {
+      detail = JSON.parse(e.detail) as Record<string, unknown>;
+    } catch {
+      /* not JSON — ignore */
+    }
+  }
+  switch (e.action) {
+    case "org.created":
+      return `${actor} created the team`;
+    case "member.joined":
+      return `${actor} joined the team`;
+    case "member.left":
+      return `${actor} left the team`;
+    case "member.removed":
+      return `${actor} removed ${t || "a member"}`;
+    case "member.role_changed":
+      return typeof detail.role === "string"
+        ? `${actor} made ${t || "a member"} ${detail.role}`
+        : `${actor} changed the role of ${t || "a member"}`;
+    case "invite.created":
+      return `${actor} invited ${t || "someone"}`;
+    case "invite.declined":
+      return `${actor} declined an invitation`;
+    case "invite.revoked":
+      return `${actor} revoked an invitation`;
+    case "invite.expired":
+      return "an invitation expired";
+    case "machine.visibility_changed": {
+      const m = typeof detail.machine === "string" && detail.machine ? detail.machine : t || "a machine";
+      return detail.visible === false
+        ? `${actor} hid ${m} from the team`
+        : `${actor} made ${m} visible to the team`;
+    }
+    case "org.seats_changed":
+      return `${actor} changed the team's seats`;
+    case "share.created":
+      return `${actor} shared ${t || "a resource"}`;
+    case "share.revoked":
+      return `${actor} revoked a share`;
+    default:
+      return `${actor} ${e.action.replace(/\./g, " ")}${t ? ` ${t}` : ""}`;
+  }
+}
+
+// The minimal audit-log admin view (proposal 0063 D3): read-only lines in
+// GrantRow's visual grammar (dot · subject · quiet timestamp), one "Show more"
+// button driving the keyset cursor. Mounted only for owners/admins (the parent
+// gates on me.org.role); a 404 (demoted mid-session) hides it.
+function AuditCard() {
+  const [rows, setRows] = useState<OrgAuditEntry[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [hidden, setHidden] = useState(false);
+
+  useEffect(() => {
+    listOrgAudit()
+      .then((r) => {
+        setRows(r);
+        setHasMore(r.length >= 50);
+      })
+      .catch(() => setHidden(true));
+  }, []);
+
+  const more = async () => {
+    if (!rows?.length || busy) return;
+    setBusy(true);
+    try {
+      const next = await listOrgAudit(rows[rows.length - 1]!.id);
+      setRows([...rows, ...next]);
+      setHasMore(next.length >= 50);
+    } catch {
+      setHasMore(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (hidden || rows === null) return null;
+
+  return (
+    <Window path="~/team/audit" className="mb-4">
+      <h2 className="mb-1 font-mono text-base font-semibold text-slate-100">Team activity</h2>
+      <p className="mb-3 text-xs text-slate-500">
+        Membership, invites and visibility changes — visible to owners and admins.
+      </p>
+      {rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-edge px-4 py-6 text-center text-xs text-slate-500">
+          No team activity yet.
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {rows.map((e) => (
+            <li key={e.id} className="flex items-start gap-2.5 rounded-lg border border-edge bg-bar/40 px-3 py-2">
+              <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-slate-600" />
+              <div className="min-w-0 flex-1">
+                <div className="break-words font-mono text-xs text-slate-200">{humanizeAudit(e)}</div>
+                <div className="text-[11px] text-slate-500">{timeAgo(e.at)}</div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {hasMore && (
+        <button
+          onClick={more}
+          disabled={busy}
+          className="mt-3 min-h-11 w-full rounded-lg border border-edge px-3 py-2 text-xs text-slate-300 transition hover:border-accent hover:text-accent disabled:opacity-40"
+        >
+          {busy ? "…" : "Show more"}
+        </button>
       )}
     </Window>
   );
@@ -1076,6 +1951,7 @@ export function Dashboard({
   onUpdateAssistants,
   onStartSession,
   billingPending = null,
+  onMeChanged,
 }: {
   me: MeInfo;
   onClose: () => void;
@@ -1087,6 +1963,9 @@ export function Dashboard({
   /// Checkout-return state (proposal 0058 C4): drives the plan card's
   /// "activating…" notice. null when not returning from Stripe checkout.
   billingPending?: "pending" | "slow" | null;
+  /// Re-read /api/me after a membership-changing action (join/leave/create a
+  /// team, proposal 0065 C) so the plan/org blocks catch up without a reload.
+  onMeChanged?: () => void;
 }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [copied, setCopied] = useState(false);
@@ -1204,8 +2083,16 @@ export function Dashboard({
             Stripe configured. Above the fold, under the machines it caps. */}
         <PlanCard me={me} billingPending={billingPending} />
 
+        {/* Team (proposals 0063/0065): the plan, then the team it pays for,
+            then personal shares. Renders nothing for an org-less user on a
+            billing-less hub. */}
+        <TeamCard me={me} onChanged={onMeChanged} />
+
         {/* Sharing — who has access to what, and take it back */}
         <SharedCard />
+
+        {/* The team audit log (proposal 0063 D3) — owners/admins only. */}
+        {(me.org?.role === "owner" || me.org?.role === "admin") && <AuditCard />}
 
         {/* Terminal clients (proposal 0060 B4): every `ccs activate` sign-in,
             with per-token revoke — the browser-side kill switch. Hidden when
@@ -1359,12 +2246,17 @@ export function Dashboard({
 // account.
 export function InviteLanding({
   token,
+  org = false,
   me,
   onAuthed,
   onDone,
   onLoggedOut,
 }: {
   token: string;
+  /// True for a team invite (proposal 0065 C4): the /org-invite/<token> path,
+  /// read via GET /api/org-invite/:token. Copy branches on `info.kind`; the
+  /// email-mismatch and dead-token screens are shared verbatim.
+  org?: boolean;
   me: MeInfo;
   /// Re-read identity after a login/signup from the embedded AuthScreen.
   onAuthed: () => void;
@@ -1379,7 +2271,7 @@ export function InviteLanding({
   // read is what defensively attaches the invite server-side (C3.3).
   useEffect(() => {
     let alive = true;
-    getInviteInfo(token)
+    (org ? getOrgInviteInfo(token) : getInviteInfo(token))
       .then((i) => alive && setInfo(i))
       .catch((e) => {
         if (!alive) return;
@@ -1389,7 +2281,7 @@ export function InviteLanding({
     return () => {
       alive = false;
     };
-  }, [token, me.authenticated, me.email]);
+  }, [token, org, me.authenticated, me.email]);
 
   const matched = !!info && me.authenticated && (me.email ?? "").toLowerCase() === info.email.toLowerCase();
 
@@ -1427,11 +2319,17 @@ export function InviteLanding({
   }
 
   if (!me.authenticated) {
+    // Team invites (proposal 0065 C4): org-specific copy, and the server's
+    // normative consent line rendered ON the landing (proposal 0063 B2).
+    const hint =
+      info.kind === "team"
+        ? `${info.inviterEmail} invited you to join ${info.orgName || "a team"} — sign in or create an account as ${info.email} to join.${info.consent ? ` ${info.consent}` : ""}`
+        : `${info.inviterEmail} invited you — sign in or create an account as ${info.email} to see it.`;
     return (
       <AuthScreen
         google={me.googleEnabled}
         password={me.passwordLogin !== false}
-        hint={`${info.inviterEmail} invited you — sign in or create an account as ${info.email} to see it.`}
+        hint={hint}
         initialEmail={info.email}
         onAuthed={onAuthed}
       />

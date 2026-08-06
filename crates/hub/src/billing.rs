@@ -25,7 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::db::{Store, SubApply};
+use crate::db::{Store, SubApply, SubTarget};
 use crate::state::HubState;
 
 const STRIPE_API_BASE: &str = "https://api.stripe.com";
@@ -58,6 +58,19 @@ pub struct BillingConfig {
     price_pro_monthly: String,
     price_pro_annual: String,
     price_pro_founder: Option<String>,
+    /// Team per-seat prices (proposal 0064 B2) — all optional, so a hub
+    /// configured only for Pro behaves exactly as today (graceful absence one
+    /// tier down: no team prices → team checkout choices 400, nothing else
+    /// changes).
+    price_team_monthly: Option<String>,
+    price_team_annual: Option<String>,
+    price_team_founder: Option<String>,
+    /// Optional Billing Portal *configuration* id (`bpc_…`) used for TEAM (org)
+    /// portal sessions (0064 B7): the portal's quantity editing is per-config,
+    /// so the default config keeps Pro quantity locked and offers no Team↔Pro
+    /// cross-grade, while this one enables adjustable quantity (min 3) on the
+    /// Team prices only. Unset → org portals use the account default config.
+    portal_config_team: Option<String>,
     founder_deadline: u64,
     public_url: String,
     /// Stripe Managed Payments (merchant of record). Opt-in via
@@ -83,6 +96,10 @@ impl BillingConfig {
             price_pro_monthly: var("STRIPE_PRICE_PRO_MONTHLY")?,
             price_pro_annual: var("STRIPE_PRICE_PRO_ANNUAL")?,
             price_pro_founder: var("STRIPE_PRICE_PRO_FOUNDER"),
+            price_team_monthly: var("STRIPE_PRICE_TEAM_MONTHLY"),
+            price_team_annual: var("STRIPE_PRICE_TEAM_ANNUAL"),
+            price_team_founder: var("STRIPE_PRICE_TEAM_FOUNDER"),
+            portal_config_team: var("STRIPE_PORTAL_CONFIG_TEAM"),
             founder_deadline,
             public_url,
             managed_payments: matches!(
@@ -92,14 +109,29 @@ impl BillingConfig {
         })
     }
 
-    /// Does a price id belong to one of our configured Pro prices? An unrecognized
-    /// price on a subscription is logged and skipped (reconcile keeps flagging it).
-    fn recognizes_price(&self, price_id: &str) -> bool {
-        price_id == self.price_pro_monthly
+    /// Which plan a recognized price grants (proposal 0064 B2) — the price IS
+    /// the plan. `None` = not one of ours: an unrecognized price on a
+    /// subscription is logged and skipped (reconcile keeps flagging it).
+    fn plan_for_price(&self, price_id: &str) -> Option<&'static str> {
+        if price_id == self.price_pro_monthly
             || price_id == self.price_pro_annual
             || self.price_pro_founder.as_deref() == Some(price_id)
+        {
+            return Some("pro");
+        }
+        if self.price_team_monthly.as_deref() == Some(price_id)
+            || self.price_team_annual.as_deref() == Some(price_id)
+            || self.price_team_founder.as_deref() == Some(price_id)
+        {
+            return Some("team");
+        }
+        None
     }
 }
+
+/// The Team seat floor (proposal 0064 B3): a pricing decision, not deployment
+/// config — sub-$50/mo orgs cost more in admin surface than they return.
+const TEAM_SEAT_FLOOR: i64 = 3;
 
 /// Whether Stripe billing is configured (all required env present). Gates route
 /// registration in `lib.rs` and the `billing` flag in `/api/me`.
@@ -130,6 +162,9 @@ struct SubItem {
     /// basil moved `current_period_end` from the subscription onto its items.
     #[serde(default)]
     current_period_end: Option<i64>,
+    /// The seat count for a quantity-billed (Team) subscription (0064 B4).
+    #[serde(default)]
+    quantity: Option<i64>,
 }
 #[derive(Deserialize)]
 struct SubPrice {
@@ -147,6 +182,12 @@ impl Subscription {
         self.current_period_end
             .or_else(|| self.items.data.first().and_then(|i| i.current_period_end))
     }
+
+    /// The (single) item's quantity — the Team seat count (0064 B4). Portal
+    /// seat changes flow in through this on the re-fetch.
+    fn quantity(&self) -> Option<i64> {
+        self.items.data.first().and_then(|i| i.quantity)
+    }
 }
 
 #[derive(Deserialize)]
@@ -162,20 +203,30 @@ struct SubList {
 }
 
 /// `POST /v1/checkout/sessions` — returns the hosted-checkout URL to redirect to.
+/// Pro checkouts pass `quantity = 1` and no adjustable range (byte-for-byte the
+/// 0058 form); Team checkouts (0064 B3) pass the seat count, an `org_`-prefixed
+/// `client_reference_id`, and an adjustable range with the seat floor so the
+/// buyer settles the final count inside Stripe's UI without a round-trip.
 async fn create_checkout_session(
     cfg: &BillingConfig,
     price_id: &str,
-    user_id: &str,
+    client_reference_id: &str,
     customer: Option<&str>,
+    quantity: i64,
+    adjustable_min: Option<i64>,
 ) -> anyhow::Result<String> {
     let mut form: Vec<(String, String)> = vec![
         ("mode".into(), "subscription".into()),
-        ("client_reference_id".into(), user_id.into()),
+        ("client_reference_id".into(), client_reference_id.into()),
         ("line_items[0][price]".into(), price_id.into()),
-        ("line_items[0][quantity]".into(), "1".into()),
+        ("line_items[0][quantity]".into(), quantity.to_string()),
         ("success_url".into(), format!("{}/billing/success", cfg.public_url)),
         ("cancel_url".into(), format!("{}/billing/cancel", cfg.public_url)),
     ];
+    if let Some(min) = adjustable_min {
+        form.push(("line_items[0][adjustable_quantity][enabled]".into(), "true".into()));
+        form.push(("line_items[0][adjustable_quantity][minimum]".into(), min.to_string()));
+    }
     if cfg.managed_payments {
         form.push(("managed_payments[enabled]".into(), "true".into()));
     }
@@ -187,11 +238,20 @@ async fn create_checkout_session(
 }
 
 /// `POST /v1/billing_portal/sessions` — returns the customer-portal URL.
-async fn create_portal_session(cfg: &BillingConfig, customer_id: &str) -> anyhow::Result<String> {
-    let form = vec![
+/// `configuration` picks a non-default portal config (the Team one, 0064 B7);
+/// `None` = the account's saved default.
+async fn create_portal_session(
+    cfg: &BillingConfig,
+    customer_id: &str,
+    configuration: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut form = vec![
         ("customer".to_string(), customer_id.to_string()),
         ("return_url".to_string(), format!("{}/", cfg.public_url)),
     ];
+    if let Some(c) = configuration {
+        form.push(("configuration".to_string(), c.to_string()));
+    }
     let resp: UrlResp = stripe_post(cfg, "/v1/billing_portal/sessions", &form).await?;
     Ok(resp.url)
 }
@@ -253,10 +313,12 @@ async fn stripe_post<T: for<'de> Deserialize<'de>>(
 
 // ── pure decision helpers (unit-tested; no I/O) ───────────────────────────────
 
-/// Resolve a client-supplied price *choice* to a configured price id, applying the
-/// server-side founder gate (proposal 0058 D1): a `beta` user before the deadline
-/// upgrading monthly gets the founder price when one is configured. The client can
-/// never post a raw `price_…`. `None` = unknown choice → 400.
+/// Resolve a client-supplied price *choice* to a configured price id, applying
+/// the server-side founder gate (proposal 0058 D1, team arm 0064 B3). For the
+/// team choices `plan` is the ORG OWNER's founder-cohort signal (`"beta"` when
+/// their plan OR prior_plan is beta — a founder who already bought Pro keeps
+/// the Team offer). The client can never post a raw `price_…`. `None` =
+/// unknown/unconfigured choice → 400 (graceful absence for unset team prices).
 fn resolve_checkout_price(plan: &str, choice: &str, now: u64, cfg: &BillingConfig) -> Option<String> {
     let founder_open = plan == "beta" && now < cfg.founder_deadline;
     match choice {
@@ -269,48 +331,78 @@ fn resolve_checkout_price(plan: &str, choice: &str, now: u64, cfg: &BillingConfi
             Some(cfg.price_pro_monthly.clone())
         }
         "pro-annual" => Some(cfg.price_pro_annual.clone()),
+        // Team (0064 B3): founder is a monthly lock, annual is always the
+        // annual price — the same shape as Pro's (the :731 test's rule).
+        "team-monthly" => {
+            if founder_open {
+                if let Some(f) = cfg.price_team_founder.as_deref() {
+                    return Some(f.to_string());
+                }
+            }
+            cfg.price_team_monthly.clone()
+        }
+        "team-annual" => cfg.price_team_annual.clone(),
         _ => None,
     }
 }
 
-/// Map a Stripe subscription status to our intent: `(plan, plan_status)` where a
-/// `plan` of `Some("pro")` keeps the paid plan and `None` is the terminal/cancel
-/// path. `None` return = a status we don't act on (e.g. `incomplete`).
-fn plan_intent(status: &str) -> Option<(Option<&'static str>, &'static str)> {
+/// Map a Stripe subscription status to our intent: `(paid, plan_status)` where
+/// `paid = false` is the terminal/cancel path (which plan a paid status grants
+/// is the price's business — `plan_for_price`, 0064 B2). `None` return = a
+/// status we don't act on (e.g. `incomplete`).
+fn status_intent(status: &str) -> Option<(bool, &'static str)> {
     match status {
-        "active" | "trialing" => Some((Some("pro"), "active")),
-        // Grace: payment failed / retrying — keep full Pro entitlements.
-        "past_due" | "unpaid" => Some((Some("pro"), "past_due")),
+        "active" | "trialing" => Some((true, "active")),
+        // Grace: payment failed / retrying — keep full paid entitlements.
+        "past_due" | "unpaid" => Some((true, "past_due")),
         // Terminal.
-        "canceled" | "incomplete_expired" => Some((None, "canceled")),
+        "canceled" | "incomplete_expired" => Some((false, "canceled")),
         _ => None,
     }
 }
 
-/// Build the [`SubApply`] for a re-fetched subscription (proposal 0058 B3). `None`
-/// skips (an unrecognized price on an otherwise-paid sub, or a no-op status) —
-/// reconcile keeps such a subscription flagged.
-fn sub_to_apply(user_id: &str, sub: &Subscription, cfg: &BillingConfig) -> Option<SubApply> {
-    let (plan, status) = plan_intent(&sub.status)?;
-    if plan.is_some() {
-        // A paid state must carry one of our known prices, or we don't grant Pro.
-        match sub.price_id() {
-            Some(p) if cfg.recognizes_price(p) => {}
-            other => {
-                tracing::warn!("billing: unrecognized price {:?} on {} — skipping", other, sub.id);
+/// Build the [`SubApply`] for a re-fetched subscription (proposal 0058 B3,
+/// target-aware per 0064 B4). `None` skips (an unrecognized price, a no-op
+/// status, or a plan/target shape mismatch — a *team* price resolving to a
+/// user, or vice versa, must never silently grant the wrong entitlement).
+fn sub_to_apply(target: &SubTarget, sub: &Subscription, cfg: &BillingConfig) -> Option<SubApply> {
+    let (paid, status) = status_intent(&sub.status)?;
+    let plan: Option<&'static str> = if paid {
+        let plan = match sub.price_id().and_then(|p| cfg.plan_for_price(p)) {
+            Some(plan) => plan,
+            None => {
+                tracing::warn!("billing: unrecognized price {:?} on {} — skipping", sub.price_id(), sub.id);
+                return None;
+            }
+        };
+        match (target, plan) {
+            (SubTarget::User(_), "pro") | (SubTarget::Org(_), "team") => {}
+            (t, p) => {
+                tracing::warn!("billing: {p} price on a {t:?} subscription {} — skipping (mis-targeted)", sub.id);
                 return None;
             }
         }
-    }
+        Some(plan)
+    } else {
+        None
+    };
+    let seat_count = match target {
+        // Paid → mirror the re-fetched quantity (default 1 — a quantity-less
+        // sub is a 1-seat mirror, still gated by the floor at checkout);
+        // terminal → zero the pool (0064 A4).
+        SubTarget::Org(_) => Some(if paid { sub.quantity().unwrap_or(1) } else { 0 }),
+        SubTarget::User(_) => None,
+    };
     Some(SubApply {
-        user_id: user_id.to_string(),
+        target: target.clone(),
         plan: plan.map(|s| s.to_string()),
         status: status.to_string(),
         // Paid → store the sub id; terminal → clear it.
-        subscription_id: plan.is_some().then(|| sub.id.clone()),
+        subscription_id: paid.then(|| sub.id.clone()),
         // Always keep the customer id fresh (kept across cancel for resubscribe).
         customer_id: Some(sub.customer.clone()),
         period_end: sub.period_end(),
+        seat_count,
     })
 }
 
@@ -319,33 +411,76 @@ fn sub_to_apply(user_id: &str, sub: &Subscription, cfg: &BillingConfig) -> Optio
 /// Returns `None` when local state already matches — so reconcile makes zero
 /// writes in steady state (acceptance 12).
 fn reconcile_apply(row: &crate::db::BillingRow, sub: Option<&Subscription>, cfg: &BillingConfig) -> Option<SubApply> {
+    let target = SubTarget::User(row.user_id.clone());
     match sub {
         Some(sub) => {
-            let (plan, status) = plan_intent(&sub.status)?;
-            if plan.is_some() {
+            let (paid, status) = status_intent(&sub.status)?;
+            if paid {
                 // Already the right paid state? No write.
                 if row.plan == "pro" && row.plan_status.as_deref() == Some(status) {
                     return None;
                 }
-                sub_to_apply(&row.user_id, sub, cfg)
+                sub_to_apply(&target, sub, cfg)
             } else {
                 // Terminal at Stripe; already canceled locally? No write.
                 if row.plan_status.as_deref() == Some("canceled") {
                     return None;
                 }
-                sub_to_apply(&row.user_id, sub, cfg)
+                sub_to_apply(&target, sub, cfg)
             }
         }
         // Subscription gone at Stripe but we still think it's live → downgrade.
         None => {
             if matches!(row.plan_status.as_deref(), Some("active") | Some("past_due")) {
                 Some(SubApply {
-                    user_id: row.user_id.clone(),
+                    target,
                     plan: None,
                     status: "canceled".into(),
                     subscription_id: None,
                     customer_id: row.customer_id.clone(),
                     period_end: None,
+                    seat_count: None,
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// The org twin (proposal 0064 B6): one extra diffed field — a `seat_count`
+/// mismatch against the re-fetched quantity is a divergence to heal (a missed
+/// `updated` webhook is exactly a wrong seat mirror, which silently blocks or
+/// over-admits members).
+fn reconcile_apply_org(row: &crate::db::OrgBillingRow, sub: Option<&Subscription>, cfg: &BillingConfig) -> Option<SubApply> {
+    let target = SubTarget::Org(row.org_id.clone());
+    match sub {
+        Some(sub) => {
+            let (paid, status) = status_intent(&sub.status)?;
+            if paid {
+                if row.plan_status.as_deref() == Some(status)
+                    && Some(row.seat_count) == Some(sub.quantity().unwrap_or(1))
+                {
+                    return None;
+                }
+                sub_to_apply(&target, sub, cfg)
+            } else {
+                if row.plan_status.as_deref() == Some("canceled") && row.seat_count == 0 {
+                    return None;
+                }
+                sub_to_apply(&target, sub, cfg)
+            }
+        }
+        None => {
+            if matches!(row.plan_status.as_deref(), Some("active") | Some("past_due")) {
+                Some(SubApply {
+                    target,
+                    plan: None,
+                    status: "canceled".into(),
+                    subscription_id: None,
+                    customer_id: row.customer_id.clone(),
+                    period_end: None,
+                    seat_count: Some(0),
                 })
             } else {
                 None
@@ -358,12 +493,25 @@ fn reconcile_apply(row: &crate::db::BillingRow, sub: Option<&Subscription>, cfg:
 
 #[derive(Deserialize)]
 pub struct CheckoutBody {
-    /// `"pro-monthly"` or `"pro-annual"` — resolved to a price id server-side.
+    /// `"pro-monthly" | "pro-annual" | "team-monthly" | "team-annual"` —
+    /// resolved to a price id server-side.
     price: String,
+    /// Team checkouts (0064 B3): the target org. Must be the caller's own org
+    /// (owner/admin). Absent for Pro.
+    #[serde(default)]
+    org: Option<String>,
+    /// Team checkouts: the requested seat quantity — clamped server-side to
+    /// `max(3, N, member_count)`; the client renders the floor, never enforces it.
+    #[serde(default)]
+    seats: Option<i64>,
 }
 
 /// `POST /api/billing/checkout` (cookie-authed) — create a Stripe Checkout session
-/// and return `{"url":…}` for the PWA to navigate to.
+/// and return `{"url":…}` for the PWA to navigate to. Pro checkouts are
+/// byte-for-byte the 0058 path; `team-*` choices (0064 B3) target the caller's
+/// org: owner/admin only, 409 on a live subscription, server-side seat floor,
+/// `client_reference_id = "org_<id>"` (the webhook's discriminator — user ids
+/// are bare and never carry the prefix).
 pub async fn checkout(State(hub): State<HubState>, headers: HeaderMap, Json(body): Json<CheckoutBody>) -> Response {
     let Some(cfg) = BillingConfig::from_env() else {
         return (StatusCode::NOT_FOUND, "billing not configured").into_response();
@@ -371,16 +519,70 @@ pub async fn checkout(State(hub): State<HubState>, headers: HeaderMap, Json(body
     let Some(user) = hub.client_auth.user_from_cookie(&headers) else {
         return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
+    let Some(store) = hub.store() else {
+        return (StatusCode::NOT_FOUND, "billing not configured").into_response();
+    };
+
+    if body.price.starts_with("team-") {
+        // ── Team arm (0064 B3) ────────────────────────────────────────────────
+        let Some((org, role)) = store.org_for_user(&user).await else {
+            return (StatusCode::NOT_FOUND, "no team — create one first").into_response();
+        };
+        if matches!(&body.org, Some(o) if o != &org.id) {
+            return (StatusCode::NOT_FOUND, "not your team").into_response();
+        }
+        if !matches!(role.as_str(), "owner" | "admin") {
+            return (StatusCode::FORBIDDEN, "only a team owner or admin can manage billing").into_response();
+        }
+        if matches!(org.plan_status.as_deref(), Some("active") | Some("past_due")) {
+            return (StatusCode::CONFLICT, "this team already has a subscription — change seats in the billing portal").into_response();
+        }
+        // Founder gate on the org OWNER's cohort (their plan or prior_plan is
+        // beta) — a founder who already bought Pro keeps the Team offer.
+        let owner_id = store
+            .org_members(&org.id)
+            .await
+            .into_iter()
+            .find(|m| m.role == "owner")
+            .map(|m| m.user_id)
+            .unwrap_or_default();
+        let cohort = if store.user_founder_cohort(&owner_id).await { "beta" } else { "-" };
+        let Some(price_id) = resolve_checkout_price(cohort, &body.price, now_secs(), &cfg) else {
+            return (StatusCode::BAD_REQUEST, "unknown price").into_response();
+        };
+        let member_count = store.org_member_ids(&org.id).await.len() as i64;
+        let seats = body.seats.unwrap_or(TEAM_SEAT_FLOOR).max(TEAM_SEAT_FLOOR).max(member_count);
+        let reference = format!("org_{}", org.id);
+        match create_checkout_session(
+            &cfg,
+            &price_id,
+            &reference,
+            org.billing_customer_id.as_deref(),
+            seats,
+            Some(TEAM_SEAT_FLOOR),
+        )
+        .await
+        {
+            Ok(url) => {
+                store
+                    .audit_append(&org.id, Some(&user), "billing.checkout", None, Some(&format!("{{\"seats\":{seats}}}")))
+                    .await;
+                return (StatusCode::OK, Json(json!({ "url": url }))).into_response();
+            }
+            Err(e) => {
+                tracing::warn!("billing: team checkout create failed: {e}");
+                return (StatusCode::BAD_GATEWAY, "payment provider error").into_response();
+            }
+        }
+    }
+
     let plan = hub.limits_for(&user).await.plan;
     let Some(price_id) = resolve_checkout_price(&plan, &body.price, now_secs(), &cfg) else {
         return (StatusCode::BAD_REQUEST, "unknown price").into_response();
     };
-    let Some(store) = hub.store() else {
-        return (StatusCode::NOT_FOUND, "billing not configured").into_response();
-    };
     // Reuse a known Stripe customer so a resubscribe attaches to the same record.
     let (customer_id, _sub) = store.billing_ids(&user).await;
-    match create_checkout_session(&cfg, &price_id, &user, customer_id.as_deref()).await {
+    match create_checkout_session(&cfg, &price_id, &user, customer_id.as_deref(), 1, None).await {
         Ok(url) => (StatusCode::OK, Json(json!({ "url": url }))).into_response(),
         Err(e) => {
             tracing::warn!("billing: checkout create failed: {e}");
@@ -389,9 +591,17 @@ pub async fn checkout(State(hub): State<HubState>, headers: HeaderMap, Json(body
     }
 }
 
+#[derive(Deserialize, Default)]
+pub struct PortalBody {
+    /// Team billing (0064 B3): open the ORG's portal (owner/admin only) — where
+    /// seat-quantity changes happen. Absent → today's user path.
+    #[serde(default)]
+    org: Option<String>,
+}
+
 /// `POST /api/billing/portal` (cookie-authed) — open the Stripe customer portal.
-/// 409 when the user has no stored customer id (they've never subscribed).
-pub async fn portal(State(hub): State<HubState>, headers: HeaderMap) -> Response {
+/// 409 when the target has no stored customer id (never subscribed).
+pub async fn portal(State(hub): State<HubState>, headers: HeaderMap, body: Option<Json<PortalBody>>) -> Response {
     let Some(cfg) = BillingConfig::from_env() else {
         return (StatusCode::NOT_FOUND, "billing not configured").into_response();
     };
@@ -401,11 +611,28 @@ pub async fn portal(State(hub): State<HubState>, headers: HeaderMap) -> Response
     let Some(store) = hub.store() else {
         return (StatusCode::NOT_FOUND, "billing not configured").into_response();
     };
-    let (customer_id, _sub) = store.billing_ids(&user).await;
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    // The Team portal config (quantity adjustable, min 3) applies ONLY to org
+    // sessions (0064 B7); user sessions ride the account default.
+    let configuration = if b.org.is_some() { cfg.portal_config_team.clone() } else { None };
+    let customer_id = if b.org.is_some() {
+        let Some((org, role)) = store.org_for_user(&user).await else {
+            return (StatusCode::NOT_FOUND, "no team").into_response();
+        };
+        if b.org.as_deref() != Some(org.id.as_str()) {
+            return (StatusCode::NOT_FOUND, "not your team").into_response();
+        }
+        if !matches!(role.as_str(), "owner" | "admin") {
+            return (StatusCode::FORBIDDEN, "only a team owner or admin can manage billing").into_response();
+        }
+        org.billing_customer_id
+    } else {
+        store.billing_ids(&user).await.0
+    };
     let Some(customer_id) = customer_id else {
         return (StatusCode::CONFLICT, "no billing account — subscribe first").into_response();
     };
-    match create_portal_session(&cfg, &customer_id).await {
+    match create_portal_session(&cfg, &customer_id, configuration.as_deref()).await {
         Ok(url) => (StatusCode::OK, Json(json!({ "url": url }))).into_response(),
         Err(e) => {
             tracing::warn!("billing: portal create failed: {e}");
@@ -493,19 +720,35 @@ pub async fn webhook(State(hub): State<HubState>, headers: HeaderMap, body: Byte
         }
     };
 
-    // Resolve (user_id, subscription) for the event, always re-fetching current
+    // Resolve (target, subscription) for the event, always re-fetching current
     // API truth so out-of-order delivery converges. `Ack` = ignore (200, no write).
     enum Resolved {
-        Apply(String, Subscription),
+        Apply(SubTarget, Subscription),
         Ack,
         Upstream(anyhow::Error),
+    }
+    // A Stripe customer is created per checkout and can never be both a user's
+    // and an org's — resolve users first, then orgs (0064 B4).
+    async fn resolve_customer(store: &Arc<dyn Store>, customer: &str) -> Option<SubTarget> {
+        if let Some(uid) = store.user_by_billing_customer(customer).await {
+            return Some(SubTarget::User(uid));
+        }
+        store.org_by_billing_customer(customer).await.map(SubTarget::Org)
     }
     let resolved = match event.kind.as_str() {
         "checkout.session.completed" => {
             match serde_json::from_value::<CheckoutSessionObj>(event.data.object) {
                 Ok(s) => match (s.client_reference_id, s.subscription) {
-                    (Some(uid), Some(sub_id)) => match get_subscription(&cfg, &sub_id).await {
-                        Ok(Some(sub)) => Resolved::Apply(uid, sub),
+                    (Some(reference), Some(sub_id)) => match get_subscription(&cfg, &sub_id).await {
+                        Ok(Some(sub)) => {
+                            // The `org_` prefix is the discriminator (0064 B3):
+                            // user ids are bare and never carry it.
+                            let target = match reference.strip_prefix("org_") {
+                                Some(oid) => SubTarget::Org(oid.to_string()),
+                                None => SubTarget::User(reference),
+                            };
+                            Resolved::Apply(target, sub)
+                        }
                         Ok(None) => Resolved::Ack,
                         Err(e) => Resolved::Upstream(e),
                     },
@@ -519,8 +762,8 @@ pub async fn webhook(State(hub): State<HubState>, headers: HeaderMap, body: Byte
         | "customer.subscription.deleted" => {
             match serde_json::from_value::<SubObj>(event.data.object) {
                 Ok(o) => match get_subscription(&cfg, &o.id).await {
-                    Ok(Some(sub)) => match store.user_by_billing_customer(&sub.customer).await {
-                        Some(uid) => Resolved::Apply(uid, sub),
+                    Ok(Some(sub)) => match resolve_customer(&store, &sub.customer).await {
+                        Some(target) => Resolved::Apply(target, sub),
                         None => Resolved::Ack, // checkout event / reconcile heals
                     },
                     Ok(None) => Resolved::Ack,
@@ -533,8 +776,8 @@ pub async fn webhook(State(hub): State<HubState>, headers: HeaderMap, body: Byte
             match serde_json::from_value::<InvoiceObj>(event.data.object) {
                 Ok(inv) => match inv.subscription_id() {
                     Some(sub_id) => match get_subscription(&cfg, &sub_id).await {
-                        Ok(Some(sub)) => match store.user_by_billing_customer(&sub.customer).await {
-                            Some(uid) => Resolved::Apply(uid, sub),
+                        Ok(Some(sub)) => match resolve_customer(&store, &sub.customer).await {
+                            Some(target) => Resolved::Apply(target, sub),
                             None => Resolved::Ack,
                         },
                         Ok(None) => Resolved::Ack,
@@ -550,7 +793,7 @@ pub async fn webhook(State(hub): State<HubState>, headers: HeaderMap, body: Byte
     };
 
     let apply = match resolved {
-        Resolved::Apply(uid, sub) => sub_to_apply(&uid, &sub, &cfg),
+        Resolved::Apply(target, sub) => sub_to_apply(&target, &sub, &cfg),
         Resolved::Ack => None,
         // Upstream Stripe failure → 502 (retry). 402 is reserved for plan limits.
         Resolved::Upstream(e) => {
@@ -588,6 +831,7 @@ pub async fn reconcile(store: Arc<dyn Store>) {
     let Some(cfg) = BillingConfig::from_env() else { return };
     let mut fixed = 0usize;
     let rows = store.billing_rows_for_reconcile().await;
+    let org_rows = store.org_billing_rows_for_reconcile().await;
 
     // Stripe → local.
     let mut seen_subs: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -602,17 +846,29 @@ pub async fn reconcile(store: Arc<dyn Store>) {
         };
         for sub in &page.data {
             seen_subs.insert(sub.id.clone());
-            let Some(uid) = store.user_by_billing_customer(&sub.customer).await else {
-                tracing::warn!("reconcile: paying customer {} maps to no local user", sub.customer);
-                continue;
-            };
-            if let Some(row) = rows.iter().find(|r| r.user_id == uid) {
-                if let Some(apply) = reconcile_apply(row, Some(sub), &cfg) {
-                    apply_reconcile(&store, &apply).await;
-                    fixed += 1;
-                    tracing::info!("reconcile: fixed user {uid} from Stripe sub {}", sub.id);
+            // Users first, then orgs (0064 B4's resolution order — a customer
+            // is created per checkout and can never be both).
+            if let Some(uid) = store.user_by_billing_customer(&sub.customer).await {
+                if let Some(row) = rows.iter().find(|r| r.user_id == uid) {
+                    if let Some(apply) = reconcile_apply(row, Some(sub), &cfg) {
+                        apply_reconcile(&store, &apply).await;
+                        fixed += 1;
+                        tracing::info!("reconcile: fixed user {uid} from Stripe sub {}", sub.id);
+                    }
                 }
+                continue;
             }
+            if let Some(oid) = store.org_by_billing_customer(&sub.customer).await {
+                if let Some(row) = org_rows.iter().find(|r| r.org_id == oid) {
+                    if let Some(apply) = reconcile_apply_org(row, Some(sub), &cfg) {
+                        apply_reconcile(&store, &apply).await;
+                        fixed += 1;
+                        tracing::info!("reconcile: fixed org {oid} from Stripe sub {}", sub.id);
+                    }
+                }
+                continue;
+            }
+            tracing::warn!("reconcile: paying customer {} maps to no local user or org", sub.customer);
         }
         match page.data.last() {
             Some(last) if page.has_more => starting_after = Some(last.id.clone()),
@@ -635,6 +891,27 @@ pub async fn reconcile(store: Arc<dyn Store>) {
             }
         }
     }
+    for row in &org_rows {
+        let gone = match &row.subscription_id {
+            Some(id) => !seen_subs.contains(id),
+            None => true,
+        };
+        if gone {
+            if let Some(apply) = reconcile_apply_org(row, None, &cfg) {
+                apply_reconcile(&store, &apply).await;
+                fixed += 1;
+                tracing::info!("reconcile: downgraded org {} (subscription gone at Stripe)", row.org_id);
+            }
+        }
+        // Over-seat is a legitimate lingering state after a deliberate seat
+        // reduction (0064 A4) — a standing info line item, a bug signal otherwise.
+        if row.member_count > row.seat_count && row.seat_count > 0 {
+            tracing::info!(
+                "reconcile: org {} is over-seat ({} members / {} seats)",
+                row.org_id, row.member_count, row.seat_count
+            );
+        }
+    }
 
     if fixed > 0 {
         tracing::info!("reconcile: applied {fixed} correction(s)");
@@ -642,18 +919,8 @@ pub async fn reconcile(store: Arc<dyn Store>) {
 }
 
 async fn apply_reconcile(store: &Arc<dyn Store>, a: &SubApply) {
-    if let Err(e) = store
-        .apply_subscription_state(
-            &a.user_id,
-            a.plan.as_deref(),
-            &a.status,
-            a.subscription_id.as_deref(),
-            a.customer_id.as_deref(),
-            a.period_end,
-        )
-        .await
-    {
-        tracing::warn!("reconcile: apply for {} failed: {e}", a.user_id);
+    if let Err(e) = store.apply_sub(a).await {
+        tracing::warn!("reconcile: apply for {:?} failed: {e}", a.target);
     }
 }
 
@@ -669,6 +936,10 @@ mod tests {
             price_pro_monthly: "price_monthly".into(),
             price_pro_annual: "price_annual".into(),
             price_pro_founder: Some("price_founder".into()),
+            price_team_monthly: Some("price_team_monthly".into()),
+            price_team_annual: Some("price_team_annual".into()),
+            price_team_founder: Some("price_team_founder".into()),
+            portal_config_team: None,
             founder_deadline: 2_000_000_000,
             public_url: "https://app.example.com".into(),
             managed_payments: false,
@@ -682,9 +953,19 @@ mod tests {
             current_period_end: Some(1_900_000_000),
             customer: customer.into(),
             items: SubItems {
-                data: vec![SubItem { price: SubPrice { id: price.into() }, current_period_end: None }],
+                data: vec![SubItem { price: SubPrice { id: price.into() }, current_period_end: None, quantity: None }],
             },
         }
+    }
+
+    fn team_sub(id: &str, status: &str, price: &str, customer: &str, quantity: i64) -> Subscription {
+        let mut s = sub(id, status, price, customer);
+        s.items.data[0].quantity = Some(quantity);
+        s
+    }
+
+    fn user(u: &str) -> SubTarget {
+        SubTarget::User(u.into())
     }
 
     #[test]
@@ -696,7 +977,7 @@ mod tests {
         s.current_period_end = None;
         s.items.data[0].current_period_end = Some(1_950_000_000);
         assert_eq!(s.period_end(), Some(1_950_000_000));
-        let a = sub_to_apply("u", &s, &cfg()).unwrap();
+        let a = sub_to_apply(&user("u"), &s, &cfg()).unwrap();
         assert_eq!(a.period_end, Some(1_950_000_000));
     }
 
@@ -738,29 +1019,117 @@ mod tests {
     }
 
     #[test]
-    fn plan_intent_maps_statuses() {
-        assert_eq!(plan_intent("active"), Some((Some("pro"), "active")));
-        assert_eq!(plan_intent("trialing"), Some((Some("pro"), "active")));
-        assert_eq!(plan_intent("past_due"), Some((Some("pro"), "past_due")));
-        assert_eq!(plan_intent("unpaid"), Some((Some("pro"), "past_due")));
-        assert_eq!(plan_intent("canceled"), Some((None, "canceled")));
-        assert_eq!(plan_intent("incomplete_expired"), Some((None, "canceled")));
-        assert_eq!(plan_intent("incomplete"), None);
+    fn status_intent_maps_statuses() {
+        assert_eq!(status_intent("active"), Some((true, "active")));
+        assert_eq!(status_intent("trialing"), Some((true, "active")));
+        assert_eq!(status_intent("past_due"), Some((true, "past_due")));
+        assert_eq!(status_intent("unpaid"), Some((true, "past_due")));
+        assert_eq!(status_intent("canceled"), Some((false, "canceled")));
+        assert_eq!(status_intent("incomplete_expired"), Some((false, "canceled")));
+        assert_eq!(status_intent("incomplete"), None);
+    }
+
+    // Proposal 0064 B2: the price IS the plan — all six configured prices map,
+    // and a mis-targeted subscription (team price on a user, or vice versa) is
+    // skipped with no write (acceptance 9).
+    #[test]
+    fn plan_for_price_maps_and_target_mismatch_skips() {
+        let c = cfg();
+        assert_eq!(c.plan_for_price("price_monthly"), Some("pro"));
+        assert_eq!(c.plan_for_price("price_annual"), Some("pro"));
+        assert_eq!(c.plan_for_price("price_founder"), Some("pro"));
+        assert_eq!(c.plan_for_price("price_team_monthly"), Some("team"));
+        assert_eq!(c.plan_for_price("price_team_annual"), Some("team"));
+        assert_eq!(c.plan_for_price("price_team_founder"), Some("team"));
+        assert_eq!(c.plan_for_price("price_bogus"), None);
+        // Mis-targeted: a team price resolving to a USER target → skip.
+        assert!(sub_to_apply(&user("u"), &sub("sub_1", "active", "price_team_monthly", "cus_1"), &c).is_none());
+        // …and a pro price on an ORG target → skip.
+        assert!(sub_to_apply(&SubTarget::Org("o".into()), &sub("sub_1", "active", "price_monthly", "cus_1"), &c).is_none());
+    }
+
+    // Proposal 0064 B3/B4: the org apply mirrors quantity; terminal zeroes it.
+    #[test]
+    fn org_sub_to_apply_mirrors_quantity() {
+        let c = cfg();
+        let org = SubTarget::Org("o1".into());
+        let a = sub_to_apply(&org, &team_sub("sub_t", "active", "price_team_monthly", "cus_o", 5), &c).unwrap();
+        assert_eq!(a.plan.as_deref(), Some("team"));
+        assert_eq!(a.seat_count, Some(5));
+        assert_eq!(a.subscription_id.as_deref(), Some("sub_t"));
+        // Terminal: plan None, seats zeroed, customer kept.
+        let d = sub_to_apply(&org, &team_sub("sub_t", "canceled", "price_team_monthly", "cus_o", 5), &c).unwrap();
+        assert_eq!(d.plan, None);
+        assert_eq!(d.seat_count, Some(0));
+        assert_eq!(d.customer_id.as_deref(), Some("cus_o"));
+        // A user apply never carries a seat count.
+        let u = sub_to_apply(&user("u"), &sub("sub_1", "active", "price_monthly", "cus_1"), &c).unwrap();
+        assert_eq!(u.seat_count, None);
+    }
+
+    // Proposal 0064 B6: the org reconcile heals a seat mismatch and no-ops in
+    // steady state (acceptance 11's decision half).
+    #[test]
+    fn reconcile_apply_org_heals_seats_and_noops() {
+        let c = cfg();
+        let row = crate::db::OrgBillingRow {
+            org_id: "o1".into(),
+            customer_id: Some("cus_o".into()),
+            subscription_id: Some("sub_t".into()),
+            plan: "team".into(),
+            plan_status: Some("active".into()),
+            seat_count: 3,
+            member_count: 3,
+        };
+        // In sync (active, quantity 3) → no write.
+        assert!(reconcile_apply_org(&row, Some(&team_sub("sub_t", "active", "price_team_monthly", "cus_o", 3)), &c).is_none());
+        // Seat drift (Stripe says 5) → heal to 5.
+        let heal = reconcile_apply_org(&row, Some(&team_sub("sub_t", "active", "price_team_monthly", "cus_o", 5)), &c).unwrap();
+        assert_eq!(heal.seat_count, Some(5));
+        // Gone at Stripe while locally active → downgrade with seats 0.
+        let down = reconcile_apply_org(&row, None, &c).unwrap();
+        assert_eq!((down.plan.clone(), down.seat_count), (None, Some(0)));
+        // Already canceled + 0 seats → no write.
+        let dead = crate::db::OrgBillingRow { plan_status: Some("canceled".into()), seat_count: 0, ..row };
+        assert!(reconcile_apply_org(&dead, None, &c).is_none());
+        assert!(reconcile_apply_org(&dead, Some(&team_sub("sub_t", "canceled", "price_team_monthly", "cus_o", 0)), &c).is_none());
+    }
+
+    // Proposal 0064 B3: the team founder gate keys on the OWNER's cohort and is
+    // a monthly lock; unset team prices → None (400, graceful absence).
+    #[test]
+    fn team_checkout_price_resolution() {
+        let c = cfg();
+        let before = c.founder_deadline - 1;
+        let after = c.founder_deadline + 1;
+        assert_eq!(resolve_checkout_price("beta", "team-monthly", before, &c).as_deref(), Some("price_team_founder"));
+        assert_eq!(resolve_checkout_price("beta", "team-monthly", after, &c).as_deref(), Some("price_team_monthly"));
+        assert_eq!(resolve_checkout_price("-", "team-monthly", before, &c).as_deref(), Some("price_team_monthly"));
+        assert_eq!(resolve_checkout_price("beta", "team-annual", before, &c).as_deref(), Some("price_team_annual"));
+        // No team prices configured → team choices resolve to None (400) while
+        // Pro is untouched (acceptance 5).
+        let mut c2 = cfg();
+        c2.price_team_monthly = None;
+        c2.price_team_annual = None;
+        c2.price_team_founder = None;
+        assert_eq!(resolve_checkout_price("beta", "team-monthly", before, &c2), None);
+        assert_eq!(resolve_checkout_price("free", "team-annual", before, &c2), None);
+        assert_eq!(resolve_checkout_price("beta", "pro-monthly", before, &c2).as_deref(), Some("price_founder"));
     }
 
     #[test]
     fn sub_to_apply_requires_known_price_for_paid() {
         let c = cfg();
         // Recognized price → pro apply with the sub id set.
-        let a = sub_to_apply("u", &sub("sub_1", "active", "price_monthly", "cus_1"), &c).unwrap();
+        let a = sub_to_apply(&user("u"), &sub("sub_1", "active", "price_monthly", "cus_1"), &c).unwrap();
         assert_eq!(a.plan.as_deref(), Some("pro"));
         assert_eq!(a.status, "active");
         assert_eq!(a.subscription_id.as_deref(), Some("sub_1"));
         assert_eq!(a.customer_id.as_deref(), Some("cus_1"));
         // Unrecognized price on an active sub → skip (None).
-        assert!(sub_to_apply("u", &sub("sub_1", "active", "price_bogus", "cus_1"), &c).is_none());
+        assert!(sub_to_apply(&user("u"), &sub("sub_1", "active", "price_bogus", "cus_1"), &c).is_none());
         // Canceled → terminal: plan None, sub id cleared, customer kept.
-        let d = sub_to_apply("u", &sub("sub_1", "canceled", "price_bogus", "cus_1"), &c).unwrap();
+        let d = sub_to_apply(&user("u"), &sub("sub_1", "canceled", "price_bogus", "cus_1"), &c).unwrap();
         assert_eq!(d.plan, None);
         assert_eq!(d.status, "canceled");
         assert_eq!(d.subscription_id, None);
@@ -804,7 +1173,7 @@ mod tests {
 
         // checkout.session.completed → fetched active pro subscription.
         let sub_active = sub("sub_1", "active", "price_monthly", "cus_1");
-        let a = sub_to_apply(&uid, &sub_active, &c).unwrap();
+        let a = sub_to_apply(&user(&uid), &sub_active, &c).unwrap();
         assert_eq!(s.billing_process_event("evt_1", "h", 1, Some(a.clone())).await.unwrap(), EventOutcome::Applied);
         assert_eq!(s.limits_for(&uid).await.plan, "pro");
         assert_eq!(s.limits_for(&uid).await.max_agents, 100, "Pro caps, no Stripe call on the read path");
@@ -814,13 +1183,13 @@ mod tests {
 
         // deleted → terminal restore to beta.
         let sub_gone = sub("sub_1", "canceled", "price_monthly", "cus_1");
-        let del = sub_to_apply(&uid, &sub_gone, &c).unwrap();
+        let del = sub_to_apply(&user(&uid), &sub_gone, &c).unwrap();
         s.billing_process_event("evt_2", "h", 3, Some(del)).await.unwrap();
         assert_eq!(s.limits_for(&uid).await.plan, "beta");
 
         // Out-of-order: a late 'updated' whose re-fetch STILL says canceled → stays
         // beta (no resurrection of pro), because we apply current API truth.
-        let late = sub_to_apply(&uid, &sub("sub_1", "canceled", "price_monthly", "cus_1"), &c).unwrap();
+        let late = sub_to_apply(&user(&uid), &sub("sub_1", "canceled", "price_monthly", "cus_1"), &c).unwrap();
         s.billing_process_event("evt_3", "h", 4, Some(late)).await.unwrap();
         assert_eq!(s.limits_for(&uid).await.plan, "beta");
     }

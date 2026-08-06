@@ -25,6 +25,9 @@ pub mod account;
 /// Share-invite lifecycle endpoints (proposal 0040) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod share;
+/// Org membership lifecycle endpoints (proposal 0063) — multi-tenant only.
+#[cfg(feature = "multi-tenant")]
+pub mod org;
 /// Stripe self-serve billing (proposal 0058 Part B) — multi-tenant only, and its
 /// routes only register when `billing::is_configured()` (STRIPE_* env present).
 #[cfg(feature = "multi-tenant")]
@@ -110,7 +113,10 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/rmdir", post(handlers::rmdir))
         .route("/api/rename", post(handlers::rename))
         .route("/api/move", post(handlers::move_path))
-        // Hub-local: favorites + Web Push (one of each for the whole fleet).
+        // Hub-local: favorites + Web Push. Single-tenant keeps one of each for
+        // the whole fleet; in multi-tenant mode favorites are per-tenant
+        // (config_dir/favorites/<user_id>.json) and push subscriptions are
+        // stamped with their owning tenant — see TENANT-BOUNDARY.md.
         .route("/api/favorites", get(handlers::get_favorites).put(handlers::put_favorites))
         .route("/api/push/key", get(handlers::push_key))
         .route("/api/push/subscribe", post(handlers::push_subscribe))
@@ -164,6 +170,23 @@ pub fn build_router(hub: HubState) -> Router {
         // Email-invite landing read (proposal 0056 C4): unauthenticated (the
         // token is the capability; exempted in require_client_auth), throttled.
         .route("/api/invite/:token", get(share::invite_info))
+        // Orgs (proposal 0063): membership lifecycle, roles, the per-machine
+        // team-visibility opt-out, and the audit log. No :org_id in paths — the
+        // caller's org is always resolved from their own membership.
+        .route("/api/orgs", post(org::create))
+        .route("/api/orgs/mine", get(org::mine))
+        .route("/api/orgs/invites", post(org::invite_create).get(org::invite_outbox))
+        .route("/api/orgs/invites/inbox", get(org::invite_inbox))
+        .route("/api/orgs/invites/:id/accept", post(org::invite_accept))
+        .route("/api/orgs/invites/:id/decline", post(org::invite_decline))
+        .route("/api/orgs/invites/:id/revoke", post(org::invite_revoke))
+        .route("/api/orgs/members/:user_id/role", post(org::member_role))
+        .route("/api/orgs/members/:user_id/remove", post(org::member_remove))
+        .route("/api/orgs/leave", post(org::leave))
+        .route("/api/orgs/machines/:agent_id/visibility", post(org::machine_visibility))
+        .route("/api/orgs/audit", get(org::audit))
+        // Org-invite landing read — beside /api/invite/:token, same posture.
+        .route("/api/org-invite/:token", get(org::invite_info))
         // The `ccs` terminal-client install one-liners (proposal 0060 D3): the
         // /install.sh template idea, ending in `ccs activate --server <hub>`.
         // Multi-tenant only — `activate` is the multi-tenant sign-in, and the

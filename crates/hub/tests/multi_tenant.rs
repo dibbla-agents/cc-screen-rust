@@ -50,25 +50,37 @@ async fn start_multi_tenant_hub() -> String {
 /// As above, but with explicit session lists per tenant (so a sharing test can
 /// give Alice a second session that a *session* share must NOT expose). Also
 /// hands back the store, so a test can seed rows (e.g. a squeezed plan).
+/// Both machines carry the SAME label "laptop" — the cross-tenant label collision.
 async fn start_hub_with(alice_sessions: &[&str], bob_sessions: &[&str]) -> (String, Arc<SqliteStore>) {
+    start_hub_labeled("laptop", alice_sessions, "laptop", bob_sessions).await
+}
+
+/// The general harness: two tenants with per-tenant machine labels + session
+/// lists. Distinct labels let a test name *specifically* the other tenant's
+/// machine (`?machine=alice-box`) and assert the refusal (0042 Stream A).
+async fn start_hub_labeled(
+    alice_label: &str,
+    alice_sessions: &[&str],
+    bob_label: &str,
+    bob_sessions: &[&str],
+) -> (String, Arc<SqliteStore>) {
     let tmp = std::env::temp_dir().join(format!("ccr-hub-mt-{}-{}", std::process::id(), now_nanos()));
     let _ = std::fs::create_dir_all(&tmp);
     let store = SqliteStore::connect(&format!("sqlite://{}/hub.db", tmp.display()))
         .await
         .expect("open store");
-    // Two tenants, each with a "laptop" — the label collides across tenants.
     let alice = store.create_user("alice@x.com", "alicepass1-long").await.unwrap();
     let bob = store.create_user("bob@x.com", "bobpass1234-long").await.unwrap();
-    let (_atok, alice_agent) = store.upsert_agent(&alice, "laptop").await.unwrap();
-    let (_btok, bob_agent) = store.upsert_agent(&bob, "laptop").await.unwrap();
+    let (_atok, alice_agent) = store.upsert_agent(&alice, alice_label).await.unwrap();
+    let (_btok, bob_agent) = store.upsert_agent(&bob, bob_label).await.unwrap();
 
     let registry = Registry::new();
     // Register both agents online with a dummy uplink channel + their sessions.
     let (txa, _rxa) = mpsc::channel::<Vec<u8>>(8);
-    registry.register_agent(&alice_agent, &alice, "laptop", "a.local", vec![], Vec::new(), txa)
+    registry.register_agent(&alice_agent, &alice, alice_label, "a.local", vec![], Vec::new(), txa)
         .set_sessions(alice_sessions.iter().map(|n| sess(n)).collect());
     let (txb, _rxb) = mpsc::channel::<Vec<u8>>(8);
-    registry.register_agent(&bob_agent, &bob, "laptop", "b.local", vec![], Vec::new(), txb)
+    registry.register_agent(&bob_agent, &bob, bob_label, "b.local", vec![], Vec::new(), txb)
         .set_sessions(bob_sessions.iter().map(|n| sess(n)).collect());
     // Keep the fake agents' uplink receivers alive for the life of the hub so a
     // relayed Attach frame doesn't fail the send (the WS still upgrades regardless).
@@ -766,6 +778,261 @@ async fn client_token_flow_end_to_end() {
         .await
         .unwrap();
     assert_eq!(after.status(), reqwest::StatusCode::UNAUTHORIZED, "revoked token 401s at once");
+}
+
+// ── Proposal 0042 Stream A/I: the full cross-tenant refusal surface ───────────
+
+/// GET a cookie'd path; returns the response for status assertions.
+async fn get_resp(client: &reqwest::Client, base: &str, cookie: &str, path: &str) -> reqwest::Response {
+    client
+        .get(format!("http://{base}{path}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// PUT a cookie'd JSON body; returns the response.
+async fn put_json(
+    client: &reqwest::Client,
+    base: &str,
+    cookie: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> reqwest::Response {
+    client
+        .put(format!("http://{base}{path}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// Does this cookie complete the WS upgrade (101) for an arbitrary /api WS path?
+async fn ws_upgrades(base: &str, cookie: &str, path_and_query: &str) -> bool {
+    let mut req = format!("ws://{base}{path_and_query}").into_client_request().unwrap();
+    req.headers_mut().insert(COOKIE, HeaderValue::from_str(cookie).unwrap());
+    tokio_tungstenite::connect_async(req).await.is_ok()
+}
+
+/// The 0042 Stream A acceptance, widened to the FULL relay surface: tenant B —
+/// fully authenticated, with an online agent of their own — is refused (404,
+/// never 2xx, never a relayed effect) on every route that resolves an agent,
+/// attacking by A's machine label (`?machine=`), by A's session name, and via
+/// machine-less resolution. Distinct labels ("alice-box"/"bob-box") make the
+/// attack target unambiguous: a 404 here is `resolve_scoped` refusing in B's
+/// scope, before anything reaches A's agent.
+#[tokio::test]
+async fn cross_tenant_full_surface_is_refused() {
+    let (base, _store) = start_hub_labeled("alice-box", &["claude-a"], "bob-box", &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+    let nf = reqwest::StatusCode::NOT_FOUND;
+
+    // Positive controls first: bob's own scope works, so every refusal below is
+    // the boundary, not a broken harness.
+    assert_eq!(session_names(&client, &base, &bob).await, vec!["claude-b"]);
+    assert!(can_attach(&base, &bob, "claude-b").await, "bob attaches his own session");
+    assert!(ws_upgrades(&base, &bob, "/api/watch?machine=bob-box").await, "bob watches his own box");
+
+    // ── GET routes: by A's machine label AND by A's session name ──────────────
+    let gets: &[&str] = &[
+        "/api/dirs?machine=alice-box",
+        "/api/dirs?session=claude-a",
+        "/api/dirs/search?machine=alice-box&q=src",
+        "/api/files/search?machine=alice-box&q=main",
+        "/api/files?machine=alice-box",
+        "/api/files?session=claude-a",
+        "/api/file/read?machine=alice-box&path=/etc/hostname",
+        "/api/file/read?session=claude-a&path=/etc/hostname",
+        "/api/session/root?machine=alice-box",
+        "/api/session/root?session=claude-a",
+        "/api/sessions/restorable?machine=alice-box",
+        "/api/assistants/update?machine=alice-box",
+        "/api/assistants/plan?machine=alice-box",
+        // The bulk proxy (download) must refuse BEFORE any relay is opened.
+        "/api/download?machine=alice-box&path=/etc/passwd",
+        "/api/download?session=claude-a&path=/etc/passwd",
+    ];
+    for path in gets {
+        let r = get_resp(&client, &base, &bob, path).await;
+        assert_eq!(r.status(), nf, "GET {path} must be refused for tenant B");
+    }
+
+    // ── POST routes: lifecycle, control, file mutations ───────────────────────
+    let posts: &[(&str, serde_json::Value)] = &[
+        ("/api/session?machine=alice-box", serde_json::json!({ "tool": "cc", "name": "intruder", "dir": "/tmp" })),
+        ("/api/session/delete", serde_json::json!({ "session": "claude-a" })),
+        ("/api/session/delete?machine=alice-box", serde_json::json!({ "session": "claude-a" })),
+        ("/api/session/color", serde_json::json!({ "session": "claude-a", "color": "red" })),
+        ("/api/session/label", serde_json::json!({ "session": "claude-a", "label": "pwned" })),
+        ("/api/sessions/restore?machine=alice-box", serde_json::json!({})),
+        ("/api/key", serde_json::json!({ "session": "claude-a", "key": "enter" })),
+        ("/api/key?machine=alice-box", serde_json::json!({ "session": "claude-a", "key": "enter" })),
+        ("/api/paste", serde_json::json!({ "session": "claude-a", "text": "rm -rf /", "enter": true })),
+        ("/api/clear-history", serde_json::json!({ "session": "claude-a" })),
+        ("/api/file/write?machine=alice-box", serde_json::json!({ "path": "/tmp/x", "content": "hi" })),
+        ("/api/file/delete?machine=alice-box", serde_json::json!({ "path": "/tmp/x" })),
+        ("/api/mkdir?machine=alice-box", serde_json::json!({ "path": "/tmp/x" })),
+        ("/api/rmdir?machine=alice-box", serde_json::json!({ "path": "/tmp/x" })),
+        ("/api/rename?machine=alice-box", serde_json::json!({ "from": "/tmp/a", "to": "/tmp/b" })),
+        ("/api/move?machine=alice-box", serde_json::json!({ "from": "/tmp/a", "to": "/tmp/b" })),
+        ("/api/assistants/update?machine=alice-box", serde_json::json!({ "tools": [] })),
+    ];
+    for (path, body) in posts {
+        let r = post_json(&client, &base, &bob, path, body.clone()).await;
+        assert_eq!(r.status(), nf, "POST {path} must be refused for tenant B");
+    }
+
+    // ── The two WS bridges refuse at the handshake (no 101, nothing bridged) ──
+    assert!(!ws_upgrades(&base, &bob, "/api/ws?session=claude-a").await, "terminal by A's session");
+    assert!(!ws_upgrades(&base, &bob, "/api/ws?machine=alice-box&session=claude-a").await, "terminal by A's machine");
+    assert!(!ws_upgrades(&base, &bob, "/api/watch?machine=alice-box").await, "fs-watch on A's machine");
+
+    // ── /api/tools discloses nothing: A's machine answers exactly like a ──────
+    // machine that does not exist (the documented `[]` contract, not a 404).
+    let a_tools = get_resp(&client, &base, &bob, "/api/tools?machine=alice-box").await;
+    assert_eq!(a_tools.status(), reqwest::StatusCode::OK);
+    let a_tools: serde_json::Value = a_tools.json().await.unwrap();
+    let ghost = get_json(&client, &base, &bob, "/api/tools?machine=no-such-box").await;
+    assert_eq!(a_tools, ghost, "A's tools indistinguishable from an unknown machine");
+    assert!(a_tools.as_array().unwrap().is_empty());
+
+    // ── /api/machines never lists A's box for B ───────────────────────────────
+    let machines = get_json(&client, &base, &bob, "/api/machines").await;
+    let labels: Vec<&str> = machines.as_array().unwrap().iter().map(|m| m["machine"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["bob-box"], "B's machine list holds only his own");
+}
+
+/// 0049/0050 through the 0042 lens: assistant update/plan are OWNER-only. Even a
+/// full agent-grant (the widest share there is) yields 403 — a share grants
+/// *use*, never administration of someone else's host.
+#[tokio::test]
+async fn agent_grantee_cannot_administer_assistants() {
+    let (base, _store) = start_hub_labeled("alice-box", &["claude-a"], "bob-box", &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+
+    // Alice agent-shares her whole box to Bob; Bob accepts.
+    let created = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "alice-box" })).await;
+    assert!(created.status().is_success());
+    let invite_id = created.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert!(post_json(&client, &base, &bob, &format!("/api/shares/{invite_id}/accept"), serde_json::json!({})).await.status().is_success());
+
+    // The grant works: Bob now resolves + lists Alice's box…
+    let names = session_names(&client, &base, &bob).await;
+    assert!(names.contains(&"claude-a".to_string()), "grant active: {names:?}");
+
+    // …but administration stays 403 (resolve succeeds, ownership fails).
+    let fb = reqwest::StatusCode::FORBIDDEN;
+    let st = get_resp(&client, &base, &bob, "/api/assistants/update?machine=alice-box").await;
+    assert_eq!(st.status(), fb, "status read is owner-only");
+    let up = post_json(&client, &base, &bob, "/api/assistants/update?machine=alice-box",
+        serde_json::json!({ "tools": [] })).await;
+    assert_eq!(up.status(), fb, "update is owner-only");
+    let plan = get_resp(&client, &base, &bob, "/api/assistants/plan?machine=alice-box").await;
+    assert_eq!(plan.status(), fb, "install plan is owner-only");
+    // The owner herself passes the ownership gate (the fake agent advertises no
+    // caps, so she gets the 501 capability answer — proving 403 was the tenant
+    // gate, not a dead route).
+    let own = get_resp(&client, &base, &alice, "/api/assistants/update?machine=alice-box").await;
+    assert_eq!(own.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+/// Org routes are membership-scoped (proposal 0063 B1, under the 0042 bar):
+/// a tenant outside the org gets 404 everywhere — existence is never disclosed
+/// — and cannot act on another org's invites or members.
+#[tokio::test]
+async fn org_routes_are_tenant_scoped() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+    let nf = reqwest::StatusCode::NOT_FOUND;
+
+    // Alice creates a team; sanity: her own org surface answers.
+    let created = post_json(&client, &base, &alice, "/api/orgs", serde_json::json!({ "name": "team-a" })).await;
+    assert!(created.status().is_success(), "org create: {}", created.status());
+    let mine = get_resp(&client, &base, &alice, "/api/orgs/mine").await;
+    assert!(mine.status().is_success());
+    assert_eq!(mine.json::<serde_json::Value>().await.unwrap()["myRole"], "owner");
+    assert!(get_resp(&client, &base, &alice, "/api/orgs/audit").await.status().is_success(), "owner reads the audit log");
+
+    // Bob (no org): every org route is a uniform 404 — no existence oracle.
+    assert_eq!(get_resp(&client, &base, &bob, "/api/orgs/mine").await.status(), nf);
+    assert_eq!(get_resp(&client, &base, &bob, "/api/orgs/audit").await.status(), nf);
+    assert_eq!(get_resp(&client, &base, &bob, "/api/orgs/invites").await.status(), nf);
+    assert_eq!(
+        post_json(&client, &base, &bob, "/api/orgs/invites", serde_json::json!({ "email": "x@x.com" })).await.status(),
+        nf
+    );
+    assert_eq!(post_json(&client, &base, &bob, "/api/orgs/leave", serde_json::json!({})).await.status(), nf);
+    assert_eq!(
+        post_json(&client, &base, &bob, "/api/orgs/members/some-user/role", serde_json::json!({ "role": "admin" })).await.status(),
+        nf
+    );
+    assert_eq!(
+        post_json(&client, &base, &bob, "/api/orgs/members/some-user/remove", serde_json::json!({})).await.status(),
+        nf
+    );
+    assert_eq!(
+        post_json(&client, &base, &bob, "/api/orgs/machines/some-agent/visibility", serde_json::json!({ "visible": false })).await.status(),
+        nf
+    );
+
+    // Alice invites carol; Bob can neither accept, decline, nor revoke it.
+    let inv = post_json(&client, &base, &alice, "/api/orgs/invites", serde_json::json!({ "email": "carol@x.com" })).await;
+    assert!(inv.status().is_success(), "invite create: {}", inv.status());
+    let inv_id = inv.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(post_json(&client, &base, &bob, &format!("/api/orgs/invites/{inv_id}/accept"), serde_json::json!({})).await.status(), nf, "not the addressee");
+    assert_eq!(post_json(&client, &base, &bob, &format!("/api/orgs/invites/{inv_id}/decline"), serde_json::json!({})).await.status(), nf);
+    assert_eq!(post_json(&client, &base, &bob, &format!("/api/orgs/invites/{inv_id}/revoke"), serde_json::json!({})).await.status(), nf, "no org, no revoke");
+
+    // The invite survived every foreign action: still pending in Alice's outbox.
+    let outbox = get_json(&client, &base, &alice, "/api/orgs/invites").await;
+    let pending: Vec<_> = outbox.as_array().unwrap().iter().filter(|i| i["status"] == "pending").collect();
+    assert_eq!(pending.len(), 1, "invite untouched by the refused actions");
+}
+
+/// Favorites are per-tenant (the 0042 candidate-finding-#1 fix): what A saves,
+/// B never sees, and each tenant round-trips their own list independently.
+#[tokio::test]
+async fn favorites_are_tenant_scoped() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+
+    // Both start empty.
+    assert!(get_json(&client, &base, &alice, "/api/favorites").await.as_array().unwrap().is_empty());
+    assert!(get_json(&client, &base, &bob, "/api/favorites").await.as_array().unwrap().is_empty());
+
+    // Alice saves a favorite…
+    let put = put_json(&client, &base, &alice, "/api/favorites",
+        serde_json::json!([{ "id": "f1", "text": "deploy the thing" }])).await;
+    assert!(put.status().is_success(), "alice PUT: {}", put.status());
+
+    // …she reads it back; Bob reads EMPTY (the leak this fix closes).
+    let a1 = get_json(&client, &base, &alice, "/api/favorites").await;
+    assert_eq!(a1.as_array().unwrap().len(), 1);
+    assert_eq!(a1[0]["id"], "f1");
+    assert!(
+        get_json(&client, &base, &bob, "/api/favorites").await.as_array().unwrap().is_empty(),
+        "tenant B must not see tenant A's favorites"
+    );
+
+    // Bob keeps his own list without touching Alice's.
+    assert!(put_json(&client, &base, &bob, "/api/favorites",
+        serde_json::json!([{ "id": "b1", "text": "bob's own" }])).await.status().is_success());
+    let a2 = get_json(&client, &base, &alice, "/api/favorites").await;
+    assert_eq!(a2.as_array().unwrap().len(), 1);
+    assert_eq!(a2[0]["id"], "f1", "alice's list untouched by bob's write");
+    let b2 = get_json(&client, &base, &bob, "/api/favorites").await;
+    assert_eq!(b2.as_array().unwrap().len(), 1);
+    assert_eq!(b2[0]["id"], "b1");
 }
 
 /// A client code redeemed through the *agent* poll endpoint (or vice versa) is

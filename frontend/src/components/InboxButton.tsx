@@ -8,7 +8,16 @@
 // parent gates on me.multiTenant).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { acceptInvite, declineInvite, listInbox, type ShareInvite } from "../api";
+import {
+  acceptInvite,
+  declineInvite,
+  listInbox,
+  orgInviteInbox,
+  respondOrgInvite,
+  ApiError,
+  type OrgInboxInvite,
+  type ShareInvite,
+} from "../api";
 import { InboxIcon, XIcon } from "../icons";
 import { ago } from "../util";
 
@@ -32,6 +41,10 @@ export default function InboxButton({
   onCountChange?: (count: number) => void;
 }) {
   const [invites, setInvites] = useState<ShareInvite[]>([]);
+  // Pending TEAM invites (proposal 0065 C): same inbox, org-flavored rows with
+  // the server's normative consent line. Empty on pre-0063 hubs (404 → []).
+  const [orgInvites, setOrgInvites] = useState<OrgInboxInvite[]>([]);
+  const [orgErr, setOrgErr] = useState<{ id: string; msg: string } | null>(null);
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const onCount = useRef(onCountChange);
@@ -39,9 +52,13 @@ export default function InboxButton({
 
   const reload = useCallback(async () => {
     try {
-      const list = await listInbox();
+      const [list, orgs] = await Promise.all([
+        listInbox(),
+        orgInviteInbox().catch(() => [] as OrgInboxInvite[]),
+      ]);
       setInvites(list);
-      onCount.current?.(list.length);
+      setOrgInvites(orgs);
+      onCount.current?.(list.length + orgs.length);
     } catch {
       /* transient — keep the last list */
     }
@@ -53,7 +70,7 @@ export default function InboxButton({
     return () => clearInterval(t);
   }, [reload]);
 
-  const count = invites.length;
+  const count = invites.length + orgInvites.length;
 
   const act = async (id: string, accept: boolean) => {
     setBusyId(id);
@@ -71,6 +88,25 @@ export default function InboxButton({
     } finally {
       setBusyId(null);
       onCount.current?.(Math.max(0, count - 1));
+    }
+  };
+
+  // Accept/decline a TEAM invite. NOT optimistic: accept can fail meaningfully
+  // (402 team out of seats, 409 already in another team) and the server's
+  // message must be shown where the tap happened.
+  const actOrg = async (id: string, accept: boolean) => {
+    setBusyId(id);
+    setOrgErr(null);
+    try {
+      await respondOrgInvite(id, accept);
+      setOrgInvites((xs) => xs.filter((i) => i.id !== id));
+      if (accept) onAccepted?.();
+      onCount.current?.(Math.max(0, count - 1));
+    } catch (e) {
+      setOrgErr({ id, msg: e instanceof ApiError ? e.message : "Could not respond — try again." });
+      reload();
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -92,10 +128,41 @@ export default function InboxButton({
           <XIcon className="h-4 w-4" />
         </button>
       </div>
-      {invites.length === 0 ? (
+      {count === 0 ? (
         <div className="px-4 py-8 text-center text-xs text-slate-500">No pending invitations.</div>
       ) : (
         <ul className="divide-y divide-edge">
+          {orgInvites.map((i) => (
+            <li key={`org-${i.id}`} className="px-4 py-3">
+              <div className="text-sm text-slate-100">
+                <span className="text-slate-400">{i.inviterEmail || "Someone"}</span> invited you to
+                join <span className="font-medium">{i.orgName || "a team"}</span>
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                as {i.role || "member"} · {ago(i.createdAt)} ago
+              </div>
+              {/* The normative consent copy (proposal 0063 B2) — the accept
+                  must be informed, so the server's string renders verbatim. */}
+              {i.consent && <p className="mt-1.5 text-[11px] text-amber">{i.consent}</p>}
+              <div className="mt-2 flex justify-end gap-2">
+                <button
+                  disabled={busyId === i.id}
+                  onClick={() => actOrg(i.id, false)}
+                  className="min-h-11 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude disabled:opacity-40"
+                >
+                  Decline
+                </button>
+                <button
+                  disabled={busyId === i.id}
+                  onClick={() => actOrg(i.id, true)}
+                  className="min-h-11 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110 disabled:opacity-40"
+                >
+                  Join team
+                </button>
+              </div>
+              {orgErr?.id === i.id && <div className="mt-2 text-[11px] text-claude">{orgErr.msg}</div>}
+            </li>
+          ))}
           {invites.map((i) => (
             <li key={i.id} className="px-4 py-3">
               <div className="text-sm text-slate-100">

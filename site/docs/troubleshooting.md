@@ -62,6 +62,36 @@ hit a limit: existing machines stay enrolled, running sessions keep running, and
 your files are never touched — the cap only blocks *new* machines and sessions
 until you're back under it.
 
+## "This team is out of seats"
+
+Accepting the invite would take the team past its paid seat count. The
+team's **owner or an admin** fixes it — add seats from Billing (the Stripe
+portal), or remove a member to free one. **Nothing was lost**: the invite
+stays valid and the accept simply works once a seat is free.
+
+## "Team machine pool full" / "Team session limit reached"
+
+Team limits are **pooled**: 10 machines and 50 concurrent sessions per seat,
+counted across the whole team — so you can hit the cap even if *you* have
+only one machine, because a teammate is using the headroom. Same rule as
+every limit: nothing is deleted; existing machines stay enrolled and running
+sessions keep running. Free the pool (unlink a machine, stop a session,
+anyone's) or have the owner add seats. Re-enrolling a machine the team
+already has never counts against the pool.
+
+## A teammate's machine isn't visible
+
+Three usual causes, in order:
+
+1. **They hid it.** Each machine has an owner-only "Visible to team" toggle —
+   ask them to check the team window.
+2. **Membership isn't active yet.** An invited-but-not-accepted member sees
+   (and shows) nothing — the invite must be accepted, and the team needs a
+   free seat for that.
+3. **A freshly enrolled machine hasn't propagated.** Normally visibility is
+   immediate; in the rare miss, a nightly reconcile heals it. If it's still
+   missing the next day, that's a bug — please report it.
+
 ## Assistants are outdated
 
 Use the **Update** button on the machine's dashboard row — it updates the

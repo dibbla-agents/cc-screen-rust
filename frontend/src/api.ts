@@ -140,6 +140,31 @@ export interface MePlan {
   // Current billing period end, unix epoch seconds (proposal 0058). Drives the
   // "until <date>" note on a cancel-at-period-end subscription. Absent otherwise.
   periodEnd?: number;
+  // ── Team plan fields (proposals 0064/0065 Part D) — present only when the
+  // caller is a member of an ACTIVE org (`name === "team"`). The machine/session
+  // caps above are then the POOLED org numbers; no client math needed.
+  // Seats purchased on the org's subscription.
+  seats?: number;
+  // Current member count (the seats meter's numerator).
+  members?: number;
+  orgId?: string;
+  orgName?: string;
+  // The caller's role in the org: "owner" | "admin" | "member". Gates the
+  // billing actions (portal is owner/admin).
+  orgRole?: string;
+  // The org owner's email — the "Billing is managed by …" caption for members.
+  ownerEmail?: string;
+}
+
+// The caller's org membership (proposal 0063 B1), present on /api/me whenever
+// they belong to one — even a dormant (0-seat) org. The minimal contract the
+// TeamCard/AuditCard gate on; the full picture comes from GET /api/orgs/mine.
+export interface MeOrg {
+  id: string;
+  name: string;
+  role: "owner" | "admin" | "member";
+  seats: number;
+  memberCount: number;
 }
 
 export interface MeInfo {
@@ -152,6 +177,9 @@ export interface MeInfo {
   email?: string;
   // Present when authenticated on a multi-tenant hub (proposal 0056 B1).
   plan?: MePlan;
+  // Present when the caller is an org member (proposal 0063 B1) — even while
+  // the org is dormant (0 seats). Absent = no team, render nothing team-shaped.
+  org?: MeOrg;
   // The operator's support address (CCHUB_SUPPORT_EMAIL) for the upgrade mailto.
   supportEmail?: string | null;
   // Whether Stripe billing is configured on this hub (proposal 0058 B4). Absent
@@ -182,14 +210,22 @@ export async function getMe(): Promise<MeInfo> {
 // authed and return a URL we navigate to full-page (never window.open/_blank —
 // an installed PWA must return into scope; see 0058 Mobile/touch).
 
+// The client-side price *choices* (never raw Stripe ids). The team prices
+// (proposal 0064 B3) carry an org target + a seat quantity, clamped server-side
+// to max(3, N, memberCount) — the client renders the floor, never enforces it.
+export type CheckoutPrice = "pro-monthly" | "pro-annual" | "team-monthly" | "team-annual";
+
 // startCheckout opens a Stripe Checkout session for the chosen price. The
 // founder price is decided server-side, so the client always posts the plain
-// "pro-monthly"/"pro-annual". Redirects on success; throws ApiError otherwise.
-export async function startCheckout(price: "pro-monthly" | "pro-annual"): Promise<void> {
+// choice string. Redirects on success; throws ApiError otherwise.
+export async function startCheckout(
+  price: CheckoutPrice,
+  opts?: { org?: string; seats?: number }
+): Promise<void> {
   const r = await fetch("/api/billing/checkout", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ price }),
+    body: JSON.stringify({ price, org: opts?.org, seats: opts?.seats }),
   });
   if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `checkout: ${r.status}`);
   const { url } = (await r.json()) as { url: string };
@@ -197,9 +233,20 @@ export async function startCheckout(price: "pro-monthly" | "pro-annual"): Promis
 }
 
 // openBillingPortal sends the subscriber to Stripe's hosted portal (update card,
-// switch plan, cancel). 409 when the user has no billing account yet.
-export async function openBillingPortal(): Promise<void> {
-  const r = await fetch("/api/billing/portal", { method: "POST" });
+// switch plan, cancel). 409 when the user has no billing account yet. Pass
+// `{org}` to open the ORG's portal (owner/admin — where seat-quantity changes
+// happen, proposal 0064 B3); omitted = today's personal path, byte-identical.
+export async function openBillingPortal(opts?: { org?: string }): Promise<void> {
+  const r = await fetch(
+    "/api/billing/portal",
+    opts?.org
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ org: opts.org }),
+        }
+      : { method: "POST" }
+  );
   if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `portal: ${r.status}`);
   const { url } = (await r.json()) as { url: string };
   window.location.assign(url);
@@ -346,10 +393,18 @@ export interface ReceivedShare {
   agentId: string;
   machine?: string;
   session?: string | null;
-  kind: "agent" | "session";
+  // "team" (proposal 0065 A4): a machine-wide, view-level grant materialized
+  // from org membership. Not individually leavable/revocable — the way out is
+  // the owner's per-machine opt-out or leaving the team.
+  kind: "agent" | "session" | "team";
   permission: "use" | "view";
   ownerEmail?: string;
   createdAt: number;
+  // How the grant reached me (proposal 0065 Part B): "team" = materialized from
+  // org membership; "direct"/absent = an explicit 0039 share. Old hubs omit it.
+  origin?: "direct" | "team";
+  // The granting org's name, on team rows only — the badge tooltip's text.
+  orgName?: string | null;
 }
 
 // createShare offers an agent (no session) or a single session to a user by
@@ -387,7 +442,13 @@ export async function createShare(args: {
 export interface InviteInfo {
   email: string;
   inviterEmail: string;
-  kind: "agent" | "session";
+  kind: "agent" | "session" | "team";
+  // Team invites only (proposal 0065 C4, read via GET /api/org-invite/:token):
+  // the org's name, the offered role, and the server's normative consent copy —
+  // the landing MUST render `consent` verbatim (proposal 0063 B2).
+  orgName?: string;
+  role?: string;
+  consent?: string;
 }
 
 export async function getInviteInfo(token: string): Promise<InviteInfo> {
@@ -436,6 +497,208 @@ export const revokeShare = (id: string) => postShare(`/api/shares/${encodeURICom
 export async function leaveShare(id: string): Promise<void> {
   const r = await fetch(`/api/shares/received/${encodeURIComponent(id)}/leave`, { method: "POST" });
   if (!r.ok && r.status !== 204) throw new Error((await r.text()).trim() || `leave: ${r.status}`);
+}
+
+// ── Teams / orgs (proposals 0063 membership, 0065 team UX) ───────────────────
+// One org per user in v1, so no org id appears in any path — the hub resolves
+// the caller's org from their membership. Non-members get 404 on every org
+// route (existence is never disclosed); role-forbidden actions get 403.
+
+// The org core, as GET /api/orgs/mine returns it.
+export interface OrgInfo {
+  id: string;
+  name: string;
+  // Purchased seats. 0 = dormant (created but not activated) — members keep
+  // their personal plans and nothing pools until seats exist.
+  seats: number;
+  memberCount: number;
+  // The org subscription's status/period (proposal 0064) — absent pre-billing.
+  planStatus?: string | null;
+  periodEnd?: number | null;
+}
+
+export interface OrgMember {
+  userId: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  joinedAt: number;
+}
+
+// A pending org invite (the /mine outbox — owner/admin only, EMPTY for members).
+export interface OrgInvite {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: number;
+  expiresAt?: number | null;
+  inviteUrl?: string;
+}
+
+// One of MY machines with the per-machine team-visibility opt-out flag (the
+// consent surface, proposal 0063 §consent).
+export interface OrgMachine {
+  agentId: string;
+  machine: string;
+  teamVisible: boolean;
+}
+
+export interface OrgMine {
+  org: OrgInfo;
+  myRole: "owner" | "admin" | "member";
+  members: OrgMember[];
+  invites: OrgInvite[];
+  machines: OrgMachine[];
+}
+
+// getOrg — the TeamCard's whole data read. Resolves null when the caller is in
+// no org (the endpoint's 404); throws ApiError on real failures.
+export async function getOrg(): Promise<OrgMine | null> {
+  const r = await fetch("/api/orgs/mine");
+  if (r.status === 404) return null;
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `org: ${r.status}`);
+  return r.json();
+}
+
+// createOrg — start a team; the caller becomes its owner. The org is dormant
+// (0 seats) until checkout activates it. 409 when already in a team.
+export async function createOrg(name: string): Promise<{ id: string }> {
+  const r = await fetch("/api/orgs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `org: ${r.status}`);
+  return r.json();
+}
+
+// createOrgInvite — owner/admin invite by email. ONE response shape whether the
+// address has an account or not (no account-existence oracle); the copyable
+// /org-invite link is how the invite travels. 402 = out of seats (render the
+// seats LimitCard); 403 for plain members.
+export async function createOrgInvite(
+  email: string,
+  role?: "member" | "admin"
+): Promise<{ id: string; status: string; inviteUrl?: string }> {
+  const r = await fetch("/api/orgs/invites", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role }),
+  });
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `invite: ${r.status}`);
+  const j = (await r.json()) as { id: string; status: string; invite_url?: string };
+  return { id: j.id, status: j.status, inviteUrl: j.invite_url };
+}
+
+// revokeOrgInvite — owner/admin cancels a pending invite.
+export async function revokeOrgInvite(id: string): Promise<void> {
+  const r = await fetch(`/api/orgs/invites/${encodeURIComponent(id)}/revoke`, { method: "POST" });
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `invite: ${r.status}`);
+}
+
+// One row of MY pending org invites (GET /api/orgs/invites/inbox). `consent` is
+// the server's normative copy and MUST be rendered on the accept surface.
+export interface OrgInboxInvite {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: number;
+  expiresAt?: number | null;
+  orgName?: string;
+  inviterEmail?: string | null;
+  consent?: string;
+}
+
+export async function orgInviteInbox(): Promise<OrgInboxInvite[]> {
+  const r = await fetch("/api/orgs/invites/inbox");
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `inbox: ${r.status}`);
+  return r.json();
+}
+
+// respondOrgInvite — accept/decline a pending org invite. Accept can answer
+// 402 (team out of seats — surface the message / seats LimitCard) or 409
+// (already in another team, or no longer pending).
+export async function respondOrgInvite(id: string, accept: boolean): Promise<{ status: string }> {
+  const r = await fetch(
+    `/api/orgs/invites/${encodeURIComponent(id)}/${accept ? "accept" : "decline"}`,
+    { method: "POST" }
+  );
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `invite: ${r.status}`);
+  return r.json().catch(() => ({ status: "ok" }));
+}
+
+// removeOrgMember — owner/admin removes a member (admins only remove members).
+// Their team visibility is pruned server-side, both directions.
+export async function removeOrgMember(userId: string): Promise<void> {
+  const r = await fetch(`/api/orgs/members/${encodeURIComponent(userId)}/remove`, { method: "POST" });
+  if (!r.ok && r.status !== 204) {
+    throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `remove: ${r.status}`);
+  }
+}
+
+// setOrgMemberRole — owner only. Role "owner" is an atomic ownership transfer.
+export async function setOrgMemberRole(userId: string, role: string): Promise<void> {
+  const r = await fetch(`/api/orgs/members/${encodeURIComponent(userId)}/role`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!r.ok && r.status !== 204) {
+    throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `role: ${r.status}`);
+  }
+}
+
+// leaveOrg — 409 for the owner (transfer ownership first); the message is shown
+// inline.
+export async function leaveOrg(): Promise<void> {
+  const r = await fetch("/api/orgs/leave", { method: "POST" });
+  if (!r.ok && r.status !== 204) {
+    throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `leave: ${r.status}`);
+  }
+}
+
+// setMachineTeamVisible — the per-machine opt-out toggle (machine owner only;
+// no admin override). Takes effect within the action, not a nightly pass.
+export async function setMachineTeamVisible(agentId: string, visible: boolean): Promise<void> {
+  const r = await fetch(`/api/orgs/machines/${encodeURIComponent(agentId)}/visibility`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ visible }),
+  });
+  if (!r.ok && r.status !== 204) {
+    throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `visibility: ${r.status}`);
+  }
+}
+
+// One audit-log line (proposal 0063 Part D). Owner/admin only; members get 404.
+export interface OrgAuditEntry {
+  id: number;
+  at: number;
+  actorEmail?: string | null;
+  // Dotted vocabulary ("invite.created", "member.joined", …) — humanized
+  // client-side; unknown actions fall back to the raw string.
+  action: string;
+  target?: string | null;
+  // Small JSON blob (role, machine label…) — never terminal content.
+  detail?: string | null;
+}
+
+// listOrgAudit — keyset-paged newest-first; pass the last row's id as `before`
+// for the next page. Throws ApiError(404) for non-admin members (hide the card).
+export async function listOrgAudit(before?: number): Promise<OrgAuditEntry[]> {
+  const q = before !== undefined ? `?before=${encodeURIComponent(String(before))}` : "";
+  const r = await fetch(`/api/orgs/audit${q}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `audit: ${r.status}`);
+  return r.json();
+}
+
+// getOrgInviteInfo — the /org-invite/<token> landing read (unauthenticated; the
+// token IS the capability). A dead/unknown token throws ApiError(404).
+export async function getOrgInviteInfo(token: string): Promise<InviteInfo> {
+  const r = await fetch(`/api/org-invite/${encodeURIComponent(token)}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `invite: ${r.status}`);
+  return r.json();
 }
 
 let unauthorizedHandler: (() => void) | null = null;
