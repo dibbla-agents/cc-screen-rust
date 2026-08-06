@@ -78,5 +78,6 @@ its turn.
 
 - [Using the web app](../web-app/) — sessions, the grid, files, uploads,
   sharing.
-- [The ccs terminal client](../tui/) — the same fleet from a terminal.
+- [The ccs terminal client](../tui/) — the same fleet from a terminal. Sign
+  it in with `ccs activate` — the same code-approve flow as step 3.
 - Add more machines any time — dashboard → **Add a machine**.

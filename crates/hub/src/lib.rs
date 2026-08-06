@@ -37,6 +37,12 @@ pub mod summarizer;
 pub mod uplink_server;
 pub mod watch_ws;
 
+// In-process hub + fake-agent doubles for e2e tests (proposal 0059 B1). Behind a
+// feature so a normal hub build never compiles them; consumed by the hub's own
+// `tests/e2e.rs` and, as a dev-dependency, by the `ccs` TUI e2e harness.
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -129,6 +135,15 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/device/token", post(device::token))
         .route("/api/device/validate", post(device::validate))
         .route("/api/device/approve", post(device::approve))
+        // Terminal-client sign-in (proposal 0060 B2): the same RFC-8628 flow on
+        // distinct paths (so a pre-0060 hub 404s clean). /approve is shared.
+        .route("/api/device/client/code", post(device::client_code))
+        .route("/api/device/client/token", post(device::client_token))
+        // Terminal-client token management (0060 B4): the account page's list +
+        // revoke (cookie-authed) and `ccs logout`'s self-revoke (Bearer-authed).
+        .route("/api/client-tokens", get(account::client_tokens_list))
+        .route("/api/client-tokens/delete", post(account::client_tokens_delete))
+        .route("/api/client-tokens/revoke-self", post(account::client_tokens_revoke_self))
         // Account + dashboard. /signup is unauthenticated (it mints the session);
         // the agent-management routes are cookie-authed.
         .route("/api/signup", post(account::signup))
@@ -148,7 +163,13 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/shares/:id/revoke", post(share::revoke))
         // Email-invite landing read (proposal 0056 C4): unauthenticated (the
         // token is the capability; exempted in require_client_auth), throttled.
-        .route("/api/invite/:token", get(share::invite_info));
+        .route("/api/invite/:token", get(share::invite_info))
+        // The `ccs` terminal-client install one-liners (proposal 0060 D3): the
+        // /install.sh template idea, ending in `ccs activate --server <hub>`.
+        // Multi-tenant only — `activate` is the multi-tenant sign-in, and the
+        // single-tenant build stays byte-for-byte route-free of 0060.
+        .route("/ccs.sh", get(install::ccs_sh))
+        .route("/ccs.ps1", get(install::ccs_ps1));
 
     // Stripe billing (proposal 0058 Part B): register only when configured, so an
     // unconfigured hub 404s these paths (the handlers also re-check config as

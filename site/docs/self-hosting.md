@@ -56,7 +56,9 @@ cc-screen-rust install --hub https://hub.example:8840 \
 
 **3 — Open it.** Browse `https://hub.example:8840` (log in with the password;
 Add to Home Screen on a phone), or `ccs --server https://hub.example:8840
---token <client-token>`.
+--token <client-token>`. (If you run the hub *multi-tenant* — with a user
+database — `ccs activate` device sign-in works against it too, exactly as on
+the hosted service.)
 
 ## The agent's hub flags
 

@@ -872,8 +872,12 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
     // The invite-link read (proposal 0056 C4) is public by design: the token is
     // the capability, and the landing page must render before login. The route
     // only exists in the multi-tenant build, so the exemption is gated with it.
+    // The 0060 client device-flow endpoints are unauthenticated like their agent
+    // siblings (the device_code is the bearer); same multi-tenant-only gating.
     #[cfg(feature = "multi-tenant")]
-    let exempt = exempt || path.starts_with("/api/invite/");
+    let exempt = exempt
+        || path.starts_with("/api/invite/")
+        || matches!(path.as_str(), "/api/device/client/code" | "/api/device/client/token");
     // The Stripe webhook (proposal 0058 B2) authenticates via its Stripe-Signature
     // HMAC (verified in the handler), not a session cookie — and Stripe sends no
     // Origin header, so the origin check above passes it through.
@@ -885,7 +889,20 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
     // here; the resolved tenant scope is stashed for the handlers so every relay
     // lookup is filtered to the caller's own agents.
     if hub.multi_tenant() {
-        let user = hub.client_auth.user_from_cookie(req.headers());
+        #[allow(unused_mut)]
+        let mut user = hub.client_auth.user_from_cookie(req.headers());
+        // Proposal 0060 B3: a headless client (`ccs`) authenticates with a
+        // per-user client token instead of a cookie — resolve `Bearer → user`
+        // against `client_tokens` (and ONLY `client_tokens`: agent uplink
+        // tokens must never authenticate a client, and vice versa — the 0001
+        // two-credential invariant). Everything downstream (Visibility scope,
+        // sharing, WS attach, bulk) inherits with no handler changes.
+        #[cfg(feature = "multi-tenant")]
+        if user.is_none() && !exempt {
+            if let Some(bearer) = cc_screen_auth::bearer_token(req.headers()) {
+                user = hub.user_by_client_token_hash(&cc_screen_auth::sha256_hex(bearer)).await;
+            }
+        }
         if !exempt && user.is_none() {
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }

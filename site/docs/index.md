@@ -58,7 +58,8 @@ bytes between your browser and the machine that owns them. (More in
   your phone's home screen for the app experience.
   See [Using the web app](web-app/).
 - **`ccs`** — a native terminal client with a session switcher and a
-  multi-pane grid, for when you live in a terminal anyway.
+  multi-pane grid, for when you live in a terminal anyway. Sign it in with
+  `ccs activate` — the same code-approve gesture as enrolling a machine.
   See [The ccs terminal client](tui/).
 
 ## Where to go next

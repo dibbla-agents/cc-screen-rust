@@ -8,11 +8,12 @@ use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use cc_screen_protocol::{CreateReq, MachineInfo, SessionInfo, ToolInfo};
+use cc_screen_protocol::{CreateReq, MachineInfo, RestorableSession, SessionInfo, ToolInfo};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
+use ratatui::backend::Backend;
 use ratatui::layout::Rect;
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
@@ -22,7 +23,6 @@ use crate::input;
 use crate::layout::{self, Layout};
 use crate::pane::{ConnState, Pane, WsOut};
 use crate::ready::{self, ReadyEdge};
-use crate::term::Tui;
 use crate::ui;
 
 /// How long a foreground ready-toast (0018 §3) stays up before the 1 s ticker
@@ -33,6 +33,95 @@ const TOAST_TTL: Duration = Duration::from_secs(8);
 /// ready-edge gates. Kept tiny so the detector itself stays pure + testable.
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Why a `ccs <session>` direct-attach query (0059 C2) couldn't be resolved to a
+/// single session. `Ambiguous` carries the human-readable candidate labels
+/// (`machine/name`, or just `name` in single-agent mode) so the CLI can print
+/// them to stderr before exiting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachError {
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+/// Case-insensitive subsequence test: do `query`'s chars appear, in order, in
+/// `hay`? The last (fuzzy) tier of `resolve_attach`.
+fn fuzzy_subseq(hay: &str, query: &str) -> bool {
+    let mut q = query.chars().flat_map(char::to_lowercase).peekable();
+    for h in hay.chars().flat_map(char::to_lowercase) {
+        match q.peek() {
+            Some(&qc) if qc == h => {
+                q.next();
+            }
+            _ => {}
+        }
+        if q.peek().is_none() {
+            return true;
+        }
+    }
+    q.peek().is_none()
+}
+
+/// Display label for a session in ambiguity messages: `machine/name` on a hub,
+/// bare `name` for a single unnamed agent.
+fn attach_label(s: &SessionInfo) -> String {
+    if s.machine.is_empty() {
+        s.name.clone()
+    } else {
+        format!("{}/{}", s.machine, s.name)
+    }
+}
+
+/// Resolve a `ccs <session>` positional query (0059 C2) to a single
+/// `(name, machine)` target. Precedence, first tier with any match wins:
+///   1. exact `machine/name`
+///   2. exact `name`
+///   3. unique `name` prefix
+///   4. unique fuzzy (case-insensitive subsequence) `name` match
+/// Exactly one hit in the winning tier ⇒ `Ok`; more than one ⇒ `Ambiguous` (the
+/// candidates); no hit in any tier ⇒ `NotFound`. Pure — unit-tested below and
+/// reused by both the CLI pre-flight (`main.rs`) and `App::start_in_menu`.
+pub fn resolve_attach(sessions: &[SessionInfo], query: &str) -> Result<(String, String), AttachError> {
+    let pick = |hits: &[&SessionInfo]| -> Option<Result<(String, String), AttachError>> {
+        match hits {
+            [] => None,
+            [one] => Some(Ok((one.name.clone(), one.machine.clone()))),
+            many => Some(Err(AttachError::Ambiguous(many.iter().map(|s| attach_label(s)).collect()))),
+        }
+    };
+
+    // 1. exact machine/name (only when the query carries a slash).
+    if let Some((machine, name)) = query.split_once('/') {
+        let hits: Vec<&SessionInfo> =
+            sessions.iter().filter(|s| s.machine == machine && s.name == name).collect();
+        if let Some(r) = pick(&hits) {
+            return r;
+        }
+    }
+    // 2. exact name.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| s.name == query).collect();
+    if let Some(r) = pick(&hits) {
+        return r;
+    }
+    // 3. unique name prefix.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| s.name.starts_with(query)).collect();
+    if let Some(r) = pick(&hits) {
+        return r;
+    }
+    // 4. unique fuzzy (subsequence) name match.
+    let hits: Vec<&SessionInfo> = sessions.iter().filter(|s| fuzzy_subseq(&s.name, query)).collect();
+    pick(&hits).unwrap_or(Err(AttachError::NotFound))
+}
+
+/// The name to show for a session (proposal 0036 / 0059 C1): the operator-chosen
+/// display label when set (and non-empty), else the slug `short`. Display-only —
+/// it never replaces the identity `name`/`short`, so routing keys are untouched.
+pub fn display_name(s: &SessionInfo) -> &str {
+    match s.label.as_deref() {
+        Some(l) if !l.is_empty() => l,
+        _ => &s.short,
+    }
 }
 
 /// Everything the event loop reacts to.
@@ -49,6 +138,12 @@ pub enum AppMsg {
     /// The tool list for the form's selected machine (re-fetched on a hub when
     /// the machine changes, since tools are per-agent).
     ToolsLoaded(Vec<ToolInfo>),
+    /// Result of an async rename (0059 C1): Ok closes the overlay + refreshes;
+    /// Err(message) keeps the rename overlay open with the error shown.
+    Labeled(Result<(), String>),
+    /// The restorable-session list for the restore picker (0059 C5). Empty (or a
+    /// failed fetch) shows a status message instead of opening the overlay.
+    Restorable(Vec<RestorableSession>),
 }
 
 pub enum PaneMsg {
@@ -70,6 +165,9 @@ enum GridOverlay {
     Menu { target: usize, selected: usize },
     /// Inline new-session form that fills box `target` on submit.
     NewForm { target: usize, form: NewForm },
+    /// Rename overlay for the focused box's session (0059 C1), reached from the
+    /// action menu. Reuses the switcher rename form + text-input logic.
+    Rename(RenameForm),
 }
 
 /// One selectable row of the grid action menu, in visual (top→bottom) order:
@@ -79,17 +177,24 @@ enum MenuItem {
     ChangeLayout,
     NewSession,
     Session(usize),
+    /// Rename the focused box's session (0059 C1). Present only when the box holds
+    /// a session (`can_rename`), between the session list and Clear this box.
+    RenameSession,
     ClearBox,
     Quit,
 }
 
-/// The selectable menu rows for `session_count` sessions. Length is always
-/// `session_count + 4`, so navigation wrapping is a plain modulo.
-fn menu_items(session_count: usize) -> Vec<MenuItem> {
-    let mut v = Vec::with_capacity(session_count + 4);
+/// The selectable menu rows for `session_count` sessions. Length is
+/// `session_count + 4` (+1 more when `can_rename`), so navigation wrapping stays a
+/// plain modulo over the returned length.
+fn menu_items(session_count: usize, can_rename: bool) -> Vec<MenuItem> {
+    let mut v = Vec::with_capacity(session_count + 5);
     v.push(MenuItem::ChangeLayout);
     v.push(MenuItem::NewSession);
     v.extend((0..session_count).map(MenuItem::Session));
+    if can_rename {
+        v.push(MenuItem::RenameSession);
+    }
     v.push(MenuItem::ClearBox);
     v.push(MenuItem::Quit);
     v
@@ -149,6 +254,34 @@ enum NewFormAction {
     /// The selected machine changed — re-fetch both its dir listing (`parent`)
     /// and its tool list, since both are per-agent.
     MachineChanged(String),
+}
+
+/// Outcome of feeding a key to a rename overlay (0059 C1).
+enum RenameAction {
+    None,
+    Submit,
+    Cancel,
+}
+
+/// Apply one key to a `RenameForm` — shared by the switcher rename overlay and the
+/// grid action-menu rename overlay. Same text-field logic as the new-session form:
+/// printable→push, Backspace→pop, Esc→cancel, Enter→submit.
+fn rename_key(form: &mut RenameForm, k: KeyEvent) -> RenameAction {
+    match (k.code, k.modifiers) {
+        (KeyCode::Esc, _) => RenameAction::Cancel,
+        (KeyCode::Enter, _) => RenameAction::Submit,
+        (KeyCode::Backspace, _) => {
+            form.value.pop();
+            RenameAction::None
+        }
+        (KeyCode::Char(c), m)
+            if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+        {
+            form.value.push(c);
+            RenameAction::None
+        }
+        _ => RenameAction::None,
+    }
 }
 
 /// Apply one key to a `NewForm` — shared by the switcher form and the grid form.
@@ -349,6 +482,30 @@ enum Overlay {
     None,
     Confirm { session: String, graceful: bool },
     NewSession(NewForm),
+    /// Rename the selected session (0059 C1) — a single free-text field seeded
+    /// with the current display name.
+    RenameSession(RenameForm),
+    /// A checklist of the sessions a redeploy left restorable (0059 C5).
+    RestorePicker(RestoreForm),
+}
+
+/// The rename overlay's state (0059 C1). `session`/`machine` identify the target
+/// (routing keys, never shown as editable); `value` is the edited display label.
+struct RenameForm {
+    session: String,
+    machine: String,
+    value: String,
+    error: Option<String>,
+}
+
+/// The restorable-session picker's state (0059 C5). `selected` is parallel to
+/// `items` (a per-row checkbox); `cursor` is the highlighted row. NOTE: restore is
+/// all-or-nothing server-side, so the toggles are a preview/confirmation only —
+/// see `submit_restore_picker`.
+struct RestoreForm {
+    items: Vec<RestorableSession>,
+    selected: Vec<bool>,
+    cursor: usize,
 }
 
 struct NewForm {
@@ -391,6 +548,10 @@ impl NewForm {
 }
 
 const MOUSE_STEP: isize = 3;
+/// `g` (top) in keyboard-scroll mode: a delta far larger than any history
+/// (alacritty caps scrollback at 10 000 lines) so the view lands on the oldest
+/// line. `Pane::scroll` clamps to `[0, history]`.
+const SCROLL_TOP: isize = 1_000_000;
 
 pub struct App {
     rest: Rest,
@@ -423,10 +584,19 @@ pub struct App {
     area: (u16, u16),
     prefix: (KeyCode, KeyModifiers),
     prefix_armed: bool,
+    /// Keyboard-scroll mode on the focused pane (0059 C3), entered with `^A [`.
+    /// While set, `key_grid` routes navigation keys to `Pane::scroll[_to_live]`
+    /// instead of the input encoder; `q`/`Esc`/`G` clear it back to live.
+    scroll_mode: bool,
     tx: mpsc::Sender<AppMsg>,
     rx: Option<mpsc::Receiver<AppMsg>>,
     should_quit: bool,
     pending_refresh: bool,
+    /// A `ccs <session>` direct-attach query (0059 C2), if given. Resolved against
+    /// the freshly-refreshed session list in `start_in_menu`: on a hit the app
+    /// boots straight into the grid attached to that session (no action menu); a
+    /// resolve miss falls back to the default menu boot.
+    start_attach_query: Option<String>,
 
     // ── ready-session notifications (0018) ──────────────────────────────────
     /// Sessions that crossed the gated busy→waiting edge and are still ready,
@@ -440,6 +610,23 @@ pub struct App {
     /// (§5). Drives the foreground/background split; defaults true so terminals
     /// without focus reporting always take the (harmless) statusbar toast.
     is_focused: bool,
+}
+
+/// Which real-terminal side effects `App::run_with` starts. Production passes the
+/// default (both on); e2e tests pass both off and drive the loop synthetically
+/// through `App::tx()` (proposal 0059 B2).
+#[derive(Clone, Copy, Debug)]
+pub struct RunOpts {
+    /// Spawn the crossterm `EventStream` reader task (real keyboard/mouse/resize).
+    pub spawn_term_events: bool,
+    /// Spawn the 1 s ticker that drives `AppMsg::Tick` (poll refresh, toast expiry).
+    pub spawn_ticker: bool,
+}
+
+impl Default for RunOpts {
+    fn default() -> Self {
+        Self { spawn_term_events: true, spawn_ticker: true }
+    }
 }
 
 impl App {
@@ -468,21 +655,85 @@ impl App {
             area: (80, 24),
             prefix,
             prefix_armed: false,
+            scroll_mode: false,
             tx,
             rx: Some(rx),
             should_quit: false,
             pending_refresh: false,
+            start_attach_query: None,
             toast: Vec::new(),
             toast_until: None,
             is_focused: true,
         }
     }
 
-    pub async fn run(mut self, term: &mut Tui) -> Result<()> {
-        let mut rx = self.rx.take().expect("run() called once");
-        self.spawn_term_events();
-        self.spawn_ticker();
+    /// Clone the app's message sender. Tests drive the loop by pushing synthetic
+    /// `AppMsg`s (keys, ticks, resizes) onto this channel instead of a real
+    /// crossterm `EventStream` / ticker (see `RunOpts`).
+    pub fn tx(&self) -> mpsc::Sender<AppMsg> {
+        self.tx.clone()
+    }
 
+    /// Arm `ccs <session>` direct-attach (0059 C2): `query` is resolved against the
+    /// session list at boot (`start_in_menu`), attaching box 0 straight into the
+    /// grid instead of opening the action menu. `main.rs` sets the raw query it
+    /// already pre-flighted for exit codes; `App` re-resolves via the same pure
+    /// `resolve_attach`, so a miss (e.g. the session vanished) degrades to the
+    /// default menu boot rather than erroring.
+    pub fn set_start_attach(&mut self, query: String) {
+        self.start_attach_query = Some(query);
+    }
+
+    pub async fn run<B: Backend>(self, term: &mut Terminal<B>) -> Result<()> {
+        self.run_with(term, RunOpts::default()).await
+    }
+
+    /// The event loop, generic over the ratatui backend so an e2e test can run it
+    /// against a `TestBackend` (proposal 0059 B2). `opts` gates the real-terminal
+    /// side effects (the crossterm event stream + the 1 s ticker) so a test owns
+    /// the stimulus and feeds the loop deterministically via `tx()`.
+    pub async fn run_with<B: Backend>(mut self, term: &mut Terminal<B>, opts: RunOpts) -> Result<()> {
+        let mut rx = self.take_rx();
+        if opts.spawn_term_events {
+            self.spawn_term_events();
+        }
+        if opts.spawn_ticker {
+            self.spawn_ticker();
+        }
+
+        self.init().await;
+        self.draw(term)?;
+
+        while let Some(msg) = rx.recv().await {
+            self.handle_msg(msg).await;
+            while let Ok(m) = rx.try_recv() {
+                self.handle_msg(m).await;
+            }
+            if self.should_quit {
+                break;
+            }
+            self.draw(term)?;
+        }
+        Ok(())
+    }
+
+    // ── driver pieces, shared by `run_with` and the e2e harness (0059 B3) ────────
+    //
+    // A bin-only loop can't be single-stepped from a test. Splitting it into
+    // `take_rx` / `init` / `handle_msg` / `draw` lets `tests/e2e.rs` push a
+    // synthetic `AppMsg`, drain the channel, redraw a `TestBackend`, and assert on
+    // the buffer — while production still runs the exact same pieces in `run_with`.
+
+    /// Take the app's receiver (once). Production's `run_with` owns it; a test owns
+    /// it so it can drain pane/create/tool messages between synthetic stimuli.
+    pub fn take_rx(&mut self) -> mpsc::Receiver<AppMsg> {
+        self.rx.take().expect("take_rx()/run() called once")
+    }
+
+    /// One-time async startup: resolve the server root, probe for a hub, load the
+    /// default machine's tools, do the first session refresh, and pick the initial
+    /// screen. No terminal side effects (no `spawn_*`) — those are `run_with`'s.
+    pub async fn init(&mut self) {
         if let Ok((home, machine)) = self.rest.root_info().await {
             self.home = home;
             self.self_machine = machine;
@@ -499,24 +750,26 @@ impl App {
         // fetch them for the machine the form will default to.
         self.tools = self.rest.tools(&self.default_machine_name()).await.unwrap_or_default();
 
-        self.sync_area(term);
         self.refresh().await;
         self.start_in_menu();
-        term.draw(|f| self.render(f))?;
+    }
 
-        while let Some(msg) = rx.recv().await {
-            self.handle(msg).await;
-            while let Ok(m) = rx.try_recv() {
-                self.handle(m).await;
-            }
-            if self.should_quit {
-                break;
-            }
-            self.sync_area(term);
-            self.relayout();
-            term.draw(|f| self.render(f))?;
-        }
+    /// Handle one message (a key/tick/resize, or a pane/create/tools async result).
+    pub async fn handle_msg(&mut self, msg: AppMsg) {
+        self.handle(msg).await;
+    }
+
+    /// Re-pin the layout to the current terminal size and repaint one frame.
+    pub fn draw<B: Backend>(&mut self, term: &mut Terminal<B>) -> Result<()> {
+        self.sync_area(term);
+        self.relayout();
+        term.draw(|f| self.render(f))?;
         Ok(())
+    }
+
+    /// Whether the loop has been asked to quit (a test checks this after `q`).
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
     }
 
     fn spawn_term_events(&self) {
@@ -552,7 +805,7 @@ impl App {
         });
     }
 
-    fn sync_area(&mut self, term: &Tui) {
+    fn sync_area<B: Backend>(&mut self, term: &Terminal<B>) {
         if let Ok(sz) = term.size() {
             self.area = (sz.width, sz.height);
         }
@@ -566,6 +819,8 @@ impl App {
             AppMsg::Created(res) => self.handle_created(res),
             AppMsg::DirCands { parent, entries } => self.handle_dir_cands(parent, entries),
             AppMsg::ToolsLoaded(tools) => self.handle_tools_loaded(tools),
+            AppMsg::Labeled(res) => self.handle_labeled(res),
+            AppMsg::Restorable(list) => self.handle_restorable(list),
         }
         if self.pending_refresh {
             self.pending_refresh = false;
@@ -597,6 +852,7 @@ impl App {
                     .collect();
                 let edges = ready::detect_ready_edges(&self.sessions, &list, &mounted, now_secs());
                 self.sessions = list;
+                self.refresh_pane_accents();
                 self.note_ready_edges(edges, &mounted);
                 if self.selected >= self.sessions.len() {
                     self.selected = self.sessions.len().saturating_sub(1);
@@ -757,8 +1013,14 @@ impl App {
     fn handle_created(&mut self, res: Result<(String, String), String>) {
         match res {
             Ok((name, machine)) => {
-                self.overlay = Overlay::None;
-                self.grid_overlay = GridOverlay::None;
+                // Only dismiss the new-session overlay this reply belongs to — a slow
+                // create must not wipe a rename/confirm overlay opened meanwhile.
+                if matches!(self.overlay, Overlay::NewSession(_)) {
+                    self.overlay = Overlay::None;
+                }
+                if matches!(self.grid_overlay, GridOverlay::NewForm { .. }) {
+                    self.grid_overlay = GridOverlay::None;
+                }
                 // If the create was launched to fill a box, drop it in there on
                 // the machine we routed it to; otherwise it was a plain switcher
                 // create.
@@ -887,10 +1149,14 @@ impl App {
             Overlay::None => 0,
             Overlay::Confirm { .. } => 1,
             Overlay::NewSession(_) => 2,
+            Overlay::RenameSession(_) => 3,
+            Overlay::RestorePicker(_) => 4,
         };
         match kind {
             1 => self.key_confirm(k),
             2 => self.key_newform(k),
+            3 => self.key_rename(k),
+            4 => self.key_restore_picker(k),
             _ => self.key_list(k),
         }
     }
@@ -913,7 +1179,17 @@ impl App {
             (KeyCode::Char('n'), _) => self.open_newform(),
             (KeyCode::Char('x'), _) => self.confirm_delete(false),
             (KeyCode::Char('e'), _) => self.confirm_delete(true),
-            (KeyCode::Char('R'), _) => self.restore_all(),
+            // Context-sensitive Shift-R (0059 C1 + C5): with sessions present it
+            // renames the selected one; with an empty list (nothing to rename, e.g.
+            // right after a redeploy) it opens the restorable-session picker. Bare
+            // `r` stays "refresh" above.
+            (KeyCode::Char('R'), _) => {
+                if self.sessions.is_empty() {
+                    self.open_restore_picker();
+                } else {
+                    self.open_rename();
+                }
+            }
             _ => {}
         }
     }
@@ -1078,11 +1354,163 @@ impl App {
     fn restore_all(&mut self) {
         let rest = self.rest.clone();
         let tx = self.tx.clone();
+        // Route to the same agent the restorable list was fetched from (0059 C5) —
+        // a machine-less restore 404s on a multi-agent hub. Mirrors `restorable`.
+        let machine = self.default_machine_name();
         tokio::spawn(async move {
-            let _ = rest.restore().await;
+            let _ = rest.restore(&machine).await;
             let _ = tx.send(AppMsg::Tick).await; // nudge a refresh
         });
         self.status = "restoring…".into();
+    }
+
+    // ── rename (0059 C1) ──────────────────────────────────────────────────────
+    /// Open the rename overlay for the selected session, seeded with its current
+    /// display name (the label if set, else the slug).
+    fn open_rename(&mut self) {
+        if let Some(s) = self.sessions.get(self.selected) {
+            self.overlay = Overlay::RenameSession(RenameForm {
+                session: s.name.clone(),
+                machine: s.machine.clone(),
+                value: display_name(s).to_string(),
+                error: None,
+            });
+        }
+    }
+
+    /// Text-field key handling for the switcher rename overlay, via the shared
+    /// `rename_key` (same printable→push / Backspace→pop / Esc / Enter logic the
+    /// new-session form uses).
+    fn key_rename(&mut self, k: KeyEvent) {
+        let action = {
+            let Overlay::RenameSession(form) = &mut self.overlay else {
+                return;
+            };
+            rename_key(form, k)
+        };
+        match action {
+            RenameAction::None => {}
+            RenameAction::Cancel => self.overlay = Overlay::None,
+            RenameAction::Submit => self.submit_rename(),
+        }
+    }
+
+    fn submit_rename(&mut self) {
+        let vals = match &self.overlay {
+            Overlay::RenameSession(f) => Some((f.session.clone(), f.machine.clone(), f.value.clone())),
+            _ => None,
+        };
+        if let Some((session, machine, value)) = vals {
+            self.spawn_set_label(session, machine, value);
+        }
+    }
+
+    /// Spawn the label mutation; the result arrives as `AppMsg::Labeled`. An empty
+    /// value clears the label (the server falls back to the slug), so submit `None`.
+    fn spawn_set_label(&self, session: String, machine: String, value: String) {
+        let trimmed = value.trim().to_string();
+        let label = if trimmed.is_empty() { None } else { Some(trimmed) };
+        let rest = self.rest.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let r = rest
+                .set_label(&session, label.as_deref(), &machine)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppMsg::Labeled(r)).await;
+        });
+    }
+
+    fn handle_labeled(&mut self, res: Result<(), String>) {
+        match res {
+            Ok(()) => {
+                // Close whichever rename overlay is open (switcher or grid) + refresh.
+                // Guard on the overlay *kind*: a slow reply must never clobber a
+                // different overlay the user opened meanwhile (e.g. Esc'd the rename,
+                // then opened New-session / a delete-confirm). Symmetric with the
+                // Err arm and with `handle_created`.
+                if matches!(self.overlay, Overlay::RenameSession(_)) {
+                    self.overlay = Overlay::None;
+                }
+                if matches!(self.grid_overlay, GridOverlay::Rename(_)) {
+                    self.grid_overlay = GridOverlay::None;
+                }
+                self.status = "renamed".into();
+                self.pending_refresh = true;
+            }
+            // Keep the open overlay up and surface the server's message.
+            Err(e) => {
+                if let Overlay::RenameSession(f) = &mut self.overlay {
+                    f.error = Some(e);
+                } else if let GridOverlay::Rename(f) = &mut self.grid_overlay {
+                    f.error = Some(e);
+                }
+            }
+        }
+    }
+
+    // ── restorable picker (0059 C5) ──────────────────────────────────────────
+    /// Fetch the restorable-session list (for the default machine) and post it back
+    /// as `AppMsg::Restorable`, which opens the picker (or reports "nothing to
+    /// restore" on an empty/failed fetch).
+    fn open_restore_picker(&mut self) {
+        let rest = self.rest.clone();
+        let tx = self.tx.clone();
+        let machine = self.default_machine_name();
+        self.status = "loading restorable…".into();
+        tokio::spawn(async move {
+            let list = rest.restorable(&machine).await.unwrap_or_default();
+            let _ = tx.send(AppMsg::Restorable(list)).await;
+        });
+    }
+
+    fn handle_restorable(&mut self, list: Vec<RestorableSession>) {
+        if list.is_empty() {
+            self.status = "nothing to restore".into();
+            return;
+        }
+        let n = list.len();
+        self.overlay = Overlay::RestorePicker(RestoreForm {
+            items: list,
+            // Pre-checked: restore is all-or-nothing, so every row comes back.
+            selected: vec![true; n],
+            cursor: 0,
+        });
+    }
+
+    fn key_restore_picker(&mut self, k: KeyEvent) {
+        let Overlay::RestorePicker(form) = &mut self.overlay else {
+            return;
+        };
+        let n = form.items.len();
+        match k.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => form.cursor = (form.cursor + 1) % n,
+            KeyCode::Up | KeyCode::Char('k') if n > 0 => form.cursor = (form.cursor + n - 1) % n,
+            KeyCode::Char(' ') => {
+                if let Some(b) = form.selected.get_mut(form.cursor) {
+                    *b = !*b;
+                }
+            }
+            // `a` selects all, then restores (Enter/a both restore — see the note
+            // in submit_restore_picker).
+            KeyCode::Char('a') => {
+                form.selected.iter_mut().for_each(|b| *b = true);
+                self.submit_restore_picker();
+            }
+            KeyCode::Enter => self.submit_restore_picker(),
+            _ => {}
+        }
+    }
+
+    fn submit_restore_picker(&mut self) {
+        // NOTE: restore is all-or-nothing server-side — `POST /api/sessions/restore`
+        // takes no body and `Cmd::Restore` carries no session list, so the per-row
+        // checkboxes are a preview/confirmation of what will come back, not a
+        // selection. Per-session selective restore would need a new backend
+        // endpoint (out of scope here — 0059 C5 is TUI-only).
+        self.overlay = Overlay::None;
+        self.restore_all();
     }
 
     // ── grid keys ────────────────────────────────────────────────────────────
@@ -1094,12 +1522,18 @@ impl App {
             GridOverlay::Palette(_) => 1,
             GridOverlay::Menu { .. } => 2,
             GridOverlay::NewForm { .. } => 3,
+            GridOverlay::Rename(_) => 4,
         };
         match overlay {
             1 => return self.key_palette(k),
             2 => return self.key_menu(k),
             3 => return self.key_grid_newform(k),
+            4 => return self.key_grid_rename(k),
             _ => {}
+        }
+        // Keyboard-scroll mode captures navigation keys for the focused pane.
+        if self.scroll_mode {
+            return self.key_scroll(k);
         }
         if self.prefix_armed {
             self.prefix_armed = false;
@@ -1109,6 +1543,7 @@ impl App {
             }
             match k.code {
                 KeyCode::Char('d') => self.open_menu(self.active),
+                KeyCode::Char('[') => self.enter_scroll_mode(), // 0059 C3: scroll mode
                 KeyCode::Char('x') => self.kill_focused(),
                 KeyCode::Char('g') => self.jump_ready(), // 0018: go to ready session(s)
                 KeyCode::Char('l') | KeyCode::Char(' ') => self.open_palette(),
@@ -1142,6 +1577,7 @@ impl App {
         let cur = Layout::ALL.iter().position(|&l| l == self.layout).unwrap_or(0);
         self.grid_overlay = GridOverlay::Palette(cur);
         self.prefix_armed = false;
+        self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
     fn key_palette(&mut self, k: KeyEvent) {
@@ -1169,6 +1605,17 @@ impl App {
     /// New session / Quit still work, and clearing the empty box falls back to
     /// the switcher).
     fn start_in_menu(&mut self) {
+        // Direct-attach (0059 C2): `ccs <session>` boots straight into the grid
+        // attached to the resolved session, skipping the action menu. `main.rs`
+        // already pre-flighted the query for the exit-code UX; we re-resolve here
+        // against the freshly-refreshed list (same data, same pure function) so a
+        // late miss falls back to the default menu boot instead of a blank grid.
+        if let Some(query) = self.start_attach_query.take() {
+            if let Ok((name, machine)) = resolve_attach(&self.sessions, &query) {
+                self.fill_box(0, name, machine); // → Grid mode, box 0, no menu
+                return;
+            }
+        }
         match self.sessions.first() {
             Some(first) => {
                 let (name, machine) = (first.name.clone(), first.machine.clone());
@@ -1186,6 +1633,7 @@ impl App {
         let selected = menu_initial(&self.sessions, current.as_deref());
         self.grid_overlay = GridOverlay::Menu { target, selected };
         self.prefix_armed = false;
+        self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
     fn key_menu(&mut self, k: KeyEvent) {
@@ -1193,7 +1641,8 @@ impl App {
             GridOverlay::Menu { target, selected } => (*target, *selected),
             _ => return,
         };
-        let len = menu_items(self.sessions.len()).len(); // always sessions + 4
+        let can_rename = self.box_has_session(target);
+        let len = menu_items(self.sessions.len(), can_rename).len();
         match k.code {
             KeyCode::Esc => self.grid_overlay = GridOverlay::None,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1203,13 +1652,19 @@ impl App {
                 self.grid_overlay = GridOverlay::Menu { target, selected: (selected + 1) % len };
             }
             KeyCode::Enter => {
-                let item = menu_items(self.sessions.len()).get(selected).copied();
+                let item = menu_items(self.sessions.len(), can_rename).get(selected).copied();
                 if let Some(item) = item {
                     self.activate_menu(target, item);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Whether box `target` currently holds an attached session (gates the menu's
+    /// Rename row + the pane-title/statusbar rename resolution).
+    fn box_has_session(&self, target: usize) -> bool {
+        self.panes.get(target).and_then(|p| p.as_ref()).is_some()
     }
 
     fn activate_menu(&mut self, target: usize, item: MenuItem) {
@@ -1224,11 +1679,54 @@ impl App {
                     self.fill_box(target, name, machine);
                 }
             }
+            MenuItem::RenameSession => self.open_grid_rename(target),
             MenuItem::ClearBox => {
                 self.grid_overlay = GridOverlay::None;
                 self.clear_box(target);
             }
             MenuItem::Quit => self.should_quit = true,
+        }
+    }
+
+    /// Open the grid rename overlay for box `target`'s session (0059 C1), seeded
+    /// with its current display name. No-op for an empty box.
+    fn open_grid_rename(&mut self, target: usize) {
+        let Some((session, machine)) =
+            self.panes.get(target).and_then(|p| p.as_ref()).map(|p| (p.session.clone(), p.machine.clone()))
+        else {
+            return;
+        };
+        let value = self
+            .sessions
+            .iter()
+            .find(|s| s.name == session && s.machine == machine)
+            .map(display_name)
+            .unwrap_or(session.as_str())
+            .to_string();
+        self.grid_overlay = GridOverlay::Rename(RenameForm { session, machine, value, error: None });
+    }
+
+    fn key_grid_rename(&mut self, k: KeyEvent) {
+        let action = {
+            let GridOverlay::Rename(form) = &mut self.grid_overlay else {
+                return;
+            };
+            rename_key(form, k)
+        };
+        match action {
+            RenameAction::None => {}
+            RenameAction::Cancel => self.grid_overlay = GridOverlay::None,
+            RenameAction::Submit => {
+                let vals = match &self.grid_overlay {
+                    GridOverlay::Rename(f) => {
+                        Some((f.session.clone(), f.machine.clone(), f.value.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some((session, machine, value)) = vals {
+                    self.spawn_set_label(session, machine, value);
+                }
+            }
         }
     }
 
@@ -1338,6 +1836,43 @@ impl App {
         }
     }
 
+    // ── keyboard scrollback (0059 C3) ────────────────────────────────────────
+    /// Enter tmux-shaped scroll mode on the focused pane (`^A [`). A no-op when
+    /// the focused box is empty — there's nothing to scroll.
+    fn enter_scroll_mode(&mut self) {
+        if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some() {
+            self.scroll_mode = true;
+        }
+    }
+
+    /// Route a key while the focused pane is in keyboard-scroll mode. tmux-shaped:
+    /// `PgUp`/`PgDn` or `Ctrl+U`/`Ctrl+D` page, `k`/`j` line-step, `g`/`G`
+    /// top/live, `q`/`Esc` return to live. Nothing here reaches the input encoder;
+    /// scroll is visual-only (input still targets the live session). Every other
+    /// key is swallowed — the mode is modal until an explicit exit.
+    fn key_scroll(&mut self, k: KeyEvent) {
+        let page = self.box_size(self.active).1 as isize; // one screen = pane rows
+        let Some(p) = self.panes.get_mut(self.active).and_then(|x| x.as_mut()) else {
+            self.scroll_mode = false; // the pane vanished — drop back to live
+            return;
+        };
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('G') => {
+                p.scroll_to_live();
+                self.scroll_mode = false;
+            }
+            KeyCode::Char('g') => p.scroll(SCROLL_TOP), // jump to the oldest line
+            KeyCode::PageUp => p.scroll(page),
+            KeyCode::PageDown => p.scroll(-page),
+            KeyCode::Char('u') if ctrl => p.scroll(page),
+            KeyCode::Char('d') if ctrl => p.scroll(-page),
+            KeyCode::Char('k') => p.scroll(1),
+            KeyCode::Char('j') => p.scroll(-1),
+            _ => {}
+        }
+    }
+
     // ── attach / fill / layout ───────────────────────────────────────────────
     fn attach(&mut self) {
         let Some(s) = self.sessions.get(self.selected) else {
@@ -1372,9 +1907,26 @@ impl App {
 
         self.remember(&session);
         self.panes[idx] = Some(Pane::new(id, session, machine, cols, rows, out_tx, task));
+        self.refresh_pane_accents();
         self.active = idx;
         self.mode = Mode::Grid;
         self.prefix_armed = false;
+        self.scroll_mode = false; // a fresh attach starts live
+    }
+
+    /// Sync each mounted box's border accent from the current session list's
+    /// web-set colour marks (proposal 0029 / 0059 C4). Display-only: a colour set
+    /// on the phone shows on the next poll; an unmarked/unknown token clears it.
+    fn refresh_pane_accents(&mut self) {
+        for slot in self.panes.iter_mut() {
+            let Some(p) = slot.as_mut() else { continue };
+            let accent = self
+                .sessions
+                .iter()
+                .find(|s| s.name == p.session && s.machine == p.machine)
+                .and_then(|s| ui::util::color_token_to_color(s.color.as_deref()));
+            p.set_accent(accent);
+        }
     }
 
     fn set_layout(&mut self, l: Layout) {
@@ -1517,6 +2069,26 @@ impl App {
                     Overlay::NewSession(form) => {
                         ui::overlay::new_session(f, &self.new_session_view(form));
                     }
+                    Overlay::RenameSession(form) => {
+                        ui::overlay::rename_session(
+                            f,
+                            &ui::overlay::RenameView {
+                                current: &form.session,
+                                value: &form.value,
+                                error: form.error.as_deref(),
+                            },
+                        );
+                    }
+                    Overlay::RestorePicker(form) => {
+                        ui::overlay::restore_picker(
+                            f,
+                            &ui::overlay::RestoreView {
+                                items: &form.items,
+                                selected: &form.selected,
+                                cursor: form.cursor,
+                            },
+                        );
+                    }
                 }
             }
             Mode::Grid => {
@@ -1524,9 +2096,11 @@ impl App {
                     f,
                     self.layout,
                     &self.panes,
+                    &self.sessions,
                     self.active,
                     &self.prefix_label(),
                     self.prefix_armed,
+                    self.scroll_mode,
                     self.toast_text().as_deref(),
                 );
                 match &self.grid_overlay {
@@ -1539,11 +2113,20 @@ impl App {
                             selected: *selected,
                             box_num: *target + 1,
                             box_count: self.panes.len(),
+                            can_rename: self.box_has_session(*target),
                         },
                     ),
                     GridOverlay::NewForm { form, .. } => {
                         ui::overlay::new_session(f, &self.new_session_view(form));
                     }
+                    GridOverlay::Rename(form) => ui::overlay::rename_session(
+                        f,
+                        &ui::overlay::RenameView {
+                            current: &form.session,
+                            value: &form.value,
+                            error: form.error.as_deref(),
+                        },
+                    ),
                 }
             }
         }
@@ -1621,9 +2204,86 @@ mod tests {
         }
     }
 
+    /// Like `sess`, but pins the session's machine (for hub / multi-machine cases).
+    fn sess_on(name: &str, machine: &str) -> SessionInfo {
+        let mut s = sess(name);
+        s.machine = machine.into();
+        s
+    }
+
+    #[test]
+    fn resolve_attach_exact_name() {
+        let list = vec![sess("alpha"), sess("beta")];
+        assert_eq!(resolve_attach(&list, "alpha"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_machine_slash_name() {
+        // Same name on two machines: the bare name is ambiguous, but the
+        // machine/name form disambiguates to one.
+        let list = vec![sess_on("web", "boxA"), sess_on("web", "boxB")];
+        assert_eq!(resolve_attach(&list, "boxB/web"), Ok(("web".into(), "boxB".into())));
+        assert!(matches!(resolve_attach(&list, "web"), Err(AttachError::Ambiguous(_))));
+    }
+
+    #[test]
+    fn resolve_attach_unique_prefix() {
+        let list = vec![sess("alpha"), sess("beta")];
+        // "al" is a unique prefix of alpha (not a prefix of beta).
+        assert_eq!(resolve_attach(&list, "al"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_unique_fuzzy() {
+        let list = vec![sess("alpha"), sess("gamma")];
+        // "aph" is neither a prefix nor a substring, but is a subsequence of alpha
+        // (a·l·p·h·a) and of nothing else.
+        assert_eq!(resolve_attach(&list, "aph"), Ok(("alpha".into(), String::new())));
+    }
+
+    #[test]
+    fn resolve_attach_ambiguous_lists_candidates() {
+        // "a" prefixes both alpha and apex → ambiguous, with both labelled.
+        let list = vec![sess("alpha"), sess("apex")];
+        match resolve_attach(&list, "a") {
+            Err(AttachError::Ambiguous(c)) => {
+                assert!(c.contains(&"alpha".to_string()) && c.contains(&"apex".to_string()), "{c:?}");
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_attach_missing_is_not_found() {
+        let list = vec![sess("alpha"), sess("beta")];
+        assert_eq!(resolve_attach(&list, "zzz"), Err(AttachError::NotFound));
+        // Even an empty list is NotFound, never a panic.
+        assert_eq!(resolve_attach(&[], "alpha"), Err(AttachError::NotFound));
+    }
+
+    #[test]
+    fn resolve_attach_exact_name_beats_prefix_of_another() {
+        // Exact "al" wins outright even though it also prefixes "album".
+        let list = vec![sess("al"), sess("album")];
+        assert_eq!(resolve_attach(&list, "al"), Ok(("al".into(), String::new())));
+    }
+
+    #[test]
+    fn display_name_prefers_label_then_short() {
+        // 0059 C1: label wins when set + non-empty; otherwise fall back to `short`.
+        let mut s = sess("claude-abc");
+        assert_eq!(display_name(&s), "claude-abc"); // absent → slug
+        s.label = Some("My Feature".into());
+        assert_eq!(display_name(&s), "My Feature"); // set → label
+        s.label = Some(String::new());
+        assert_eq!(display_name(&s), "claude-abc"); // empty → slug
+        s.label = None;
+        assert_eq!(display_name(&s), "claude-abc"); // cleared → slug
+    }
+
     #[test]
     fn menu_items_order_and_length() {
-        let it = menu_items(2);
+        let it = menu_items(2, false);
         assert_eq!(it.len(), 6); // 2 sessions + 4 actions
         assert_eq!(
             it,
@@ -1637,7 +2297,23 @@ mod tests {
             ]
         );
         // No sessions still yields the four action rows.
-        assert_eq!(menu_items(0).len(), 4);
+        assert_eq!(menu_items(0, false).len(), 4);
+        // 0059 C1: a rename-able box inserts a Rename row between the sessions and
+        // Clear this box (so length grows by one, indices after it shift).
+        let it = menu_items(2, true);
+        assert_eq!(it.len(), 7);
+        assert_eq!(
+            it,
+            vec![
+                MenuItem::ChangeLayout,
+                MenuItem::NewSession,
+                MenuItem::Session(0),
+                MenuItem::Session(1),
+                MenuItem::RenameSession,
+                MenuItem::ClearBox,
+                MenuItem::Quit,
+            ]
+        );
     }
 
     #[test]
@@ -1652,7 +2328,7 @@ mod tests {
     #[test]
     fn menu_navigation_wraps_over_the_whole_list() {
         // 1 session → [layout, new, session0, clear, quit] = len 5.
-        let len = menu_items(1).len();
+        let len = menu_items(1, false).len();
         assert_eq!(len, 5);
         assert_eq!((0 + len - 1) % len, len - 1); // up from the top wraps to Quit
         assert_eq!((len - 1 + 1) % len, 0); // down from the bottom wraps to the top
@@ -1792,5 +2468,41 @@ mod tests {
         assert!(subseq.is_some());
         assert_eq!(fuzzy_score("docs", "xyz"), None);
         assert!(fuzzy_score("anything", "").is_some());
+    }
+
+    // Regression (0059 Wave-2 verify): a slow async reply must dismiss only the
+    // overlay it owns. Before the guard, an in-flight rename/create reply landing
+    // after the user Esc'd and opened a *different* overlay would silently wipe it.
+    fn rename_form(name: &str) -> RenameForm {
+        RenameForm { session: name.into(), machine: String::new(), value: name.into(), error: None }
+    }
+
+    #[test]
+    fn labeled_ok_dismisses_only_its_own_overlay() {
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        // A foreign overlay (a delete-confirm) opened after the rename was Esc'd:
+        // a stray SetLabel success must NOT close it.
+        a.overlay = Overlay::Confirm { session: "alpha".into(), graceful: true };
+        a.handle_labeled(Ok(()));
+        assert!(matches!(a.overlay, Overlay::Confirm { .. }), "foreign overlay must survive");
+        // …but it does close its own rename overlay.
+        a.overlay = Overlay::RenameSession(rename_form("alpha"));
+        a.handle_labeled(Ok(()));
+        assert!(matches!(a.overlay, Overlay::None), "rename overlay closes on success");
+    }
+
+    #[test]
+    fn created_ok_does_not_clobber_a_rename_overlay() {
+        let mut a = App::test_fixture(vec![], "");
+        a.overlay = Overlay::RenameSession(rename_form("alpha"));
+        a.handle_created(Ok(("newname".into(), String::new())));
+        assert!(
+            matches!(a.overlay, Overlay::RenameSession(_)),
+            "a rename overlay must survive a stray Created(Ok)"
+        );
+        // Its own new-session overlay still closes.
+        a.overlay = Overlay::NewSession(NewForm::new(String::new(), 0));
+        a.handle_created(Ok(("newname".into(), String::new())));
+        assert!(matches!(a.overlay, Overlay::None), "the new-session overlay closes on success");
     }
 }

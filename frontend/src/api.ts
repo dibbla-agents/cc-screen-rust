@@ -272,19 +272,45 @@ export async function rotateAgent(machine: string): Promise<string | null> {
 // so the page renders the plan-limit card instead of an error line (0056 B2).
 export async function approveDevice(
   userCode: string
-): Promise<{ ok: boolean; machine?: string; limit?: boolean; error?: string }> {
+): Promise<{ ok: boolean; machine?: string; kind?: string; label?: string; limit?: boolean; error?: string }> {
   const r = await fetch("/api/device/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ user_code: userCode }),
   });
   if (r.ok) {
-    const j = await r.json().catch(() => ({}) as { machine_id?: string });
-    return { ok: true, machine: j.machine_id };
+    // `kind`/`label` (proposal 0060 B6) say WHAT was approved: a machine
+    // enrollment ('agent') or a terminal sign-in ('client'). A pre-0060 hub
+    // omits them — treated as the machine flow, exactly as before.
+    const j = await r.json().catch(() => ({}) as { machine_id?: string; kind?: string; label?: string });
+    return { ok: true, machine: j.machine_id, kind: j.kind ?? "agent", label: j.label ?? j.machine_id };
   }
   const text = (await r.text().catch(() => "")).trim();
   if (r.status === 404) return { ok: false, error: "Unknown or expired code" };
   return { ok: false, limit: r.status === 402, error: text || `Error ${r.status}` };
+}
+
+// ── Terminal clients (proposal 0060 B4): the account page's list + revoke ─────
+export interface ClientTokenInfo {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt?: number | null;
+}
+
+export async function listClientTokens(): Promise<ClientTokenInfo[]> {
+  const r = await fetch("/api/client-tokens");
+  if (!r.ok) return [];
+  return (await r.json().catch(() => [])) as ClientTokenInfo[];
+}
+
+export async function deleteClientToken(id: string): Promise<boolean> {
+  const r = await fetch("/api/client-tokens/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  return r.ok;
 }
 
 // ── Sharing (proposals 0039 permission model / 0040 invite lifecycle) ─────────

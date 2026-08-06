@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Security model — cc-screen docs</title>
 <meta name="description" content="What the hub can and cannot see, what the agents run with, where credentials live, and the transport rules — cc-screen's security model, honestly stated." />
-<meta name="theme-color" content="#060e09" />
+<meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
 </head>
 <body>
 <header class="docs-header">
-  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <a class="wordmark" href="../../">cc<span class="dot">·</span>screen</a>
   <span class="docs-tag">docs</span>
-  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in</a>
 </header>
 <div class="docs-layout">
   <details class="docs-nav mobile-nav">
@@ -127,6 +127,13 @@ agent to do.)</li>
 <li><strong>Your account</strong> authenticates to the hub with a password (or Google) and
 rides a signed session cookie. Headless clients (<code>ccs</code>, scripts) use a
 bearer token instead.</li>
+<li><strong>Each signed-in terminal</strong> (<code>ccs activate</code>) gets its own client token:
+hashed at rest on the hub, shown to no one (it&#39;s handed to the terminal
+exactly once, over the wire), stored on the client at
+<code>~/.config/cc-screen-tui/credentials.toml</code> (<code>0600</code>), and individually
+revocable — <code>ccs logout</code> from the terminal, or <strong>Terminal clients</strong> on the
+dashboard. It&#39;s a <em>client</em> credential, distinct from a machine&#39;s uplink
+token; neither is ever accepted in the other&#39;s place.</li>
 <li><strong>Each machine</strong> has its own uplink credential, minted when you approve its
 enrollment code. It&#39;s stored on the machine at
 <code>~/.config/cc-screen-rust/enroll.json</code>, written with owner-only (<code>0600</code>)
@@ -179,6 +186,7 @@ scope your shares deliberately (&quot;can view&quot; vs &quot;can use&quot;).</l
 </div>
 <footer class="docs-footer">
   <span>v0.4.0 — docs track the latest release</span>
+  <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
 </body>

@@ -141,4 +141,40 @@ describe("ActivatePage (proposal 0056 A1/B2)", () => {
     expect(container.innerHTML).toContain("Unknown or expired code");
     expect(container.innerHTML).not.toContain("Plan limit reached");
   });
+
+  // Proposal 0060 B6: a terminal sign-in (kind 'client') gets its own success
+  // copy — no machine language, no install/start-session hand-off, no agent
+  // polling (nothing registered).
+  it("says 'Terminal signed in' with the label for a client-kind approve", async () => {
+    vi.mocked(approveDevice).mockResolvedValue({
+      ok: true,
+      machine: "erik@orchid",
+      kind: "client",
+      label: "erik@orchid",
+    });
+    const onStart = vi.fn();
+    await submitCode(<ActivatePage email="e@x.com" onDone={() => {}} onStartSession={onStart} />);
+
+    expect(container.innerHTML).toContain("Terminal signed in");
+    expect(container.innerHTML).toContain("erik@orchid");
+    expect(container.innerHTML).not.toContain("connected to your machines");
+    const buttons = Array.from(container.querySelectorAll("button"));
+    expect(
+      buttons.find((b) => b.textContent === "Start your first session"),
+      "no machine hand-off on a terminal sign-in"
+    ).toBeFalsy();
+    expect(listAgents, "no agent polling for a client sign-in").not.toHaveBeenCalled();
+  });
+
+  it("treats a pre-0060 approve response (no kind) as the machine flow", async () => {
+    // api.ts defaults kind to 'agent' when the hub omits it — the old success
+    // card, byte-for-byte.
+    vi.mocked(approveDevice).mockResolvedValue({ ok: true, machine: "pine", kind: "agent", label: "pine" });
+    vi.mocked(listAgents).mockResolvedValue([
+      { agentId: "a1", machine: "pine", online: true, createdAt: 0, missing: [] },
+    ]);
+    await submitCode(<ActivatePage email="e@x.com" onDone={() => {}} />);
+    expect(container.innerHTML).toContain("connected");
+    expect(container.innerHTML).not.toContain("Terminal signed in");
+  });
 });

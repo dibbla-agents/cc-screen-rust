@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Self-hosting — cc-screen docs</title>
 <meta name="description" content="Run your own cc-screen hub and agents — quick start, uplink tokens, Docker, off-tailnet TLS, and the full environment reference." />
-<meta name="theme-color" content="#060e09" />
+<meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
 </head>
 <body>
 <header class="docs-header">
-  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <a class="wordmark" href="../../">cc<span class="dot">·</span>screen</a>
   <span class="docs-tag">docs</span>
-  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in</a>
 </header>
 <div class="docs-layout">
   <details class="docs-nav mobile-nav">
@@ -150,7 +150,9 @@ cc-screen-rust install --hub https://hub.example:8840 \
     --hub-token LAPTOP_TOKEN --machine-id laptop
 </code></pre>
 <p><strong>3 — Open it.</strong> Browse <code>https://hub.example:8840</code> (log in with the password;
-Add to Home Screen on a phone), or <code>ccs --server https://hub.example:8840 --token &lt;client-token&gt;</code>.</p>
+Add to Home Screen on a phone), or <code>ccs --server https://hub.example:8840 --token &lt;client-token&gt;</code>. (If you run the hub <em>multi-tenant</em> — with a user
+database — <code>ccs activate</code> device sign-in works against it too, exactly as on
+the hosted service.)</p>
 <h2 id="the-agent39s-hub-flags">The agent&#39;s hub flags</h2>
 <p>Same binary as the stand-alone server; the hub flags are additive.</p>
 <table>
@@ -375,6 +377,7 @@ that sets <code>X-Forwarded-Proto: https</code> — the cookie is <code>Secure</
 </div>
 <footer class="docs-footer">
   <span>v0.4.0 — docs track the latest release</span>
+  <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
 </body>

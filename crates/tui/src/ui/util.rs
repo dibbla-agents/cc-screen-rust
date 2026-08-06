@@ -2,6 +2,35 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ratatui::style::Color;
+
+/// Map a curated session-mark palette token (proposal 0029,
+/// `cc_screen_protocol::SESSION_COLOR_TOKENS`) to a concrete terminal colour, so
+/// the switcher row accent + grid border match the web PWA's rendered shade.
+///
+/// The web owns the shade as `hsl(<hue> 60% 58%)` (`frontend/src/util.ts`
+/// `SESSION_COLORS` → `sessionAccent().border`); these RGB values are that HSL
+/// converted, so a session marked `teal` on the phone reads teal here too.
+///
+/// **Display-only, forward-compatible:** an unknown token (a newer palette entry
+/// this build doesn't know) or `None` maps to `None` — the caller then falls back
+/// to today's default styling, never a broken colour. Setting colours stays
+/// web-only.
+pub fn color_token_to_color(token: Option<&str>) -> Option<Color> {
+    let (r, g, b) = match token? {
+        "rose" => (212, 84, 105),
+        "magenta" => (212, 84, 169),
+        "violet" => (148, 84, 212),
+        "indigo" => (84, 105, 212),
+        "teal" => (84, 212, 201),
+        "lime" => (137, 212, 84),
+        "orange" => (212, 137, 84),
+        "slate" => (84, 148, 212),
+        _ => return None,
+    };
+    Some(Color::Rgb(r, g, b))
+}
+
 /// Truncate to `max` display chars, appending `…` when cut.
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -67,6 +96,20 @@ mod tests {
         assert_eq!(dir_crumb("", "fallback"), "fallback");
         // Trailing slash is ignored (empty segments filtered).
         assert_eq!(dir_crumb("/a/b/c/", "x"), "b/c");
+    }
+
+    #[test]
+    fn color_token_maps_known_unknown_and_none() {
+        // A known token → its concrete RGB (the web `teal` shade).
+        assert_eq!(color_token_to_color(Some("teal")), Some(Color::Rgb(84, 212, 201)));
+        assert_eq!(color_token_to_color(Some("rose")), Some(Color::Rgb(212, 84, 105)));
+        // Every curated token resolves (kept in lockstep with the protocol set).
+        for tok in cc_screen_protocol::SESSION_COLOR_TOKENS {
+            assert!(color_token_to_color(Some(tok)).is_some(), "token {tok} should map");
+        }
+        // An unknown token (forward-compat) and an absent mark → no accent.
+        assert_eq!(color_token_to_color(Some("chartreuse")), None);
+        assert_eq!(color_token_to_color(None), None);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use ratatui::{
     Frame,
 };
 
+use cc_screen_protocol::SessionInfo;
+
 use crate::layout::Layout;
 use crate::pane::{ConnState, Pane};
 
@@ -22,11 +24,18 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     focused: Option<&Pane>,
+    // The live session list, so the focused box's name reflects an operator rename
+    // (0059 C1) — resolved by identity, falling back to the pane's session name.
+    sessions: &[SessionInfo],
     layout: Layout,
     active: usize,
     count: usize,
     prefix_label: &str,
     prefix_armed: bool,
+    // Keyboard-scroll mode on the focused pane (0059 C3). When set, the
+    // scrollback indicator shows even at offset 0 (marking the mode) and the
+    // right segment lists the scroll keys.
+    scroll_mode: bool,
     // The ready-session toast (0018 §3); when present it takes the bar's
     // right-aligned segment in place of the key hints.
     toast: Option<&str>,
@@ -42,13 +51,18 @@ pub fn render(
                 ConnState::Open => ("● live", Color::Green),
                 ConnState::Closed => ("✕ closed", Color::Red),
             };
+            let name = sessions
+                .iter()
+                .find(|s| s.name == p.session && s.machine == p.machine)
+                .map(crate::app::display_name)
+                .unwrap_or(p.session.as_str());
             left.push(Span::styled(
-                format!(" {} ", p.session),
+                format!(" {name} "),
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
             left.push(Span::styled(format!("  {state_txt}"), Style::default().fg(state_col)));
             left.push(Span::styled(format!("  {cols}×{rows}"), Style::default().fg(Color::DarkGray)));
-            if p.scroll_offset() > 0 {
+            if scroll_mode || p.scroll_offset() > 0 {
                 left.push(Span::styled(
                     format!("  ⇡ scrollback {}", p.scroll_offset()),
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -81,6 +95,10 @@ pub fn render(
         Some(t) => Line::from(Span::styled(
             t.to_string(),
             Style::default().fg(Color::Black).bg(TOAST_BG).add_modifier(Modifier::BOLD),
+        )),
+        None if scroll_mode => Line::from(Span::styled(
+            "PgUp/PgDn ^U/^D · k/j · g/G · q live  ".to_string(),
+            Style::default().fg(Color::Yellow),
         )),
         None => {
             let hint = if count > 1 {

@@ -27,11 +27,34 @@ const INSTALL_SCRIPT: &str = include_str!("../../../scripts/install-machine.sh")
 /// `__CCSCREEN_MACHINE_NAME__` for an optional `?name=` pre-bake.
 const INSTALL_PS1: &str = include_str!("../../../scripts/install-machine.ps1");
 
+/// The `ccs` terminal-client installer (`curl <hub>/ccs.sh | sh`), the 0060 D3
+/// sibling of the machine installer: wraps the cargo-dist `ccs` installer and
+/// ends by *printing* `ccs activate --server <hub>` — the one-liner that ends
+/// in a working sign-in.
+#[cfg(feature = "multi-tenant")]
+const CCS_SCRIPT: &str = include_str!("../../../scripts/install-ccs.sh");
+
+/// The Windows twin (`irm <hub>/ccs.ps1 | iex`).
+#[cfg(feature = "multi-tenant")]
+const CCS_PS1: &str = include_str!("../../../scripts/install-ccs.ps1");
+
 /// The cross-platform cargo-dist binary installer (auto-detects macOS arm64/x64 +
 /// Linux, installs to ~/.local/bin). Always-latest GitHub release asset; override
 /// with `CCHUB_INSTALLER_URL` (e.g. to point at the Dibbla /dl mirror).
 const DEFAULT_INSTALLER_URL: &str =
     "https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-rust-installer.sh";
+
+/// The cargo-dist installer for the `ccs` terminal client (package
+/// `cc-screen-tui`). Override with `CCHUB_CCS_INSTALLER_URL`.
+#[cfg(feature = "multi-tenant")]
+const DEFAULT_CCS_INSTALLER_URL: &str =
+    "https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh";
+
+/// The Windows cargo-dist `ccs` installer asset. Override with
+/// `CCHUB_CCS_INSTALLER_PS1_URL`.
+#[cfg(feature = "multi-tenant")]
+const DEFAULT_CCS_INSTALLER_PS1_URL: &str =
+    "https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.ps1";
 
 /// The Windows cargo-dist PowerShell installer asset (drops cc-screen-rust.exe
 /// into ~\.local\bin + user PATH). Override with `CCHUB_INSTALLER_PS1_URL`.
@@ -117,6 +140,39 @@ pub async fn install_sh(
         .replace("__CCSCREEN_MACHINE_NAME__", &name)
         .replace("__CCSCREEN_ASSISTANTS__", &assistants);
     ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], body).into_response()
+}
+
+/// `GET /ccs.sh` — the hub-served `ccs` (terminal-client) installer (proposal
+/// 0060 D3). Public + unauthenticated like `/install.sh` (it reveals only the
+/// hub + installer URLs; the sign-in it points at still requires a logged-in
+/// approval). No `?name=` — a terminal client labels itself at activate time.
+#[cfg(feature = "multi-tenant")]
+pub async fn ccs_sh(State(_hub): State<HubState>, headers: HeaderMap) -> Response {
+    let hub_url = hub_public_url(&headers);
+    let installer_url = std::env::var("CCHUB_CCS_INSTALLER_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_CCS_INSTALLER_URL.to_string());
+    let body = CCS_SCRIPT
+        .replace("__CCSCREEN_HUB_URL__", &hub_url)
+        .replace("__CCSCREEN_INSTALLER_URL__", &installer_url);
+    ([(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")], body).into_response()
+}
+
+/// `GET /ccs.ps1` — the Windows twin of `ccs_sh`.
+#[cfg(feature = "multi-tenant")]
+pub async fn ccs_ps1(State(_hub): State<HubState>, headers: HeaderMap) -> Response {
+    let hub_url = hub_public_url(&headers);
+    let installer_url = std::env::var("CCHUB_CCS_INSTALLER_PS1_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_CCS_INSTALLER_PS1_URL.to_string());
+    let body = CCS_PS1
+        .replace("__CCSCREEN_HUB_URL__", &hub_url)
+        .replace("__CCSCREEN_INSTALLER_URL__", &installer_url);
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
 }
 
 /// `GET /install.ps1` — the Windows twin of `install_sh`. Same public,

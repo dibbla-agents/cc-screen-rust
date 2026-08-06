@@ -69,6 +69,10 @@ pub struct Pane {
     conn: ConnState,
     out_tx: mpsc::Sender<WsOut>,
     task: JoinHandle<()>,
+    /// The web-set session mark colour (proposal 0029) mapped to a terminal
+    /// colour, kept in sync from the session list so the grid box border can use
+    /// it as an accent. `None` = unmarked → today's default border. Display-only.
+    accent: Option<Color>,
 }
 
 impl Pane {
@@ -94,18 +98,26 @@ impl Pane {
             conn: ConnState::Connecting,
             out_tx,
             task,
+            accent: None,
         }
     }
 
-    /// The box title: `machine/session` when aggregated through a hub, else just
-    /// the session name.
-    pub fn title(&self) -> String {
-        if self.machine.is_empty() {
-            self.session.clone()
-        } else {
-            format!("{}/{}", self.machine, self.session)
-        }
+    /// The web-set mark colour to accent this box's border with (proposal 0029),
+    /// or `None` when unmarked. Refreshed from the session list, so a colour set
+    /// on the phone shows here on the next poll. Display-only.
+    pub fn accent(&self) -> Option<Color> {
+        self.accent
     }
+
+    /// Update the mark accent (from the latest session list). Display-only — the
+    /// TUI never sets a colour, it only mirrors what the web stored.
+    pub fn set_accent(&mut self, accent: Option<Color>) {
+        self.accent = accent;
+    }
+
+    // (`Pane::title()` was removed in 0059 C1+C5 — the grid resolves a box's title
+    // from the live session list at render time so a rename shows without
+    // re-attaching; see `ui::grid::pane_title`.)
 
     /// Feed a chunk of PTY output into the emulator. A chunk that *starts* with
     /// the RIS reset is a fresh (re)attach snapshot / lagged-resync /
@@ -332,6 +344,23 @@ mod tests {
         let scrolled = render(&p, 20, 5);
         assert!(!scrolled.contains("LINE_39"), "newest hidden: {scrolled:?}");
         assert!(scrolled.contains("LINE_18"), "deep history shown: {scrolled:?}");
+    }
+
+    #[tokio::test]
+    async fn huge_delta_lands_at_top_of_history() {
+        // `g` (top) in keyboard-scroll mode passes a delta far larger than the
+        // history; alacritty clamps it to the oldest available line rather than
+        // overshooting, and the view then shows the very first line.
+        let mut p = pane(20, 5);
+        for i in 0..40 {
+            p.process(format!("LINE_{i}\r\n").as_bytes());
+        }
+        p.scroll(1_000_000); // the SCROLL_TOP delta app.rs sends for `g`
+        let top = p.scroll_offset();
+        assert!(top > 0, "a huge delta scrolls back into history: {top}");
+        assert_eq!(top, p.scroll_offset(), "offset is stable once clamped at the top");
+        let view = render(&p, 20, 5);
+        assert!(view.contains("LINE_0"), "the top view shows the oldest line: {view:?}");
     }
 
     #[tokio::test]

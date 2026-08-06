@@ -341,7 +341,10 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+/// The `Authorization: Bearer <token>` value, if present. Public so the
+/// multi-tenant hub can resolve a client Bearer to a user (proposal 0060 B3)
+/// with the same parsing `is_authed` uses.
+pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
         .to_str()

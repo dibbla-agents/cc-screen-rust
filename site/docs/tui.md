@@ -11,53 +11,105 @@ machine's agent directly, if you self-host without a hub). A session
 switcher, a multi-pane grid with real scrollback, tmux-style keys — your
 whole fleet without leaving the terminal.
 
+Why not just `tmux`? tmux attaches you to one machine you can already reach;
+`ccs` attaches you to *every* machine your hub can — over a single
+outbound-only uplink, with agent-aware ready notifications — no inbound SSH
+and no per-machine tmux sockets.
+
 ![Four sessions in the ccs grid](../img/tui-grid.png)
 
 ## Install
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
+curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 ```
 
-drops `ccs` into `~/.local/bin`. It's a real terminal app — it needs an
-interactive TTY.
+drops `ccs` into `~/.local/bin` and prints the sign-in command. (The generic
+installer, if you'd rather not fetch through the hub:
+`curl --proto '=https' --tlsv1.2 -LsSf
+https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh`.)
+It's a real terminal app — it needs an interactive TTY.
 
-## Connect
+## Connect (hosted — app.ccscreen.dev)
 
 ```sh
-ccs --server https://app.ccscreen.dev --token <token>
+ccs activate
 ```
 
-The server URL and token are remembered in
-`~/.config/cc-screen-tui/config.toml`, so from then on plain `ccs`
-reconnects. The token can also come from `api_token` in that config file or
-the `CCS_API_TOKEN` / `CCWEB_API_TOKEN` environment variables.
+prints a short one-time code and a URL, polls for your approval, and confirms
+the account it signed in as:
 
-This is the *client* token — the credential a browser or script uses to talk
-to the hub — not a machine's uplink credential.
+![ccs activate: the one-time code, the URL, and the signed-in confirmation](../img/ccs-activate.png)
 
-Self-hosting? Point it at your own endpoint instead:
+Open the URL from any logged-in browser — your phone is fine, and it works
+over SSH because nothing has to open on the box itself — type the code, and
+approve. That's it: `✓ Logged in as you@example.com`, and plain `ccs` from
+then on connects as you. Codes expire after 10 minutes; a fresh one is a
+re-run away. It's the same code-approve gesture as enrolling a machine, just
+signing in a *terminal* instead.
+
+![Approving the terminal's code on the /activate page](../img/web-approve-terminal.png)
+
+`ccs logout` signs the terminal out again — it revokes the credential
+server-side and forgets it locally. You can also revoke any terminal from
+the dashboard's **Terminal clients** list.
+
+## Connect (self-hosted)
+
+Point it at your own endpoint with a static token:
 
 ```sh
 ccs --server http://laptop:8839          # one machine's agent, directly
 ccs --server http://hub:8840 --token …   # your own hub (all machines)
 ```
 
+The server URL and token are remembered, so from then on plain `ccs`
+reconnects. This is the *client* token — the credential a browser or script
+uses to talk to the hub (`CCWEB_API_TOKEN` on the server / `--token` on
+`cc-screen-hub install`) — not a machine's uplink credential. A self-hosted
+*multi-tenant* hub supports `ccs activate` too.
+
 (`--insecure` accepts a self-signed certificate for an ad-hoc `wss` setup.)
+
+## Credentials
+
+- Device sign-ins land in `~/.config/cc-screen-tui/credentials.toml` —
+  owner-only (`0600`), keyed per hub, never printed. The server URL lives in
+  `config.toml` next to it.
+- Precedence when several sources exist: `--token` > `CCS_API_TOKEN` >
+  `CCWEB_API_TOKEN` > `credentials.toml` > `api_token` in `config.toml`.
+- Headless/CI use: set `CCS_API_TOKEN` (or pass `--token`) and skip
+  `activate` entirely.
 
 ## Using it
 
 `ccs` opens in the **switcher**: every machine's sessions in one list, each
-tagged with its machine, plus create / kill / restore actions. Pick sessions
-into the **grid** — the same six layouts as the web app, and panes from
-different machines can sit side by side. Each pane is a full terminal
-emulator with multi-thousand-line scrollback.
+tagged with its machine and its latest one-line summary, plus create / kill /
+rename / restore actions. Pick sessions into the **grid** — the same six
+layouts as the web app, and panes from different machines can sit side by
+side. Each pane is a full terminal emulator with multi-thousand-line
+scrollback.
+
+Jump straight to a session — handy from a script or muscle memory:
+
+```sh
+ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
+```
+
+In the switcher:
+
+- `↑`/`↓` or `j`/`k` move · `Enter` attach · `n` new · `x`/`e` kill · `r` refresh
+- `R` — **rename** the selected session (when the list is empty, `R` opens the
+  **restorable-session picker** to bring sessions back after a redeploy)
 
 Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 
-- `Ctrl-A d` — open the menu
+- `Ctrl-A d` — open the action menu (attach / rename / clear / layout)
 - `Ctrl-A` then a digit — switch layout
+- `Ctrl-A g` — jump to a session that just went ready
+- `Ctrl-A [` — enter **scrollback** mode on the focused pane (`PgUp`/`PgDn`,
+  `k`/`j`, `g`/`G` top/live, `q`/`Esc` back to live); any printable key in
+  normal mode snaps back to live
 - click or move spatially to focus panes
 
 Everything else you type goes straight to the focused session's PTY.
@@ -66,6 +118,7 @@ Everything else you type goes straight to the focused session's PTY.
 
 ```sh
 ccs update       # fetch the latest ccs build
+ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 ```

@@ -1,0 +1,51 @@
+# Linux CI for the `ccs` TUI (proposal 0059 B5). The blocking `test` job runs the
+# colocated unit tests plus the tests/e2e.rs harness, which drives a real `App`
+# against an in-process hub + fake agent (cc_screen_hub::test_support). The PTY
+# smoke test — the flaky tier — is quarantined into its own, clearly-isolated job
+# so it can never block the main signal.
+name: tui-ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # The e2e harness pulls in cc-screen-hub (features=["test-support"]) as a
+      # dev-dependency, and the hub embeds the React PWA via rust-embed
+      # (frontend/dist) — so the frontend must be built before cargo compiles the
+      # tui test binaries.
+      - name: Build the frontend (rust-embed input)
+        run: cd frontend && npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Inline unit tests + the tests/e2e.rs scenarios (proposal 0059 B3).
+      - name: Test (units + e2e)
+        run: cargo test -p cc-screen-tui
+
+  # Quarantined: the PTY smoke test (B4) boots the real `ccs` binary in a pty and
+  # is the flaky tier. It runs isolated so a flake here never blocks the `test`
+  # job above. Kept honest (not continue-on-error) but on its own.
+  pty-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the frontend (rust-embed input)
+        run: cd frontend && npm ci && npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: PTY smoke (real ccs binary in a pty)
+        run: cargo test -p cc-screen-tui --features pty-smoke --test pty_smoke
