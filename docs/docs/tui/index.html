@@ -155,11 +155,26 @@ multi-thousand-line scrollback.</p>
 <p>Jump straight to a session — handy from a script or muscle memory:</p>
 <pre><code class="language-sh">ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
 </code></pre>
-<p>In the switcher:</p>
+<h3 id="search">Search</h3>
+<p>The switcher is <strong>search-first</strong>, like the web sidebar: just start typing and
+the list filters and re-ranks live. Matching is fuzzy and spans the session
+name, its folder, its AI summary, its tool, and its machine — ranked
+name &gt; path &gt; summary — so finding a session in a big fleet is &quot;type 3
+letters, Enter&quot;. <code>Esc</code> clears the query first; a second <code>Esc</code> quits
+(<code>Ctrl-U</code> clears in one stroke).</p>
+<p>On a hub with several machines the resting list groups sessions under
+per-machine hostname headers (offline machines are marked); while you&#39;re
+typing the list flattens to ranked order and each row shows its machine
+inline. The selected session&#39;s full 2–3 sentence AI summary appears above the
+status bar.</p>
+<p>Because typing searches, the switcher&#39;s commands live on Ctrl-chords:</p>
 <ul>
-<li><code>↑</code>/<code>↓</code> or <code>j</code>/<code>k</code> move · <code>Enter</code> attach · <code>n</code> new · <code>x</code>/<code>e</code> kill · <code>r</code> refresh</li>
-<li><code>R</code> — <strong>rename</strong> the selected session (when the list is empty, <code>R</code> opens the
-<strong>restorable-session picker</strong> to bring sessions back after a redeploy)</li>
+<li><code>↑</code>/<code>↓</code> move · <code>Enter</code> attach the selected (top) match</li>
+<li><code>Ctrl-N</code> new session · <code>Ctrl-X</code> kill · <code>Ctrl-E</code> graceful exit</li>
+<li><code>Ctrl-R</code> rename the selected session</li>
+<li><code>Ctrl-O</code> open the <strong>restorable-session picker</strong> (bring sessions back after
+a redeploy)</li>
+<li><code>Esc</code> clear the search, then quit · <code>Ctrl-C</code> quit</li>
 </ul>
 <p>Inside the grid the prefix key is <strong>Ctrl-A</strong> (tmux-style):</p>
 <ul>
@@ -183,7 +198,7 @@ ccs --help       # the full flag reference
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.1 — docs track the latest release</span>
+  <span>v0.5.2 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

@@ -152,6 +152,13 @@ at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> whi
 signed in, which links the machine to your account. They expire after 10
 minutes and the installer auto-requests a fresh one, so an expired code costs
 nothing.</p>
+<h2 id="why-did-nx-and-q-stop-working-in-the-ccs-switcher">Why did <code>n</code>/<code>x</code> (and <code>q</code>) stop working in the <code>ccs</code> switcher?</h2>
+<p>The switcher became <strong>search-first</strong>: typing now filters the session list, so
+single letters type into the search instead of running commands. The actions
+moved to chords — <code>Ctrl-N</code> new, <code>Ctrl-X</code> kill, <code>Ctrl-E</code> graceful exit,
+<code>Ctrl-R</code> rename, <code>Ctrl-O</code> restore — and <code>Esc</code> clears the search, then quits.
+The header line in the switcher always shows the current keys; see
+<a href="tui.md">the ccs terminal client</a> for the full map.</p>
 <h2 id="is-cc-screen-open-source-what39s-it-built-with">Is cc-screen open source? What&#39;s it built with?</h2>
 <p>The code lives at
 <a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.
@@ -163,7 +170,7 @@ behaves exactly as the hosted one did before payments existed.</p>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.1 — docs track the latest release</span>
+  <span>v0.5.2 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
