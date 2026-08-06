@@ -834,6 +834,42 @@ mod tests {
         }
     }
 
+    // The fail-closed ambiguity property (0042 Stream A acceptance #3): when one
+    // caller's visibility legitimately spans TWO agents carrying the same
+    // machine label — their own "laptop" plus an agent-grant on another owner's
+    // "laptop" — a label-addressed resolve must refuse rather than pick either;
+    // and the machine-less, session-less resolve with two usable agents
+    // likewise refuses. This pins the `it.next().is_some() → None` comment in
+    // `resolve_scoped` ("a second match … treated as ambiguous → refuse").
+    #[test]
+    fn resolve_scoped_refuses_ambiguity_fail_closed() {
+        let r = Registry::new();
+        let a = r.register_agent("agent-a", "alice", "laptop", "a.local", vec![], vec![], dummy_agent());
+        let b = r.register_agent("agent-b", "bob", "laptop", "b.local", vec![], vec![], dummy_agent());
+        a.set_sessions(vec![sess("mine")]);
+        b.set_sessions(vec![sess("theirs")]);
+
+        // Alice owns agent-a AND holds an agent-grant on bob's agent-b — both
+        // "laptop"s are now usable in her scope: the ambiguous case.
+        let alice = Visibility::from_rows(
+            "alice".into(),
+            vec![row("s1", "agent-b", "bob", "alice", "agent", None, false)],
+        );
+        assert!(alice.may_use_agent(&a) && alice.may_use_agent(&b), "precondition: both usable");
+
+        // By machine label: two matches → refuse, never pick one.
+        assert!(r.resolve_scoped(&alice, "laptop", None).is_none(), "same-label ambiguity refuses");
+        // Machine-less, session-less: two usable agents → refuse.
+        assert!(r.resolve_scoped(&alice, "", None).is_none(), "no disambiguator refuses");
+
+        // A session name still pins uniquely — the refusal is about ambiguity,
+        // not access — and a caller with only ONE "laptop" resolves fine.
+        let id = |c: Option<Arc<AgentConn>>| c.map(|x| x.agent_id.clone());
+        assert_eq!(id(r.resolve_scoped(&alice, "", Some("mine"))), Some("agent-a".into()));
+        assert_eq!(id(r.resolve_scoped(&alice, "", Some("theirs"))), Some("agent-b".into()));
+        assert_eq!(id(r.resolve_scoped(&Visibility::user("bob"), "laptop", None)), Some("agent-b".into()));
+    }
+
     // Administration is owner-only (proposal 0049). A share grants *use*, not
     // administration: an agent-grantee may create and attach on someone else's
     // box, but must not update its binaries or restart its terminals.

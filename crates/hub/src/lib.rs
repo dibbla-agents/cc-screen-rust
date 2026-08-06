@@ -113,7 +113,10 @@ pub fn build_router(hub: HubState) -> Router {
         .route("/api/rmdir", post(handlers::rmdir))
         .route("/api/rename", post(handlers::rename))
         .route("/api/move", post(handlers::move_path))
-        // Hub-local: favorites + Web Push (one of each for the whole fleet).
+        // Hub-local: favorites + Web Push. Single-tenant keeps one of each for
+        // the whole fleet; in multi-tenant mode favorites are per-tenant
+        // (config_dir/favorites/<user_id>.json) and push subscriptions are
+        // stamped with their owning tenant — see TENANT-BOUNDARY.md.
         .route("/api/favorites", get(handlers::get_favorites).put(handlers::put_favorites))
         .route("/api/push/key", get(handlers::push_key))
         .route("/api/push/subscribe", post(handlers::push_subscribe))

@@ -661,14 +661,42 @@ pub async fn update_status(
     }
 }
 
-// ── Favorites (hub-local: one list for the whole fleet) ───────────────────────
-fn favorites_path(hub: &HubState) -> std::path::PathBuf {
-    hub.config_dir.join("favorites.json")
+// ── Favorites (hub-local; per-tenant in multi-tenant mode) ────────────────────
+// 0042 candidate finding #1: the historical single `config_dir/favorites.json`
+// is correct for a one-operator fleet but a cross-tenant leak on a multi-tenant
+// hub. So the file is keyed by the caller's scope: single-tenant
+// (`Visibility::All`) keeps `favorites.json` byte-for-byte; a multi-tenant
+// caller gets `config_dir/favorites/<user_id>.json`. A pre-existing shared
+// favorites.json on a multi-tenant hub is deliberately NOT migrated — it is a
+// mixed-tenant file, so every user starts empty and the old file is simply
+// never read in multi-tenant mode.
+fn favorites_path_in(config_dir: &std::path::Path, scope: &Visibility) -> Option<std::path::PathBuf> {
+    match scope {
+        Visibility::All => Some(config_dir.join("favorites.json")),
+        Visibility::User(v) => {
+            let uid = v.user_id.as_str();
+            // user_id is an opaque token-safe id, but never trust it as a path
+            // component: [A-Za-z0-9_-] only (rejects separators, dots, empty).
+            if uid.is_empty()
+                || !uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return None;
+            }
+            Some(config_dir.join("favorites").join(format!("{uid}.json")))
+        }
+    }
 }
 
-pub async fn get_favorites(State(hub): State<HubState>) -> Json<Vec<Favorite>> {
-    let list = std::fs::read_to_string(favorites_path(&hub))
-        .ok()
+fn favorites_path(hub: &HubState, scope: &Visibility) -> Option<std::path::PathBuf> {
+    favorites_path_in(&hub.config_dir, scope)
+}
+
+pub async fn get_favorites(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+) -> Json<Vec<Favorite>> {
+    let list = favorites_path(&hub, &scope)
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<Vec<Favorite>>(&s).ok())
         .unwrap_or_default();
     Json(list)
@@ -676,6 +704,7 @@ pub async fn get_favorites(State(hub): State<HubState>) -> Json<Vec<Favorite>> {
 
 pub async fn put_favorites(
     State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
     Json(list): Json<Vec<Favorite>>,
 ) -> Response {
     // Same validation as the agent's store: dedupe by id, cap count + length.
@@ -695,7 +724,16 @@ pub async fn put_favorites(
             break;
         }
     }
-    let path = favorites_path(&hub);
+    // A gated route always carries a real scope; a missing/unsanitizable tenant
+    // id fails closed rather than falling back to a shared file.
+    let Some(path) = favorites_path(&hub, &scope) else {
+        return (StatusCode::FORBIDDEN, "no tenant for favorites").into_response();
+    };
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(&clean).unwrap_or_default();
     match std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)) {
@@ -996,5 +1034,51 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         next.run(req).await
     } else {
         (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // 0042 candidate finding #1: favorites are per-tenant in multi-tenant mode,
+    // and the single-tenant path is byte-for-byte the historical one.
+    #[test]
+    fn favorites_path_is_scope_keyed() {
+        let dir = Path::new("/cfg");
+        // Single-tenant: the historical shared file, unchanged.
+        assert_eq!(
+            favorites_path_in(dir, &Visibility::All),
+            Some(dir.join("favorites.json")),
+        );
+        // Multi-tenant: per-user file under favorites/, keyed by the (opaque,
+        // token-safe) user id.
+        assert_eq!(
+            favorites_path_in(dir, &Visibility::user("u_AbC-123")),
+            Some(dir.join("favorites").join("u_AbC-123.json")),
+        );
+        // Two tenants never share a path.
+        assert_ne!(
+            favorites_path_in(dir, &Visibility::user("alice")),
+            favorites_path_in(dir, &Visibility::user("bob")),
+        );
+        // And no tenant path is the single-tenant shared file (no read of the
+        // legacy mixed-tenant favorites.json in multi-tenant mode).
+        assert_ne!(
+            favorites_path_in(dir, &Visibility::user("alice")),
+            favorites_path_in(dir, &Visibility::All),
+        );
+    }
+
+    // The user id is server-minted, but never trust it as a path component:
+    // anything outside [A-Za-z0-9_-] (and the empty exempt-path scope) fails
+    // closed instead of escaping config_dir or falling back to a shared file.
+    #[test]
+    fn favorites_path_rejects_unsafe_user_ids() {
+        let dir = Path::new("/cfg");
+        for bad in ["", "../evil", "a/b", "a\\b", "a.b", "..", "a b", "a\0b"] {
+            assert_eq!(favorites_path_in(dir, &Visibility::user(bad)), None, "must refuse {bad:?}");
+        }
     }
 }
