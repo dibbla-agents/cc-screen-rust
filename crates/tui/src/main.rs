@@ -24,37 +24,7 @@ async fn main() -> Result<()> {
         _ => {}
     }
     let cli = cli::Cli::parse();
-    let had_config = config::config_path().map(|p| p.exists()).unwrap_or(false);
     let mut cfg = config::Config::load();
-
-    // First-run banner (0060 C5): no config file at all, no --server, an
-    // interactive terminal → ask once where to connect, and roll straight into
-    // the device sign-in when the hub turns out to be multi-tenant. Strictly
-    // gated on no-config-exists: a config with a dead/unauthed server gets the
-    // one-line 401 hint, never a wizard.
-    if !had_config && cli.server.is_none() && cli.attach.is_none() && stdin_is_tty() {
-        if let Some(server) = first_run_prompt()? {
-            cfg.server = server.clone();
-            cfg.save()?;
-            match actions::probe_multi_tenant(&server, cli.insecure).await {
-                Ok(true) => {
-                    let mut out = std::io::stdout();
-                    match actions::run_activate(&server, cli.insecure, &default_label(), true, &mut out).await {
-                        Ok(a) => {
-                            actions::persist_login(&server, &a.token)?;
-                            println!("\n{} Logged in as {}", actions::check_mark(), a.email);
-                        }
-                        Err(e) => {
-                            eprintln!("ccs: {}", e.message());
-                            std::process::exit(e.exit_code());
-                        }
-                    }
-                }
-                Ok(false) => {} // reachable, no device flow — continue into the TUI
-                Err(e) => eprintln!("ccs: {} (continuing — the TUI will keep retrying)", e.message()),
-            }
-        }
-    }
 
     // Honest persistence (0060 A1): the *effective* server becomes the config
     // truth before the app ever saves (the recents-save used to clobber an
@@ -70,13 +40,48 @@ async fn main() -> Result<()> {
     if let Some(t) = cli.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         config::store_credential(&server, t)?;
     }
-    let token = config::resolve_token(
+    let mut server = server;
+    let mut token = config::resolve_token(
         cli.token.clone(),
         std::env::var("CCS_API_TOKEN").ok(),
         std::env::var("CCWEB_API_TOKEN").ok(),
         config::credential_for(&server),
         cfg.api_token.clone(),
     );
+
+    // Not signed in yet → plain `ccs` IS `ccs activate` (0060 follow-up): with
+    // no token from any source and an interactive terminal, run the device
+    // sign-in right here — against the saved server if it's a multi-tenant
+    // hub, else the hosted hub — persist, and continue straight into the TUI.
+    // An explicit --server that isn't a hub (a direct agent, an open
+    // self-host) is left alone; so is any non-TTY/scripted run.
+    if token.is_none() && stdin_is_tty() {
+        let target = if cli.server.is_some() {
+            match actions::probe_multi_tenant(&server, cli.insecure).await {
+                Ok(true) => Some(server.clone()),
+                _ => None, // explicit non-hub server: tokenless is legitimate
+            }
+        } else {
+            Some(actions::resolve_activate_server(Some(&server), cli.insecure).await)
+        };
+        if let Some(target) = target {
+            println!("No sign-in yet — running `ccs activate` first.\n");
+            let mut out = std::io::stdout();
+            match actions::run_activate(&target, cli.insecure, &default_label(), true, &mut out).await {
+                Ok(a) => {
+                    actions::persist_login(&target, &a.token)?;
+                    println!("\n{} Logged in as {}\n", actions::check_mark(), a.email);
+                    server = target;
+                    cfg.server = server.clone();
+                    token = Some(a.token);
+                }
+                Err(e) => {
+                    eprintln!("ccs: {}", e.message());
+                    std::process::exit(e.exit_code());
+                }
+            }
+        }
+    }
 
     let rest = client::Rest::new(&server, cli.insecure, token)?;
 
@@ -165,35 +170,23 @@ fn default_label() -> String {
     format!("{user}@{host}")
 }
 
-/// C5's one-time question. `Ok(None)` means the user gave an empty-after-trim
-/// answer equal to nothing we can use (never happens — empty takes the default).
-fn first_run_prompt() -> Result<Option<String>> {
-    use std::io::Write;
-    println!("No server configured.");
-    print!("Server URL [https://app.ccscreen.dev]: ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let s = line.trim().trim_end_matches('/');
-    Ok(Some(if s.is_empty() { "https://app.ccscreen.dev".to_string() } else { s.to_string() }))
-}
-
 /// `ccs activate` (alias `login`) — device-code sign-in to a multi-tenant hub
 /// (proposal 0060 Part C). Runs pre-TTY on the normal screen; exit codes: 0
 /// signed in, 1 denied/expired/failed, 2 this-hub-can't (single-tenant or
 /// pre-0060).
 async fn run_activate_cmd() -> Result<()> {
     let (flag_server, insecure) = parse_sub_flags();
-    let had_config = config::config_path().map(|p| p.exists()).unwrap_or(false);
     let server = match flag_server {
         Some(s) => s,
-        None if had_config => config::Config::load().server.trim_end_matches('/').to_string(),
+        // Flag-free: the saved server if it's a real multi-tenant hub, else
+        // the hosted hub. Never a prompt, never a dead end.
         None => {
-            if !stdin_is_tty() {
-                eprintln!("ccs: no server configured — pass --server <url>");
-                std::process::exit(2);
-            }
-            first_run_prompt()?.unwrap_or_else(|| "https://app.ccscreen.dev".into())
+            let saved = config::config_path()
+                .map(|p| p.exists())
+                .unwrap_or(false)
+                .then(|| config::Config::load().server)
+                .filter(|s| !s.trim().is_empty());
+            actions::resolve_activate_server(saved.as_deref(), insecure).await
         }
     };
     let mut out = std::io::stdout();

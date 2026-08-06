@@ -260,6 +260,26 @@ fn display_host(base: &str) -> String {
     crate::config::host_key(base)
 }
 
+/// The hosted hub — where a flag-free sign-in lands when the saved server
+/// can't do device sign-in (unreachable, single-tenant, or the localhost
+/// default the pre-0060 clobber bug wrote into configs).
+pub const DEFAULT_HOSTED_HUB: &str = "https://app.ccscreen.dev";
+
+/// Resolve where a flag-free `ccs activate` signs in: the saved server iff it
+/// probes as a multi-tenant hub, else [`DEFAULT_HOSTED_HUB`]. Never a dead
+/// end, never a prompt — `--server` exists for anything unusual.
+pub async fn resolve_activate_server(saved: Option<&str>, insecure: bool) -> String {
+    if let Some(s) = saved.map(|s| s.trim_end_matches('/')).filter(|s| !s.is_empty()) {
+        if matches!(probe_multi_tenant(s, insecure).await, Ok(true)) {
+            return s.to_string();
+        }
+        if s != DEFAULT_HOSTED_HUB {
+            eprintln!("ccs: saved server {s} doesn't offer device sign-in — using {DEFAULT_HOSTED_HUB}");
+        }
+    }
+    DEFAULT_HOSTED_HUB.to_string()
+}
+
 /// `(bold_cyan, cyan, reset)` when stdout is an interactive terminal, else
 /// three empty strings — so piped output and the test writers stay plain.
 pub fn ansi() -> (&'static str, &'static str, &'static str) {
@@ -345,5 +365,26 @@ mod tests {
         assert!(ActivateError::SingleTenant.message().contains("api_token"));
         assert!(ActivateError::HubTooOld.message().contains("static token"));
         assert!(ActivateError::Expired.message().contains("ccs activate"));
+    }
+
+    // Flag-free activate resolution: a saved server is honored only when it
+    // actually IS a multi-tenant hub; anything else (unreachable, the old
+    // clobbered localhost default, a single-tenant box) falls straight
+    // through to the hosted hub — no dead end, no prompt.
+    #[tokio::test]
+    async fn resolve_activate_server_falls_back_to_hosted() {
+        // Unreachable saved server (nothing listens on this port) → hosted.
+        assert_eq!(
+            resolve_activate_server(Some("http://127.0.0.1:9"), false).await,
+            DEFAULT_HOSTED_HUB
+        );
+        // The clobbered legacy default → hosted (nothing on 8839 in tests).
+        assert_eq!(
+            resolve_activate_server(Some("http://127.0.0.1:8839"), false).await,
+            DEFAULT_HOSTED_HUB
+        );
+        // No saved server at all → hosted.
+        assert_eq!(resolve_activate_server(None, false).await, DEFAULT_HOSTED_HUB);
+        assert_eq!(resolve_activate_server(Some("  "), false).await, DEFAULT_HOSTED_HUB);
     }
 }

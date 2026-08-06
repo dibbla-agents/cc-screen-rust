@@ -36,8 +36,9 @@ It's a real terminal app — it needs an interactive TTY.
 ccs activate
 ```
 
-prints a short one-time code and a URL, polls for your approval, and confirms
-the account it signed in as:
+(or just `ccs` — with no sign-in yet it runs the activation itself, then
+drops you straight into the switcher). It prints a short one-time code and a
+URL, polls for your approval, and confirms the account it signed in as:
 
 ![ccs activate: the one-time code, the URL, and the signed-in confirmation](../img/ccs-activate.png)
 
