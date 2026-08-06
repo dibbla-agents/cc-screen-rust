@@ -93,18 +93,18 @@ function shell({ slug, title, description, content }) {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${esc(title)} — cc-screen docs</title>
 <meta name="description" content="${esc(description)}" />
-<meta name="theme-color" content="#060e09" />
+<meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="${siteRoot}favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="${docsRoot}docs.css" />
 </head>
 <body>
 <header class="docs-header">
-  <a class="wordmark" href="${siteRoot}"><span class="prompt">&gt;_</span>cc-screen</a>
+  <a class="wordmark" href="${siteRoot}">cc<span class="dot">·</span>screen</a>
   <span class="docs-tag">docs</span>
-  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in</a>
 </header>
 <div class="docs-layout">
   <details class="docs-nav mobile-nav">
@@ -124,6 +124,7 @@ ${content}
 </div>
 <footer class="docs-footer">
   <span>v${version} — docs track the latest release</span>
+  <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
 </body>

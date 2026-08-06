@@ -5,18 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>The ccs terminal client — cc-screen docs</title>
 <meta name="description" content="ccs — a native terminal client with a session switcher and a multi-machine grid, for people who live in a terminal." />
-<meta name="theme-color" content="#060e09" />
+<meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="../docs.css" />
 </head>
 <body>
 <header class="docs-header">
-  <a class="wordmark" href="../../"><span class="prompt">&gt;_</span>cc-screen</a>
+  <a class="wordmark" href="../../">cc<span class="dot">·</span>screen</a>
   <span class="docs-tag">docs</span>
-  <a class="signin" href="https://app.ccscreen.dev">Sign in ↗</a>
+  <a class="signin" href="https://app.ccscreen.dev">Sign in</a>
 </header>
 <div class="docs-layout">
   <details class="docs-nav mobile-nav">
@@ -94,42 +94,85 @@
 machine&#39;s agent directly, if you self-host without a hub). A session
 switcher, a multi-pane grid with real scrollback, tmux-style keys — your
 whole fleet without leaving the terminal.</p>
+<p>Why not just <code>tmux</code>? tmux attaches you to one machine you can already reach;
+<code>ccs</code> attaches you to <em>every</em> machine your hub can — over a single
+outbound-only uplink, with agent-aware ready notifications — no inbound SSH
+and no per-machine tmux sockets.</p>
 <p><img src="../img/tui-grid.png" alt="Four sessions in the ccs grid"></p>
 <h2 id="install">Install</h2>
-<pre><code class="language-sh">curl --proto &#39;=https&#39; --tlsv1.2 -LsSf \
-  https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh
+<pre><code class="language-sh">curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 </code></pre>
-<p>drops <code>ccs</code> into <code>~/.local/bin</code>. It&#39;s a real terminal app — it needs an
-interactive TTY.</p>
-<h2 id="connect">Connect</h2>
-<pre><code class="language-sh">ccs --server https://app.ccscreen.dev --token &lt;token&gt;
+<p>drops <code>ccs</code> into <code>~/.local/bin</code> and prints the sign-in command. (The generic
+installer, if you&#39;d rather not fetch through the hub:
+<code>curl --proto &#39;=https&#39; --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh</code>.)
+It&#39;s a real terminal app — it needs an interactive TTY.</p>
+<h2 id="connect-hosted-appccscreendev">Connect (hosted — app.ccscreen.dev)</h2>
+<pre><code class="language-sh">ccs activate
 </code></pre>
-<p>The server URL and token are remembered in
-<code>~/.config/cc-screen-tui/config.toml</code>, so from then on plain <code>ccs</code>
-reconnects. The token can also come from <code>api_token</code> in that config file or
-the <code>CCS_API_TOKEN</code> / <code>CCWEB_API_TOKEN</code> environment variables.</p>
-<p>This is the <em>client</em> token — the credential a browser or script uses to talk
-to the hub — not a machine&#39;s uplink credential.</p>
-<p>Self-hosting? Point it at your own endpoint instead:</p>
+<p>prints a short one-time code and a URL, polls for your approval, and confirms
+the account it signed in as:</p>
+<p><img src="../img/ccs-activate.png" alt="ccs activate: the one-time code, the URL, and the signed-in confirmation"></p>
+<p>Open the URL from any logged-in browser — your phone is fine, and it works
+over SSH because nothing has to open on the box itself — type the code, and
+approve. That&#39;s it: <code>✓ Logged in as you@example.com</code>, and plain <code>ccs</code> from
+then on connects as you. Codes expire after 10 minutes; a fresh one is a
+re-run away. It&#39;s the same code-approve gesture as enrolling a machine, just
+signing in a <em>terminal</em> instead.</p>
+<p><img src="../img/web-approve-terminal.png" alt="Approving the terminal&#39;s code on the /activate page"></p>
+<p><code>ccs logout</code> signs the terminal out again — it revokes the credential
+server-side and forgets it locally. You can also revoke any terminal from
+the dashboard&#39;s <strong>Terminal clients</strong> list.</p>
+<h2 id="connect-self-hosted">Connect (self-hosted)</h2>
+<p>Point it at your own endpoint with a static token:</p>
 <pre><code class="language-sh">ccs --server http://laptop:8839          # one machine&#39;s agent, directly
 ccs --server http://hub:8840 --token …   # your own hub (all machines)
 </code></pre>
+<p>The server URL and token are remembered, so from then on plain <code>ccs</code>
+reconnects. This is the <em>client</em> token — the credential a browser or script
+uses to talk to the hub (<code>CCWEB_API_TOKEN</code> on the server / <code>--token</code> on
+<code>cc-screen-hub install</code>) — not a machine&#39;s uplink credential. A self-hosted
+<em>multi-tenant</em> hub supports <code>ccs activate</code> too.</p>
 <p>(<code>--insecure</code> accepts a self-signed certificate for an ad-hoc <code>wss</code> setup.)</p>
+<h2 id="credentials">Credentials</h2>
+<ul>
+<li>Device sign-ins land in <code>~/.config/cc-screen-tui/credentials.toml</code> —
+owner-only (<code>0600</code>), keyed per hub, never printed. The server URL lives in
+<code>config.toml</code> next to it.</li>
+<li>Precedence when several sources exist: <code>--token</code> &gt; <code>CCS_API_TOKEN</code> &gt;
+<code>CCWEB_API_TOKEN</code> &gt; <code>credentials.toml</code> &gt; <code>api_token</code> in <code>config.toml</code>.</li>
+<li>Headless/CI use: set <code>CCS_API_TOKEN</code> (or pass <code>--token</code>) and skip
+<code>activate</code> entirely.</li>
+</ul>
 <h2 id="using-it">Using it</h2>
 <p><code>ccs</code> opens in the <strong>switcher</strong>: every machine&#39;s sessions in one list, each
-tagged with its machine, plus create / kill / restore actions. Pick sessions
-into the <strong>grid</strong> — the same six layouts as the web app, and panes from
-different machines can sit side by side. Each pane is a full terminal
-emulator with multi-thousand-line scrollback.</p>
+tagged with its machine and its latest one-line summary, plus create / kill /
+rename / restore actions. Pick sessions into the <strong>grid</strong> — the same six
+layouts as the web app, and panes from different machines can sit side by
+side. Each pane is a full terminal emulator with multi-thousand-line
+scrollback.</p>
+<p>Jump straight to a session — handy from a script or muscle memory:</p>
+<pre><code class="language-sh">ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
+</code></pre>
+<p>In the switcher:</p>
+<ul>
+<li><code>↑</code>/<code>↓</code> or <code>j</code>/<code>k</code> move · <code>Enter</code> attach · <code>n</code> new · <code>x</code>/<code>e</code> kill · <code>r</code> refresh</li>
+<li><code>R</code> — <strong>rename</strong> the selected session (when the list is empty, <code>R</code> opens the
+<strong>restorable-session picker</strong> to bring sessions back after a redeploy)</li>
+</ul>
 <p>Inside the grid the prefix key is <strong>Ctrl-A</strong> (tmux-style):</p>
 <ul>
-<li><code>Ctrl-A d</code> — open the menu</li>
+<li><code>Ctrl-A d</code> — open the action menu (attach / rename / clear / layout)</li>
 <li><code>Ctrl-A</code> then a digit — switch layout</li>
+<li><code>Ctrl-A g</code> — jump to a session that just went ready</li>
+<li><code>Ctrl-A [</code> — enter <strong>scrollback</strong> mode on the focused pane (<code>PgUp</code>/<code>PgDn</code>,
+<code>k</code>/<code>j</code>, <code>g</code>/<code>G</code> top/live, <code>q</code>/<code>Esc</code> back to live); any printable key in
+normal mode snaps back to live</li>
 <li>click or move spatially to focus panes</li>
 </ul>
 <p>Everything else you type goes straight to the focused session&#39;s PTY.</p>
 <h2 id="maintenance">Maintenance</h2>
 <pre><code class="language-sh">ccs update       # fetch the latest ccs build
+ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 </code></pre>
@@ -138,6 +181,7 @@ ccs --help       # the full flag reference
 </div>
 <footer class="docs-footer">
   <span>v0.4.0 — docs track the latest release</span>
+  <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
 </body>
