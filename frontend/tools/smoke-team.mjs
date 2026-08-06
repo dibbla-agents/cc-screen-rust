@@ -15,10 +15,16 @@
 // in one 3-seat org, one machine enrolled for A so B holds a team-visibility
 // row. Then, in a phone viewport:
 //
-//   as B (member):  the drawer shows the team chip ("team"); the dashboard
-//                   shows the ~/team window with the member list, the PlanCard
-//                   seats-meter text ("2 / 3"), and NO admin actions
-//                   (the member side of the admin-vs-member split);
+//   as B (member):  the team-visibility grant is asserted at the API seam
+//                   (GET /api/shares/received carries the origin:"team" row) —
+//                   the drawer's machine rows/chips only render for machines
+//                   with a LIVE agent in the hub roster, and the CLI-enrolled
+//                   seed machine never connects one, so the drawer honestly
+//                   shows no machine row to badge. The UI surface that row
+//                   drives regardless is the ~/shared card's "via your team"
+//                   summary. The dashboard shows the ~/team window with the
+//                   member list, the PlanCard seats-meter text ("2 / 3"), and
+//                   NO admin actions (the member side of the split);
 //   as A (owner):   the TeamCard invite form's success state shows a copyable
 //                   /org-invite/ link; the seat picker cannot step below 3
 //                   (only when billing is configured — without Stripe the
@@ -120,6 +126,18 @@ must((await api(ub, "POST", `/api/orgs/invites/${invId}/accept`)).status === 200
 const meB = await api(ub, "GET", "/api/me");
 must(meB.json?.plan?.name === "team", "B is pool-governed (plan=team)");
 const billingOn = meB.json?.billing === true; // false on this Stripe-less hub
+// The team-visibility row itself (0065 Part B), at the API seam: B received a
+// materialized grant on A's machine, kind/origin "team". This is the data the
+// drawer chip renders from — but the chip's home (a machine row) only exists
+// for machines with a live connected agent, which the CLI-enrolled seed
+// machine is not, so the row is asserted here and its UI stand-in (the
+// ~/shared "via your team" summary) in the browser pass below.
+const recvB = await api(ub, "GET", "/api/shares/received");
+const teamRow = (recvB.json ?? []).find((r) => r.origin === "team");
+must(teamRow, "B's received list carries a team-visibility row");
+must(teamRow.kind === "team", "team row kind=team");
+must(teamRow.ownerEmail === A, "team row is owned by A");
+must(teamRow.orgName === orgName, "team row carries the org name");
 
 // ── Playwright: the phone viewport recipe, verbatim from smoke.mjs ──────────
 const browser = await chromium.launch({
@@ -151,10 +169,41 @@ async function signedInPage(user, errors) {
   );
   const page = await ctx.newPage();
   page.on("console", (m) => {
-    if (m.type() === "error") errors.push("console: " + m.text());
+    if (m.type() !== "error") return;
+    // One known-benign resource error: the drawer's restorable probe. With
+    // ZERO connected agents (this seed enrolls a machine but never runs one)
+    // the hub's route() has no owning agent and answers 404; the app catches
+    // it (fetchRestorable(...).catch(() => [])) — pre-existing fleet-offline
+    // behavior, not a team-tier regression. Everything else still fails.
+    const url = m.location()?.url ?? "";
+    if (m.text().startsWith("Failed to load resource") && url.includes("/api/sessions/restorable"))
+      return;
+    errors.push("console: " + m.text() + (url ? ` (${url})` : ""));
   });
   page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
   return { ctx, page };
+}
+
+// The phone app auto-opens the session drawer when no pane has a session
+// (App.tsx: !isDesktop && currentSession === null). Wait for it (fall back to
+// the header button if a future change drops the auto-open), then close it via
+// its own ✕ so the footer / dashboard entry is unobstructed.
+async function openDashboard(page) {
+  try {
+    await page.getByText("Sessions", { exact: true }).waitFor({ timeout: 5000 });
+  } catch {
+    await page.getByRole("button", { name: "Open sessions" }).click();
+    await page.getByText("Sessions", { exact: true }).waitFor({ timeout: 5000 });
+  }
+  // The header ✕ (aria-label "Close") — getByLabel, since the empty-state also
+  // renders a text "Close" button and getByRole would match both.
+  await page.getByLabel("Close", { exact: true }).click();
+  await page
+    .getByText("Sessions", { exact: true })
+    .waitFor({ state: "detached", timeout: 5000 });
+  // Footer (phone): "Your machines & account" → the full-screen Dashboard.
+  await page.getByRole("button", { name: "Your machines & account" }).click();
+  await page.getByText("~/team", { exact: false }).first().waitFor({ timeout: 8000 });
 }
 
 try {
@@ -163,47 +212,70 @@ try {
   const { ctx: ctxB, page: pageB } = await signedInPage(ub, errsB);
   await pageB.goto(base, { waitUntil: "networkidle" });
 
-  // The drawer: B holds a team-visibility row on A's machine — its row wears
-  // the "team" chip (0065 Part B; chip text is exactly "team", the org name
-  // rides the tooltip/aria-label).
-  await pageB.getByRole("button", { name: "Open sessions" }).click();
-  await pageB.getByText("team", { exact: true }).first().waitFor({ timeout: 8000 })
-    .catch(() => fail("drawer shows no team chip on the teammate's machine row"));
-  await pageB.keyboard.press("Escape");
+  // The drawer auto-opens (no session). Honest drawer state for this seed: the
+  // hub roster (/api/machines) only lists machines whose agent has connected,
+  // so the CLI-enrolled machine renders NO row here — nothing to chip. The
+  // build-aware empty state still offers "New session…".
+  await pageB.getByText("Sessions", { exact: true }).waitFor({ timeout: 8000 })
+    .catch(() => fail("member drawer never opened"));
+  if ((await pageB.getByText(/New session/).count()) === 0)
+    fail("member drawer shows no New session action (empty state broken)");
 
   // The dashboard: the ~/team window (TeamCard) with the member list.
-  await pageB.goto(`${base}/account`, { waitUntil: "networkidle" }).catch(() => {});
-  const teamWin = pageB.getByText("~/team", { exact: false }).first();
-  await teamWin.waitFor({ timeout: 8000 })
-    .catch(() => fail("dashboard shows no ~/team window (TeamCard)"));
+  await openDashboard(pageB).catch(() => fail("member could not open the dashboard's ~/team window"));
   for (const email of [A, B]) {
     if ((await pageB.getByText(email, { exact: false }).count()) === 0)
       fail(`TeamCard member list is missing ${email}`);
   }
-  // PlanCard seats meter: 2 members of 3 seats → "2 / 3".
+  // Seats meter: 2 members of 3 seats → "2 / 3". On a billing hub that's the
+  // PlanCard's Seats bar; the PlanCard renders NOTHING when Stripe isn't
+  // configured (0058 graceful absence), so there the TeamCard's members
+  // counter ("2 / 3") and its "2 members · 3 seats" line are the meter.
   if ((await pageB.getByText(/2\s*\/\s*3/).count()) === 0)
-    fail('PlanCard seats meter does not show "2 / 3"');
-  // Admin-vs-member split: a plain member gets NO invite form and no role
-  // controls (the management surface is owner/admin-only, 0063 B3).
+    fail('seats meter does not show "2 / 3"');
+  if (billingOn) {
+    if ((await pageB.getByText("Seats", { exact: true }).count()) === 0)
+      fail("PlanCard shows no Seats meter label");
+    // Billing is owner/admin-only — the member gets the pointer note instead.
+    if ((await pageB.getByText(/Billing is managed by/).count()) === 0)
+      fail('member B misses the "Billing is managed by" note');
+  } else {
+    if ((await pageB.getByText(/2 members · 3 seats/).count()) === 0)
+      fail('TeamCard does not show "2 members · 3 seats"');
+    // 0058 graceful absence: no plan/billing card at all without Stripe.
+    if ((await pageB.getByText("~/plan", { exact: false }).count()) > 0)
+      fail("PlanCard rendered on a hub with billing:false");
+  }
+  // The team-visibility row's UI stand-in (~/shared card): team-materialized
+  // grants are summarized, not listed ("via your team: 1 machine from 1
+  // teammate — managed in ~/team").
+  if ((await pageB.getByText(/via your team/).count()) === 0)
+    fail('~/shared card shows no "via your team" visibility summary');
+  // Admin-vs-member split: a plain member gets NO invite form, no role
+  // controls, and no billing management (owner/admin-only, 0063 B3).
   if ((await pageB.getByRole("button", { name: /invite/i }).count()) > 0)
     fail("member B sees an invite action (admin-vs-member split broken)");
+  if ((await pageB.getByRole("combobox", { name: /Role for/ }).count()) > 0)
+    fail("member B sees role controls (admin-vs-member split broken)");
+  if ((await pageB.getByRole("button", { name: /Manage billing/ }).count()) > 0)
+    fail("member B sees Manage billing (owner/admin-only)");
   if (errsB.length) fail("member pass JS errors: " + errsB.join("; "));
   await ctxB.close();
 
   // ── Pass 2 — A, the owner ─────────────────────────────────────────────────
   const errsA = [];
   const { ctx: ctxA, page: pageA } = await signedInPage(ua, errsA);
-  await pageA.goto(`${base}/account`, { waitUntil: "networkidle" }).catch(() => {});
-  await pageA.getByText("~/team", { exact: false }).first().waitFor({ timeout: 8000 })
-    .catch(() => fail("owner dashboard shows no ~/team window"));
+  await pageA.goto(base, { waitUntil: "networkidle" });
+  await openDashboard(pageA).catch(() => fail("owner dashboard shows no ~/team window"));
 
   // Invite form success state: submit an address with no account → the
   // copyable /org-invite/ link is the delivery channel (the hub sends no mail).
   const inviteAddr = `smoke-c-${ts}@ccscreen.test`;
   try {
-    await pageA.getByPlaceholder(/email/i).first().fill(inviteAddr);
-    await pageA.getByRole("button", { name: /invite/i }).first().click();
+    await pageA.getByPlaceholder("name@example.com").fill(inviteAddr);
+    await pageA.getByRole("button", { name: "Invite", exact: true }).click();
     await pageA.getByText(/\/org-invite\//).first().waitFor({ timeout: 8000 });
+    await pageA.getByRole("button", { name: "Copy link" }).waitFor({ timeout: 4000 });
   } catch {
     fail("invite form success state never showed a copyable /org-invite/ link");
   }
@@ -220,14 +292,23 @@ try {
     } catch {
       fail("seat picker not found on a billing-enabled hub");
     }
-  } else if ((await pageA.getByText(/per seat/i).count()) > 0) {
-    // Stripe-less: no seat purchase UI should render at all.
-    fail("seat purchase UI rendered on a hub with billing:false");
+  } else {
+    // Stripe-less: no seat purchase UI should render at all (0064 graceful
+    // absence) — no SeatPicker stepper, no per-seat price copy.
+    const stepper =
+      (await pageA.getByRole("button", { name: "Fewer seats" }).count()) +
+      (await pageA.getByRole("button", { name: "More seats" }).count());
+    const priceCopy = await pageA.getByText(/\/seat\/(mo|yr)/).count();
+    if (stepper > 0 || priceCopy > 0)
+      fail("seat purchase UI rendered on a hub with billing:false");
   }
   if (errsA.length) fail("owner pass JS errors: " + errsA.join("; "));
   await ctxA.close();
 
-  if (!failed) console.log("SMOKE-TEAM PASS (chip, TeamCard, seats meter, invite link, action split)");
+  if (!failed)
+    console.log(
+      "SMOKE-TEAM PASS (team row + ~/shared summary, TeamCard, seats meter, invite link, action split)"
+    );
 } catch (e) {
   fail(e.message);
 } finally {
