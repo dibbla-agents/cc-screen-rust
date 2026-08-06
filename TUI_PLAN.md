@@ -343,3 +343,16 @@ stays deferred, host Shift-drag is the copy story), the grid (M5 — shipped),
 file/editor/upload/clipboard/PDF, a named-server picker UI, and any SSE/WS push
 for the session list (polling is fine).
 ```
+
+## Amendments
+
+- **Proposal 0062 (search-first switcher).** The switcher is type-to-filter:
+  printable keys build a query ranked with the web sidebar's tiers
+  (name > path > summary/meta, `fuzzy_score_web` in `app.rs` mirroring
+  `frontend/src/util.ts`), so the letter commands moved to Ctrl-chords —
+  `^N` new, `^X` kill, `^E` exit, `^R` rename, `^O` restore picker; `q`/`j`/
+  `k`/`r` dropped (Esc clears-then-quits, arrows/wheel navigate, the 1 s
+  ticker refreshes). Multi-machine hubs group the resting list under hostname
+  headers and chip rows while filtering; the AI `headline` vs raw `preview`
+  styling split matches the web and the selected row's `detail` renders in a
+  footer. Any key-summary above predating this is superseded.

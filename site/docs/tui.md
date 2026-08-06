@@ -99,11 +99,29 @@ Jump straight to a session — handy from a script or muscle memory:
 ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
 ```
 
-In the switcher:
+### Search
 
-- `↑`/`↓` or `j`/`k` move · `Enter` attach · `n` new · `x`/`e` kill · `r` refresh
-- `R` — **rename** the selected session (when the list is empty, `R` opens the
-  **restorable-session picker** to bring sessions back after a redeploy)
+The switcher is **search-first**, like the web sidebar: just start typing and
+the list filters and re-ranks live. Matching is fuzzy and spans the session
+name, its folder, its AI summary, its tool, and its machine — ranked
+name > path > summary — so finding a session in a big fleet is "type 3
+letters, Enter". `Esc` clears the query first; a second `Esc` quits
+(`Ctrl-U` clears in one stroke).
+
+On a hub with several machines the resting list groups sessions under
+per-machine hostname headers (offline machines are marked); while you're
+typing the list flattens to ranked order and each row shows its machine
+inline. The selected session's full 2–3 sentence AI summary appears above the
+status bar.
+
+Because typing searches, the switcher's commands live on Ctrl-chords:
+
+- `↑`/`↓` move · `Enter` attach the selected (top) match
+- `Ctrl-N` new session · `Ctrl-X` kill · `Ctrl-E` graceful exit
+- `Ctrl-R` rename the selected session
+- `Ctrl-O` open the **restorable-session picker** (bring sessions back after
+  a redeploy)
+- `Esc` clear the search, then quit · `Ctrl-C` quit
 
 Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 

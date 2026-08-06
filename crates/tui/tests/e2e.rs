@@ -494,8 +494,8 @@ async fn kill_with_confirm_deletes_and_drops_from_list() {
     h.key(KeyCode::Enter).await;
     assert!(h.tick_until(|t| t.contains("alpha") && t.contains("beta")).await, "in switcher");
 
-    // Kill the highlighted session (alpha) with the y/n confirm.
-    h.key(KeyCode::Char('x')).await; // → confirm overlay
+    // Kill the highlighted session (alpha) with the y/n confirm (Ctrl+X, 0062).
+    h.ctrl('x').await; // → confirm overlay
     assert!(h.pump_until(|t| t.contains("kill session alpha")).await, "confirm prompt shown");
     h.key(KeyCode::Char('y')).await; // confirm
 
@@ -617,8 +617,11 @@ async fn switcher_shows_headline_and_color_accent() {
     let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
     let mut alpha = sess("alpha");
     alpha.headline = Some("fix the parser".into());
+    alpha.detail = Some("Deep in the parser rewrite; tests are green.".into()); // 0062 Part C
     alpha.color = Some("teal".into()); // curated palette token (proposal 0029)
-    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![alpha, sess("beta")]).await;
+    let mut beta = sess("beta");
+    beta.preview = "rawpreview".into(); // raw-terminal fallback row (0062 Part C)
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![alpha, beta]).await;
 
     // Make the poll deterministic: wait until the hub advertises alpha (with its
     // headline/colour) before the client's boot poll runs.
@@ -633,12 +636,43 @@ async fn switcher_shows_headline_and_color_accent() {
     h.key(KeyCode::Down).await;
     h.key(KeyCode::Enter).await;
 
-    // The switcher row surfaces the LLM headline as trailing text.
+    // The switcher row surfaces the LLM headline as trailing text; the selected
+    // row (alpha) also surfaces its `detail` in the footer (0062 Part C).
     assert!(
         h.tick_until(|t| t.contains("alpha") && t.contains("fix the parser")).await,
         "switcher should render the headline; got:\n{}",
         h.text()
     );
+    assert!(
+        h.text().contains("Deep in the parser rewrite"),
+        "the selected row's detail shows in the footer; got:\n{}",
+        h.text()
+    );
+
+    // 0062 Part C: the headline and the raw-preview fallback carry clearly
+    // different styles — the preview is darker + italic, the headline is not.
+    {
+        let buf = h.term.backend().buffer();
+        let area = buf.area;
+        let mut headline_style = None;
+        let mut preview_style = None;
+        for y in 0..area.height {
+            let row: String = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            // `find` is a byte offset; the dot/highlight glyphs are multi-byte,
+            // so convert to the char (cell) column before indexing the buffer.
+            if let Some(col) = row.find("fix the parser") {
+                headline_style = Some(buf[(row[..col].chars().count() as u16, y)].style());
+            }
+            if let Some(col) = row.find("rawpreview") {
+                preview_style = Some(buf[(row[..col].chars().count() as u16, y)].style());
+            }
+        }
+        let (hs, ps) = (headline_style.expect("headline cell"), preview_style.expect("preview cell"));
+        assert_ne!(hs, ps, "headline and preview styles must differ");
+        use ratatui::style::Modifier;
+        assert!(ps.add_modifier.contains(Modifier::ITALIC), "preview renders italic");
+        assert!(!hs.add_modifier.contains(Modifier::ITALIC), "headline is not italic");
+    }
 
     // The attach dot for the marked session is painted the mapped teal (the web's
     // `hsl(175 60% 58%)` → Rgb(84,212,201)). Scan for a dot cell in that colour.
@@ -745,8 +779,8 @@ async fn rename_session_sets_label_and_row_reflects_it() {
     h.key(KeyCode::Enter).await;
     assert!(h.tick_until(|t| t.contains("alpha") && t.contains("beta")).await, "in switcher");
 
-    // Selection starts on the first row (alpha). R → rename overlay, type a label.
-    h.key(KeyCode::Char('R')).await;
+    // Selection starts on the first row (alpha). Ctrl+R (0062) → rename overlay.
+    h.ctrl('r').await;
     assert!(h.pump_until(|t| t.contains("rename session")).await, "rename overlay shown");
     // The field is seeded with the current display name ("alpha") — clear it, then
     // type the new label.
@@ -803,7 +837,7 @@ async fn rename_session_empty_value_clears_label() {
     h.key(KeyCode::Enter).await;
     assert!(h.tick_until(|t| t.contains("Old Label")).await, "switcher shows the current label");
 
-    h.key(KeyCode::Char('R')).await;
+    h.ctrl('r').await;
     assert!(h.pump_until(|t| t.contains("rename session")).await, "rename overlay shown");
     // The field is seeded with "Old Label" — clear it, then submit empty.
     for _ in 0..20 {
@@ -826,9 +860,10 @@ async fn rename_session_empty_value_clears_label() {
 
 // ── 11. Restorable-session picker (0059 C5) ─────────────────────────────────
 
-/// Switcher `R` on an EMPTY session list opens the restorable picker: it fetches
-/// the restorable set (a `Cmd::Restorable` reaches the agent), lists the two
-/// restorable sessions, and Enter fires an all-or-nothing `Cmd::Restore`.
+/// Switcher `Ctrl+O` (0062; formerly `R` on an empty list) opens the restorable
+/// picker: it fetches the restorable set (a `Cmd::Restorable` reaches the
+/// agent), lists the two restorable sessions, and Enter fires an all-or-nothing
+/// `Cmd::Restore`.
 #[tokio::test]
 async fn restorable_picker_lists_and_restores() {
     let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
@@ -847,8 +882,8 @@ async fn restorable_picker_lists_and_restores() {
         h.text()
     );
 
-    // R on the empty list → fetch restorable + open the picker.
-    h.key(KeyCode::Char('R')).await;
+    // Ctrl+O → fetch restorable + open the picker.
+    h.ctrl('o').await;
     assert!(
         h.pump_until(|t| t.contains("restore-me") && t.contains("restore-too")).await,
         "the restorable picker should list both restorable sessions; got:\n{}",
@@ -869,6 +904,163 @@ async fn restorable_picker_lists_and_restores() {
         h.pump_cond(move || a.observed().cmds.iter().any(|c| matches!(c, Cmd::Restore))).await,
         "Enter in the picker should fire an all-or-nothing Restore; saw: {:?}",
         agent.observed().cmds
+    );
+}
+
+// ── 12. Search-first switcher (proposal 0062) ───────────────────────────────
+
+/// Reach the full-screen switcher from a 2-session boot (the action menu opens
+/// on the attached session; with a rename-able box "Clear this box" is Down×3).
+async fn into_switcher(h: &mut Harness) {
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Down).await;
+    h.key(KeyCode::Enter).await;
+}
+
+/// Part A: typing filters and ranks name > meta — a session whose *name*
+/// matches the query sorts above one whose *headline* matches — and Enter
+/// attaches the top match ("type 3 letters, Enter").
+#[tokio::test]
+async fn switcher_type_to_filter_ranks_name_over_meta() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut meta_hit = sess("zzz");
+    meta_hit.headline = Some("findme related work".into());
+    let _agent =
+        spawn_scriptable_agent(&hub, "boxA", None, vec![sess("findme"), meta_hit]).await;
+    await_hub(&hub, None, |l| l.len() == 2).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    into_switcher(&mut h).await;
+    assert!(h.tick_until(|t| t.contains("findme") && t.contains("zzz")).await, "in switcher");
+
+    h.type_str("findme").await;
+    let t = h.text();
+    // The name-tier hit ranks above the headline-only (META-tier) hit: the row
+    // whose *name* is findme renders above zzz's row. (Skip the query line —
+    // it echoes the typed text with a "›" prefix.)
+    let lines: Vec<&str> = t.lines().collect();
+    let name_row = lines
+        .iter()
+        .position(|l| l.contains("findme") && !l.contains('›'))
+        .expect("name row visible");
+    let meta_row = lines.iter().position(|l| l.contains("zzz")).expect("meta row visible");
+    assert!(name_row < meta_row, "name match ranks above meta match:\n{t}");
+
+    // Enter attaches the top-ranked match.
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxA:findme")).await,
+        "Enter attaches the top match; got:\n{}",
+        h.text()
+    );
+}
+
+/// Part A: Esc is the web's clear-then-close two-step — with a query it only
+/// clears; on an empty query it quits. Former command letters (`q` included)
+/// type into the query and trigger nothing.
+#[tokio::test]
+async fn switcher_esc_clears_then_quits() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    into_switcher(&mut h).await;
+    assert!(h.tick_until(|t| t.contains("alpha")).await, "in switcher");
+
+    // `q` no longer quits — it types into the query (and filters everything out).
+    h.type_str("qqq").await;
+    assert!(!h.app.should_quit(), "q must not quit the search-first switcher");
+    assert!(
+        h.text().contains("no matches"),
+        "an all-miss query shows the no-matches hint; got:\n{}",
+        h.text()
+    );
+
+    h.key(KeyCode::Esc).await;
+    assert!(!h.app.should_quit(), "Esc with a query only clears it");
+    assert!(
+        h.text().contains("alpha") && h.text().contains("type to search"),
+        "the cleared switcher shows the full list again; got:\n{}",
+        h.text()
+    );
+    h.key(KeyCode::Esc).await;
+    assert!(h.app.should_quit(), "Esc on an empty query quits");
+}
+
+/// The remapped chords act while their old letters are dead: `n` types into the
+/// query, `Ctrl+N` opens the new-session form.
+#[tokio::test]
+async fn switcher_ctrl_chords_still_work() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha"), sess("beta")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    into_switcher(&mut h).await;
+    assert!(h.tick_until(|t| t.contains("alpha")).await, "in switcher");
+
+    // Bare `n` filters (no overlay); the form title "new session" must not show.
+    h.key(KeyCode::Char('n')).await;
+    assert!(!h.text().contains("new session"), "bare n only types; got:\n{}", h.text());
+    h.key(KeyCode::Esc).await; // clear the query
+
+    h.ctrl('n').await;
+    assert!(
+        h.pump_until(|t| t.contains("new session")).await,
+        "Ctrl+N opens the new-session form; got:\n{}",
+        h.text()
+    );
+}
+
+/// Part B: with two machines the resting switcher groups under hostname
+/// headers; filtering flattens to ranked rows with an inline machine chip, and
+/// Enter still routes the attach to the right machine.
+#[tokio::test]
+async fn switcher_machine_headers_and_chips() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _a = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+    let _b = spawn_scriptable_agent(&hub, "boxB", None, vec![sess("bravo")]).await;
+    await_hub(&hub, None, |list| {
+        list.iter().any(|s| s.machine == "boxA") && list.iter().any(|s| s.machine == "boxB")
+    })
+    .await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    into_switcher(&mut h).await;
+    assert!(h.tick_until(|t| t.contains("alpha") && t.contains("bravo")).await, "in switcher");
+
+    // Resting: per-machine header rows (the fake registers hostname == id) —
+    // a header line holds the hostname alone, not a session row — and no chips.
+    let t = h.text();
+    let lines: Vec<&str> = t.lines().collect();
+    assert!(
+        lines.iter().any(|l| l.contains("boxA") && !l.contains("alpha")),
+        "boxA header row missing:\n{t}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("boxB") && !l.contains("bravo")),
+        "boxB header row missing:\n{t}"
+    );
+    assert!(!t.contains('['), "no machine chips at rest:\n{t}");
+    // ↑/↓ skip headers: Down from alpha lands on bravo (a session), and
+    // attaching routes to boxB even across the group boundary.
+    h.key(KeyCode::Down).await;
+
+    // Filtering: headers suppressed, the surviving row carries the chip.
+    h.type_str("bravo").await;
+    let t = h.text();
+    assert!(t.contains("[boxB]"), "machine chip while filtering:\n{t}");
+    assert!(
+        !t.lines().any(|l| l.contains("boxA")),
+        "boxA header (and alpha's row) suppressed while filtering:\n{t}"
+    );
+
+    // Enter attaches the top match on its owning machine.
+    h.key(KeyCode::Enter).await;
+    assert!(
+        h.pump_until(|t| t.contains("SNAP:boxB:bravo")).await,
+        "attach routes to boxB; got:\n{}",
+        h.text()
     );
 }
 

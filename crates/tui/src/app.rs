@@ -453,6 +453,91 @@ fn fuzzy_score(name: &str, q: &str) -> Option<i32> {
     Some(100 - name.len() as i32)
 }
 
+// ── switcher search (proposal 0062) ─────────────────────────────────────────
+
+// Tiered field weighting for the switcher's type-to-search, ported from the web
+// sidebar (SessionDrawer.tsx, proposal 0028): a session's score is
+// `TIER_BASE + fuzzy_score_web(q, field)` for its best-matching field. The tier
+// gap dwarfs any realistic fuzzy score (low hundreds), so a tier strictly
+// dominates: a name hit always outranks a path-only hit, a path hit always
+// outranks a summary/metadata-only hit; the fuzzy score only breaks ties
+// *within* a tier. Keep the constants in lockstep with the frontend's.
+const NAME_TIER: i64 = 100_000;
+const PATH_TIER: i64 = 10_000;
+const META_TIER: i64 = 0;
+
+/// Port of the web sidebar's `fuzzyScore` (`frontend/src/util.ts`): greedy
+/// leftmost case-insensitive subsequence match of `query` against `text`, with
+/// the same bonuses — +2 per matched char, +6 for a head-of-string hit, +12 for
+/// a word-start hit (after `/-_. `), +4·run for contiguous runs. `None` = not a
+/// subsequence; an empty query scores 0 (matches everything). Kept separate
+/// from `fuzzy_score` above (the dir-autocomplete scorer) because ranking
+/// parity with the web is the contract here — both clients must order the same.
+fn fuzzy_score_web(query: &str, text: &str) -> Option<i64> {
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let h: Vec<char> = text.to_lowercase().chars().collect();
+    let mut hi = 0usize;
+    let mut score: i64 = 0;
+    let mut last: isize = -2;
+    let mut run: i64 = 0;
+    for &qc in &q {
+        let Some(pos) = (hi..h.len()).find(|&j| h[j] == qc) else {
+            return None;
+        };
+        score += 2;
+        if pos == 0 {
+            score += 6;
+        }
+        if pos == 0 || "/-_. ".contains(h[pos - 1]) {
+            score += 12;
+        }
+        if pos as isize == last + 1 {
+            run += 1;
+            score += 4 * run;
+        } else {
+            run = 0;
+        }
+        last = pos as isize;
+        hi = pos + 1;
+    }
+    Some(score)
+}
+
+/// Best tiered score of `q` against one session (`None` = filtered out).
+/// Fields and tiers mirror the web's `scoreItem`: NAME (`short`, `label`) >
+/// PATH (cwd leaf, full cwd) > META (headline, detail, preview, tool, machine).
+/// The cwd *leaf* is scored as its own PATH field so a folder literally named
+/// the query outranks one that merely contains it as an ancestor.
+/// `machine_label` is the resolved hostname (the header/chip text) so a query
+/// matches a machine by either its id or its display name.
+fn score_session(s: &SessionInfo, machine_label: &str, q: &str) -> Option<i64> {
+    let cwd_leaf = s.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let fields: [(&str, i64); 10] = [
+        (&s.short, NAME_TIER),
+        (s.label.as_deref().unwrap_or(""), NAME_TIER),
+        (cwd_leaf, PATH_TIER),
+        (&s.cwd, PATH_TIER),
+        (s.headline.as_deref().unwrap_or(""), META_TIER),
+        (s.detail.as_deref().unwrap_or(""), META_TIER),
+        (&s.preview, META_TIER),
+        (&s.tool, META_TIER),
+        (&s.machine, META_TIER),
+        (machine_label, META_TIER),
+    ];
+    fields.iter().filter_map(|(f, base)| fuzzy_score_web(q, f).map(|sc| base + sc)).max()
+}
+
+/// One display row of the switcher list (proposal 0062 Part B): a per-machine
+/// group header (hub mode, >1 machine, empty query) or a session, referenced
+/// by its index into `App::sessions()`.
+pub enum SwitcherRow {
+    Header { label: String, online: bool },
+    Session(usize),
+}
+
 /// Recompute the shown candidates from the cached listing + the current partial.
 /// Hidden directories are excluded unless the partial itself starts with `.`.
 fn refilter_dirs(form: &mut NewForm) {
@@ -566,7 +651,13 @@ pub struct App {
     self_machine: String,
     home: String,
     sessions: Vec<SessionInfo>,
+    /// The switcher's cursor as an index into `visible_sessions()` (the display
+    /// order — ranked while filtering, grouped at rest). NOT a `sessions` index;
+    /// every session-consuming action resolves through `selected_session()`.
     selected: usize,
+    /// The switcher's type-to-search query (proposal 0062 Part A). Empty =
+    /// the resting (grouped) list; non-empty = filtered + ranked.
+    query: String,
     status: String,
     mode: Mode,
     overlay: Overlay,
@@ -643,6 +734,7 @@ impl App {
             home: String::new(),
             sessions: Vec::new(),
             selected: 0,
+            query: String::new(),
             status: "connecting…".into(),
             mode: Mode::Switcher,
             overlay: Overlay::None,
@@ -854,8 +946,9 @@ impl App {
                 self.sessions = list;
                 self.refresh_pane_accents();
                 self.note_ready_edges(edges, &mounted);
-                if self.selected >= self.sessions.len() {
-                    self.selected = self.sessions.len().saturating_sub(1);
+                let visible = self.visible_sessions().len();
+                if self.selected >= visible {
+                    self.selected = visible.saturating_sub(1);
                 }
                 // Auto-detach any box whose session ended. Keyed by (machine,
                 // name) so a session on one machine doesn't keep a box alive for
@@ -964,12 +1057,14 @@ impl App {
             self.fill_box(self.active, e.name, e.machine);
         } else {
             let keys: HashSet<(String, String)> = self.toast.iter().map(|e| e.key()).collect();
-            if let Some(idx) = self
-                .sessions
-                .iter()
-                .position(|s| keys.contains(&(s.machine.clone(), s.name.clone())))
-            {
-                self.selected = idx;
+            // A fresh switcher entry starts unfiltered; the cursor indexes the
+            // visible (grouped) order, so resolve the ready session through it.
+            self.clear_query();
+            if let Some(pos) = self.visible_sessions().iter().position(|&i| {
+                let s = &self.sessions[i];
+                keys.contains(&(s.machine.clone(), s.name.clone()))
+            }) {
+                self.selected = pos;
             }
             self.clear_toast();
             self.grid_overlay = GridOverlay::None;
@@ -1161,37 +1256,55 @@ impl App {
         }
     }
 
+    // The search-first switcher (proposal 0062, amending 0059's key summary):
+    // bare printables type into the query, so every letter command lives on a
+    // Ctrl-chord. `q`/`j`/`k`/`r` are gone (Esc/Ctrl+C quit, arrows + wheel
+    // navigate, the 1 s ticker already refreshes).
     fn key_list(&mut self, k: KeyEvent) {
         match (k.code, k.modifiers) {
-            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
-                // If picking a session to fill a box, cancel back to the grid.
-                if self.fill_target.take().is_some() {
+            // Esc: clear an active query first; on an empty query cancel back to
+            // the grid (fill-a-box) or quit — the web sidebar's clear-then-close
+            // two-step.
+            (KeyCode::Esc, _) => {
+                if !self.query.is_empty() {
+                    self.clear_query();
+                } else if self.fill_target.take().is_some() {
                     self.mode = Mode::Grid;
                 } else {
                     self.should_quit = true;
                 }
             }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.move_sel(1),
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.move_sel(-1),
-            (KeyCode::Char('r'), _) => self.pending_refresh = true,
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => self.clear_query(),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => self.open_newform(),
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => self.confirm_delete(false),
+            (KeyCode::Char('e'), KeyModifiers::CONTROL) => self.confirm_delete(true),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => self.open_rename(),
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => self.open_restore_picker(),
+            (KeyCode::Down, _) => self.move_sel(1),
+            (KeyCode::Up, _) => self.move_sel(-1),
             (KeyCode::Enter, _) => self.attach(),
-            (KeyCode::Char('n'), _) => self.open_newform(),
-            (KeyCode::Char('x'), _) => self.confirm_delete(false),
-            (KeyCode::Char('e'), _) => self.confirm_delete(true),
-            // Context-sensitive Shift-R (0059 C1 + C5): with sessions present it
-            // renames the selected one; with an empty list (nothing to rename, e.g.
-            // right after a redeploy) it opens the restorable-session picker. Bare
-            // `r` stays "refresh" above.
-            (KeyCode::Char('R'), _) => {
-                if self.sessions.is_empty() {
-                    self.open_restore_picker();
-                } else {
-                    self.open_rename();
-                }
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.selected = 0;
+            }
+            // Type-to-search: any printable key (bare or shifted) appends to the
+            // query and re-ranks immediately, cursor snapping to the top match.
+            (KeyCode::Char(ch), m)
+                if !m.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
+                self.query.push(ch);
+                self.selected = 0;
             }
             _ => {}
         }
+    }
+
+    fn clear_query(&mut self) {
+        self.query.clear();
+        self.selected = 0;
     }
 
     fn key_confirm(&mut self, k: KeyEvent) {
@@ -1235,7 +1348,9 @@ impl App {
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let n = self.sessions.len();
+        // Wraps over the *visible* (possibly filtered) list; group headers are
+        // not part of it, so the cursor can never land on one.
+        let n = self.visible_sessions().len();
         if n == 0 {
             return;
         }
@@ -1346,8 +1461,8 @@ impl App {
     }
 
     fn confirm_delete(&mut self, graceful: bool) {
-        if let Some(s) = self.sessions.get(self.selected) {
-            self.overlay = Overlay::Confirm { session: s.name.clone(), graceful };
+        if let Some(session) = self.selected_session().map(|s| s.name.clone()) {
+            self.overlay = Overlay::Confirm { session, graceful };
         }
     }
 
@@ -1368,13 +1483,12 @@ impl App {
     /// Open the rename overlay for the selected session, seeded with its current
     /// display name (the label if set, else the slug).
     fn open_rename(&mut self) {
-        if let Some(s) = self.sessions.get(self.selected) {
-            self.overlay = Overlay::RenameSession(RenameForm {
-                session: s.name.clone(),
-                machine: s.machine.clone(),
-                value: display_name(s).to_string(),
-                error: None,
-            });
+        let seed = self
+            .selected_session()
+            .map(|s| (s.name.clone(), s.machine.clone(), display_name(s).to_string()));
+        if let Some((session, machine, value)) = seed {
+            self.overlay =
+                Overlay::RenameSession(RenameForm { session, machine, value, error: None });
         }
     }
 
@@ -1875,7 +1989,7 @@ impl App {
 
     // ── attach / fill / layout ───────────────────────────────────────────────
     fn attach(&mut self) {
-        let Some(s) = self.sessions.get(self.selected) else {
+        let Some(s) = self.selected_session() else {
             return;
         };
         let (session, machine) = (s.name.clone(), s.machine.clone());
@@ -1977,6 +2091,7 @@ impl App {
     fn after_box_removed(&mut self) {
         if self.panes.iter().all(|p| p.is_none()) {
             self.mode = Mode::Switcher;
+            self.clear_query(); // a fresh switcher entry starts unfiltered
             self.set_layout(Layout::Single);
             self.active = 0;
             self.pending_refresh = true;
@@ -2157,6 +2272,112 @@ impl App {
     pub fn status(&self) -> &str {
         &self.status
     }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Whether the switcher list is being filtered (non-empty query).
+    pub fn filtering(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    /// Hub mode with more than one connected machine — when the switcher groups
+    /// under per-machine headers at rest and chips rows while filtering
+    /// (proposal 0062 Part B). Direct mode and single-machine hubs render
+    /// exactly as before.
+    pub fn multi_machine(&self) -> bool {
+        self.hub_mode && self.machines.len() > 1
+    }
+
+    /// The display name for a machine id: its hostname when known, the id
+    /// otherwise, "this machine" for the empty id (the web sidebar's fallback).
+    pub fn machine_label(&self, id: &str) -> String {
+        match self.machines.iter().find(|m| m.machine == id) {
+            Some(m) if !m.hostname.is_empty() => m.hostname.clone(),
+            _ if !id.is_empty() => id.to_string(),
+            _ => "this machine".into(),
+        }
+    }
+
+    fn machine_online(&self, id: &str) -> bool {
+        self.machines.iter().find(|m| m.machine == id).is_none_or(|m| m.online)
+    }
+
+    /// Session indices in display order: ranked (name > path > meta, the web's
+    /// 0028 tiers) while filtering; resting order (name-sorted, grouped by
+    /// machine when `multi_machine`) otherwise. `selected` indexes THIS list.
+    pub fn visible_sessions(&self) -> Vec<usize> {
+        let q = self.query.trim();
+        if q.is_empty() {
+            if !self.multi_machine() {
+                return (0..self.sessions.len()).collect();
+            }
+            // Group by machine: known machines in `/api/machines` order, then
+            // any stragglers in first-appearance order. Name order inside a
+            // group rides on `sessions` being name-sorted.
+            let mut order: Vec<&str> = self.machines.iter().map(|m| m.machine.as_str()).collect();
+            for s in &self.sessions {
+                if !order.contains(&s.machine.as_str()) {
+                    order.push(&s.machine);
+                }
+            }
+            let mut out = Vec::with_capacity(self.sessions.len());
+            for m in order {
+                out.extend(
+                    self.sessions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.machine == m)
+                        .map(|(i, _)| i),
+                );
+            }
+            out
+        } else {
+            let mut scored: Vec<(i64, usize)> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    score_session(s, &self.machine_label(&s.machine), q).map(|sc| (sc, i))
+                })
+                .collect();
+            // Stable sort: equal scores keep the resting (name) order.
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.into_iter().map(|(_, i)| i).collect()
+        }
+    }
+
+    /// The switcher's display rows: per-machine headers interleaved at group
+    /// boundaries at rest in multi-machine hub mode; the flat (possibly ranked)
+    /// session list otherwise. Headers are non-selectable — the cursor lives in
+    /// `visible_sessions()`, whose order matches this list's `Session` rows.
+    pub fn switcher_rows(&self) -> Vec<SwitcherRow> {
+        let vis = self.visible_sessions();
+        if self.filtering() || !self.multi_machine() {
+            return vis.into_iter().map(SwitcherRow::Session).collect();
+        }
+        let mut rows = Vec::with_capacity(vis.len() + self.machines.len());
+        let mut cur: Option<&str> = None;
+        for i in vis {
+            let m = self.sessions[i].machine.as_str();
+            if cur != Some(m) {
+                rows.push(SwitcherRow::Header {
+                    label: self.machine_label(m),
+                    online: self.machine_online(m),
+                });
+                cur = Some(m);
+            }
+            rows.push(SwitcherRow::Session(i));
+        }
+        rows
+    }
+
+    /// The selected session, resolved through the visible-row indirection —
+    /// the only way switcher actions (attach/kill/rename/detail footer) may
+    /// address a session, so a filtered-out row can never be acted on.
+    pub fn selected_session(&self) -> Option<&SessionInfo> {
+        self.visible_sessions().get(self.selected).map(|&i| &self.sessions[i])
+    }
 }
 
 /// First line of an error chain — keeps the status bar to one line.
@@ -2174,6 +2395,29 @@ impl App {
         a.sessions = sessions;
         a.status = status.into();
         a
+    }
+
+    /// Like `test_fixture`, but in hub mode with a machine list — for the
+    /// switcher's multi-machine grouping/chip render tests (proposal 0062 B).
+    pub fn test_fixture_hub(
+        sessions: Vec<SessionInfo>,
+        machines: Vec<cc_screen_protocol::MachineInfo>,
+        status: &str,
+    ) -> Self {
+        let mut a = Self::test_fixture(sessions, status);
+        a.hub_mode = true;
+        a.machines = machines;
+        a
+    }
+
+    /// Set the switcher search query directly (render tests drive state, not keys).
+    pub fn test_set_query(&mut self, q: &str) {
+        self.query = q.into();
+    }
+
+    /// Set the switcher cursor directly (an index into `visible_sessions()`).
+    pub fn test_set_selected(&mut self, sel: usize) {
+        self.selected = sel;
     }
 }
 
@@ -2468,6 +2712,184 @@ mod tests {
         assert!(subseq.is_some());
         assert_eq!(fuzzy_score("docs", "xyz"), None);
         assert!(fuzzy_score("anything", "").is_some());
+    }
+
+    // ── switcher search (proposal 0062) ──────────────────────────────────────
+
+    fn machine(id: &str, hostname: &str, online: bool) -> MachineInfo {
+        MachineInfo { machine: id.into(), hostname: hostname.into(), online }
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Shared ranking vectors with the web scorer (`frontend/src/util.ts`
+    /// `fuzzyScore`): same inputs, same relative order — the 0062 parity
+    /// contract. Absolute values are asserted for the bonus arithmetic.
+    #[test]
+    fn fuzzy_score_web_matches_the_web_scorer() {
+        // No match / empty query.
+        assert_eq!(fuzzy_score_web("xyz", "docs"), None);
+        assert_eq!(fuzzy_score_web("", "anything"), Some(0));
+        assert_eq!(fuzzy_score_web("a", ""), None);
+        // Head-of-string hit: +2 (char) +6 (head) +12 (word start) = 20.
+        assert_eq!(fuzzy_score_web("d", "dev"), Some(20));
+        // Word-start hit after a separator: +2 +12 = 14.
+        assert_eq!(fuzzy_score_web("d", "my-dev"), Some(14));
+        // Mid-word hit: just +2.
+        assert_eq!(fuzzy_score_web("e", "dev"), Some(2));
+        // Contiguous run: "de" on "dev" = 20 + (2 + 4·1) = 26.
+        assert_eq!(fuzzy_score_web("de", "dev"), Some(26));
+        // Case-insensitive.
+        assert_eq!(fuzzy_score_web("DE", "dev"), fuzzy_score_web("de", "dev"));
+        // A contiguous prefix run beats a scattered mid-word subsequence.
+        assert!(fuzzy_score_web("dev", "development") > fuzzy_score_web("dev", "widevine"));
+        // …and (web parity, deliberately) word-start bonuses can make up for a
+        // broken run: "dev" ties on "development" (d@head + contiguous e,v) and
+        // "daemon-vault" (d@head, scattered e, v@word-start).
+        assert_eq!(fuzzy_score_web("dev", "development"), Some(36));
+        assert_eq!(fuzzy_score_web("dev", "daemon-vault"), Some(36));
+    }
+
+    #[test]
+    fn score_session_tiers_name_over_path_over_meta() {
+        let mut name_hit = sess("apollo");
+        name_hit.cwd = "/x/y".into();
+        let mut path_hit = sess("zzz");
+        path_hit.cwd = "/home/apollo".into();
+        let mut meta_hit = sess("yyy");
+        meta_hit.headline = Some("fixing apollo tests".into());
+        let n = score_session(&name_hit, "", "apo").unwrap();
+        let p = score_session(&path_hit, "", "apo").unwrap();
+        let m = score_session(&meta_hit, "", "apo").unwrap();
+        assert!(n > p && p > m, "name {n} > path {p} > meta {m}");
+        assert!(n >= NAME_TIER && p >= PATH_TIER && p < NAME_TIER && m < PATH_TIER);
+        // A renamed session is findable by its label at NAME tier.
+        let mut labelled = sess("slug-1");
+        labelled.label = Some("apollo work".into());
+        assert!(score_session(&labelled, "", "apo").unwrap() >= NAME_TIER);
+        // The machine is searchable by id and by resolved hostname (META tier).
+        let on_box = sess_on("web", "boxA");
+        assert!(score_session(&on_box, "pine", "pine").is_some());
+        assert!(score_session(&on_box, "pine", "boxa").is_some());
+        // No field matches → filtered out.
+        assert_eq!(score_session(&sess("web"), "", "qqq"), None);
+    }
+
+    #[test]
+    fn visible_sessions_ranks_while_filtering_and_groups_at_rest() {
+        // Name-sorted resting list: apollo(boxB), banana(boxA), cherry(boxB).
+        let mut apollo = sess_on("apollo", "boxB");
+        apollo.cwd = "/w/one".into();
+        let banana = sess_on("banana", "boxA");
+        let mut cherry = sess_on("cherry", "boxB");
+        cherry.headline = Some("apollo related".into());
+        let mut a = App::test_fixture_hub(
+            vec![apollo, banana, cherry],
+            vec![machine("boxA", "hostA", true), machine("boxB", "hostB", true)],
+            "",
+        );
+        // Resting: grouped by machine in /api/machines order (boxA first).
+        assert_eq!(a.visible_sessions(), vec![1, 0, 2]);
+        let rows = a.switcher_rows();
+        assert_eq!(rows.len(), 5, "2 headers + 3 sessions");
+        assert!(matches!(&rows[0], SwitcherRow::Header { label, .. } if label == "hostA"));
+        assert!(matches!(rows[1], SwitcherRow::Session(1)));
+        assert!(matches!(&rows[2], SwitcherRow::Header { label, .. } if label == "hostB"));
+        // Filtering: flat, ranked — apollo (name) above cherry (headline);
+        // banana drops out. Headers are suppressed.
+        a.test_set_query("apollo");
+        assert_eq!(a.visible_sessions(), vec![0, 2]);
+        assert!(a.switcher_rows().iter().all(|r| matches!(r, SwitcherRow::Session(_))));
+        // The cursor + actions resolve through the filtered view.
+        assert_eq!(a.selected_session().unwrap().name, "apollo");
+        a.move_sel(1);
+        assert_eq!(a.selected_session().unwrap().name, "cherry");
+    }
+
+    #[test]
+    fn switcher_rows_stay_flat_in_direct_and_single_machine_mode() {
+        // Direct mode: no headers ever (byte-identical resting render).
+        let a = App::test_fixture(vec![sess("alpha"), sess("beta")], "");
+        assert!(a.switcher_rows().iter().all(|r| matches!(r, SwitcherRow::Session(_))));
+        // Hub with ONE machine: also flat.
+        let a = App::test_fixture_hub(
+            vec![sess_on("alpha", "boxA")],
+            vec![machine("boxA", "hostA", true)],
+            "",
+        );
+        assert!(!a.multi_machine());
+        assert!(a.switcher_rows().iter().all(|r| matches!(r, SwitcherRow::Session(_))));
+    }
+
+    #[test]
+    fn key_list_types_into_query_and_letter_commands_are_dead() {
+        let mut a = App::test_fixture(vec![sess("alpha"), sess("beta")], "");
+        // Former command letters now type into the query and trigger nothing.
+        for c in ['n', 'x', 'q', 'j', 'k', 'r', 'e'] {
+            a.key_list(key(KeyCode::Char(c)));
+        }
+        assert_eq!(a.query(), "nxqjkre");
+        assert!(matches!(a.overlay, Overlay::None), "no overlay opened by bare letters");
+        assert!(!a.should_quit(), "q must not quit");
+        // Backspace pops; Ctrl+U clears.
+        a.key_list(key(KeyCode::Backspace));
+        assert_eq!(a.query(), "nxqjkr");
+        a.key_list(ctrl('u'));
+        assert_eq!(a.query(), "");
+    }
+
+    #[test]
+    fn key_list_esc_clears_query_then_quits() {
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.key_list(key(KeyCode::Char('a')));
+        assert_eq!(a.query(), "a");
+        a.key_list(key(KeyCode::Esc));
+        assert_eq!(a.query(), "", "first Esc clears the query");
+        assert!(!a.should_quit());
+        a.key_list(key(KeyCode::Esc));
+        assert!(a.should_quit(), "second Esc quits");
+    }
+
+    #[test]
+    fn key_list_esc_with_fill_target_cancels_to_grid() {
+        let mut a = App::test_fixture(vec![sess("alpha")], "");
+        a.fill_target = Some(0);
+        a.mode = Mode::Switcher;
+        a.key_list(key(KeyCode::Char('z')));
+        a.key_list(key(KeyCode::Esc)); // clears the query, stays in the switcher
+        assert!(matches!(a.mode, Mode::Switcher));
+        a.key_list(key(KeyCode::Esc)); // cancels back to the grid
+        assert!(matches!(a.mode, Mode::Grid));
+        assert!(!a.should_quit());
+    }
+
+    #[test]
+    fn key_list_ctrl_chords_act_with_an_active_query() {
+        let mut a = App::test_fixture(vec![sess("alpha"), sess("beta")], "");
+        a.test_set_query("alp");
+        // Ctrl+X kills the selected (filtered top) row, not a hidden one.
+        a.key_list(ctrl('x'));
+        match &a.overlay {
+            Overlay::Confirm { session, graceful } => {
+                assert_eq!(session, "alpha");
+                assert!(!graceful);
+            }
+            _ => panic!("Ctrl+X should open the kill confirm"),
+        }
+        a.overlay = Overlay::None;
+        a.key_list(ctrl('e'));
+        assert!(
+            matches!(&a.overlay, Overlay::Confirm { graceful: true, .. }),
+            "Ctrl+E opens the graceful-exit confirm"
+        );
+        a.overlay = Overlay::None;
+        a.key_list(ctrl('r'));
+        assert!(
+            matches!(&a.overlay, Overlay::RenameSession(f) if f.session == "alpha"),
+            "Ctrl+R renames the selected filtered row"
+        );
     }
 
     // Regression (0059 Wave-2 verify): a slow async reply must dismiss only the

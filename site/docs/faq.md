@@ -90,6 +90,15 @@ signed in, which links the machine to your account. They expire after 10
 minutes and the installer auto-requests a fresh one, so an expired code costs
 nothing.
 
+## Why did `n`/`x` (and `q`) stop working in the `ccs` switcher?
+
+The switcher became **search-first**: typing now filters the session list, so
+single letters type into the search instead of running commands. The actions
+moved to chords — `Ctrl-N` new, `Ctrl-X` kill, `Ctrl-E` graceful exit,
+`Ctrl-R` rename, `Ctrl-O` restore — and `Esc` clears the search, then quits.
+The header line in the switcher always shows the current keys; see
+[the ccs terminal client](tui.md) for the full map.
+
 ## Is cc-screen open source? What's it built with?
 
 The code lives at
