@@ -121,6 +121,19 @@ function isCtrlB(e: KeyboardEvent): boolean {
   );
 }
 
+// A keydown from a modifier key alone. These must NEVER be treated as "the
+// chord key" — they arrive *before* the character on any layout where the chord
+// needs a modifier to type. On a Swedish keyboard `/` is Shift+7, so ⌃B then
+// Shift+7 delivers keydown "Shift" first; without this guard that unrecognised
+// key cancelled the prefix and the `/` that followed went to the terminal. Same
+// for ⌃B S (share) and ⌃B ⇧C (clear colour) on every layout.
+function isModifierKey(k: string): boolean {
+  return (
+    k === "Shift" || k === "Control" || k === "Alt" || k === "Meta" ||
+    k === "AltGraph" || k === "CapsLock"
+  );
+}
+
 // shouldSkipShortcut returns true when focus is in a real text input (compose
 // textarea, favourites search, etc.) — but NOT when focus is in xterm.js's
 // hidden helper textarea, which is technically a textarea but is really just
@@ -1132,6 +1145,8 @@ export default function App() {
         }
         if (armed) {
           const k = e.key;
+          // A bare modifier keydown is not the chord key — see isModifierKey.
+          if (isModifierKey(k)) return;
           if (k === "ArrowUp" || k === "ArrowDown") {
             stop();
             clearArm();
@@ -1169,6 +1184,8 @@ export default function App() {
         }
         if (repeating) {
           const k = e.key;
+          // A bare modifier keydown is not the chord key — see isModifierKey.
+          if (isModifierKey(k)) return;
           if (k === "ArrowUp" || k === "ArrowDown") {
             stop();
             handleViewerArrow(k);
@@ -1204,6 +1221,8 @@ export default function App() {
 
       if (armed) {
         const k = e.key;
+        // A bare modifier keydown is not the chord key — see isModifierKey.
+        if (isModifierKey(k)) return;
         const lay = layoutRef.current;
 
         if (k >= "1" && k <= "9") {
@@ -1330,6 +1349,8 @@ export default function App() {
       // Not in a fresh prefix — are we in the post-arrow repeat window?
       if (repeating) {
         const k = e.key;
+        // A bare modifier keydown is not the chord key — see isModifierKey.
+        if (isModifierKey(k)) return;
         if (isArrow(k)) {
           stop();
           handleArrow(k);
