@@ -256,8 +256,15 @@ async function idleRendererPass() {
     await dpage.locator(".xterm").first().click({ position: { x: 50, y: 60 } });
     await dpage.keyboard.type(token);
     await dpage.waitForTimeout(400);
+    // Type the chord the way a Swedish keyboard does — "/" is Shift+7, so the
+    // browser delivers a bare "Shift" keydown between the prefix and the chord
+    // key. That used to cancel the prefix (it looked like an unrecognised
+    // chord), which broke ⌃B / on every layout where "/" needs a modifier —
+    // and ⌃B ⇧S on all of them.
     await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.down("Shift");
     await dpage.keyboard.press("/");
+    await dpage.keyboard.up("Shift");
     await dpage.waitForSelector('[data-testid="term-find"]', { timeout: 5000 });
     await dpage.keyboard.type(token);
     await dpage.waitForTimeout(400);
