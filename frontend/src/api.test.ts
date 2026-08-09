@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   downloadURL,
+  imageSendError,
   fetchMachines,
   inlineURL,
   watchURL,
@@ -166,5 +167,24 @@ describe("createShare (proposal 0056 C2)", () => {
     await expect(
       createShare({ granteeEmail: "ghost@x.com", machine: "laptop" })
     ).resolves.toEqual({ id: "i1", status: "pending", inviteUrl: "/invite/tok123" });
+  });
+});
+
+describe("imageSendError", () => {
+  it("maps the 0066 status codes to short actionable messages", () => {
+    const err = (status: number) => {
+      const e = new Error(`clip: ${status}`) as Error & { status?: number };
+      e.status = status;
+      return e;
+    };
+    expect(imageSendError(err(413))).toMatch(/too large/i);
+    expect(imageSendError(err(422))).toMatch(/couldn't be read/i);
+    expect(imageSendError(err(503))).toMatch(/isn't accepting input/i);
+    expect(imageSendError(err(507))).toMatch(/storage is full/i);
+  });
+
+  it("stays generic for anything else", () => {
+    expect(imageSendError(new Error("network"))).toMatch(/try again/i);
+    expect(imageSendError(null)).toMatch(/try again/i);
   });
 });

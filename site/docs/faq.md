@@ -107,6 +107,14 @@ you an app icon, full-screen terminals sized to the phone, the file
 browser/editor, and push notifications when an agent finishes its turn (on
 iOS, notifications require the home-screen install).
 
+## Why does Codex mention X11 when I paste an image?
+
+Your agent predates assistant-aware image delivery: it asked Codex to read
+the machine's X11/Wayland clipboard, which headless boxes don't have. Update
+the agent on that machine and pasted images reach Codex as a staged local
+file instead — no display server, no Xvfb. Details in
+[Troubleshooting](../troubleshooting/#codex-says-clipboard-unavailable-an-x11-error-on-image-paste).
+
 ## What are the codes like `WDJB-MJHT`?
 
 One-time machine-activation codes. The installer prints one; you approve it
@@ -124,7 +132,7 @@ moved to chords — `Ctrl-N` new, `Ctrl-X` kill, `Ctrl-E` graceful exit,
 The same applies inside the grid's action menu (`Ctrl-A d`): `j`/`k` now type
 into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
-[the ccs terminal client](tui.md) for the full map.
+[the ccs terminal client](../tui/) for the full map.
 
 ## Is cc-screen open source? What's it built with?
 

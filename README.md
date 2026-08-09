@@ -8,7 +8,9 @@
 **Drive Claude Code, Codex, Gemini, and Kimi sessions on all your machines —
 from your phone.** cc-screen keeps your AI coding agents running 24/7 as
 long-lived terminal sessions on your own computers, and lets you check in,
-type, approve, paste images, and browse/edit files from anywhere: a phone
+type, approve, paste images (assistant-aware: Claude reads them via a
+clipboard shim, Codex gets a staged file path — no X11 needed on the box),
+and browse/edit files from anywhere: a phone
 browser (installable PWA), any desktop browser, or a native terminal client.
 Sessions survive disconnects and reboots — a restart resumes each agent's
 conversation right where it left off.

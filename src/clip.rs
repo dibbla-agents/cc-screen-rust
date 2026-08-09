@@ -161,6 +161,18 @@ pub struct ClipReadQuery {
 
 // POST /api/clip?session=<name> — body is a PNG. Body size is bounded by the
 // DefaultBodyLimit layer on this route (see main.rs).
+//
+// Delivery is assistant-aware (proposal 0066), dispatched on the session's
+// server-owned `image_paste` strategy — never on client input:
+//   - ClipboardProbe (Claude & default): stage in the ClipStore + drop file,
+//     send Ctrl-V; the clipboard shim serves the image (proposal 0007).
+//   - BracketedImagePath (Codex): stage a unique durable private PNG and
+//     bracketed-paste its shell-escaped absolute path — no Enter, no Ctrl-V.
+//     Codex attaches a recognized pasted image path itself; its native
+//     clipboard read needs X11/Wayland a headless box doesn't have.
+//
+// A 204 means the bytes were staged and the PTY write completed — not that the
+// assistant has parsed the attachment.
 pub async fn clip_put(
     State(app): State<AppState>,
     Query(q): Query<ClipQuery>,
@@ -172,12 +184,61 @@ pub async fn clip_put(
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty image").into_response();
     }
-    app.inner.clip.put(&q.session, body.to_vec());
-    // Also drop it to a local file so a hub-only agent's shim (no HTTP bind) can
-    // read it; harmless duplicate for a bound agent.
-    write_clip_file(&q.session, &body);
-    sess.write_input(&[PASTE_BYTE]);
-    StatusCode::NO_CONTENT.into_response()
+    match sess.image_paste {
+        crate::tools::ImagePasteStrategy::ClipboardProbe => {
+            app.inner.clip.put(&q.session, body.to_vec());
+            // Also drop it to a local file so a hub-only agent's shim (no HTTP
+            // bind) can read it; harmless duplicate for a bound agent.
+            write_clip_file(&q.session, &body);
+            let (written, err) = sess.write_input_checked(&[PASTE_BYTE]);
+            if written == 0 && err.is_some() {
+                return (StatusCode::SERVICE_UNAVAILABLE, "session input closed").into_response();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        crate::tools::ImagePasteStrategy::BracketedImagePath => {
+            use crate::clip_attachment::StageError;
+            let path = match app.inner.attachments.stage(&q.session, &body) {
+                Ok(p) => p,
+                Err(StageError::InvalidPng) => {
+                    return (StatusCode::UNPROCESSABLE_ENTITY, "not a valid PNG image")
+                        .into_response();
+                }
+                Err(StageError::Quota) => {
+                    return (
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        "image attachment quota exhausted for this session",
+                    )
+                        .into_response();
+                }
+                Err(StageError::Unstageable(why)) => {
+                    tracing::warn!("clip: could not stage attachment for {}: {why}", q.session);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "could not stage image")
+                        .into_response();
+                }
+            };
+            let Some(escaped) = crate::clip_attachment::escaped_path(&path) else {
+                app.inner.attachments.discard(&q.session, &path, body.len());
+                return (StatusCode::INTERNAL_SERVER_ERROR, "could not stage image")
+                    .into_response();
+            };
+            // Exactly ESC[200~<escaped-path>ESC[201~ — no trailing Enter, so
+            // the image attaches to the composer without submitting.
+            let buf = cc_screen_protocol::wrap_bracketed_paste(&escaped, false);
+            let (written, err) = sess.write_input_checked(&buf);
+            if err.is_some() || written < buf.len() {
+                if written == 0 {
+                    // Proven zero-byte failure: the assistant can't have seen
+                    // the path, so the file and its quota roll back.
+                    app.inner.attachments.discard(&q.session, &path, body.len());
+                }
+                // Partial/ambiguous delivery keeps the file until normal
+                // session cleanup — Codex may already hold the path.
+                return (StatusCode::SERVICE_UNAVAILABLE, "session input failed").into_response();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
 }
 
 // GET /api/clip/targets — the shim's "what's available" probe.
@@ -231,6 +292,159 @@ mod tests {
         let p2 = clip_file_in(base, "../../etc/passwd").unwrap();
         assert_eq!(p2, Path::new("/run/user/1000/cc-screen/clip/______etc_passwd.png"));
         assert!(clip_file_in(base, "").is_none());
+    }
+
+    /// A minimal valid-header PNG (signature + IHDR), padded.
+    fn tiny_png() -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        v.extend_from_slice(b"IHDR");
+        v.extend_from_slice(&2u32.to_be_bytes());
+        v.extend_from_slice(&2u32.to_be_bytes());
+        v.resize(64, 0);
+        v
+    }
+
+    #[cfg(unix)]
+    fn dispatch_tool(prefix: &str, cmd: &str, tmpl: &str, strat: crate::tools::ImagePasteStrategy) -> crate::tools::Tool {
+        crate::tools::Tool {
+            cmd: cmd.into(),
+            prefix: prefix.into(),
+            tmpl: tmpl.into(),
+            extra_flag: None,
+            extra_max: 0,
+            resume_suffix: None,
+            resume_keep_extra: false,
+            yolo_flag: None,
+            install_hint: None,
+            update_cmd: None,
+            image_paste: strat,
+        }
+    }
+
+    /// Poll `path` until `pred(bytes)` or timeout; returns the final content.
+    #[cfg(unix)]
+    async fn wait_for(path: &Path, pred: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        for _ in 0..100 {
+            if let Ok(b) = std::fs::read(path) {
+                if pred(&b) {
+                    return b;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        std::fs::read(path).unwrap_or_default()
+    }
+
+    // 0066 Part C: the strategy dispatch, end to end against a real PTY. The
+    // fake assistant is `stty raw -echo; cat > <file>` — raw mode so the line
+    // discipline neither buffers on newline nor eats the 0x16 lnext char, and
+    // the recorded bytes are exactly what the assistant's stdin saw.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_delivers_bracketed_path_to_codex_and_ctrl_v_to_probe() {
+        use axum::extract::{Query, State};
+        let tmp = std::env::temp_dir().join(format!("ccr-clipdisp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let seen_codex = tmp.join("seen-codex.bin");
+        let seen_probe = tmp.join("seen-probe.bin");
+        let codex = dispatch_tool(
+            "codex",
+            "coc",
+            &format!("stty raw -echo; cat > '{}'", seen_codex.display()),
+            crate::tools::ImagePasteStrategy::BracketedImagePath,
+        );
+        let probe = dispatch_tool(
+            "claude",
+            "cc",
+            &format!("stty raw -echo; cat > '{}'", seen_probe.display()),
+            crate::tools::ImagePasteStrategy::ClipboardProbe,
+        );
+        let app = crate::engine::AppState::new(
+            vec![codex.clone(), probe.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let dir = tmp.to_string_lossy().to_string();
+        let c = app.create(&codex, "t", &dir, vec![], false, true).unwrap();
+        let p = app.create(&probe, "t", &dir, vec![], false, true).unwrap();
+        // Let the fake assistants reach raw mode before any paste bytes land.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Unknown session → 404, nothing staged.
+        let r = clip_put(
+            State(app.clone()),
+            Query(ClipQuery { session: "codex-nope".into() }),
+            Bytes::from(tiny_png()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+        // Invalid PNG to the codex session → 422, no file, no input.
+        let r = clip_put(
+            State(app.clone()),
+            Query(ClipQuery { session: c.clone() }),
+            Bytes::from_static(b"not a png"),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Two rapid valid pastes → 204 + two distinct durable paths delivered
+        // as exact bracketed-paste frames, no Enter, no Ctrl-V.
+        for _ in 0..2 {
+            let r = clip_put(
+                State(app.clone()),
+                Query(ClipQuery { session: c.clone() }),
+                Bytes::from(tiny_png()),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        }
+        let att_dir = tmp.join("clip-attachments").join(&c);
+        let mut staged: Vec<PathBuf> =
+            std::fs::read_dir(&att_dir).unwrap().flatten().map(|e| e.path()).collect();
+        staged.sort();
+        assert_eq!(staged.len(), 2, "each paste staged its own file");
+        assert_ne!(staged[0], staged[1]);
+        for f in &staged {
+            assert_eq!(std::fs::read(f).unwrap(), tiny_png(), "exact bytes retained");
+        }
+        let seen = wait_for(&seen_codex, |b| b.windows(6).filter(|w| w == b"\x1b[201~").count() >= 2).await;
+        let text = String::from_utf8_lossy(&seen);
+        for f in &staged {
+            let esc = crate::clip_attachment::escaped_path(f).unwrap();
+            assert!(
+                text.contains(&format!("\x1b[200~{esc}\x1b[201~")),
+                "exact bracketed frame for {f:?} in {text:?}"
+            );
+        }
+        assert!(!seen.contains(&0x16), "no Ctrl-V on the bracketed path");
+        assert!(!seen.contains(&b'\r'), "no Enter — the image must not submit");
+
+        // The probe session still gets the 0007 contract: 0x16 + staged slot.
+        let r = clip_put(
+            State(app.clone()),
+            Query(ClipQuery { session: p.clone() }),
+            Bytes::from(tiny_png()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let seen = wait_for(&seen_probe, |b| b.contains(&0x16)).await;
+        assert_eq!(seen, vec![0x16], "exactly the paste key, nothing else");
+        assert_eq!(app.inner.clip.current(Some(&p)), Some(tiny_png()), "shim slot staged");
+
+        // Cleanup: kill both (hard exit keeps attachments — resume may need
+        // them); then a purge on the codex session removes its directory.
+        app.inner.attachments.purge_session(&c);
+        assert!(!att_dir.exists());
+        app.get(&c).map(|s| s.kill());
+        app.get(&p).map(|s| s.kill());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

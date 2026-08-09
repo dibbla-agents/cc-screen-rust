@@ -8,6 +8,7 @@ import {
   fetchSessions,
   flattenDataTransfer,
   getAuthStatus,
+  imageSendError,
   pasteText,
   restoreSessions,
   saveFavorites,
@@ -1299,10 +1300,10 @@ export default function App() {
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //
   // xterm.js converts the paste-shortcut keydown directly into a 0x16 byte
-  // on the PTY's stdin — Claude Code sees that, runs its clipboard probe,
-  // and finds nothing because our `/api/clip` POST hasn't completed staging
-  // yet. Then our POST finally lands and the server fires *another* 0x16 via
-  // tmux send-keys, but it arrives after Claude Code already gave up.
+  // on the PTY's stdin — a clipboard-probing assistant sees that, runs its
+  // clipboard probe, and finds nothing because our `/api/clip` POST hasn't
+  // completed staging yet. Then our POST finally lands and the server injects
+  // the real paste input, but it arrives after the assistant already gave up.
   //
   // Fix: stop the keydown from reaching xterm's helper-textarea listener so
   // it never sends the racing 0x16. We do NOT preventDefault — the browser's
@@ -1318,7 +1319,7 @@ export default function App() {
   //   - Mac + Ctrl+V:                    — NO `paste` event, ever
   // If we blocked Ctrl+V on Mac we'd kill xterm's 0x16 but get no paste
   // event to take over — net result: dead key. Mac users who muscle-memory
-  // Ctrl+V still get the old behaviour (xterm forwards 0x16, Claude Code
+  // Ctrl+V still get the old behaviour (xterm forwards 0x16, the assistant
   // probes and shows its "no clipboard image" feedback), and Cmd+V is the
   // path that actually works.
   //
@@ -1448,8 +1449,9 @@ export default function App() {
   // route any image in the payload to the active pane's session.
   //
   // Routes:
-  //   image in clipboard -> POST /api/clip (stages + tmux send-keys C-v;
-  //     Claude Code's shim then reads the staged PNG)
+  //   image in clipboard -> POST /api/clip; the agent delivers it using the
+  //     session tool's own paste contract (Claude: paste key + clipboard
+  //     shim; Codex: staged file path — server-side dispatch, 0066)
   //   text only          -> POST /api/paste (bracketed paste; same path the
   //     compose sheet uses, so multi-line goes in as one block)
   //
@@ -1498,10 +1500,12 @@ export default function App() {
           try {
             const png = await toPng(blob!);
             await sendImage(target.name, png, target.machine);
-            showToast("📋 Image pasted", true);
+            // "Sent", not "pasted": a 204 means the agent staged + injected it;
+            // the assistant itself hasn't acknowledged parsing it (0066).
+            showToast("📋 Image sent", true);
           } catch (err) {
             console.error("clipboard image paste:", err);
-            showToast("Paste failed", false);
+            showToast(imageSendError(err), false);
           }
         })();
         return;
@@ -1800,9 +1804,11 @@ export default function App() {
     if (!currentSession) return;
     pasteText(currentSession.name, text, enter, currentSession.machine).catch(() => {});
   };
-  const onImage = (png: Blob) => {
-    if (!currentSession) return;
-    sendImage(currentSession.name, png, currentSession.machine).catch(() => {});
+  // Awaited so ImageSheet can keep its preview + show a retryable error when
+  // the send fails (0066) — closing optimistically used to swallow failures.
+  const onImage = async (png: Blob) => {
+    if (!currentSession) throw new Error("no active session");
+    await sendImage(currentSession.name, png, currentSession.machine);
   };
   const conn = conns[active] ?? "closed";
   // One unified status dot: connection trouble (red) wins, else the agent is

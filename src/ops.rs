@@ -25,6 +25,7 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
                 // The user is ending it on purpose — forget it so a later restore
                 // doesn't resurrect it (mirrors the REST delete handler).
                 crate::manifest::forget(&app.inner.config_dir, &req.session);
+                app.inner.attachments.purge_session(&req.session);
                 match req.mode.as_str() {
                     "exit" | "soft" => sess.graceful_exit(),
                     _ => sess.kill(),
@@ -166,6 +167,7 @@ mod tests {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
         }
     }
 

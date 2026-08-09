@@ -9,6 +9,21 @@ use std::path::PathBuf;
 
 use cc_screen_protocol::{ExtraDirs, ToolInfo};
 
+/// How a staged clipboard image reaches this tool's PTY (proposal 0066).
+/// Server-internal — never a wire field, never chosen by a client.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImagePasteStrategy {
+    /// Send Ctrl-V (0x16); the assistant shells out to xclip/wl-paste/pbpaste
+    /// and the cc-screen shim serves the staged PNG (proposal 0007). Claude
+    /// Code's contract, and the backward-compatible default for every tool.
+    ClipboardProbe,
+    /// Stage the PNG as a private local file and bracketed-paste its
+    /// shell-escaped absolute path — no Enter, no Ctrl-V. Codex reads the
+    /// clipboard natively via X11/Wayland (absent on a headless box), but it
+    /// recognises an explicitly pasted readable image path and attaches it.
+    BracketedImagePath,
+}
+
 #[derive(Clone)]
 pub struct Tool {
     pub cmd: String,    // shell command, e.g. cc
@@ -34,6 +49,11 @@ pub struct Tool {
     /// escape hatch for a pinned version, a wrapper, or a distro package. `None`
     /// falls back to the registry (`update_commands`).
     pub update_cmd: Option<String>,
+    /// How a pasted clipboard image is delivered to this tool's PTY (0066).
+    /// Filled by `with_defaults` from the same `(prefix, cmd)` identity the
+    /// other built-in metadata uses, so a `tools.conf` Codex override inherits
+    /// it; a genuinely unknown custom tool keeps the compatible probe.
+    pub image_paste: ImagePasteStrategy,
 }
 
 impl Tool {
@@ -49,6 +69,7 @@ impl Tool {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: ImagePasteStrategy::ClipboardProbe,
         }
     }
 }
@@ -832,6 +853,13 @@ fn with_defaults(mut tools: Vec<Tool>) -> Vec<Tool> {
                 }
             }
         }
+        // Image-paste delivery (0066): Codex — including a tools.conf override
+        // that keeps its command or prefix — gets the bracketed-path strategy;
+        // everything else (Claude, kimi, gemini, shell, unknown custom tools)
+        // keeps the backward-compatible clipboard probe.
+        if matches!((t.prefix.as_str(), t.cmd.as_str()), ("codex", _) | (_, "coc")) {
+            t.image_paste = ImagePasteStrategy::BracketedImagePath;
+        }
     }
     tools
 }
@@ -968,6 +996,29 @@ mod tests {
         // The bare shell has no approval flag.
         let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
         assert!(sh.yolo_flag.is_none());
+    }
+
+    #[test]
+    fn image_paste_strategy_mapping() {
+        // Built-ins: Codex is the only bracketed-path tool (0066).
+        let t = load_tools(None);
+        for tool in &t {
+            let want = if tool.prefix == "codex" {
+                ImagePasteStrategy::BracketedImagePath
+            } else {
+                ImagePasteStrategy::ClipboardProbe
+            };
+            assert_eq!(tool.image_paste, want, "{}", tool.prefix);
+        }
+        // A tools.conf override that keeps Codex's prefix or command inherits
+        // its strategy through the same identity logic as the other defaults.
+        let by_prefix = with_defaults(parse("cc_tool xx codex 'my-codex-wrapper'"));
+        assert_eq!(by_prefix[0].image_paste, ImagePasteStrategy::BracketedImagePath);
+        let by_cmd = with_defaults(parse("cc_tool coc oai 'codex --profile fast'"));
+        assert_eq!(by_cmd[0].image_paste, ImagePasteStrategy::BracketedImagePath);
+        // A genuinely unknown custom tool keeps the compatible probe.
+        let custom = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        assert_eq!(custom[0].image_paste, ImagePasteStrategy::ClipboardProbe);
     }
 
     #[test]

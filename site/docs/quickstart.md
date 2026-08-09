@@ -93,6 +93,10 @@ tool, and the directory.
 
 The machine also appears on your dashboard with a pulsing **online** dot.
 
+Try an image while you're at it: copy a screenshot and press Ctrl-V (⌘V on
+Mac) in the session — it lands in the assistant as an attachment, exactly as
+if you'd pasted it locally on that machine.
+
 ![A live Claude session, driven from a phone](../img/mobile-agent.png)
 
 ## 5. Put it on your phone
