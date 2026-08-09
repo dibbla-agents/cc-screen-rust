@@ -119,6 +119,30 @@ You do **not** need to install Xvfb or any X11 packages.
 
 ![The notification bell in the switcher header](../img/mobile-notifications.png "The bell lives in the switcher header — it shows whether push is active and can send a test notification.")
 
+## Ctrl+F doesn't find anything in a terminal
+
+It can't: terminals are drawn on the GPU, so the browser's Find sees no text
+there (it still works for the rest of the page). Use **`Ctrl+B /`** — the
+find bar over the focused pane — or the magnifier button in the header on a
+phone. Enter / Shift+Enter cycle matches, Esc closes.
+
+## The terminal text looks slightly different
+
+cc-screen renders terminals with WebGL where the browser supports it, and
+falls back to plain DOM rendering where it doesn't (older iOS Safari, some
+VMs, a machine with no GPU access). Antialiasing differs a little between the
+two; everything else — selection, links, scrollback, search — behaves the
+same, and no action is needed. To see which one you're on, open the browser
+console and type:
+
+```js
+window.__ccRenderer   // "webgl" or "dom"
+```
+
+A tab that starts on WebGL can move to `"dom"` on its own if the browser
+drops the GPU context (iOS does this when a tab is backgrounded). That's the
+fallback working as designed, not a fault.
+
 ## The page looks stale after an update
 
 The web app is a PWA; after a deploy the service worker can serve the old

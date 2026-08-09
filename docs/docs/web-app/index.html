@@ -124,6 +124,18 @@ templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
 from <em>different machines</em> — one grid, your whole fleet. There&#39;s a layout
 palette to switch arrangements, and each pane is a full live terminal.</p>
 <p><figure><img src="../img/web-grid.png" alt="Three live panes with the layout palette open" loading="lazy" /><figcaption>Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.</figcaption></figure></p>
+<h3 id="searching-terminal-output">Searching terminal output</h3>
+<p><code>Ctrl+B /</code> opens a find bar over the focused pane: type to search that
+session&#39;s scrollback, <strong>Enter</strong> / <strong>Shift+Enter</strong> for next / previous,
+<strong>Esc</strong> to close and hand the keyboard back to the terminal. On a phone, the
+magnifier button in the header does the same thing. In the file editor, the
+agent column&#39;s magnifier searches the mirrored session.</p>
+<p>Use this instead of the browser&#39;s own Find for terminal output: cc-screen
+draws terminals on the GPU, so <code>Cmd/Ctrl+F</code> — which still works for the rest
+of the page — can&#39;t see the characters. And a detail people notice: the
+terminal cursor doesn&#39;t blink. That&#39;s deliberate; a blinking caret repaints
+the page forever and costs real battery, and it was never part of what the
+remote agent sends.</p>
 <h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
 <p>Every machine gets a built-in file browser and editor, confined to that
 machine&#39;s home directory. The tree is live (it follows filesystem changes as

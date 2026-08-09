@@ -14,10 +14,15 @@ const session = process.env.SESSION || "smoketest";
 // Full tmux name, for asserting the swipe actually scrolled (copy-mode).
 const tmuxSession = process.env.TMUX_SESSION || `claude-${session}`;
 
+// GL is ENABLED here (software rasterizer): the terminals adopt the WebGL
+// renderer (proposal 0068 Part D), so every terminal step below — selection,
+// swipe scroll, find — is exercised on the renderer real users get. The DOM
+// fallback gets its own launch in domFallbackPass().
+const GL_ARGS = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
 const browser = await chromium.launch({
   executablePath: exe,
   headless: true,
-  args: ["--no-sandbox", "--disable-gpu"],
+  args: ["--no-sandbox", ...GL_ARGS],
 });
 const ctx = await browser.newContext({
   viewport: { width: 390, height: 844 },
@@ -166,6 +171,148 @@ async function desktopEditorPass() {
     fail("desktop editor pass: " + e.message);
   } finally {
     await dctx.close();
+  }
+}
+
+// Mount the throwaway session in a desktop pane and return the page. Shared by
+// the desktop passes below (the empty pane renders the real switcher, so
+// picking the session is a click on its row).
+async function mountDesktopSession(dpage) {
+  await dpage.goto(base, { waitUntil: "networkidle" });
+  // The empty pane renders the real switcher, so the session's own row is the
+  // thing to wait for (its copy is stable; the pane's placeholder text is not).
+  await dpage.getByRole("button", { name: new RegExp(session) }).first().click({ timeout: 15000 });
+  await dpage.waitForSelector('[title="open"]', { timeout: 10000 });
+}
+
+// ── Proposal 0068 ─────────────────────────────────────────────────────────────
+// The renderer swap (Part D), the idle-quiescence budget (Parts A/B), the
+// closed-drawer row gating (Part B) and terminal find (Part E), in one desktop
+// pass on the GL-enabled browser.
+async function idleRendererPass() {
+  const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  try {
+    await mountDesktopSession(dpage);
+
+    // 1) The WebGL renderer is live (GL_ARGS above give headless Chrome a
+    //    software GL implementation).
+    const renderer = await dpage.evaluate(() => window.__ccRenderer);
+    if (renderer !== "webgl") {
+      fail(`expected the WebGL renderer, got ${renderer ?? "undefined"}`);
+      return;
+    }
+
+    // 2) Idle quiescence. With no input and no output, an idle tab must not
+    //    repaint continuously: no infinite CSS animation anywhere in the DOM,
+    //    and style/layout counts that barely move across a 10s window (the poll
+    //    ticks are the only expected work). Before proposal 0068 the blinking
+    //    cursor alone drove these into the hundreds.
+    const metrics = async () => {
+      const cdp = await dpage.context().newCDPSession(dpage);
+      const { metrics: m } = await cdp.send("Performance.getMetrics");
+      const at = (n) => m.find((x) => x.name === n)?.value ?? 0;
+      return { style: at("RecalcStyleCount"), layout: at("LayoutCount") };
+    };
+    await dpage.waitForTimeout(1500); // let the attach settle
+    const before = await metrics();
+    await dpage.waitForTimeout(10_000);
+    const after = await metrics();
+    const dStyle = after.style - before.style;
+    const dLayout = after.layout - before.layout;
+    const infinite = await dpage.evaluate(() =>
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getTiming?.().iterations === Infinity)
+        .map((a) => a.effect?.target?.className ?? "?")
+    );
+    if (infinite.length) {
+      fail(`idle DOM has infinite CSS animations: ${infinite.join(", ")}`);
+      return;
+    }
+    if (dStyle > 60 || dLayout > 60) {
+      fail(`idle tab is not quiescent over 10s: +${dStyle} restyles, +${dLayout} layouts`);
+      return;
+    }
+
+    // 3) A closed drawer renders no session rows (the root and its slide stay
+    //    mounted; only the list body unmounts).
+    const closedRows = await dpage.locator('[data-drawer="closed"] [data-session-row]').count();
+    if (closedRows !== 0) {
+      fail(`closed drawer still renders ${closedRows} session rows`);
+      return;
+    }
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("s");
+    await dpage.waitForSelector('[data-drawer="open"] [data-session-row]', { timeout: 5000 });
+    await dpage.keyboard.press("Escape");
+
+    // 4) Terminal find (⌃B /) — the replacement for browser find-in-page over
+    //    terminal output. Type a token into the terminal, search for it, and
+    //    assert the addon selected the match.
+    const token = "SMOKEFIND";
+    await dpage.locator(".xterm").first().click({ position: { x: 50, y: 60 } });
+    await dpage.keyboard.type(token);
+    await dpage.waitForTimeout(400);
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("/");
+    await dpage.waitForSelector('[data-testid="term-find"]', { timeout: 5000 });
+    await dpage.keyboard.type(token);
+    await dpage.waitForTimeout(400);
+    const selection = await dpage.evaluate(() => window.__ccTerm?.getSelection?.() ?? "");
+    await dpage.keyboard.press("Escape");
+    const findGone = (await dpage.locator('[data-testid="term-find"]').count()) === 0;
+    // Clear the typed token off the agent's prompt line.
+    await dpage.keyboard.press("Control+c");
+    if (!selection.includes(token)) {
+      fail(`⌃B / did not select the match (selection: ${JSON.stringify(selection)})`);
+      return;
+    }
+    if (!findGone) {
+      fail("Esc did not close the terminal find bar");
+      return;
+    }
+    if (derrs.length) fail("idle/renderer pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    fail("idle/renderer pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
+// The other half of Part D: with GL unavailable the terminal must still mount,
+// on xterm's DOM renderer, with search working there too.
+async function domFallbackPass() {
+  const nogl = await chromium.launch({
+    executablePath: exe,
+    headless: true,
+    args: ["--no-sandbox", "--disable-3d-apis", "--disable-gpu"],
+  });
+  const dctx = await nogl.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  try {
+    await mountDesktopSession(dpage);
+    const renderer = await dpage.evaluate(() => window.__ccRenderer);
+    if (renderer !== "dom") {
+      fail(`expected the DOM fallback with GL disabled, got ${renderer ?? "undefined"}`);
+      return;
+    }
+    // Find must work identically under the fallback.
+    await dpage.locator(".xterm").first().click({ position: { x: 50, y: 60 } });
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("/");
+    await dpage.waitForSelector('[data-testid="term-find"]', { timeout: 5000 });
+    await dpage.keyboard.press("Escape");
+    if (derrs.length) fail("DOM fallback pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    fail("DOM fallback pass: " + e.message);
+  } finally {
+    await dctx.close();
+    await nogl.close();
   }
 }
 
@@ -476,7 +623,11 @@ try {
   else {
     await desktopEditorPass();
     if (process.exitCode === 1) throw new Error("desktop editor pass failed");
-    console.log("SMOKE PASS (swipe scrolled into copy-mode; editor save/new/read OK)");
+    await idleRendererPass();
+    if (process.exitCode === 1) throw new Error("idle/renderer pass failed");
+    await domFallbackPass();
+    if (process.exitCode === 1) throw new Error("DOM fallback pass failed");
+    console.log("SMOKE PASS (swipe scrolled into copy-mode; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

@@ -20,6 +20,16 @@ import type { Session } from "./api";
 export const NOTIFY_MIN_WORK_SECS = 60;
 export const NOTIFY_INPUT_QUIET_SECS = 60;
 
+// How recent the busy→ready transition must be for a toast (proposal 0068 C).
+// This is defence in depth for §2's existing invariant — the caller already
+// advances the baseline while hidden and emits nothing there, so an edge that
+// happened out of sight is never toasted on return. The explicit gate bounds
+// that structurally: however long the gap between two snapshots turns out to be
+// (the hidden tab's 60s heartbeat, a frozen PWA, a future change to the poll),
+// a completion older than this can no longer surface as a burst of toasts
+// duplicating the OS push that already fired for it (0002).
+export const TOAST_FRESH_SECS = 15;
+
 // The identity used everywhere a session is keyed across machines: a same-named
 // session on a different agent is a different session. Mirrors App.tsx's
 // `refKey` / PaneRef identity so the mounted-exclusion set lines up.
@@ -82,6 +92,13 @@ export function detectReadyEdges(
     if (busySince === 0) continue; // never recorded a work start (server gate)
     if (ageSince(busySince) < NOTIFY_MIN_WORK_SECS) continue; // gate 1: worked > 1 min
     if (ageSince(lastInput) < NOTIFY_INPUT_QUIET_SECS) continue; // gate 2: user idle > 1 min
+
+    // Gate 3 (freshness): the transition itself must be recent. `busy_until`
+    // equals the busy→ready instant once ready (0024) and, unlike `activity`,
+    // is not bumped by a cosmetic repaint; fall back to `activity`, and don't
+    // gate at all when neither is recorded (an older agent).
+    const anchor = c.busy_until && c.busy_until > 0 ? c.busy_until : c.activity;
+    if (anchor > 0 && ageSince(anchor) > TOAST_FRESH_SECS) continue;
 
     edges.push({
       name: c.name,

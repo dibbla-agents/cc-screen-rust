@@ -278,6 +278,27 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   PNG, `507` quota, `503` PTY write failed (rollback only on a proven
   zero-byte write). No hub/wire change — the dispatch is agent-local. See
   `cc-screen-saas` proposal 0066.
+- **An idle web client must draw nothing (0068).** The tab is the product's
+  primary surface and stays open for days, so *continuous* work in the frontend
+  is a bug: **no infinite CSS animation** outside a loading state (no cursor
+  blink — `cursorBlink: false` in both terminal surfaces — no pulsing dots, no
+  scanline), and closed overlays (`SessionDrawer`, `StatusView`) keep their
+  root + transition but unmount their rows (`useOpenOrClosing`). Terminals
+  render through **`@xterm/addon-webgl`, exact-pinned `0.18.0`** (0.19 targets
+  xterm 6 and declares no peer dep — it would install silently broken beside
+  5.5) via `src/xtermRenderer.ts`, which falls back to the DOM renderer on
+  no-WebGL2 *and* on context loss and reports the live one as
+  `window.__ccRenderer`. Because WebGL draws pixels, browser find-in-page can't
+  see terminal output: **`⌃B /`** (header magnifier on touch, the agent-column
+  magnifier in the editor) opens the in-pane find bar — `⌃B t` still reaches
+  [0038]'s tree filter, and `Cmd/Ctrl+F` is still never hijacked. Every
+  recurring poll goes through **`usePoll` (`src/poll.ts`)**: visible cadences
+  are unchanged, hidden tabs pause (sessions keep a 60s heartbeat for the tab
+  title + app badge) and refetch once on return. Poll payloads are applied only
+  when they actually changed (`sameJson` / `sessionsKeyRef`) so the memoized
+  `TerminalView`/`TileGrid`/`SessionDrawer`/`StatusView` don't re-render on a
+  no-op tick — **keep the props those four receive stable** (`useCallback` /
+  `useMemo`), or the memo silently stops working. See proposal 0068.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

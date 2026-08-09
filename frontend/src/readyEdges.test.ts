@@ -5,6 +5,7 @@ import {
   sessionKey,
   NOTIFY_MIN_WORK_SECS,
   NOTIFY_INPUT_QUIET_SECS,
+  TOAST_FRESH_SECS,
 } from "./readyEdges";
 
 // A fixed "now" in unix seconds; helpers build timestamps relative to it.
@@ -53,6 +54,50 @@ describe("detectReadyEdges", () => {
     expect(edges).toHaveLength(1);
     expect(edges[0].headline).toBe("Waiting to run tests");
     expect(edges[0].detail).toBe("It refactored auth and is paused for approval.");
+  });
+
+  // Proposal 0068 Part C — gate 3 (freshness). The caller already refuses to
+  // toast while hidden; this bounds the exposure structurally so a long gap
+  // between snapshots (60s hidden heartbeat, frozen PWA) can never surface as a
+  // burst of toasts for completions the OS push already announced.
+  it("rejects a stale completion (transition older than the freshness window)", () => {
+    const prev = [mk({ name: "a", waiting: false })];
+    const cur = [
+      mk({
+        name: "a",
+        waiting: true,
+        busy_since: longAgo(600),
+        last_input_at: longAgo(600),
+        busy_until: NOW_S - (TOAST_FRESH_SECS + 5),
+      }),
+    ];
+    expect(detectReadyEdges(prev, cur, NONE, NOW_MS)).toEqual([]);
+  });
+
+  it("fires for a completion that just happened", () => {
+    const prev = [mk({ name: "a", waiting: false })];
+    const cur = [
+      mk({
+        name: "a",
+        waiting: true,
+        busy_since: longAgo(600),
+        last_input_at: longAgo(600),
+        busy_until: NOW_S - 3,
+      }),
+    ];
+    expect(detectReadyEdges(prev, cur, NONE, NOW_MS)).toHaveLength(1);
+  });
+
+  it("falls back to `activity` and doesn't gate when neither anchor is recorded", () => {
+    const prev = [mk({ name: "a", waiting: false })];
+    const stale = [
+      mk({ name: "a", waiting: true, busy_since: longAgo(600), last_input_at: longAgo(600), activity: NOW_S - 300 }),
+    ];
+    expect(detectReadyEdges(prev, stale, NONE, NOW_MS)).toEqual([]);
+    const unknown = [
+      mk({ name: "a", waiting: true, busy_since: longAgo(600), last_input_at: longAgo(600) }),
+    ];
+    expect(detectReadyEdges(prev, unknown, NONE, NOW_MS)).toHaveLength(1);
   });
 
   it("rejects gate 1: a trivial <1min turn produces no toast", () => {

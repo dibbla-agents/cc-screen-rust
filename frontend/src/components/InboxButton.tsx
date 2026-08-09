@@ -7,7 +7,7 @@
 // a className and it handles its own state. Renders only in multi-tenant (the
 // parent gates on me.multiTenant).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   acceptInvite,
   declineInvite,
@@ -19,6 +19,7 @@ import {
   type ShareInvite,
 } from "../api";
 import { InboxIcon, XIcon } from "../icons";
+import { usePoll } from "../poll";
 import { ago } from "../util";
 
 function subject(i: ShareInvite): string {
@@ -64,11 +65,9 @@ export default function InboxButton({
     }
   }, []);
 
-  useEffect(() => {
-    reload();
-    const t = setInterval(reload, 15000);
-    return () => clearInterval(t);
-  }, [reload]);
+  // Paused while the tab is hidden, refetched on return (proposal 0068 Part C)
+  // — this only drives the header badge, which nobody reads while hidden.
+  usePoll(reload, 15000, { immediate: true });
 
   const count = invites.length + orgInvites.length;
 

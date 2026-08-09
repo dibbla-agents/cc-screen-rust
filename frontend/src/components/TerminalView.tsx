@@ -1,8 +1,11 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon } from "@xterm/addon-search";
 import { wsURL } from "../api";
+import { attachRenderer } from "../xtermRenderer";
+import TerminalFindBar from "./TerminalFindBar";
 
 export type ConnState = "connecting" | "open" | "closed";
 
@@ -26,30 +29,44 @@ interface Props {
   // current selection. Called with the live instance on mount and `null`
   // on unmount — the parent stores it by pane index.
   onTerm?: (term: Terminal | null) => void;
+  // Bump to open this pane's find bar (Ctrl+B / from App, or the pane menu on
+  // touch). Only the active pane reacts, so one counter serves every pane.
+  // Terminal output is drawn as pixels under the WebGL renderer, so the
+  // browser's own Cmd/Ctrl+F can no longer find it — this replaces it
+  // (proposal 0068 Part E; amends 0027's browser-Find policy).
+  searchSignal?: number;
 }
 
 // One TerminalView per session (parent remounts via key={session}). It owns the
 // xterm instance and the WebSocket, reconnecting on drop — because all state
 // lives in tmux, a reconnect re-attaches exactly where the agent left off.
-export default function TerminalView({
+function TerminalView({
   session,
   machine,
   fontSize,
   onState,
   active = true,
   onTerm,
+  searchSignal = 0,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const fitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
 
   // Build the terminal once.
   useEffect(() => {
     const host = hostRef.current!;
     const term = new Terminal({
-      cursorBlink: true,
+      // Steady cursor, deliberately. A blinking cursor is pure client-side
+      // paint — it never touches the PTY in either direction — but under any
+      // renderer it keeps the browser's style/paint pipeline running every
+      // vsync forever, which is what made an idle tab burn 8-20% of a core.
+      // A mirror of a remote agent gains nothing from a blinking caret.
+      cursorBlink: false,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize,
       scrollback: 5000,
@@ -83,7 +100,14 @@ export default function TerminalView({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    searchRef.current = search;
     term.open(host);
+    // WebGL rendering where available, DOM renderer everywhere else (see
+    // xtermRenderer.ts). Must come after open() — the addon needs the screen
+    // element.
+    const disposeRenderer = attachRenderer(term);
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
@@ -96,9 +120,11 @@ export default function TerminalView({
 
     return () => {
       onTerm?.(null);
+      disposeRenderer();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
     // fontSize change handled separately to avoid tearing down the socket.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -317,6 +343,24 @@ export default function TerminalView({
     focusTerminal();
   }, [active]);
 
+  // Open the find bar when the parent bumps searchSignal — but only in the
+  // active pane, so one counter can serve every pane. The last-seen value is
+  // tracked in a ref (not just effect deps) so that *activating* a pane after
+  // someone searched in another one doesn't pop this pane's find bar too.
+  const lastSearchSignal = useRef(searchSignal);
+  useEffect(() => {
+    if (searchSignal === lastSearchSignal.current) return;
+    lastSearchSignal.current = searchSignal;
+    if (!active) return;
+    setFindOpen(true);
+  }, [searchSignal, active]);
+
+  function closeFind() {
+    setFindOpen(false);
+    searchRef.current?.clearDecorations();
+    focusTerminal();
+  }
+
   // Suppress the browser's native context menu inside the terminal. xterm.js
   // defaults `rightClickSelectsWord: true` on Mac (where Ctrl+click is the
   // OS right-click) — useful, but Chrome *also* shows its own context menu
@@ -475,8 +519,14 @@ export default function TerminalView({
   // bg-bar (= #0f1720, the xterm theme background) makes the padding
   // strip blend in — no two-tone gutter.
   return (
-    <div className="h-full w-full bg-bar pl-2 pt-1.5">
+    <div className="relative h-full w-full bg-bar pl-2 pt-1.5">
       <div ref={hostRef} className="h-full w-full" />
+      {findOpen && <TerminalFindBar search={searchRef} onClose={closeFind} />}
     </div>
   );
 }
+
+// Memoized: the 4s session poll re-renders App, and without this every mounted
+// xterm pane re-renders with it. Props are stabilized by the parent
+// (TileGrid/App useCallback), so the default shallow compare holds.
+export default memo(TerminalView);

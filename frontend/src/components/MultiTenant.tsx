@@ -49,6 +49,7 @@ import {
 } from "../api";
 import ShareForm from "./ShareForm";
 import { RefreshIcon, ShareIcon } from "../icons";
+import { usePoll } from "../poll";
 
 // One-time injected keyframes/texture (kept out of tailwind.config to avoid a
 // build-config change). Rendered once by <Backdrop/>.
@@ -57,16 +58,20 @@ function ensureStyle() {
   if (typeof document === "undefined" || document.getElementById(STYLE_ID)) return;
   const el = document.createElement("style");
   el.id = STYLE_ID;
+  // NOTE (proposal 0068 Part B): everything here is either static or a ONE-SHOT
+  // entry animation. No `infinite` animations — the dashboard/login backdrop is
+  // on screen for hours at a time, and an infinite keyframe on a paint property
+  // (box-shadow, background-color) keeps the browser's style/paint pipeline
+  // running every vsync for as long as the tab is open. The old perpetual
+  // scanline sweep, pulsing status dots, and blinking fake cursor are gone;
+  // colour carries the same information.
   el.textContent = `
-    @keyframes mt-blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
     @keyframes mt-rise { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-    @keyframes mt-pulse { 0%,100%{box-shadow:0 0 0 0 rgba(245,185,66,.55)} 50%{box-shadow:0 0 0 4px rgba(245,185,66,0)} }
-    @keyframes mt-scan { from{transform:translateY(-100%)} to{transform:translateY(100%)} }
     .mt-rise{animation:mt-rise .4s cubic-bezier(.2,.8,.2,1) both}
-    .mt-cursor{display:inline-block;width:.6ch;height:1.05em;vertical-align:-2px;background:#38bdf8;animation:mt-blink 1.1s steps(1) infinite}
-    .mt-dot-on{animation:mt-pulse 2.2s ease-out infinite}
+    .mt-cursor{display:inline-block;width:.6ch;height:1.05em;vertical-align:-2px;background:#38bdf8}
+    .mt-dot-on{box-shadow:0 0 0 3px rgba(245,185,66,.18)}
     .mt-grid{background-image:linear-gradient(rgba(36,48,66,.5) 1px,transparent 1px),linear-gradient(90deg,rgba(36,48,66,.5) 1px,transparent 1px);background-size:34px 34px}
-    @media (prefers-reduced-motion: reduce){.mt-rise,.mt-cursor,.mt-dot-on{animation:none}}
+    @media (prefers-reduced-motion: reduce){.mt-rise{animation:none}}
   `;
   document.head.appendChild(el);
 }
@@ -75,16 +80,16 @@ function Backdrop({ children }: { children: React.ReactNode }) {
   useEffect(ensureStyle, []);
   return (
     <div className="fixed inset-0 overflow-auto bg-bar text-slate-100">
-      {/* Layered atmosphere: a cyan glow up top, a faint engineering grid, and a
-          slow scanline — all very low-contrast so content stays the focus. */}
+      {/* Layered atmosphere: a cyan glow up top and a faint engineering grid —
+          both very low-contrast so content stays the focus. The scanline that
+          used to sweep this layer on an infinite 7s loop is gone: a
+          viewport-sized element animating forever kept the compositor busy for
+          as long as the page was open (proposal 0068 Part B). */}
       <div className="pointer-events-none absolute inset-0 mt-grid opacity-[0.35]" />
       <div
         className="pointer-events-none absolute inset-0"
         style={{ background: "radial-gradient(120% 60% at 50% -10%, rgba(56,189,248,.13), transparent 60%)" }}
       />
-      <div className="pointer-events-none absolute inset-0 overflow-hidden opacity-[0.04]">
-        <div className="h-1/3 w-full bg-accent" style={{ animation: "mt-scan 7s linear infinite" }} />
-      </div>
       <div className="relative flex min-h-full flex-col items-center justify-center px-5 py-10">
         {children}
       </div>
@@ -93,7 +98,7 @@ function Backdrop({ children }: { children: React.ReactNode }) {
 }
 
 // A terminal-window card: a chrome bar with traffic-light dots + a path crumb and
-// blinking cursor, then the body.
+// a (steady — see ensureStyle) cursor block, then the body.
 function Window({
   path,
   children,
@@ -1038,11 +1043,12 @@ function TerminalClientsCard() {
   const [tokens, setTokens] = useState<ClientTokenInfo[] | null>(null);
 
   const reload = () => listClientTokens().then(setTokens).catch(() => setTokens([]));
-  useEffect(() => {
-    reload();
-    const t = setInterval(reload, 8000);
-    return () => clearInterval(t);
-  }, []);
+  // The first load always runs; the recurring poll only once we know there IS a
+  // card to keep fresh. Before proposal 0068 the interval was registered above
+  // the `if (!tokens?.length) return null` guard, so a user with no terminal
+  // clients polled every 8s for a card that rendered nothing. Paused while the
+  // tab is hidden, refetched on return.
+  usePoll(reload, 8000, { immediate: true, enabled: !!tokens?.length });
 
   if (!tokens?.length) return null;
 
@@ -1099,11 +1105,9 @@ function SharedCard() {
     listOutbox().then(setOutbox).catch(() => setOutbox([]));
     listReceivedShares().then(setReceived).catch(() => setReceived([]));
   };
-  useEffect(() => {
-    reload();
-    const t = setInterval(reload, 8000);
-    return () => clearInterval(t);
-  }, []);
+  // 8s while visible (the cadence proposals 0041/0065 specify), paused while
+  // hidden with a refetch on return — proposal 0068 Part C.
+  usePoll(reload, 8000, { immediate: true });
 
   // Only the live offers/grants are actionable; terminal rows are dropped.
   // "invited" (proposal 0056 Part C) = an email invite awaiting signup.
@@ -1434,12 +1438,7 @@ function TeamCard({ me, onChanged }: { me: MeInfo; onChanged?: () => void }) {
       .then(setInbox)
       .catch(() => {});
   };
-  useEffect(() => {
-    reload();
-    const t = setInterval(reload, 8000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  usePoll(reload, 8000, { immediate: true });
 
   // Accept/decline a pending org invite. A 402 (team out of seats) or 409
   // (already in a team) surfaces the server's message inline.
@@ -2022,9 +2021,8 @@ export function Dashboard({
       firstLoad.current = false;
       reload();
     }
-    const t = setInterval(reload, 8000); // live online status
-    return () => clearInterval(t);
   }, []);
+  usePoll(reload, 8000); // live online status; paused while hidden (0068 C)
 
   return (
     <Backdrop>

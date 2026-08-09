@@ -50,6 +50,21 @@ palette to switch arrangements, and each pane is a full live terminal.
 
 ![Three live panes with the layout palette open](../img/web-grid.png "Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.")
 
+### Searching terminal output
+
+`Ctrl+B /` opens a find bar over the focused pane: type to search that
+session's scrollback, **Enter** / **Shift+Enter** for next / previous,
+**Esc** to close and hand the keyboard back to the terminal. On a phone, the
+magnifier button in the header does the same thing. In the file editor, the
+agent column's magnifier searches the mirrored session.
+
+Use this instead of the browser's own Find for terminal output: cc-screen
+draws terminals on the GPU, so `Cmd/Ctrl+F` — which still works for the rest
+of the page — can't see the characters. And a detail people notice: the
+terminal cursor doesn't blink. That's deliberate; a blinking caret repaints
+the page forever and costs real battery, and it was never part of what the
+remote agent sends.
+
 ## Files: browse, edit, cowork
 
 Every machine gets a built-in file browser and editor, confined to that

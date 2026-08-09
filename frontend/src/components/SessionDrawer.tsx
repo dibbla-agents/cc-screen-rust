@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type MachineInfo, type MePlan, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedEntry, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
 import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import NotificationsButton from "./NotificationsButton";
+import { useOpenOrClosing } from "../useOpenOrClosing";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
 import ToastsButton from "./ToastsButton";
 import CreateSession from "./CreateSession";
@@ -173,7 +174,7 @@ const META_TIER = 0; // headline, detail, preview, tool, machine
 // ranked by a fuzzy score. ⌃B → type → ⏎ switches, starts, or re-layouts. On a
 // phone it's a full-screen takeover; on desktop a left slide-in over the active
 // terminal (see `sidebar`), so the width-locked PTY is never resized.
-export default function SessionDrawer({
+function SessionDrawer({
   open,
   embedded = false,
   sidebar = false,
@@ -542,6 +543,12 @@ export default function SessionDrawer({
   // /pane variants fill their parent, so they take no inline width.
   const rootStyle = sidebar ? { width: sidebarWidth } : undefined;
 
+  // Rows render while open, and for the length of the close transition. In the
+  // `pane` variant (proposal 0026) the drawer is permanently open, so this is
+  // always true there. NB `sidebarWidth` is derived from the session data, not
+  // from the rendered rows, so the closed width is unaffected.
+  const body = useOpenOrClosing(open, 200);
+
   // ── Create mode: the in-sidebar search-first create flow (proposal 0016). ──
   if (mode === "create") {
     return (
@@ -699,6 +706,7 @@ export default function SessionDrawer({
             itemRefs.current[i] = el;
           }}
           className={`group flex items-center rounded-md transition-colors ${rowState}`}
+          data-session-row=""
           // Per-session mark (proposal 0029): a thin left colour spine via an
           // inset box-shadow (no layout shift), so a marked session is scannable
           // in the list. Unmarked rows render exactly as before.
@@ -931,7 +939,9 @@ export default function SessionDrawer({
   let lastMachine: string | null = null;
 
   return (
-    <div className={rootClass} style={rootStyle} aria-hidden={sidebar && !open}>
+    // data-drawer marks the switcher root for the smoke suite's "a closed drawer
+    // renders no session rows" assertion (proposal 0068 Part F).
+    <div className={rootClass} style={rootStyle} aria-hidden={sidebar && !open} data-drawer={open ? "open" : "closed"}>
       {/* Header: title + count, then the keyboard hint and icon chrome. */}
       <div className="flex items-center gap-2 border-b border-edge/80 px-3 py-2.5">
         <span className="text-[13px] font-semibold tracking-wide text-slate-100">Sessions</span>
@@ -989,13 +999,19 @@ export default function SessionDrawer({
       <div className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1.5">
         {error && <div className="px-2 py-2 text-[12px] text-red-400">{error}</div>}
 
-        {view.length === 0 && filtering && (
+        {body && view.length === 0 && filtering && (
           <div className="px-3 py-8 text-center text-[12px] text-slate-600">
             No matches for “{q}”.
           </div>
         )}
 
-        {view.map((it, i) => {
+        {/* `body` gates the rows only — the root, its 200ms slide and the header
+            (NotificationsButton, which probes push permission on mount) stay
+            mounted. A closed drawer therefore renders zero session rows instead
+            of a full list sitting behind a `-translate-x-full`, which is what
+            kept a status dot per running session live off-screen
+            (proposal 0068 Part B). */}
+        {body && view.map((it, i) => {
           if (it.kind !== "session") {
             // A divider between the action block and the session rows in the
             // resting (unfiltered) list, mirroring today's layout.
@@ -1087,3 +1103,8 @@ export default function SessionDrawer({
     </div>
   );
 }
+
+// Memoized: the 4s session poll re-renders App; without this the whole drawer
+// (every session row) re-renders with it even when nothing changed
+// (proposal 0068 Part C).
+export default memo(SessionDrawer);

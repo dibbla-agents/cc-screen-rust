@@ -107,6 +107,19 @@ you an app icon, full-screen terminals sized to the phone, the file
 browser/editor, and push notifications when an agent finishes its turn (on
 iOS, notifications require the home-screen install).
 
+## Does an open cc-screen tab drain my battery?
+
+It shouldn't. A tab sitting there with terminals open and nothing happening
+is designed to be **quiescent**: no blinking cursor, no perpetual background
+animation, and terminals drawn on the GPU. Polling slows to once a minute
+when the tab is hidden (just enough to keep the tab title and app badge
+honest) and picks straight back up when you return.
+
+If a tab *is* burning CPU, the usual suspects are an agent producing output
+non-stop (that's real work, not waste) or an extension injecting animation
+into the page. Chrome's Task Manager (Window ▸ Task Manager) shows the tab's
+own CPU; an idle cc-screen tab should sit near zero.
+
 ## Why does Codex mention X11 when I paste an image?
 
 Your agent predates assistant-aware image delivery: it asked Codex to read

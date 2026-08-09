@@ -2078,6 +2078,10 @@ function AgentColumn({
 }) {
   const dot =
     conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
+  // Find-in-mirror (proposal 0068 Part E). Terminal output is pixels under the
+  // WebGL renderer, so browser find-in-page can't reach it; bumping this opens
+  // the mirror's own find bar.
+  const [findSignal, setFindSignal] = useState(0);
   return (
     <div className={`flex h-full flex-col border-l bg-bar ${control ? "border-accent" : "border-edge"}`}>
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-edge px-2.5">
@@ -2088,6 +2092,14 @@ function AgentColumn({
           <>
             <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
             <span className="min-w-0 flex-1 truncate text-xs text-slate-300">{session}</span>
+            <button
+              onClick={() => setFindSignal((n) => n + 1)}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 ring-1 ring-inset ring-edge hover:bg-panel hover:text-slate-200"
+              title="Find in the agent output"
+              aria-label="Find in the agent output"
+            >
+              <SearchIcon className="h-3.5 w-3.5" />
+            </button>
             <button
               onClick={onToggleControl}
               className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[11px] font-medium ring-1 ring-inset transition-colors ${
@@ -2127,6 +2139,7 @@ function AgentColumn({
             maxFontSize={fontSize}
             control={control}
             recalibrateSignal={recalibrate}
+            searchSignal={findSignal}
             onState={onConn}
           />
         ) : (
