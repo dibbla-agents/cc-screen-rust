@@ -158,6 +158,7 @@ mod tests {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
         }
     }
 

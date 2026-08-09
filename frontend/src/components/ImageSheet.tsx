@@ -1,10 +1,13 @@
 import { useRef, useState } from "react";
+import { imageSendError } from "../api";
 import { toPng } from "../util";
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  onSend: (png: Blob) => void;
+  // Awaited: resolves once the agent staged + injected the image (HTTP 204),
+  // rejects on failure so the sheet can keep the preview for a retry (0066).
+  onSend: (png: Blob) => Promise<void>;
 }
 
 // The async Clipboard API (navigator.clipboard.read) is gated to *secure
@@ -26,12 +29,14 @@ const isMac =
 const pasteHint = isMac ? "⌘V" : "⌃V";
 
 // Pick a screenshot (Photos / Files / Camera) or read it from the phone
-// clipboard, preview it, then inject it into Claude Code as a paste.
+// clipboard, preview it, then send it to the active session — the agent
+// delivers it using that tool's own paste contract (0066).
 export default function ImageSheet({ open, onClose, onSend }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [png, setPng] = useState<Blob | null>(null);
   const [url, setUrl] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   if (!open) return null;
@@ -81,10 +86,20 @@ export default function ImageSheet({ open, onClose, onSend }: Props) {
     setErr(null);
     onClose();
   };
-  const send = () => {
-    if (png) {
-      onSend(png);
+  // Close only after the agent confirmed staging + injection (204). On
+  // failure the preview stays put — sending state doubles as the double-tap
+  // guard — so a retry is one tap, not a reselect (0066).
+  const send = async () => {
+    if (!png || sending) return;
+    setErr(null);
+    setSending(true);
+    try {
+      await onSend(png);
       close();
+    } catch (e) {
+      setErr(imageSendError(e));
+    } finally {
+      setSending(false);
     }
   };
 
@@ -158,10 +173,10 @@ export default function ImageSheet({ open, onClose, onSend }: Props) {
           )}
           <button
             onClick={send}
-            disabled={!png || busy}
+            disabled={!png || busy || sending}
             className="flex-1 rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-bar active:opacity-80 disabled:opacity-40"
           >
-            {busy ? "…" : "Paste into terminal"}
+            {sending ? "Sending…" : busy ? "…" : "Send to session"}
           </button>
         </div>
       </div>

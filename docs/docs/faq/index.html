@@ -167,6 +167,12 @@ the current member count, the team just can&#39;t grow until it&#39;s back under
 you an app icon, full-screen terminals sized to the phone, the file
 browser/editor, and push notifications when an agent finishes its turn (on
 iOS, notifications require the home-screen install).</p>
+<h2 id="why-does-codex-mention-x11-when-i-paste-an-image">Why does Codex mention X11 when I paste an image?</h2>
+<p>Your agent predates assistant-aware image delivery: it asked Codex to read
+the machine&#39;s X11/Wayland clipboard, which headless boxes don&#39;t have. Update
+the agent on that machine and pasted images reach Codex as a staged local
+file instead — no display server, no Xvfb. Details in
+<a href="../troubleshooting/#codex-says-clipboard-unavailable-an-x11-error-on-image-paste">Troubleshooting</a>.</p>
 <h2 id="what-are-the-codes-like-wdjb-mjht">What are the codes like <code>WDJB-MJHT</code>?</h2>
 <p>One-time machine-activation codes. The installer prints one; you approve it
 at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> while
@@ -181,7 +187,7 @@ moved to chords — <code>Ctrl-N</code> new, <code>Ctrl-X</code> kill, <code>Ctr
 The same applies inside the grid&#39;s action menu (<code>Ctrl-A d</code>): <code>j</code>/<code>k</code> now type
 into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
-<a href="tui.md">the ccs terminal client</a> for the full map.</p>
+<a href="../tui/">the ccs terminal client</a> for the full map.</p>
 <h2 id="is-cc-screen-open-source-what39s-it-built-with">Is cc-screen open source? What&#39;s it built with?</h2>
 <p>The code lives at
 <a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.

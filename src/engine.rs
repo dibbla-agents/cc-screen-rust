@@ -176,6 +176,10 @@ pub struct Session {
     pub created: u64,
     /// Whether this session launched YOLO — reported to clients as a badge.
     pub skip_permissions: bool,
+    /// How a pasted clipboard image is delivered to this PTY (proposal 0066).
+    /// Copied immutably from the resolved tool at spawn/restore; never client
+    /// input. See `tools::ImagePasteStrategy` and `clip.rs`.
+    pub image_paste: tools::ImagePasteStrategy,
     /// Operator-chosen mark colour (proposal 0029): a curated palette token, or
     /// `None` when unmarked. Mirrored on the live session for a lowest-latency
     /// read in `session_list`; the authoritative copy persists in the manifest.
@@ -291,6 +295,7 @@ impl Session {
             extra_dirs,
             created: now,
             skip_permissions,
+            image_paste: tool.image_paste,
             color: Mutex::new(None),
             label: Mutex::new(None),
             pid,
@@ -311,6 +316,15 @@ impl Session {
     }
 
     pub fn write_input(&self, data: &[u8]) {
+        let _ = self.write_input_checked(data);
+    }
+
+    /// Fallible input write (0066): returns how many bytes actually reached
+    /// the PTY writer, plus the error that stopped it (if any). `written == 0`
+    /// with an error is a *proven* zero-byte failure — the only case a caller
+    /// may treat as "the assistant saw nothing" and roll back; a partial count
+    /// is ambiguous delivery.
+    pub fn write_input_checked(&self, data: &[u8]) -> (usize, Option<std::io::Error>) {
         if !data.is_empty() {
             if let Ok(mut st) = self.state.lock() {
                 let now = now_secs();
@@ -335,9 +349,23 @@ impl Session {
                 }
             }
         }
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(data);
-            let _ = w.flush();
+        let Ok(mut w) = self.writer.lock() else {
+            return (0, Some(std::io::Error::other("writer poisoned")));
+        };
+        let mut written = 0usize;
+        while written < data.len() {
+            match w.write(&data[written..]) {
+                Ok(0) => {
+                    return (written, Some(std::io::ErrorKind::WriteZero.into()));
+                }
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return (written, Some(e)),
+            }
+        }
+        match w.flush() {
+            Ok(()) => (written, None),
+            Err(e) => (written, Some(e)),
         }
     }
 
@@ -710,6 +738,10 @@ pub struct Inner {
     /// `/api/session/root` so a direct client can name the box without a hub.
     pub machine_id: String,
     pub clip: ClipStore,
+    /// Durable per-session image attachments for path-paste assistants
+    /// (proposal 0066; Codex). Opened against the config dir at startup so GC
+    /// + quota reconstruction happen before any paste is accepted.
+    pub attachments: crate::clip_attachment::AttachmentStore,
     pub watcher: crate::watch::Watcher,
     /// Web Push: VAPID keys + device subscriptions + the "agent finished" sender.
     pub push: crate::push::Push,
@@ -738,6 +770,12 @@ impl AppState {
         auth: crate::auth::Auth,
         origin: cc_screen_auth::OriginPolicy,
     ) -> AppState {
+        // Startup GC + quota reconstruction for durable image attachments
+        // (0066): a directory survives iff a manifest record claims it (the
+        // registry is empty this early, so the manifest IS the claim set).
+        let claimed: Vec<String> =
+            manifest::entries(&config_dir).into_iter().map(|e| e.session).collect();
+        let attachments = crate::clip_attachment::AttachmentStore::open(&config_dir, &claimed);
         AppState {
             inner: Arc::new(Inner {
                 tools,
@@ -753,6 +791,7 @@ impl AppState {
                 home,
                 machine_id,
                 clip: ClipStore::default(),
+                attachments,
                 auth,
                 origin,
                 login_throttle: cc_screen_auth::LoginThrottle::new(),
@@ -883,6 +922,10 @@ impl AppState {
             let restarting = inner.restarting.lock().unwrap().remove(&key);
             if matches!(status, Ok(s) if s.success()) && !restarting {
                 manifest::forget(&inner.config_dir, &key);
+                // Permanent goodbye → its durable image attachments go too
+                // (0066). A restart/resume stop keeps them: a Codex draft or
+                // transcript may still reference the staged paths.
+                inner.attachments.purge_session(&key);
             }
         });
         Ok(full)
@@ -1190,6 +1233,7 @@ mod tests {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
         }
     }
 
@@ -1756,6 +1800,7 @@ mod tests {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
         };
         // env_path = the empty tmp dir → `ghost-cli` can't resolve.
         let state = AppState::new(

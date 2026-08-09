@@ -921,9 +921,11 @@ export async function clearHistory(session: string, machine?: string): Promise<v
   if (!r.ok && r.status !== 204) throw new Error(`clear-history: ${r.status}`);
 }
 
-// sendImage stages a PNG as the clipboard for a session and triggers Claude
-// Code to paste it (the server sends the paste key; the xclip/wl-paste shim
-// then fetches this image). Used for pasting phone screenshots.
+// sendImage stages a PNG on the owning agent, which delivers it to the
+// session's assistant using that tool's own paste contract (server-side
+// dispatch — Claude reads it via the clipboard shim, Codex gets a staged file
+// path pasted; proposal 0066). A 204 means staged + injected, not that the
+// assistant has parsed it. Used for pasting phone screenshots.
 export async function sendImage(session: string, png: Blob, machine?: string): Promise<void> {
   const r = await fetch(
     withMachine(`/api/clip?session=${encodeURIComponent(session)}`, machine),
@@ -933,7 +935,28 @@ export async function sendImage(session: string, png: Blob, machine?: string): P
       body: png,
     }
   );
-  if (!r.ok && r.status !== 204) throw new Error(`clip: ${r.status}`);
+  if (!r.ok && r.status !== 204) {
+    const e = new Error(`clip: ${r.status}`) as Error & { status?: number };
+    e.status = r.status;
+    throw e;
+  }
+}
+
+// Short actionable message for a failed image send; other statuses stay generic.
+export function imageSendError(err: unknown): string {
+  const status = (err as { status?: number } | null)?.status;
+  switch (status) {
+    case 413:
+      return "Image too large — try a smaller screenshot.";
+    case 422:
+      return "That image couldn't be read — try re-copying it.";
+    case 503:
+      return "The session isn't accepting input — is it still running?";
+    case 507:
+      return "Image storage is full for this session — clean up old sessions and retry.";
+    default:
+      return "Image send failed — try again.";
+  }
 }
 
 // A favourite is a saved prompt, stored server-side (durable + shared across

@@ -261,6 +261,23 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   hub-only agent has no local HTTP for the shim to read back — the file closes
   that hop. Single source of truth is the one script — don't fork per-name copies.
   See `cc-screen-saas` proposal 0007.
+- **Assistant-aware image delivery (0066).** The 0007 shim contract is now the
+  `ClipboardProbe` arm of a per-tool `ImagePasteStrategy` (`src/tools.rs`,
+  copied immutably onto `Session` at spawn — server-owned, never client
+  input). **Codex** never runs the shims — it opens the X11/Wayland clipboard
+  natively, absent on a headless box — so its strategy is
+  `BracketedImagePath`: `clip_put` stages the PNG as a unique private file in
+  the durable attachment store (`src/clip_attachment.rs`,
+  `~/.config/cc-screen-rust/clip-attachments/<session>/`, 0700/0600, quotas
+  64 files / 256 MiB per session / 1 GiB per agent → `507`) and
+  bracketed-pastes its shell-escaped absolute path — **no Enter, no Ctrl-V**;
+  Codex recognizes a pasted readable image path and attaches it. Attachments
+  are *durable*: they survive restart/resume (a draft/transcript may still
+  reference the path) and are removed only on permanent delete / clean
+  non-restart exit / startup GC of unclaimed dirs. Status contract: `422` bad
+  PNG, `507` quota, `503` PTY write failed (rollback only on a proven
+  zero-byte write). No hub/wire change — the dispatch is agent-local. See
+  `cc-screen-saas` proposal 0066.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

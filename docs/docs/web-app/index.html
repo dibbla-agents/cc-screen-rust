@@ -133,9 +133,13 @@ plan or review docs agents produce.</p>
 <p><img src="../img/mobile-editor.png" alt="The editor on a phone" loading="lazy" /></p>
 <ul>
 <li><strong>Uploads:</strong> drop files (up to 500 MiB) onto a machine from the browser.</li>
-<li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude
-session — cc-screen stages it on the machine so the CLI can read it, as if
-you&#39;d pasted locally.</li>
+<li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude or
+Codex session — it routes to the active session on whichever machine owns
+it. cc-screen stages the image on that machine and delivers it the way that
+CLI expects: Claude reads it as a local clipboard paste; Codex gets the
+staged file attached directly (the file is kept machine-locally until the
+session is deleted, so it survives drafts and resumes). No X11 or desktop
+environment is needed on the machine.</li>
 <li><strong>Downloads:</strong> pull any file back out, PDFs render in-app.</li>
 </ul>
 <h2 id="notifications">Notifications</h2>

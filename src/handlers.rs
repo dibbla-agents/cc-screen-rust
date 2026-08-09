@@ -251,8 +251,9 @@ pub async fn delete_session(State(app): State<AppState>, Json(req): Json<DeleteR
         .get(&req.session)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown session"))?;
     // The user is ending it on purpose — drop it from the restore manifest so a
-    // later restore doesn't resurrect it.
+    // later restore doesn't resurrect it, along with its image attachments.
     crate::manifest::forget(&app.inner.config_dir, &req.session);
+    app.inner.attachments.purge_session(&req.session);
     match req.mode.as_str() {
         "exit" | "soft" => {
             // Inject /exit; the child exits asynchronously, so the client polls
@@ -735,6 +736,7 @@ mod tests {
             yolo_flag: None,
             install_hint: None,
             update_cmd: None,
+            image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
         }
     }
 

@@ -159,6 +159,14 @@ CLIs first (a failed update leaves the machine untouched), then gracefully
 restarts the sessions that use them, and your panes re-attach under the same
 names. On the box: <code>cc-screen-rust doctor --update</code> (updates the CLIs only,
 restarts nothing).</p>
+<h2 id="codex-says-clipboard-unavailable-an-x11-error-on-image-paste">Codex says &quot;clipboard unavailable&quot; / an X11 error on image paste</h2>
+<p>Older cc-screen agents delivered every pasted image the same way, and Codex
+tried to read it from the machine&#39;s X11/Wayland clipboard — which a headless
+box doesn&#39;t have, so the paste failed with a clipboard/X11 connection error.
+Current agents deliver images to Codex as a staged local file instead, so
+<strong>update the agent on that machine</strong> (the machine dashboard row → Update, or
+re-run the install one-liner) and the paste works with no display server.
+You do <strong>not</strong> need to install Xvfb or any X11 packages.</p>
 <h2 id="notifications-don39t-arrive">Notifications don&#39;t arrive</h2>
 <ul>
 <li>On iOS, Web Push only works for a PWA <strong>installed to the home screen</strong> —

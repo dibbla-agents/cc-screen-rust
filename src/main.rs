@@ -10,6 +10,7 @@ mod attach;
 mod auth;
 mod bulk;
 mod clip;
+mod clip_attachment;
 mod config;
 mod confine;
 mod dirsearch;
