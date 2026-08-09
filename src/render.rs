@@ -227,8 +227,21 @@ fn find_alt_enter(carry: &[u8], rest: &[u8]) -> Option<(usize, usize)> {
     find(rest, ALT_ENTER).map(|i| (i, (i + ALT_ENTER.len()).min(rest.len())))
 }
 
+/// Substring search, ESC-first: this runs on every PTY chunk of every session
+/// that is *not* already fullscreen, so the miss case is one byte comparison per
+/// input byte, not `needle.len()`.
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
+    let last = hay.len().checked_sub(needle.len())?;
+    let mut i = 0;
+    while i <= last {
+        let off = hay[i..=last].iter().position(|&b| b == needle[0])?;
+        let s = i + off;
+        if &hay[s..s + needle.len()] == needle {
+            return Some(s);
+        }
+        i = s + 1;
+    }
+    None
 }
 
 /// Serialize a whole grid (scrollback + screen) oldest-first, one physical line
@@ -592,6 +605,15 @@ mod tests {
         let s = String::from_utf8_lossy(&e.snapshot()).to_string();
         let enter = s.find("\x1b[?1049h").expect("enters the alt screen");
         assert!(s.find("kept").unwrap() < enter, "history still lands before the swap");
+    }
+
+    #[test]
+    fn find_matches_like_a_substring_search() {
+        assert_eq!(find(b"abcabd", b"abd"), Some(3)); // false start, then the real one
+        assert_eq!(find(b"abc", b"abc"), Some(0));
+        assert_eq!(find(b"ab", b"abc"), None); // needle longer than the haystack
+        assert_eq!(find(b"aaab", b"aab"), Some(1));
+        assert_eq!(find(b"xxxx", b"y"), None);
     }
 
     #[test]
