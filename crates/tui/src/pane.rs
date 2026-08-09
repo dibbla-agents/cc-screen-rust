@@ -148,6 +148,32 @@ impl Pane {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// The child asked for mouse reporting (DECSET 1000/1002/1003) — it wants to
+    /// own the wheel itself (Claude's fullscreen renderer, `htop`, `lazygit`).
+    /// Proposal 0069 Part A: we forward wheel events instead of scrolling locally.
+    pub fn mouse_mode(&self) -> bool {
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// The child enabled SGR (1006) extended mouse encoding — pick `CSI < …M`
+    /// over the legacy X10 `CSI M` form (which caps coordinates at 223).
+    pub fn sgr_mouse(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
+    }
+
+    /// The child is in the alternate screen (DECSET 1049). alacritty builds that
+    /// grid with **zero** scrollback, so `scroll()` is pinned at offset 0 there —
+    /// every scroll affordance has to route around it (0069 Parts B and D).
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// xterm "alternate scroll" (DECSET 1007, default-on): in the alt screen a
+    /// wheel step means arrow keys. Apps that own the wheel differently reset it.
+    pub fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
     /// Resize the emulator and tell the server. No-op if unchanged.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let (cols, rows) = (cols.max(1), rows.max(1));
@@ -361,6 +387,35 @@ mod tests {
         assert_eq!(top, p.scroll_offset(), "offset is stable once clamped at the top");
         let view = render(&p, 20, 5);
         assert!(view.contains("LINE_0"), "the top view shows the oldest line: {view:?}");
+    }
+
+    /// 0069: the alternate screen has no history by construction, so the wheel's
+    /// local path is a permanent no-op there — which is exactly why `handle_mouse`
+    /// has to route around it. The mode flags it routes on are exposed here.
+    #[tokio::test]
+    async fn alt_screen_pins_scroll_and_exposes_modes() {
+        let mut p = pane(40, 5);
+        for i in 0..40 {
+            p.process(format!("L{i}\r\n").as_bytes());
+        }
+        assert!(!p.alt_screen() && !p.mouse_mode());
+        assert!(p.alternate_scroll(), "DECSET 1007 is default-on");
+        p.scroll(10);
+        assert_eq!(p.scroll_offset(), 10, "primary screen scrolls back");
+
+        // The child goes fullscreen and grabs the mouse (Claude ≥ 2.1.89).
+        p.process(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h");
+        assert!(p.alt_screen() && p.mouse_mode() && p.sgr_mouse());
+        assert_eq!(p.scroll_offset(), 0, "entering the alt screen lands live");
+        p.scroll(10);
+        assert_eq!(p.scroll_offset(), 0, "the alt grid has zero history — pinned at 0");
+
+        // …and back out: the primary grid (and its history) is intact.
+        p.process(b"\x1b[?1002l\x1b[?1006l\x1b[?1049l");
+        assert!(!p.alt_screen() && !p.mouse_mode() && !p.sgr_mouse());
+        p.scroll_to_live();
+        p.scroll(10);
+        assert_eq!(p.scroll_offset(), 10, "primary history survived the round trip");
     }
 
     #[tokio::test]

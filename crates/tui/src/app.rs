@@ -29,6 +29,10 @@ use crate::ui;
 /// auto-dismisses it. A fresh edge for the same session resets the clock.
 const TOAST_TTL: Duration = Duration::from_secs(8);
 
+/// How long a transient statusbar hint (0069 Part D) stays up. Short — it's a
+/// "that key did nothing, here's why" note, not a notification.
+const HINT_TTL: Duration = Duration::from_secs(4);
+
 /// Current Unix time in seconds (0 on the impossible pre-epoch clock), for the
 /// ready-edge gates. Kept tiny so the detector itself stays pure + testable.
 fn now_secs() -> u64 {
@@ -755,6 +759,11 @@ pub struct App {
     /// (§5). Drives the foreground/background split; defaults true so terminals
     /// without focus reporting always take the (harmless) statusbar toast.
     is_focused: bool,
+
+    /// A transient grid statusbar note ("that key can't do anything here, and
+    /// why") with its expiry — 0069 Part D's refused-`^A [` hint. Rides the
+    /// existing 1 s ticker; the ready-toast outranks it when both are up.
+    hint: Option<(String, Instant)>,
 }
 
 /// Which real-terminal side effects `App::run_with` starts. Production passes the
@@ -810,6 +819,7 @@ impl App {
             toast: Vec::new(),
             toast_until: None,
             is_focused: true,
+            hint: None,
         }
     }
 
@@ -1268,6 +1278,13 @@ impl App {
         }
     }
 
+    /// The pane's content rect (inside the box border), for pane-local mouse
+    /// coordinates. Falls back to the whole body if the index is out of range.
+    fn box_rect(&self, idx: usize) -> Rect {
+        let body = self.body_rect();
+        layout::inner_rects(self.layout, body).get(idx).copied().unwrap_or(body)
+    }
+
     fn handle_mouse(&mut self, me: crossterm::event::MouseEvent) {
         use crossterm::event::MouseEventKind::{Down, ScrollDown, ScrollUp};
         match self.mode {
@@ -1279,9 +1296,10 @@ impl App {
                     // Scroll the box under the cursor (fall back to the focused one).
                     ScrollUp | ScrollDown => {
                         let idx = self.box_at(me.column, me.row).unwrap_or(self.active);
+                        let rect = self.box_rect(idx);
+                        let up = matches!(me.kind, ScrollUp);
                         if let Some(p) = self.panes.get_mut(idx).and_then(|x| x.as_mut()) {
-                            let d = if matches!(me.kind, ScrollUp) { MOUSE_STEP } else { -MOUSE_STEP };
-                            p.scroll(d);
+                            wheel(p, up, rect, me.column, me.row, me.modifiers);
                         }
                     }
                     // Click focuses the box; clicking an empty one opens the menu.
@@ -2079,10 +2097,32 @@ impl App {
     // ── keyboard scrollback (0059 C3) ────────────────────────────────────────
     /// Enter tmux-shaped scroll mode on the focused pane (`^A [`). A no-op when
     /// the focused box is empty — there's nothing to scroll.
+    ///
+    /// Refused when the child is in the alternate screen (0069 Part D): that grid
+    /// has no history at all, so the mode would pin at offset 0 *and* swallow the
+    /// very keys (`PgUp`/`j`/`k`) the child would have scrolled on. Say so and
+    /// leave the keys flowing — this deliberately amends [0059] C3's "every mouse
+    /// affordance has a keyboard path": here the keyboard path is the child's own.
     fn enter_scroll_mode(&mut self) {
-        if self.panes.get(self.active).and_then(|x| x.as_ref()).is_some() {
-            self.scroll_mode = true;
+        let Some(p) = self.panes.get(self.active).and_then(|x| x.as_ref()) else {
+            return;
+        };
+        if p.alt_screen() {
+            self.set_hint("alt screen: no scrollback (app controls its own view)");
+            return;
         }
+        self.scroll_mode = true;
+    }
+
+    /// Flash a transient note in the grid statusbar (0069 Part D).
+    fn set_hint(&mut self, msg: &str) {
+        self.hint = Some((msg.to_string(), Instant::now() + HINT_TTL));
+    }
+
+    /// The hint text while it is still live (it simply stops rendering once the
+    /// TTL passes — the next redraw the 1 s ticker forces takes it off screen).
+    fn hint_text(&self) -> Option<&str> {
+        self.hint.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(t, _)| t.as_str())
     }
 
     /// Route a key while the focused pane is in keyboard-scroll mode. tmux-shaped:
@@ -2347,6 +2387,7 @@ impl App {
                     self.prefix_armed,
                     self.scroll_mode,
                     self.toast_text().as_deref(),
+                    self.hint_text(),
                 );
                 match &self.grid_overlay {
                     GridOverlay::None => {}
@@ -2603,6 +2644,39 @@ impl App {
             cand.sort_by(|a, b| b.0.cmp(&a.0)); // stable: ties keep resting order
             cand.into_iter().map(|(_, r)| r).collect()
         }
+    }
+}
+
+/// One wheel step over `p`, routed by what the child is doing (proposal 0069).
+/// Precedence, highest first:
+///
+/// 1. **already scrolled back locally** — the wheel keeps walking the pane's own
+///    history until it returns to live, whatever mode the child is in;
+/// 2. **the child captures the mouse** (0069 A) — forward a mouse report, so
+///    Claude's fullscreen renderer / `htop` / `lazygit` scroll their own view;
+/// 3. **alt screen without mouse capture** (0069 B) — xterm "alternate scroll":
+///    `MOUSE_STEP` arrow keys, which is what `less` and `vim` navigate on;
+/// 4. **otherwise** — today's local scrollback, unchanged.
+///
+/// `rect` is the pane's content rect; the report carries **pane-local, 1-based**
+/// coordinates so the child places the wheel inside its own screen, not the grid's.
+fn wheel(p: &mut Pane, up: bool, rect: Rect, col: u16, row: u16, mods: KeyModifiers) {
+    let step = if up { MOUSE_STEP } else { -MOUSE_STEP };
+    if p.scroll_offset() > 0 {
+        p.scroll(step);
+    } else if p.mouse_mode() {
+        // Clamped into the rect: the wheel may land on the box border, which is
+        // ours, not the child's.
+        let c = col.saturating_sub(rect.x).min(rect.width.saturating_sub(1)) + 1;
+        let r = row.saturating_sub(rect.y).min(rect.height.saturating_sub(1)) + 1;
+        p.send_input(input::encode_wheel(up, c, r, mods, p.sgr_mouse()));
+    } else if p.alt_screen() && p.alternate_scroll() {
+        let key = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, KeyModifiers::NONE);
+        if let Some(one) = input::encode(key, p.application_cursor()) {
+            p.send_input(one.repeat(MOUSE_STEP as usize));
+        }
+    } else {
+        p.scroll(step);
     }
 }
 

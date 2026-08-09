@@ -32,6 +32,8 @@ pub fn render(
     prefix_armed: bool,
     scroll_mode: bool,
     toast: Option<&str>,
+    // A transient statusbar note (0069 Part D) — outranked by the ready-toast.
+    hint: Option<&str>,
 ) {
     let rows = RLayout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
     let body = rows[0];
@@ -45,7 +47,7 @@ pub fn render(
     let focused = panes.get(active).and_then(|p| p.as_ref());
     statusbar::render(
         f, rows[1], focused, sessions, layout, active, panes.len(), prefix_label, prefix_armed,
-        scroll_mode, toast,
+        scroll_mode, toast, hint,
     );
 }
 
@@ -134,7 +136,8 @@ mod tests {
     async fn quad_shows_titles_hints_and_bar() {
         let panes = vec![Some(dummy(1, "shell-a")), None, None, None];
         let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        t.draw(|f| render(f, Layout::Quad, &panes, &[], 0, "^A", false, false, None)).unwrap();
+        t.draw(|f| render(f, Layout::Quad, &panes, &[], 0, "^A", false, false, None, None))
+            .unwrap();
         let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("shell-a"), "filled box title: {s:?}");
         assert!(s.contains("for menu"), "empty box hint: {s:?}");

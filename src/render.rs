@@ -52,12 +52,26 @@ impl Dimensions for Size {
     }
 }
 
+/// DECSET 1049 — the child entering the alternate screen. The one sequence we
+/// have to see *coming*, because the primary screen is only readable while it is
+/// still the active grid (proposal 0069 Part C).
+const ALT_ENTER: &[u8] = b"\x1b[?1049h";
+
 /// A server-side terminal emulator fed by one session's PTY output.
 pub struct Emulator {
     term: Term<VoidListener>,
     parser: Processor,
     cols: u16,
     rows: u16,
+    /// The primary screen (history + screen), serialized at the instant the child
+    /// entered the alternate screen; `None` while the child is on the primary
+    /// screen. Attaching to a session that is *already* fullscreen replays this
+    /// before `?1049h`, so the pre-app scrollback lands in the client's primary
+    /// grid instead of the zero-history alt grid (0069 Part C).
+    alt_primary: Option<Vec<u8>>,
+    /// The tail of the byte stream (`ALT_ENTER.len() - 1` bytes), so a `?1049h`
+    /// split across PTY reads is still seen before it takes effect.
+    carry: Vec<u8>,
 }
 
 impl Emulator {
@@ -65,11 +79,34 @@ impl Emulator {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let cfg = Config { scrolling_history: HISTORY, ..Default::default() };
         let term = Term::new(cfg, &Size { cols: cols as usize, rows: rows as usize }, VoidListener);
-        Self { term, parser: Processor::new(), cols, rows }
+        Self { term, parser: Processor::new(), cols, rows, alt_primary: None, carry: Vec::new() }
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        // Feed the stream in one go — except when it takes the child into the
+        // alternate screen. alacritty keeps `inactive_grid` private, so once the
+        // swap has happened the primary screen is unreachable; we stop just short
+        // of the `?1049h`, serialize the primary grid, then let the swap through.
+        let mut rest = bytes;
+        while !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            let Some((cut, end)) = find_alt_enter(&self.carry, rest) else { break };
+            self.parser.advance(&mut self.term, &rest[..cut]);
+            let mut cache = Vec::with_capacity(8 * 1024);
+            emit_grid(&mut cache, self.term.grid());
+            self.alt_primary = Some(cache);
+            self.parser.advance(&mut self.term, &rest[cut..end]);
+            rest = &rest[end..];
+        }
+        self.parser.advance(&mut self.term, rest);
+        if !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            self.alt_primary = None; // back on the primary screen: the grid itself is the truth
+        }
+        // Keep the last few bytes so the next chunk can complete a split sequence.
+        let keep = ALT_ENTER.len() - 1;
+        self.carry.extend_from_slice(bytes);
+        if self.carry.len() > keep {
+            self.carry.drain(..self.carry.len() - keep);
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -137,19 +174,26 @@ impl Emulator {
         let mode = *self.term.mode();
         let mut out: Vec<u8> = Vec::with_capacity(8 * 1024);
         out.extend_from_slice(SNAPSHOT_RESET); // RIS — back to default modes/screen
-        emit_modes(&mut out, mode);
+
+        // Order matters when the child is fullscreen (0069 Part C): the primary
+        // screen has to be replayed BEFORE `?1049h`, or every row of it lands in
+        // the client's alt grid — which has no scrollback, so anything past one
+        // screen is lost the moment the app exits. Home the cursor after the swap
+        // so the alt viewport starts at the top of its (fresh) grid.
+        if mode.contains(TermMode::ALT_SCREEN) {
+            if let Some(primary) = &self.alt_primary {
+                out.extend_from_slice(primary);
+            }
+            emit_modes(&mut out, mode);
+            out.extend_from_slice(b"\x1b[H");
+        } else {
+            emit_modes(&mut out, mode);
+        }
 
         // Emit every grid line oldest-first, each on its own physical line. The
         // client lays them out at its own width (≥ PTY width via min-size, so no
         // rewrap), and the history lines scroll up into its scrollback.
-        let top = grid.topmost_line().0;
-        let bottom = grid.bottommost_line().0;
-        for (i, li) in (top..=bottom).enumerate() {
-            if i != 0 {
-                out.extend_from_slice(b"\r\n");
-            }
-            emit_row(&mut out, grid, Line(li), cols);
-        }
+        emit_grid(&mut out, grid);
 
         // Park the cursor where the agent has it (screen-relative; the agent's
         // next redraw re-anchors at home anyway).
@@ -161,6 +205,44 @@ impl Emulator {
             out.extend_from_slice(b"\x1b[?25l");
         }
         out
+    }
+}
+
+/// Locate the next `?1049h` in `rest`, treating `carry` (the tail of the bytes
+/// already fed to the parser) as its prefix so a sequence split across two PTY
+/// reads is still found. Returns `(cut, end)` in **`rest` coordinates**: feed
+/// `rest[..cut]`, take the primary-screen snapshot, then feed `rest[cut..end]` to
+/// perform the swap. A match that began in `carry` yields `cut == 0` — the grid
+/// is untouched by a half-parsed CSI, so that is still the right instant.
+fn find_alt_enter(carry: &[u8], rest: &[u8]) -> Option<(usize, usize)> {
+    if !carry.is_empty() {
+        let mut hay = carry.to_vec();
+        hay.extend_from_slice(&rest[..rest.len().min(ALT_ENTER.len())]);
+        if let Some(i) = find(&hay, ALT_ENTER) {
+            if i < carry.len() {
+                return Some((0, (i + ALT_ENTER.len() - carry.len()).min(rest.len())));
+            }
+        }
+    }
+    find(rest, ALT_ENTER).map(|i| (i, (i + ALT_ENTER.len()).min(rest.len())))
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Serialize a whole grid (scrollback + screen) oldest-first, one physical line
+/// per row. Shared by the snapshot and by Part C's primary-screen cache so both
+/// produce byte-identical replays.
+fn emit_grid(out: &mut Vec<u8>, grid: &Grid<Cell>) {
+    let cols = grid.columns();
+    let top = grid.topmost_line().0;
+    let bottom = grid.bottommost_line().0;
+    for (i, li) in (top..=bottom).enumerate() {
+        if i != 0 {
+            out.extend_from_slice(b"\r\n");
+        }
+        emit_row(out, grid, Line(li), cols);
     }
 }
 
@@ -450,6 +532,77 @@ mod tests {
         assert_eq!(bounded.lines().count(), 5, "bounded to 5 rows: {bounded:?}");
         assert!(bounded.contains("row49"), "keeps the most recent rows");
         assert!(!bounded.contains("row10"), "drops older rows");
+    }
+
+    /// 0069 Part C: attaching while the child is fullscreen must not feed the
+    /// pre-app scrollback into the client's alt grid (which has none) — the
+    /// primary screen is replayed first, `?1049h` comes after it.
+    #[test]
+    fn alt_screen_snapshot_replays_primary_before_entering() {
+        let mut e = Emulator::new(40, 5);
+        for i in 0..20 {
+            e.process(format!("SHELL_{i}\r\n").as_bytes());
+        }
+        e.process(b"\x1b[?1049h\x1b[?1006h"); // the app goes fullscreen
+        e.process(b"FULLSCREEN_APP");
+        let snap = e.snapshot();
+        let s = String::from_utf8_lossy(&snap);
+
+        let enter = s.find("\x1b[?1049h").expect("the snapshot enters the alt screen");
+        let old = s.find("SHELL_0").expect("pre-app history is in the snapshot");
+        let app = s.find("FULLSCREEN_APP").expect("the app's own screen is in the snapshot");
+        assert!(old < enter, "history must be replayed BEFORE ?1049h");
+        assert!(enter < app, "the app's screen belongs after ?1049h");
+        assert!(s.contains("SHELL_19"), "the whole primary screen is replayed");
+
+        // Replay it into a fresh emulator (what a client does), then leave the alt
+        // screen the way the app does on exit: the shell history is back.
+        let mut dst = Emulator::new(40, 5);
+        dst.process(&snap);
+        assert!(full_text(&dst).contains("FULLSCREEN_APP"), "alt view renders live");
+        dst.process(b"\x1b[?1049l");
+        let after = full_text(&dst);
+        assert!(after.contains("SHELL_0") && after.contains("SHELL_19"), "history survived:\n{after}");
+        assert!(!after.contains("FULLSCREEN_APP"), "the app's screen went with the alt grid");
+    }
+
+    /// The cache is taken at the moment of entry and dropped on exit — a plain
+    /// primary-screen session is byte-for-byte what it was before 0069.
+    #[test]
+    fn alt_primary_cache_is_dropped_on_exit() {
+        let mut e = Emulator::new(40, 5);
+        e.process(b"before\r\n\x1b[?1049happ");
+        assert!(e.alt_primary.is_some(), "cached on entry");
+        e.process(b"\x1b[?1049l");
+        assert!(e.alt_primary.is_none(), "dropped on exit");
+        let s = String::from_utf8_lossy(&e.snapshot()).to_string();
+        assert!(!s.contains("\x1b[?1049h"), "no alt mode left to re-assert");
+        assert_eq!(s.matches("before").count(), 1, "history replayed exactly once:\n{s:?}");
+    }
+
+    /// A `?1049h` split across two PTY reads still gets caught — the carry is
+    /// what makes the capture instant independent of chunk boundaries.
+    #[test]
+    fn alt_enter_split_across_chunks_still_caches() {
+        let mut e = Emulator::new(40, 5);
+        e.process(b"kept\r\n\x1b[?10");
+        assert!(e.alt_primary.is_none(), "not in the alt screen yet");
+        e.process(b"49h");
+        assert!(e.alt_primary.is_some(), "the split sequence was seen");
+        let s = String::from_utf8_lossy(&e.snapshot()).to_string();
+        let enter = s.find("\x1b[?1049h").expect("enters the alt screen");
+        assert!(s.find("kept").unwrap() < enter, "history still lands before the swap");
+    }
+
+    #[test]
+    fn find_alt_enter_coordinates() {
+        // Whole sequence inside the chunk.
+        assert_eq!(find_alt_enter(b"", b"ab\x1b[?1049hcd"), Some((2, 10)));
+        // Straddling the boundary: cut at 0, end just past the sequence's tail.
+        assert_eq!(find_alt_enter(b"\x1b[?1049", b"h!"), Some((0, 1)));
+        assert_eq!(find_alt_enter(b"x\x1b[?10", b"49h!"), Some((0, 3)));
+        // No match, and a near-miss (the exit sequence) must not fire.
+        assert_eq!(find_alt_enter(b"", b"\x1b[?1049l"), None);
     }
 
     #[test]

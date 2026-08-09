@@ -147,6 +147,17 @@ into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
 [the ccs terminal client](../tui/) for the full map.
 
+## Why does scrolling behave differently when an app like Claude or vim is running?
+
+Because the app has taken over the screen. Full-screen apps — Claude Code's
+fullscreen renderer, `vim`, `less`, `htop` — draw on the terminal's alternate
+screen, which keeps no scrollback of its own, so in `ccs` the wheel is handed
+to the app and *its* view scrolls instead of the pane's history. Back at a
+shell prompt the wheel scrolls the pane's own multi-thousand-line scrollback
+as usual. The rules are in [the ccs terminal client](../tui/#scrolling); if
+the wheel does nothing at all, see
+[Troubleshooting](../troubleshooting/#scrolling-does-nothing-in-a-claude-session).
+
 ## Is cc-screen open source? What's it built with?
 
 The code lives at

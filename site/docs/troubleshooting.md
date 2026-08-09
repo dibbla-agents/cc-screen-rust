@@ -119,6 +119,27 @@ You do **not** need to install Xvfb or any X11 packages.
 
 ![The notification bell in the switcher header](../img/mobile-notifications.png "The bell lives in the switcher header — it shows whether push is active and can send a test notification.")
 
+## Scrolling does nothing in a Claude session
+
+In a `ccs` pane, that's Claude Code's **fullscreen renderer** (Claude Code
+2.1.89 and newer, and the default for fresh installs): it draws on the
+terminal's alternate screen and owns the mouse itself, so the pane has no
+local scrollback there and older `ccs` builds swallowed the wheel instead of
+passing it on. **`ccs` 0.5.4 and newer forward the wheel to the app**, so it
+scrolls Claude's own view — `ccs update` is the fix. The same applies to any
+full-screen app (`htop`, `lazygit`, `less`, `vim`); see
+[the ccs terminal client](../tui/#scrolling) for the full rules.
+
+Stuck on an older client? Switch Claude back to its classic renderer, which
+prints into the normal screen and scrolls with the pane — inside Claude:
+
+```
+/tui default
+```
+
+(or `"tui": "default"` in `~/.claude/settings.json`). Launching it with
+`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` has the same effect.
+
 ## Ctrl+F doesn't find anything in a terminal
 
 It can't: terminals are drawn on the GPU, so the browser's Find sees no text

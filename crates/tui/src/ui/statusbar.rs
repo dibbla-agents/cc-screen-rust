@@ -39,6 +39,9 @@ pub fn render(
     // The ready-session toast (0018 §3); when present it takes the bar's
     // right-aligned segment in place of the key hints.
     toast: Option<&str>,
+    // A transient note (0069 Part D: `^A [` refused in the alt screen). Same
+    // segment as the toast, one rank below it — a ready session matters more.
+    hint: Option<&str>,
 ) {
     f.render_widget(Block::default().style(Style::default().bg(BAR_BG)), area);
 
@@ -68,6 +71,12 @@ pub fn render(
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ));
             }
+            // The child owns the whole screen (0069): its own view, no scrollback
+            // here, and the wheel goes to it — worth one glyph so the state is
+            // legible rather than surprising.
+            if p.alt_screen() {
+                left.push(Span::styled("  ⛶ app view", Style::default().fg(Color::DarkGray)));
+            }
         }
         None => {
             left.push(Span::styled(" empty box ", Style::default().fg(Color::Black).bg(Color::DarkGray)));
@@ -95,6 +104,11 @@ pub fn render(
         Some(t) => Line::from(Span::styled(
             t.to_string(),
             Style::default().fg(Color::Black).bg(TOAST_BG).add_modifier(Modifier::BOLD),
+        )),
+        // A hint is advice, not an event: plain yellow text, no toast chip.
+        None if hint.is_some() => Line::from(Span::styled(
+            format!("{}  ", hint.unwrap_or_default()),
+            Style::default().fg(Color::Yellow),
         )),
         None if scroll_mode => Line::from(Span::styled(
             "PgUp/PgDn ^U/^D · k/j · g/G · q live  ".to_string(),

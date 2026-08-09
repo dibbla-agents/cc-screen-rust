@@ -98,6 +98,19 @@ impl Harness {
         }
     }
 
+    /// Synthesize a wheel event over the cell at `(col, row)` — the event a real
+    /// terminal sends with mouse capture on (proposal 0069).
+    async fn wheel(&mut self, up: bool, col: u16, row: u16) {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        self.send(AppMsg::Term(Event::Mouse(MouseEvent {
+            kind: if up { MouseEventKind::ScrollUp } else { MouseEventKind::ScrollDown },
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })))
+        .await;
+    }
+
     /// Deliver a `Tick` (the poll refresh the real ticker would fire).
     async fn tick(&mut self) {
         self.send(AppMsg::Tick).await;
@@ -756,6 +769,193 @@ async fn keyboard_scrollback_pages_and_returns_to_live() {
     assert!(
         h.pump_until(|t| !t.contains("scrollback") && t.contains("LN29")).await,
         "q snaps back to the live bottom (indicator gone, newest line shown); got:\n{}",
+        h.text()
+    );
+}
+
+// ── alt-screen scrolling (0069) ─────────────────────────────────────────────
+
+/// True when `hay` contains `needle` as a contiguous run of bytes.
+fn contains_seq(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Feed a chunk of raw output down the attached channel and wait until the pane
+/// has actually processed it. Mode changes (`?1049h`, `?1h`) paint nothing, so a
+/// unique visible marker is appended and waited on — the byte stream is ordered,
+/// so seeing the marker proves the modes ahead of it are applied.
+async fn push_and_settle(h: &mut Harness, agent: &FakeAgentHandle, bytes: &[u8]) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let mark = format!("MK{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let mut payload = bytes.to_vec();
+    payload.extend_from_slice(mark.as_bytes());
+    agent.push_output(&payload);
+    assert!(
+        h.pump_until(|t| t.contains(&mark)).await,
+        "the pane should have processed {bytes:?}; got:\n{}",
+        h.text()
+    );
+}
+
+/// 0069 Parts A + D: the wheel scrolls the pane's own history while the child is
+/// on the normal screen, and is handed to the child (as an SGR mouse report) once
+/// the child goes fullscreen and captures the mouse — then goes back to local
+/// scrollback when the child leaves the alternate screen.
+#[tokio::test]
+async fn wheel_scrolls_locally_then_forwards_to_a_mouse_capturing_child() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    // Single layout is borderless: the pane's content rect is the whole body,
+    // (0, 0, 100, 9), so screen cell (10, 5) is pane-local 1-based (11, 6).
+    let mut h = Harness::boot(&hub, 100, 10).await;
+    h.key(KeyCode::Esc).await;
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    // >1 screen of primary-screen history to scroll back through.
+    let mut hist = Vec::new();
+    for i in 0..30 {
+        hist.extend_from_slice(format!("LN{i}\r\n").as_bytes());
+    }
+    agent.push_output(&hist);
+    assert!(h.pump_until(|t| t.contains("LN29")).await, "history rendered; got:\n{}", h.text());
+
+    // Normal screen: the wheel walks local scrollback (today's behaviour), and
+    // nothing is written to the child.
+    h.wheel(true, 10, 5).await;
+    assert!(
+        h.pump_until(|t| t.contains("scrollback 3")).await,
+        "wheel-up scrolls the pane's own history; got:\n{}",
+        h.text()
+    );
+    assert!(agent.observed().input.is_empty(), "a local scroll must not reach the child");
+    h.wheel(false, 10, 5).await; // back to live, so the next wheel isn't the local one
+    assert!(h.pump_until(|t| !t.contains("scrollback")).await, "back at the live bottom");
+
+    // The child goes fullscreen and grabs the mouse (Claude ≥ 2.1.89).
+    push_and_settle(&mut h, &agent, b"\x1b[?1049h\x1b[?1002h\x1b[?1006h").await;
+    assert!(h.text().contains('⛶'), "the bar marks the app-owned screen; got:\n{}", h.text());
+    h.wheel(true, 10, 5).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || contains_seq(&a.observed().input, b"\x1b[<64;11;6M")).await,
+        "wheel-up should reach the child as an SGR report with pane-local coords; got: {:?}",
+        String::from_utf8_lossy(&agent.observed().input)
+    );
+    h.wheel(false, 10, 5).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || contains_seq(&a.observed().input, b"\x1b[<65;11;6M")).await,
+        "wheel-down is button 65"
+    );
+
+    // `^A [` is refused while the child owns the screen, and the keys it would
+    // have swallowed go to the child instead (Part D).
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('[')).await;
+    assert!(
+        h.text().contains("alt screen: no scrollback"),
+        "refusing scroll mode should say why; got:\n{}",
+        h.text()
+    );
+    h.key(KeyCode::Char('j')).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || a.observed().input.contains(&b'j')).await,
+        "`j` must reach the child, not a swallowed scroll-mode binding"
+    );
+
+    // The app exits: the wheel is local again, on the history that was there all
+    // along.
+    push_and_settle(&mut h, &agent, b"\x1b[?1002l\x1b[?1006l\x1b[?1049l").await;
+    assert!(!h.text().contains('⛶'), "the marker goes with the alt screen; got:\n{}", h.text());
+    h.wheel(true, 10, 5).await;
+    assert!(
+        h.pump_until(|t| t.contains("scrollback 3")).await,
+        "leaving the alt screen returns the wheel to local scrollback; got:\n{}",
+        h.text()
+    );
+}
+
+/// 0069 Part B: an alt-screen child that does NOT capture the mouse (`less`,
+/// `vim` without mouse) gets xterm "alternate scroll" — the wheel becomes arrow
+/// keys, encoded per DECCKM.
+#[tokio::test]
+async fn alt_screen_without_mouse_capture_sends_arrow_keys() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 10).await;
+    h.key(KeyCode::Esc).await;
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    push_and_settle(&mut h, &agent, b"\x1b[?1049h").await;
+    h.wheel(true, 4, 4).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || contains_seq(&a.observed().input, b"\x1b[A\x1b[A\x1b[A")).await,
+        "wheel-up should page with 3 cursor-up keys; got: {:?}",
+        String::from_utf8_lossy(&agent.observed().input)
+    );
+
+    // Application-cursor mode (DECCKM) switches the encoding to SS3, same as keys.
+    push_and_settle(&mut h, &agent, b"\x1b[?1h").await;
+    h.wheel(false, 4, 4).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || contains_seq(&a.observed().input, b"\x1bOB\x1bOB\x1bOB")).await,
+        "wheel-down in DECCKM should send SS3 B; got: {:?}",
+        String::from_utf8_lossy(&agent.observed().input)
+    );
+}
+
+/// 0069 Part C, client half: a snapshot ordered primary-rows-then-`?1049h` (what
+/// `render.rs` now emits when the child is fullscreen) leaves the pre-app history
+/// in the primary grid — so when the app exits, it is there and scrollable. With
+/// the old ordering every row landed in the zero-history alt grid and was gone.
+#[tokio::test]
+async fn alt_screen_snapshot_keeps_the_pre_app_history() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 10).await;
+    h.key(KeyCode::Esc).await;
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    // The (re)attach snapshot of a session already sitting in the alt screen.
+    let mut snap = b"\x1bc".to_vec(); // SNAPSHOT_RESET — the pane rebuilds its emulator
+    for i in 0..30 {
+        snap.extend_from_slice(format!("HIST_{i}\r\n").as_bytes());
+    }
+    snap.extend_from_slice(b"\x1b[?1049h\x1b[HFULLSCREEN_APP");
+    agent.push_output(&snap);
+    assert!(
+        h.pump_until(|t| t.contains("FULLSCREEN_APP") && !t.contains("HIST_29")).await,
+        "the alt view shows the app alone; got:\n{}",
+        h.text()
+    );
+
+    // The app exits — the history that preceded it is back, and scrollable.
+    push_and_settle(&mut h, &agent, b"\x1b[?1049l").await;
+    assert!(
+        h.pump_until(|t| t.contains("HIST_29") && !t.contains("FULLSCREEN_APP")).await,
+        "quitting the app should reveal the pre-app history; got:\n{}",
+        h.text()
+    );
+    h.wheel(true, 4, 4).await;
+    assert!(
+        h.pump_until(|t| t.contains("scrollback 3") && !t.contains("HIST_29")).await,
+        "the wheel walks the replayed history; got:\n{}",
+        h.text()
+    );
+    // …and it is the WHOLE history, not the one screen the old ordering left:
+    // keep wheeling back until alacritty clamps at the oldest line.
+    for _ in 0..8 {
+        h.wheel(true, 4, 4).await;
+    }
+    assert!(
+        h.pump_until(|t| t.contains("HIST_0")).await,
+        "scrolling back far enough reaches the oldest replayed line; got:\n{}",
         h.text()
     );
 }
