@@ -889,7 +889,22 @@ async fn alt_screen_without_mouse_capture_sends_arrow_keys() {
     h.key(KeyCode::Esc).await;
     assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
 
+    // Scroll mode is legal here (normal screen) — but the child is about to take
+    // the screen away, and the mode must not survive that (0069 Part D's twin of
+    // the entry guard: it would sit there swallowing keys the child could use).
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('[')).await;
+    assert!(h.text().contains("scrollback"), "scroll mode entered; got:\n{}", h.text());
+
     push_and_settle(&mut h, &agent, b"\x1b[?1049h").await;
+    assert!(!h.text().contains("scrollback"), "going fullscreen exits scroll mode");
+    h.key(KeyCode::Char('k')).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || a.observed().input.contains(&b'k')).await,
+        "`k` must reach the child once scroll mode has dropped"
+    );
+
     h.wheel(true, 4, 4).await;
     let a = agent.clone();
     assert!(

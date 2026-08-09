@@ -2269,12 +2269,19 @@ impl App {
     }
 
     fn handle_pane(&mut self, id: u64, msg: PaneMsg) {
-        for slot in self.panes.iter_mut() {
+        let active = self.active;
+        for (i, slot) in self.panes.iter_mut().enumerate() {
             if let Some(p) = slot {
                 if p.id == id {
                     match msg {
                         PaneMsg::Bytes(b) => p.process(&b),
                         PaneMsg::State(s) => p.set_state(s),
+                    }
+                    // The child just went fullscreen under an open scroll mode:
+                    // drop out of it rather than sit there swallowing keys the
+                    // child could act on (0069 Part D, the entry guard's twin).
+                    if i == active && self.scroll_mode && p.alt_screen() {
+                        self.scroll_mode = false;
                     }
                     return;
                 }
