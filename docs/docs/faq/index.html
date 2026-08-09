@@ -198,6 +198,15 @@ The same applies inside the grid&#39;s action menu (<code>Ctrl-A d</code>): <cod
 into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
 <a href="../tui/">the ccs terminal client</a> for the full map.</p>
+<h2 id="why-does-scrolling-behave-differently-when-an-app-like-claude-or-vim-is-running">Why does scrolling behave differently when an app like Claude or vim is running?</h2>
+<p>Because the app has taken over the screen. Full-screen apps — Claude Code&#39;s
+fullscreen renderer, <code>vim</code>, <code>less</code>, <code>htop</code> — draw on the terminal&#39;s alternate
+screen, which keeps no scrollback of its own, so in <code>ccs</code> the wheel is handed
+to the app and <em>its</em> view scrolls instead of the pane&#39;s history. Back at a
+shell prompt the wheel scrolls the pane&#39;s own multi-thousand-line scrollback
+as usual. The rules are in <a href="../tui/#scrolling">the ccs terminal client</a>; if
+the wheel does nothing at all, see
+<a href="../troubleshooting/#scrolling-does-nothing-in-a-claude-session">Troubleshooting</a>.</p>
 <h2 id="is-cc-screen-open-source-what39s-it-built-with">Is cc-screen open source? What&#39;s it built with?</h2>
 <p>The code lives at
 <a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.
@@ -209,7 +218,7 @@ behaves exactly as the hosted one did before payments existed.</p>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.3 — docs track the latest release</span>
+  <span>v0.5.4 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

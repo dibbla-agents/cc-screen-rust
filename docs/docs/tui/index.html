@@ -199,6 +199,29 @@ normal mode snaps back to live</li>
 </ul>
 <p><figure><img src="../img/tui-layouts.png" alt="The visual layout palette open over the grid" loading="lazy" /><figcaption>Ctrl-A l opens the layout palette — six layouts, applied live</figcaption></figure></p>
 <p>Everything else you type goes straight to the focused session&#39;s PTY.</p>
+<h3 id="scrolling">Scrolling</h3>
+<p>What the wheel does in a pane depends on what the app inside it is doing:</p>
+<ul>
+<li><strong>A plain shell, or Claude Code&#39;s classic renderer</strong> — the wheel scrolls
+the pane&#39;s own multi-thousand-line scrollback, as it always has.</li>
+<li><strong>An app that takes the mouse</strong> (Claude Code&#39;s fullscreen renderer, <code>htop</code>,
+<code>lazygit</code>, <code>vim</code> with mouse on) — the wheel is forwarded to the app as a
+mouse report, so the <em>app&#39;s</em> own view scrolls. The same thing tmux does.</li>
+<li><strong>A full-screen app that doesn&#39;t take the mouse</strong> (<code>less</code>, <code>vim</code> without
+mouse) — the wheel becomes three <code>Up</code>/<code>Down</code> key presses, so the file
+moves.</li>
+</ul>
+<p>One exception: once you&#39;ve scrolled a pane back into its own history, the
+wheel keeps scrolling that history until you&#39;re back at the live bottom.</p>
+<p><code>Ctrl-A [</code> (scrollback mode) is unchanged on the normal screen. A full-screen
+app has no scrollback to page through — the alternate screen keeps none by
+design — so there <code>Ctrl-A [</code> declines and flashes <code>alt screen: no scrollback (app controls its own view)</code> in the status bar rather than swallowing your
+keys: <code>PgUp</code>/<code>PgDn</code> and <code>j</code>/<code>k</code> go straight to the app, which handles them
+itself. The status bar shows a <code>⛶</code> marker while the focused pane&#39;s app is
+full-screen.</p>
+<p>Attaching to a session that&#39;s <em>already</em> running a full-screen app keeps the
+scrollback from before that app started — quit the app and the earlier output
+is still there, and still scrollable.</p>
 <h2 id="maintenance">Maintenance</h2>
 <pre><code class="language-sh">ccs update       # fetch the latest ccs build
 ccs logout       # sign this terminal out (revokes its credential)
@@ -209,7 +232,7 @@ ccs --help       # the full flag reference
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.3 — docs track the latest release</span>
+  <span>v0.5.4 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

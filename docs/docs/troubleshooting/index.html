@@ -175,6 +175,21 @@ the notifications button hides until then.</li>
 active, and has a &quot;send a test&quot; action.</li>
 </ul>
 <p><figure><img src="../img/mobile-notifications.png" alt="The notification bell in the switcher header" loading="lazy" /><figcaption>The bell lives in the switcher header — it shows whether push is active and can send a test notification.</figcaption></figure></p>
+<h2 id="scrolling-does-nothing-in-a-claude-session">Scrolling does nothing in a Claude session</h2>
+<p>In a <code>ccs</code> pane, that&#39;s Claude Code&#39;s <strong>fullscreen renderer</strong> (Claude Code
+2.1.89 and newer, and the default for fresh installs): it draws on the
+terminal&#39;s alternate screen and owns the mouse itself, so the pane has no
+local scrollback there and older <code>ccs</code> builds swallowed the wheel instead of
+passing it on. <strong><code>ccs</code> 0.5.4 and newer forward the wheel to the app</strong>, so it
+scrolls Claude&#39;s own view — <code>ccs update</code> is the fix. The same applies to any
+full-screen app (<code>htop</code>, <code>lazygit</code>, <code>less</code>, <code>vim</code>); see
+<a href="../tui/#scrolling">the ccs terminal client</a> for the full rules.</p>
+<p>Stuck on an older client? Switch Claude back to its classic renderer, which
+prints into the normal screen and scrolls with the pane — inside Claude:</p>
+<pre><code>/tui default
+</code></pre>
+<p>(or <code>&quot;tui&quot;: &quot;default&quot;</code> in <code>~/.claude/settings.json</code>). Launching it with
+<code>CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1</code> has the same effect.</p>
 <h2 id="ctrlf-doesn39t-find-anything-in-a-terminal">Ctrl+F doesn&#39;t find anything in a terminal</h2>
 <p>It can&#39;t: terminals are drawn on the GPU, so the browser&#39;s Find sees no text
 there (it still works for the rest of the page). Use <strong><code>Ctrl+B /</code></strong> — the
@@ -206,7 +221,7 @@ Add your domain to <code>CCWEB_ALLOWED_ORIGINS</code> — see
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.3 — docs track the latest release</span>
+  <span>v0.5.4 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
