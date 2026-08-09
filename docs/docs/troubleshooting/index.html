@@ -175,6 +175,23 @@ the notifications button hides until then.</li>
 active, and has a &quot;send a test&quot; action.</li>
 </ul>
 <p><figure><img src="../img/mobile-notifications.png" alt="The notification bell in the switcher header" loading="lazy" /><figcaption>The bell lives in the switcher header — it shows whether push is active and can send a test notification.</figcaption></figure></p>
+<h2 id="ctrlf-doesn39t-find-anything-in-a-terminal">Ctrl+F doesn&#39;t find anything in a terminal</h2>
+<p>It can&#39;t: terminals are drawn on the GPU, so the browser&#39;s Find sees no text
+there (it still works for the rest of the page). Use <strong><code>Ctrl+B /</code></strong> — the
+find bar over the focused pane — or the magnifier button in the header on a
+phone. Enter / Shift+Enter cycle matches, Esc closes.</p>
+<h2 id="the-terminal-text-looks-slightly-different">The terminal text looks slightly different</h2>
+<p>cc-screen renders terminals with WebGL where the browser supports it, and
+falls back to plain DOM rendering where it doesn&#39;t (older iOS Safari, some
+VMs, a machine with no GPU access). Antialiasing differs a little between the
+two; everything else — selection, links, scrollback, search — behaves the
+same, and no action is needed. To see which one you&#39;re on, open the browser
+console and type:</p>
+<pre><code class="language-js">window.__ccRenderer   // &quot;webgl&quot; or &quot;dom&quot;
+</code></pre>
+<p>A tab that starts on WebGL can move to <code>&quot;dom&quot;</code> on its own if the browser
+drops the GPU context (iOS does this when a tab is backgrounded). That&#39;s the
+fallback working as designed, not a fault.</p>
 <h2 id="the-page-looks-stale-after-an-update">The page looks stale after an update</h2>
 <p>The web app is a PWA; after a deploy the service worker can serve the old
 bundle for one more load. Close and reopen the app (or reload twice).</p>

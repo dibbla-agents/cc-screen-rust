@@ -16,8 +16,9 @@
 // — ready floats up, freshest transition on top — sorted on the stable state
 // anchor so the numbers tick live without the rows reshuffling.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { MachineInfo, Session } from "../api";
+import { useOpenOrClosing } from "../useOpenOrClosing";
 import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, stateAnchor, statusDot, statusTitle, toolColor } from "../util";
 import { XIcon } from "../icons";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -35,7 +36,7 @@ interface Props {
   onPick: (s: Session) => void;
 }
 
-export default function StatusView({ open, sessions, machines, multiMachine, multiTenant = false, onClose, onPick }: Props) {
+function StatusView({ open, sessions, machines, multiMachine, multiTenant = false, onClose, onPick }: Props) {
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -111,6 +112,12 @@ export default function StatusView({ open, sessions, machines, multiMachine, mul
       .map((x) => x.s);
   }, [ordered, q]);
 
+  // The root keeps its 150ms fade mounted, but the rows below unmount once the
+  // fade-out has finished: a closed status view renders zero session rows (and
+  // so zero status dots) instead of sitting there fully rendered behind an
+  // `opacity-0` — proposal 0068 Part B.
+  const body = useOpenOrClosing(open, 150);
+
   return (
     <div
       className={`absolute inset-0 z-40 flex flex-col transition-opacity duration-150 ${
@@ -138,7 +145,7 @@ export default function StatusView({ open, sessions, machines, multiMachine, mul
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
-          {view.length === 0 ? (
+          {!body ? null : view.length === 0 ? (
             <div className="px-3 py-8 text-center text-sm text-slate-500">
               {sessions.length === 0
                 ? multiTenant
@@ -254,3 +261,7 @@ export default function StatusView({ open, sessions, machines, multiMachine, mul
     </div>
   );
 }
+
+// Memoized: a poll tick that changes nothing must not re-render the status
+// table (proposal 0068 Part C).
+export default memo(StatusView);

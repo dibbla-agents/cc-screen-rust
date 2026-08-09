@@ -90,6 +90,28 @@ describe("SessionDrawer pane variant (proposal 0026)", () => {
 // sidebar — consistent everywhere). The name (`s.short`) is the bright, leading
 // element and always present (even with no cwd); the breadcrumb sits on the
 // second line. Static-render structural assertions, matching 0026's style.
+// Proposal 0068 Part B — a CLOSED sidebar drawer keeps its root (so the 200ms
+// slide still animates) but renders no session rows: an off-screen list of rows
+// is invisible work, and each running session's dot used to keep painting there.
+describe("SessionDrawer closed-drawer row gating (proposal 0068)", () => {
+  it("renders zero session rows while closed, and the rows when open", () => {
+    const closed = renderToStaticMarkup(
+      <SessionDrawer {...baseProps} sidebar open={false} current={null} />
+    );
+    expect(closed).toContain('data-drawer="closed"');
+    expect(closed).not.toContain("data-session-row");
+    expect(closed).not.toContain("alpha");
+    // The header (and with it NotificationsButton's push probe) stays mounted.
+    expect(closed).toContain("Sessions");
+
+    const open = renderToStaticMarkup(
+      <SessionDrawer {...baseProps} sidebar open current={null} />
+    );
+    expect(open).toContain("data-session-row");
+    expect(open).toContain("alpha");
+  });
+});
+
 describe("SessionDrawer — name-on-top row (proposal 0032)", () => {
   // A session whose name differs from the cwd leaf, so the name row and the
   // breadcrumb leaf are two distinct strings we can assert on independently.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSharedMap, fuzzyScore, machineAccent, sharedEntry, sharedOwner, sharedVia } from "./util";
+import { buildSharedMap, fuzzyScore, machineAccent, sameJson, sharedEntry, sharedOwner, sharedVia, statusDot } from "./util";
 import type { ReceivedShare } from "./api";
 
 // machineAccent backs the per-pane identity bar (proposal 0021). The contract:
@@ -186,5 +186,23 @@ describe("sharedVia / team grants", () => {
     expect(sharedOwner(map, "laptop", "claude-x")).toBe("sess@x.com");
     // The rest of the box stays team-badged.
     expect(sharedVia(map, "laptop", "claude-y")).toBe("team");
+  });
+});
+
+// Proposal 0068 — the poll-equality helper and the now-static status dot.
+describe("sameJson + statusDot (proposal 0068)", () => {
+  it("treats a re-serialized identical payload as unchanged", () => {
+    const a = [{ name: "x", waiting: true }];
+    const b = JSON.parse(JSON.stringify(a));
+    expect(sameJson(a, b)).toBe(true);
+    expect(sameJson(a, [{ name: "x", waiting: false }])).toBe(false);
+  });
+
+  it("carries no infinite animation class — colour alone encodes the state", () => {
+    for (const s of ["running", "ready", "error"] as const) {
+      expect(statusDot(s)).not.toContain("animate-");
+    }
+    // The three states still read differently.
+    expect(new Set(["running", "ready", "error"].map((s) => statusDot(s as never))).size).toBe(3);
   });
 });

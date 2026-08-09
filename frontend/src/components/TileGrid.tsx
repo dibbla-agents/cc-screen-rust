@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Terminal } from "@xterm/xterm";
 import TerminalView, { type ConnState } from "./TerminalView";
 import SessionDrawer, { type PaneSwitcherProps } from "./SessionDrawer";
@@ -218,6 +218,10 @@ interface Props {
   // Bumped by the `⌃B r` chord (proposal 0035) to put the *active* pane's
   // identity-bar name into edit mode with no pointer. Only the active pane reacts.
   renameSeq: number;
+  // Bumped by the `⌃B /` chord (proposal 0068) to open the *active* pane's
+  // terminal find bar. Handed to every pane; each pane opens only if it is the
+  // active one (TerminalView.searchSignal).
+  searchSeq: number;
   // Pane-indexed xterm registration — see TerminalView.onTerm. Lets the
   // app's global copy shortcut read the active pane's current selection.
   onTermFor?: (idx: number, term: Terminal | null) => void;
@@ -243,7 +247,7 @@ interface Props {
 // can hold different sessions without cross-talk. Mounting the same session
 // twice would make the two clients fight over tmux's single pane width, so
 // the parent dedupes; this component just renders what it's given.
-export default function TileGrid({
+function TileGrid({
   layout,
   panes,
   active,
@@ -259,6 +263,7 @@ export default function TileGrid({
   onMarkColor,
   onRename,
   renameSeq,
+  searchSeq,
   onTermFor,
   onDropFiles,
   switcher,
@@ -285,19 +290,26 @@ export default function TileGrid({
           sessions={sessions}
           machines={machines}
           fontSize={fontSize}
-          onActivate={() => onActivate(idx)}
-          onConn={(c) => onConn(idx, c)}
-          onPick={(ref) => onPickFor(idx, ref)}
-          onNew={() => onNewFor(idx)}
-          onCreated={(ref) => onPaneCreated(idx, ref)}
+          // Index-taking callbacks are handed down raw and bound to this pane's
+          // index *inside* PaneBox (useCallback). Binding them here would mint
+          // a fresh closure for every pane on every TileGrid render, which
+          // defeats the memoized TerminalView (proposal 0068 Part C).
+          onActivate={onActivate}
+          onConn={onConn}
+          onPick={onPickFor}
+          onNew={onNewFor}
+          onCreated={onPaneCreated}
           onOpenEditor={onOpenEditor}
           onMarkColor={onMarkColor}
           onRename={onRename}
           // Only the active pane receives the live rename seq; others get a
           // stable -1 so a ⌃B r bump only edits the focused pane.
           renameSeq={idx === active ? renameSeq : -1}
-          onTerm={(t) => onTermFor?.(idx, t)}
-          onDropFiles={onDropFiles ? (dt) => onDropFiles(idx, dt) : undefined}
+          // The search seq goes to every pane unchanged; TerminalView opens the
+          // bar only when it is the active pane (and only on an actual bump).
+          searchSeq={searchSeq}
+          onTerm={onTermFor}
+          onDropFiles={onDropFiles}
           switcher={switcher}
           keyboardActive={idx === active && gridKeyboardActive}
         />
@@ -314,18 +326,22 @@ interface PaneProps {
   sessions: Session[];
   machines: MachineInfo[];
   fontSize: number;
-  onActivate: () => void;
-  onConn: (c: ConnState) => void;
-  onPick: (ref: PaneRef) => void;
-  onNew: () => void;
-  onCreated: (ref: PaneRef) => void;
+  // Index-taking parent callbacks (bound to `index` in here — see the note at
+  // the call site). The parent keeps their identity stable across renders.
+  onActivate: (idx: number) => void;
+  onConn: (idx: number, c: ConnState) => void;
+  onPick: (idx: number, ref: PaneRef) => void;
+  onNew: (idx: number) => void;
+  onCreated: (idx: number, ref: PaneRef) => void;
   onOpenEditor: () => void;
   onMarkColor: (ref: PaneRef, color: string | null) => void;
   onRename: (ref: PaneRef, label: string | null) => void;
   // Bumped (on the active pane only) by ⌃B r to enter inline name-edit mode.
   renameSeq: number;
-  onTerm?: (term: Terminal | null) => void;
-  onDropFiles?: (dt: DataTransfer) => void;
+  // Bumped by ⌃B / to open the active pane's terminal find bar.
+  searchSeq: number;
+  onTerm?: (idx: number, term: Terminal | null) => void;
+  onDropFiles?: (idx: number, dt: DataTransfer) => void;
   switcher: PaneSwitcherProps;
   // Only the focused pane (and only when no sidebar/viewer owns the keyboard)
   // drives its inline switcher's ↑/↓/⏎ + autofocus (proposal 0026).
@@ -340,20 +356,37 @@ function PaneBox({
   sessions,
   machines,
   fontSize,
-  onActivate,
-  onConn,
-  onPick,
-  onNew,
-  onCreated,
+  onActivate: onActivateAt,
+  onConn: onConnAt,
+  onPick: onPickAt,
+  onNew: onNewAt,
+  onCreated: onCreatedAt,
   onOpenEditor,
   onMarkColor,
   onRename,
   renameSeq,
-  onTerm,
-  onDropFiles,
+  searchSeq,
+  onTerm: onTermAt,
+  onDropFiles: onDropFilesAt,
   switcher,
   keyboardActive,
 }: PaneProps) {
+  // Bind the parent's index-taking callbacks to this pane once. Stable
+  // identities are what let the memoized TerminalView skip re-rendering when a
+  // poll tick re-renders the app above it (proposal 0068 Part C).
+  const onActivate = useCallback(() => onActivateAt(index), [onActivateAt, index]);
+  const onConn = useCallback((c: ConnState) => onConnAt(index, c), [onConnAt, index]);
+  const onPick = useCallback((ref: PaneRef) => onPickAt(index, ref), [onPickAt, index]);
+  const onNew = useCallback(() => onNewAt(index), [onNewAt, index]);
+  const onCreated = useCallback((ref: PaneRef) => onCreatedAt(index, ref), [onCreatedAt, index]);
+  const onTerm = useCallback(
+    (t: Terminal | null) => onTermAt?.(index, t),
+    [onTermAt, index]
+  );
+  const onDropFiles = useMemo(
+    () => (onDropFilesAt ? (dt: DataTransfer) => onDropFilesAt(index, dt) : undefined),
+    [onDropFilesAt, index]
+  );
   const meta = sessions.find(
     (s) => s.name === session?.name && (s.machine ?? "") === session?.machine
   );
@@ -461,6 +494,7 @@ function PaneBox({
             onState={onConn}
             active={active}
             onTerm={onTerm}
+            searchSignal={searchSeq}
           />
         ) : (
           // Proposal 0026: an empty pane *is* the session switcher. We render the
@@ -675,3 +709,8 @@ function PaneBox({
     </div>
   );
 }
+
+// Memoized: a poll tick that changes nothing must not re-render the grid (and
+// with it every mounted xterm pane). App keeps the props stable
+// (useCallback/useMemo) — proposal 0068 Part C.
+export default memo(TileGrid);

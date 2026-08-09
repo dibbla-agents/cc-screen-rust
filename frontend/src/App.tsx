@@ -56,9 +56,10 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { agentStatus, buildSharedMap, displayName, nextSessionColor, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, buildSharedMap, displayName, nextSessionColor, sameJson, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { HIDDEN_SESSIONS_MS, usePoll } from "./poll";
 import { listReceivedShares, type ReceivedShare } from "./api";
-import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, RefreshIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
+import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, RefreshIcon, SearchIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
@@ -226,6 +227,10 @@ export default function App() {
           : s
       )
     );
+    // The optimistic edit diverges from the last-applied poll payload, so drop
+    // the equality cache — otherwise an unchanged server list would be skipped
+    // and a rejected POST would never self-heal (proposal 0068 Part C).
+    sessionsKeyRef.current = null;
     setSessionColor(ref.name, color, ref.machine).catch(() => {});
   }, []);
   // renameSession sets (or clears, with null/empty) a session's display label
@@ -243,6 +248,7 @@ export default function App() {
           : s
       )
     );
+    sessionsKeyRef.current = null; // see markColor
     setSessionLabel(ref.name, next, ref.machine).catch(() => {});
   }, []);
   // Live xterm.js instance per pane, populated by TerminalView's onTerm
@@ -259,6 +265,11 @@ export default function App() {
   // identity-bar name into edit mode — even with no pointer. Same focus-seq
   // trick as the editor's `focusSearchSeq`.
   const [renameSeq, setRenameSeq] = useState(0);
+  // Bumped by the `⌃B /` chord (proposal 0068) to open the active pane's
+  // terminal find bar. Under the WebGL renderer the terminal is pixels, so the
+  // browser's own Cmd/Ctrl+F can't search agent output any more — this is its
+  // replacement. `⌃B t` still opens the file tree's filter field ([0038]).
+  const [termSearchSeq, setTermSearchSeq] = useState(0);
   const [composeOpen, setComposeOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
   const [favOpen, setFavOpen] = useState(false);
@@ -479,6 +490,20 @@ export default function App() {
     },
     []
   );
+  // Pane-indexed xterm registration (TerminalView.onTerm). Stable identity so a
+  // re-render of App doesn't invalidate the memoized panes (proposal 0068 C).
+  const setPaneTerm = useCallback((idx: number, t: Terminal | null) => {
+    termsRef.current[idx] = t;
+  }, []);
+  // The phone renders a single TerminalView, but it reports into the ACTIVE
+  // pane's slot (see the comment at that call site) — so these bind to `active`.
+  const onPhoneConn = useCallback(
+    (c: ConnState) => setPaneConn(activeRef.current, c),
+    [setPaneConn]
+  );
+  const onPhoneTerm = useCallback((t: Terminal | null) => {
+    termsRef.current[activeRef.current] = t;
+  }, []);
   const [fontSize, setFontSize] = useState<number>(
     () => Number(localStorage.getItem(FONT_KEY)) || 13
   );
@@ -601,6 +626,9 @@ export default function App() {
   // yet (which would bounce the user to the switcher). Cleared once it appears.
   const recentMounts = useRef<Map<string, number>>(new Map());
   const refKey = (r: { name: string; machine: string }) => `${r.machine}/${r.name}`;
+  // Serialized form of the last applied session list — the equality gate in
+  // applySessionList (proposal 0068 Part C).
+  const sessionsKeyRef = useRef<string | null>(null);
 
   // Adopt a freshly-fetched session list: render it, keep the chord handler's
   // ref fresh, and drop any pane holding a now-dead session. We deliberately
@@ -609,9 +637,22 @@ export default function App() {
   // background poll can reuse it without touching the loading/error UI.
   const applySessionList = useCallback(
     (list: Session[]) => {
-      setSessions(list);
-      sessionsRef.current = list;
-      const live = new Set(list.map((s) => s.name));
+      // Byte-identical payload → keep the existing array identity (proposal
+      // 0068 Part C). An idle fleet re-serves the same list every 4s, and
+      // handing React a fresh array made the whole app (every mounted xterm
+      // pane included) re-render on each tick for nothing. The pane reconcile
+      // below still runs when a propagation grace window is outstanding, since
+      // that decision is time-dependent rather than payload-dependent.
+      const key = JSON.stringify(list);
+      const same = key === sessionsKeyRef.current;
+      if (!same) {
+        sessionsKeyRef.current = key;
+        setSessions(list);
+        sessionsRef.current = list;
+      } else if (recentMounts.current.size === 0) {
+        return;
+      }
+      const live = new Set(sessionsRef.current.map((s) => s.name));
       const now = Date.now();
       updatePanes((s) => {
         const next = s.panes.map((p) => {
@@ -802,16 +843,22 @@ export default function App() {
 
   // Quiet background poll so the working/idle state (and the title + app-icon
   // badge below) stays current while the app is open — without the manual
-  // refresh button's spinner or clobbering an error banner. Browsers throttle
-  // this to ~1×/min in a backgrounded tab, which is fine for an at-a-glance
-  // signal; `focus` (below) also forces an immediate refresh on return.
-  useEffect(() => {
-    if (authed !== true) return;
-    const id = setInterval(() => {
-      fetchSessions().then(applySessionList).catch(() => {});
-    }, 4000);
-    return () => clearInterval(id);
-  }, [applySessionList, authed]);
+  // refresh button's spinner or clobbering an error banner.
+  //
+  // Visible: 4s, unchanged (0017's toast diffing and 0023's timers are specified
+  // against it). Hidden: a 60s heartbeat rather than a full pause — the title
+  // and the PWA app badge are read precisely *while* the tab is hidden, and 60s
+  // is what the browser's own background-timer throttle already gave us. On
+  // return (focus or visibilitychange, deduped to one) it refetches through this
+  // quiet path rather than refresh(), so there's no spinner flash.
+  const pollSessions = useCallback(() => {
+    fetchSessions().then(applySessionList).catch(() => {});
+  }, [applySessionList]);
+  usePoll(pollSessions, 4000, {
+    enabled: authed === true,
+    hiddenMs: HIDDEN_SESSIONS_MS,
+    onFocus: true,
+  });
 
   // Ambient "are my agents still running?" signal: the tab title and (installed
   // PWA) app-icon badge show how many sessions are actively producing output.
@@ -864,27 +911,28 @@ export default function App() {
   // Poll the hub's machine roster (empty [] on a standalone agent, which has no
   // /api/machines). Drives the per-machine grouping + pickers; polled slowly
   // since the roster changes rarely (an agent joining/leaving the fleet).
-  useEffect(() => {
-    if (authed !== true) return;
-    const load = () => fetchMachines().then(setMachines).catch(() => {});
-    load();
-    const id = setInterval(load, 10000);
-    return () => clearInterval(id);
-  }, [authed]);
+  // Paused while the tab is hidden (it only feeds pickers and badges nobody can
+  // read then) and refetched on return — proposal 0068 Part C.
+  const loadMachines = useCallback(() => {
+    fetchMachines()
+      .then((list) => setMachines((prev) => (sameJson(prev, list) ? prev : list)))
+      .catch(() => {});
+  }, []);
+  usePoll(loadMachines, 10000, { enabled: authed === true, immediate: true });
 
   // Poll the shares granted TO me (proposal 0041) so the shared-vs-owned badges
   // reflect accepts/leaves/revokes. Multi-tenant only; a no-op endpoint on a
   // single agent, so we gate on me.multiTenant to avoid a needless 404 loop.
   const refreshReceivedShares = useCallback(() => {
     if (!me?.multiTenant) return;
-    listReceivedShares().then(setReceivedShares).catch(() => {});
+    listReceivedShares()
+      .then((list) => setReceivedShares((prev) => (sameJson(prev, list) ? prev : list)))
+      .catch(() => {});
   }, [me?.multiTenant]);
-  useEffect(() => {
-    if (authed !== true || !me?.multiTenant) return;
-    refreshReceivedShares();
-    const id = setInterval(refreshReceivedShares, 20000);
-    return () => clearInterval(id);
-  }, [authed, me?.multiTenant, refreshReceivedShares]);
+  usePoll(refreshReceivedShares, 20000, {
+    enabled: authed === true && !!me?.multiTenant,
+    immediate: true,
+  });
 
   // Open the ShareForm overlay for a session (proposal 0041), titling it by the
   // session's display name. Reached from the switcher row, the identity bar, and
@@ -928,13 +976,9 @@ export default function App() {
     if (!isDesktop && currentSession === null) setDrawerOpen(true);
   }, [isDesktop, currentSession]);
 
-  // Re-list when returning to the app (PWA resume / tab focus).
-  useEffect(() => {
-    if (authed !== true) return;
-    const onFocus = () => refresh();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [refresh, authed]);
+  // (Re-listing on PWA resume / tab focus is part of the sessions poll above —
+  // one deduplicated handler for `focus` + `visibilitychange`, on the quiet
+  // applySessionList path so returning to the tab never flashes the spinner.)
 
   // Keyboard:
   //  Phone: Ctrl+B toggles the drawer immediately (existing behaviour).
@@ -1220,7 +1264,18 @@ export default function App() {
           openEditor(null, true);
           return;
         }
-        if (k === "/" || k === "t" || k === "T") {
+        if (k === "/") {
+          // Find in the focused terminal (proposal 0068 Part E). Over the grid,
+          // "/" means "search what I'm looking at" — the agent output — which
+          // browser find-in-page can no longer do under the WebGL renderer.
+          // The file-tree filter ([0038]) keeps "/" *inside* the editor overlay
+          // (handled above) and keeps "t" here, its documented fallback.
+          stop();
+          clearArm();
+          setTermSearchSeq((n) => n + 1);
+          return;
+        }
+        if (k === "t" || k === "T") {
           // Filter tree (proposal 0038): open the viewer AND focus its "Filter
           // tree" field in one step (mirror of the find-file chord above).
           stop();
@@ -1817,10 +1872,15 @@ export default function App() {
   const dot = statusDot(headerStatus);
   // Per-session WS state for the switcher: only sessions open in a pane have a
   // connection that can be "wrong"; everything else falls through to waiting.
-  const connByRef: Record<string, string> = {};
-  panes.forEach((p, i) => {
-    if (p) connByRef[`${p.machine ?? ""}/${p.name}`] = conns[i] ?? "closed";
-  });
+  // Memoized so a poll tick that changes nothing hands the switcher (and through
+  // it the memoized drawer/grid) the same object identity — proposal 0068 C.
+  const connByRef = useMemo(() => {
+    const m: Record<string, string> = {};
+    panes.forEach((p, i) => {
+      if (p) m[`${p.machine ?? ""}/${p.name}`] = conns[i] ?? "closed";
+    });
+    return m;
+  }, [panes, conns]);
 
   // Desktop chrome auto-hide: the header (sessions ☰, conn dot, layout picker,
   // font, eraser) collapses out of view so the terminal claims the full
@@ -1883,7 +1943,10 @@ export default function App() {
   // "New session" inside an empty pane's inline switcher (proposal 0026): just
   // focus that pane. The create flow runs in place in the pane's own drawer and
   // mounts via onPaneCreated below — no sidebar to open, no create-mode token.
-  const onNewForPane = (idx: number) => setActive(idx);
+  const onNewForPane = useCallback((idx: number) => setActive(idx), [setActive]);
+  // Stable identity for the pane corner button (proposal 0068 Part C keeps the
+  // grid's props stable so its memo can hold).
+  const openEditorFromPane = useCallback(() => openEditor(null), [openEditor]);
 
   // Mount + refresh once a session is created from the sidebar's in-drawer flow.
   // Mounts in the remembered pane (−1 = active fallback), marks a propagation
@@ -1918,43 +1981,72 @@ export default function App() {
   // The non-pane-specific switcher props, hoisted once so the sidebar drawer and
   // every empty-pane switcher (proposal 0026) share one source of truth — no
   // hand-kept parallel copy to drift.
-  const paneSwitcher: PaneSwitcherProps = {
-    sessions,
-    connByRef,
-    machines,
-    multiMachine,
-    loading,
-    error,
-    onRefresh: refresh,
-    onStatus: () => setStatusOpen(true),
-    createInitialMachine: currentSession?.machine || firstOnlineMachine,
-    recentDirs: restorable.map((r) => r.dir),
-    showLayout: isDesktop,
-    onLayout: () => {
-      setDrawerOpen(false);
-      openPalette();
-    },
-    deleting,
-    onDelete: removeSession,
-    // Rename via the switcher (proposal 0035): build the ref from the row's
-    // session (carrying its machine) and reuse the optimistic renameSession.
-    onRename: (s, label) => renameSession({ name: s.name, machine: s.machine ?? "" }, label),
-    // Share a session (proposal 0041) — multi-tenant only. Opens the ShareForm
-    // overlay; the shared-with-me map drives the row badges.
-    onShare: me?.multiTenant ? (s) => openShareFor({ name: s.name, machine: s.machine ?? "" }) : undefined,
-    sharedMap: me?.multiTenant ? sharedMap : null,
-    restorable,
-    onRestore,
-    toastsOn: toastsEnabled,
-    onToggleToasts: toggleToasts,
-    // Build-aware empty states + the 402 limit card (proposal 0056 A3/B2).
-    multiTenant: !!me?.multiTenant,
-    plan: me?.plan,
-    supportEmail: me?.supportEmail ?? undefined,
-    // Whether checkout is available (proposal 0058 C2): flips the session-cap
-    // 402 card from a mailto to a Stripe checkout button.
-    billing: me?.billing ?? false,
-  };
+  // Memoized (proposal 0068 C): this object is spread into the memoized
+  // SessionDrawer and handed to the memoized TileGrid, so rebuilding it on
+  // every render would re-render both on every 4s poll tick even when the
+  // payload was byte-identical.
+  const paneSwitcher: PaneSwitcherProps = useMemo(
+    () => ({
+      sessions,
+      connByRef,
+      machines,
+      multiMachine,
+      loading,
+      error,
+      onRefresh: refresh,
+      onStatus: () => setStatusOpen(true),
+      createInitialMachine: currentSession?.machine || firstOnlineMachine,
+      recentDirs: restorable.map((r) => r.dir),
+      showLayout: isDesktop,
+      onLayout: () => {
+        setDrawerOpen(false);
+        openPalette();
+      },
+      deleting,
+      onDelete: removeSession,
+      // Rename via the switcher (proposal 0035): build the ref from the row's
+      // session (carrying its machine) and reuse the optimistic renameSession.
+      onRename: (s, label) => renameSession({ name: s.name, machine: s.machine ?? "" }, label),
+      // Share a session (proposal 0041) — multi-tenant only. Opens the ShareForm
+      // overlay; the shared-with-me map drives the row badges.
+      onShare: me?.multiTenant ? (s) => openShareFor({ name: s.name, machine: s.machine ?? "" }) : undefined,
+      sharedMap: me?.multiTenant ? sharedMap : null,
+      restorable,
+      onRestore,
+      toastsOn: toastsEnabled,
+      onToggleToasts: toggleToasts,
+      // Build-aware empty states + the 402 limit card (proposal 0056 A3/B2).
+      multiTenant: !!me?.multiTenant,
+      plan: me?.plan,
+      supportEmail: me?.supportEmail ?? undefined,
+      // Whether checkout is available (proposal 0058 C2): flips the session-cap
+      // 402 card from a mailto to a Stripe checkout button.
+      billing: me?.billing ?? false,
+    }),
+    [
+      sessions,
+      connByRef,
+      machines,
+      multiMachine,
+      loading,
+      error,
+      refresh,
+      currentSession?.machine,
+      firstOnlineMachine,
+      restorable,
+      isDesktop,
+      openPalette,
+      deleting,
+      removeSession,
+      renameSession,
+      openShareFor,
+      sharedMap,
+      onRestore,
+      toastsEnabled,
+      toggleToasts,
+      me,
+    ]
+  );
 
   // The session switcher, built once and rendered in one of two places:
   //  - phone  → full-screen takeover at the app root (embedded=false)
@@ -2192,6 +2284,20 @@ export default function App() {
           <StatusListIcon className="h-5 w-5" />
         </button>
 
+        {/* Find in the terminal (proposal 0068 Part E). Phones have no ⌃B
+            chord and no hardware keyboard, so the affordance lives here;
+            desktop uses ⌃B / (and keeps this bar uncluttered). */}
+        {!isDesktop && currentSession && (
+          <button
+            onClick={() => setTermSearchSeq((n) => n + 1)}
+            aria-label="Find in terminal"
+            title="Find in the terminal output"
+            className="flex items-center justify-center rounded-lg bg-panel px-2.5 py-2 text-slate-300 active:bg-edge"
+          >
+            <SearchIcon className="h-5 w-5" />
+          </button>
+        )}
+
         {/* Share-invite inbox (proposal 0041) — multi-tenant only. Accepting an
             invite refreshes the roster + shared-with-me feed so the shared
             machine/session shows up with its badge. */}
@@ -2336,14 +2442,15 @@ export default function App() {
             fontSize={fontSize}
             onActivate={setActive}
             onConn={setPaneConn}
-            onPickFor={(idx, ref) => mountAt(idx, ref)}
+            onPickFor={mountAt}
             onNewFor={onNewForPane}
             onPaneCreated={onPaneCreated}
-            onOpenEditor={() => openEditor(null)}
+            onOpenEditor={openEditorFromPane}
             onMarkColor={markColor}
             onRename={renameSession}
             renameSeq={renameSeq}
-            onTermFor={(idx, t) => { termsRef.current[idx] = t; }}
+            searchSeq={termSearchSeq}
+            onTermFor={setPaneTerm}
             onDropFiles={onPaneDrop}
             switcher={paneSwitcher}
             // Empty panes yield the keyboard while the sidebar switcher or the
@@ -2365,8 +2472,9 @@ export default function App() {
             session={currentSession.name}
             machine={currentSession.machine}
             fontSize={fontSize}
-            onState={(c) => setPaneConn(active, c)}
-            onTerm={(t) => { termsRef.current[active] = t; }}
+            onState={onPhoneConn}
+            onTerm={onPhoneTerm}
+            searchSignal={termSearchSeq}
           />
         ) : (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-slate-500">

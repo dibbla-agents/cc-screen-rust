@@ -1,7 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { SearchAddon } from "@xterm/addon-search";
 import { wsURL } from "../api";
+import { attachRenderer } from "../xtermRenderer";
+import TerminalFindBar from "./TerminalFindBar";
 
 export type ConnState = "connecting" | "open" | "closed";
 
@@ -101,6 +104,10 @@ interface Props {
   // (the editor's "double-click the splitter" gesture). Between bumps the count
   // stays locked and dragging only zooms the font.
   recalibrateSignal: number;
+  // Bump to open the mirror's find bar (the editor header's Find button) —
+  // the mirror's replacement for browser find-in-page under the WebGL
+  // renderer (proposal 0068 Part E).
+  searchSignal?: number;
   onState: (s: ConnState) => void;
 }
 
@@ -124,11 +131,14 @@ export default function AgentMirror({
   maxFontSize,
   control,
   recalibrateSignal,
+  searchSignal = 0,
   onState,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
   const controlRef = useRef(control);
   controlRef.current = control;
   // Grid size + target font in a ref so the calibrate/zoom helpers read fresh
@@ -210,7 +220,12 @@ export default function AgentMirror({
       },
     });
     term.loadAddon(new WebLinksAddon());
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    searchRef.current = search;
     term.open(host);
+    // WebGL where available, DOM renderer otherwise (see xtermRenderer.ts).
+    const disposeRenderer = attachRenderer(term);
     term.resize(c, r);
     termRef.current = term;
 
@@ -225,8 +240,10 @@ export default function AgentMirror({
 
     return () => {
       dataSub.dispose();
+      disposeRenderer();
       term.dispose();
       termRef.current = null;
+      searchRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -335,24 +352,49 @@ export default function AgentMirror({
   }, [recalibrateSignal]);
 
   // Focus follows control: grab the keyboard when control engages, drop it when
-  // it releases (so the editor's shortcuts resume).
+  // it releases (so the editor's shortcuts resume). The cursor stays steady in
+  // both modes — blinking it here was a second always-repainting terminal
+  // (proposal 0068 Part A); control is already signalled by the pane chrome.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.cursorBlink = control;
     if (control) term.focus();
     else term.blur();
   }, [control]);
 
   // Splitter drag / window resize → zoom the font at the locked count (no
-  // reflow). Live (not debounced) so the text scales smoothly under the drag.
+  // reflow). Coalesced to one zoom per animation frame: a drag fires many
+  // ResizeObserver callbacks per frame, and under the WebGL renderer every
+  // fontSize change rebuilds the glyph atlas (far pricier than the DOM
+  // restyle this was originally tuned for). Still live enough to scale
+  // smoothly under the drag — one frame of latency, not a debounce.
   useEffect(() => {
     const host = hostRef.current!;
-    const ro = new ResizeObserver(() => zoomFont());
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        zoomFont();
+      });
+    });
     ro.observe(host);
-    return () => ro.disconnect();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Open the find bar when the editor header bumps the signal (skips mount).
+  const firstSearchSignal = useRef(true);
+  useEffect(() => {
+    if (firstSearchSignal.current) {
+      firstSearchSignal.current = false;
+      return;
+    }
+    setFindOpen(true);
+  }, [searchSignal]);
 
   // Suppress the browser context menu inside the terminal (same as the grid).
   useEffect(() => {
@@ -363,8 +405,18 @@ export default function AgentMirror({
   }, []);
 
   return (
-    <div className="h-full w-full overflow-hidden bg-bar pl-1.5 pt-1">
+    <div className="relative h-full w-full overflow-hidden bg-bar pl-1.5 pt-1">
       <div ref={hostRef} className="h-full w-full" />
+      {findOpen && (
+        <TerminalFindBar
+          search={searchRef}
+          onClose={() => {
+            setFindOpen(false);
+            searchRef.current?.clearDecorations();
+            if (controlRef.current) termRef.current?.focus();
+          }}
+        />
+      )}
     </div>
   );
 }
