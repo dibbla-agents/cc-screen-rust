@@ -149,6 +149,34 @@ Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 
 Everything else you type goes straight to the focused session's PTY.
 
+### Scrolling
+
+What the wheel does in a pane depends on what the app inside it is doing:
+
+- **A plain shell, or Claude Code's classic renderer** — the wheel scrolls
+  the pane's own multi-thousand-line scrollback, as it always has.
+- **An app that takes the mouse** (Claude Code's fullscreen renderer, `htop`,
+  `lazygit`, `vim` with mouse on) — the wheel is forwarded to the app as a
+  mouse report, so the *app's* own view scrolls. The same thing tmux does.
+- **A full-screen app that doesn't take the mouse** (`less`, `vim` without
+  mouse) — the wheel becomes three `Up`/`Down` key presses, so the file
+  moves.
+
+One exception: once you've scrolled a pane back into its own history, the
+wheel keeps scrolling that history until you're back at the live bottom.
+
+`Ctrl-A [` (scrollback mode) is unchanged on the normal screen. A full-screen
+app has no scrollback to page through — the alternate screen keeps none by
+design — so there `Ctrl-A [` declines and flashes `alt screen: no scrollback
+(app controls its own view)` in the status bar rather than swallowing your
+keys: `PgUp`/`PgDn` and `j`/`k` go straight to the app, which handles them
+itself. The status bar shows a `⛶` marker while the focused pane's app is
+full-screen.
+
+Attaching to a session that's *already* running a full-screen app keeps the
+scrollback from before that app started — quit the app and the earlier output
+is still there, and still scrollable.
+
 ## Maintenance
 
 ```sh

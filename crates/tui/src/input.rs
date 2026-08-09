@@ -63,6 +63,35 @@ pub fn encode(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// Encode a wheel event as the mouse report a child that requested mouse
+/// reporting expects (proposal 0069 Part A). xterm numbers the wheel as buttons
+/// 64 (up) / 65 (down) — bit 6 marks a wheel event — plus the usual modifier
+/// bits: Shift 4, Alt 8, Ctrl 16. `col`/`row` are **pane-local and 1-based**.
+///
+/// `sgr` picks the encoding: SGR (DECSET 1006) `CSI < b ; col ; row M`, which has
+/// no coordinate ceiling, else the legacy X10 `CSI M` form whose three offset-32
+/// bytes cap out at 223 (we clamp rather than emit a byte the child mis-parses).
+pub fn encode_wheel(up: bool, col: u16, row: u16, m: KeyModifiers, sgr: bool) -> Vec<u8> {
+    let mut b: u16 = if up { 64 } else { 65 };
+    if m.contains(KeyModifiers::SHIFT) {
+        b += 4;
+    }
+    if m.contains(KeyModifiers::ALT) {
+        b += 8;
+    }
+    if m.contains(KeyModifiers::CONTROL) {
+        b += 16;
+    }
+    let (col, row) = (col.max(1), row.max(1));
+    if sgr {
+        // Wheel reports are press-only: the final `M` (press), never `m` (release).
+        format!("\x1b[<{b};{col};{row}M").into_bytes()
+    } else {
+        let enc = |v: u16| (32 + v.min(223)) as u8;
+        vec![0x1b, b'[', b'M', enc(b), enc(col), enc(row)]
+    }
+}
+
 /// Parse a prefix-key spec like `"C-a"` (ctrl), `"M-x"`/`"A-x"` (alt), or a bare
 /// char. A bare char with no modifier defaults to Ctrl (a printable prefix would
 /// be unusable). Returns the `(code, modifiers)` to match against key events.
@@ -223,6 +252,22 @@ mod tests {
         // Home/End
         assert_eq!(encode(k(KeyCode::Home, NONE), false).unwrap(), b"\x1b[H");
         assert_eq!(encode(k(KeyCode::End, NONE), true).unwrap(), b"\x1bOF");
+    }
+
+    #[test]
+    fn wheel_reports_sgr_and_legacy() {
+        // SGR (1006): buttons 64/65, 1-based pane-local coordinates.
+        assert_eq!(encode_wheel(true, 12, 3, NONE, true), b"\x1b[<64;12;3M");
+        assert_eq!(encode_wheel(false, 1, 1, NONE, true), b"\x1b[<65;1;1M");
+        // Modifiers: Shift 4, Alt 8, Ctrl 16.
+        assert_eq!(encode_wheel(true, 2, 2, CTRL, true), b"\x1b[<80;2;2M");
+        assert_eq!(encode_wheel(true, 2, 2, SHIFT, true), b"\x1b[<68;2;2M");
+        // Legacy X10: CSI M then three offset-32 bytes (64+32 = 96 = '`').
+        assert_eq!(encode_wheel(true, 5, 7, NONE, false), vec![0x1b, b'[', b'M', 96, 37, 39]);
+        // …clamped at 223 so a wide pane can't emit a byte the child mis-parses.
+        assert_eq!(encode_wheel(false, 900, 1, NONE, false), vec![0x1b, b'[', b'M', 97, 255, 33]);
+        // A zero coordinate would be off-screen for the child: floored to 1.
+        assert_eq!(encode_wheel(true, 0, 0, NONE, true), b"\x1b[<64;1;1M");
     }
 
     #[test]

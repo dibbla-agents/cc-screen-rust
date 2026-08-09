@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use cc_screen_auth::Auth;
 use cc_screen_protocol::hub::{
-    decode_frame, encode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_ASSISTANT_INSTALL,
-    CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
+    decode_frame, encode_frame, AgentMsg, ChannelId, Cmd, CmdResult, HubMsg,
+    CAP_ASSISTANT_INSTALL, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{RestorableSession, SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
@@ -405,6 +405,10 @@ pub struct FakeAgentHandle {
     /// Outbound frames to push to the hub out-of-band (e.g. `Sessions` after a
     /// mutation, or a `Closed` on a channel). Drained by the agent's IO task.
     outbox: tokio::sync::mpsc::UnboundedSender<(AgentMsg, Vec<u8>)>,
+    /// The most recently attached channel, so a test can push unsolicited output
+    /// down it (what a real child does when it repaints, enters the alternate
+    /// screen, …) instead of only echoing input.
+    last_ch: Arc<Mutex<Option<ChannelId>>>,
 }
 
 impl FakeAgentHandle {
@@ -426,6 +430,14 @@ impl FakeAgentHandle {
     /// True once at least one resize with these dims has been observed.
     pub fn saw_resize(&self, cols: u16, rows: u16) -> bool {
         self.observed.lock().unwrap().resizes.iter().any(|&r| r == (cols, rows))
+    }
+
+    /// Push raw PTY output down the most recently attached channel — a child
+    /// painting on its own (mode changes, a repaint), not an echo of input.
+    /// A no-op before the first attach.
+    pub fn push_output(&self, bytes: &[u8]) {
+        let Some(ch) = *self.last_ch.lock().unwrap() else { return };
+        let _ = self.outbox.send((AgentMsg::Output { ch }, bytes.to_vec()));
     }
 }
 
@@ -465,11 +477,13 @@ pub async fn spawn_scriptable_agent(
     let sessions = Arc::new(Mutex::new(sessions));
     let observed = Arc::new(Mutex::new(AgentObserved::default()));
     let (otx, mut orx) = tokio::sync::mpsc::unbounded_channel::<(AgentMsg, Vec<u8>)>();
+    let last_ch: Arc<Mutex<Option<ChannelId>>> = Arc::new(Mutex::new(None));
     let handle = FakeAgentHandle {
         machine: machine_id.to_string(),
         sessions: sessions.clone(),
         observed: observed.clone(),
         outbox: otx,
+        last_ch: last_ch.clone(),
     };
     let machine = machine_id.to_string();
 
@@ -485,6 +499,7 @@ pub async fn spawn_scriptable_agent(
                     let Ok((hub_msg, payload)) = decode_frame::<HubMsg>(&buf) else { continue };
                     match hub_msg {
                         HubMsg::Attach { ch, session, .. } => {
+                            *last_ch.lock().unwrap() = Some(ch);
                             let snap = format!("\x1bcSNAP:{machine}:{session}");
                             send(&mut ws, &AgentMsg::Snapshot { ch }, snap.as_bytes()).await;
                         }
