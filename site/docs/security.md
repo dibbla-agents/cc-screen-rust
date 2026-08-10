@@ -115,8 +115,18 @@ well. What that does and doesn't mean:
   expires, and it crossed networks we don't control on the way. That's the
   trade for an invitation that actually arrives; the 14-day expiry and the
   sign-in-as-the-invited-address rule are what bound it.
+- **The invitation carries an open-tracking pixel, and we'd rather it didn't.**
+  cc-screen composes these as plain text with nothing embedded, but the mail
+  provider ccscreen.dev sends through rewrites them as HTML and inserts a
+  one-pixel image that reports back when the message is opened. We don't use
+  that data for anything, and we can't currently switch it off on our plan.
+  Links in the body are *not* rewritten — the accept URL you see is the one you
+  get. If this matters to you, blocking remote images in your mail client stops
+  it, and so does using the copyable link instead of the email.
 - A self-hosted hub sends no mail at all unless its operator configures a
-  relay — see [Self-hosting](../self-hosting/#environment-reference).
+  relay — see [Self-hosting](../self-hosting/#environment-reference). What a
+  relay does to your messages is between you and that provider; the pixel above
+  is a property of ours, not of cc-screen.
 
 ## Transport: when TLS is required
 

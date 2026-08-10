@@ -24,10 +24,21 @@
 //! | `CCHUB_MAIL_FOOTER` | the company disclosure line (ABL 2005:551 kap. 28 §5). |
 //! | `CCHUB_PUBLIC_URL` | **required**: mailing a relative or `localhost` invite link is worse than mailing nothing, so an unset base disables the mailer. |
 //!
-//! Bodies are `text/plain` only (A4): renders everywhere, cannot carry a
-//! tracking pixel, and makes the "no marketing mail, ever" Non-Goal structural
+//! Bodies are `text/plain` only (A4): renders everywhere, carries no tracking
+//! pixel of ours, and makes the "no marketing mail, ever" Non-Goal structural
 //! rather than a promise. One message per invitation — no reminders, no
 //! follow-ups, no unsubscribe (an invitation is not a subscription).
+//!
+//! **What we compose is not always what is delivered.** A4 claimed this stream
+//! carries no tracking; that is true of the bytes below and false of what
+//! ccscreen.dev's relay puts on the wire. Brevo rewrites `text/plain` as HTML
+//! and injects an open-tracking pixel, and on the current plan it cannot be
+//! switched off (their transactional tracking is Enterprise/on-request only).
+//! Click tracking is off — the accept URL is delivered unrewritten. This is
+//! disclosed in `site/docs/security.md` rather than quietly tolerated, and it
+//! is a property of one relay, not of the mailer: a self-hoster who points
+//! `CCHUB_SMTP_URL` elsewhere gets whatever that provider does. Verified
+//! against a real delivery on 2026-08-10.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

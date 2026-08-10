@@ -105,8 +105,11 @@ the current member count, the team just can't grow until it's back under.
 
 Plain text, one message per invitation: who invited you, what to (a team, a
 machine, or a single session), the team's consent sentence verbatim when it's
-a team, and one link. No tracking pixel, no attachments, no reminders, and
-nothing else is ever sent to that address.
+a team, and one link. No attachments, no reminders, and nothing else is ever
+sent to that address. One caveat we'd rather not have: our mail provider
+rewrites the message as HTML and adds an open-tracking pixel on the way out. We
+don't use what it reports and can't turn it off on our current plan — see
+[Security](../security/#invitations-and-the-mail-that-carries-them).
 
 The link only *identifies* the invitation — it grants nothing on its own.
 Accepting means signing in with the address that was invited, so a forwarded
