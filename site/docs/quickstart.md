@@ -97,6 +97,13 @@ Try an image while you're at it: copy a screenshot and press Ctrl-V (⌘V on
 Mac) in the session — it lands in the assistant as an attachment, exactly as
 if you'd pasted it locally on that machine.
 
+Copying works in the other direction too: text you select in the terminal
+copies with ⌘C/Ctrl+C, and a copy the *assistant* makes (Claude's `/copy`)
+lands on the clipboard of the device you're holding. If a full-screen app has
+taken the terminal, a plain drag belongs to that app — hold ⌥ (Mac browser) or
+Shift and drag to select instead. Details in
+[The web app](../web-app/#copying-text-out-of-a-session).
+
 ![A live Claude session, driven from a phone](../img/mobile-agent.png)
 
 ## 5. Put it on your phone

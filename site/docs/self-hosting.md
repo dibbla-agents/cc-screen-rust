@@ -233,6 +233,39 @@ Hub (`~/.config/cc-screen-hub/web.env`):
 | `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with client auth off |
 | `CCWEB_CSP` | override the embedded app's Content-Security-Policy |
 
+## The clipboard shim
+
+`cc-screen-rust install` (and `install-shim`) writes one small script into
+`~/.local/bin` under five names — `xclip`, `wl-paste`, `pbpaste`, `pbcopy`,
+`wl-copy`. That directory is first on the PATH of every session the agent
+launches, so inside a session those names resolve to the shim and everywhere
+else on the box they don't.
+
+It handles the two clipboard directions a session actually needs:
+
+- **In.** An image you paste from the web UI is staged by the agent; when the
+  assistant shells out to `xclip`/`wl-paste`/`pbpaste` to read a clipboard
+  image, the shim serves it. This is what makes Ctrl-V work on a headless box
+  with no X11 or Wayland at all.
+- **Out.** When something inside a session copies *text*, the shim sends it to
+  the user's own clipboard as a terminal escape sequence instead of writing this
+  machine's. That matters most on macOS, where the assistant's own `pbcopy`
+  fallback otherwise succeeds and leaves the text on a shared machine's
+  pasteboard.
+
+Two guarantees worth knowing about:
+
+- The copy branch is guarded on `$CCWEB_SESSION`, which only the agent sets. Run
+  `pbcopy` yourself in a normal shell on that machine and you get the real
+  `pbcopy`, byte for byte.
+- Anything the shim doesn't own — text paste, `-o`/`-i`, an image copy — is
+  handed to the next matching tool on the PATH, resolved at run time. A real
+  `xclip` in `/usr/bin` is shadowed for agent sessions, never overwritten; a
+  foreign file already sitting in `~/.local/bin` under one of those names is
+  moved aside to `<name>.pre-ccshim` once, not clobbered.
+
+Reinstalling is idempotent. The shim is POSIX-only — Windows agents skip it.
+
 ## Updating
 
 Each binary re-runs its hosted installer and (for the services) restarts onto

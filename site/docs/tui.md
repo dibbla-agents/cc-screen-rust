@@ -194,6 +194,33 @@ Attaching to a session that's *already* running a full-screen app keeps the
 scrollback from before that app started — quit the app and the earlier output
 is still there, and still scrollable.
 
+### Copying out of a session
+
+When something inside a session copies text — Claude Code's `/copy`, its
+copy-on-select, `/export → Clipboard` — `ccs` hands that copy to **your own
+terminal emulator**, which puts it on the clipboard of the machine you're
+sitting at. That works over SSH, where a clipboard tool on the remote box would
+be useless (and would write the wrong machine's clipboard anyway).
+
+Your emulator has to support OSC 52 and have it enabled:
+
+| Emulator | Out of the box |
+|---|---|
+| kitty, WezTerm, Windows Terminal, Alacritty | yes |
+| iTerm2 | **off by default** — *Settings → General → Selection → "Applications in terminal may access clipboard"* |
+| Terminal.app | no |
+| GNOME Terminal / VTE | recent versions, yes |
+
+An emulator that doesn't support it simply does nothing — you never see escape
+sequence garbage in the pane. Two deliberate limits: a copy made before you
+attached can't be recovered (the reattach replay is a picture of the screen, not
+the byte stream), and a session asking to *read* your clipboard is always
+refused.
+
+Selecting text with the mouse inside `ccs` is a separate thing, and unchanged:
+`ccs` captures the mouse for wheel scrolling, so use your terminal's own
+**Shift+drag** to select and copy the normal way.
+
 ## Maintenance
 
 ```sh

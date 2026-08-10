@@ -144,6 +144,23 @@ You do **not** need to install Xvfb or any X11 packages.
 
 ![The notification bell in the switcher header](../img/mobile-notifications.png "The bell lives in the switcher header — it shows whether push is active and can send a test notification.")
 
+## Swiping does nothing on my phone
+
+Same cause as the entry below, in the web app. Claude Code's **fullscreen
+renderer** draws on the terminal's alternate screen — which keeps no scrollback
+at all — and takes the mouse, so a swipe had nothing to move. **cc-screen 0.5.6
+and newer** hand the swipe to the application instead, so a drag scrolls
+*Claude's own* transcript, and a flick coasts. Reload the tab (twice, if the
+PWA served you the old bundle) after your hub has been updated.
+
+The trap is that this is **rolled out per install**, not per version: the same
+Claude Code build can use the fullscreen renderer on one machine and the classic
+one on another, and it can flip on a machine at any time — the decision is
+cached in `~/.claude.json`, and Claude persists `"tui"` into
+`~/.claude/settings.json` once the renderer has been active. So "it works on my
+other machine" says nothing. If you're stuck on an older cc-screen, `/tui
+default` inside Claude switches that install back to the classic renderer.
+
 ## Scrolling does nothing in a Claude session
 
 In a `ccs` pane, that's Claude Code's **fullscreen renderer** (Claude Code
@@ -172,13 +189,51 @@ there (it still works for the rest of the page). Use **`Ctrl+B /`** — the
 find bar over the focused pane — or the magnifier button in the header on a
 phone. Enter / Shift+Enter cycle matches, Esc closes.
 
+## I copied inside Claude and my clipboard is empty
+
+Which machine's clipboard? That's the whole question.
+
+Every copy Claude Code performs — `/copy`, copy-on-select, `Ctrl+C` on a
+selection inside its own UI, `/export → Clipboard` — is emitted to the terminal
+for the terminal to act on. **cc-screen 0.5.6 and newer act on it**: the text
+lands on the clipboard of the device you're actually holding. Older clients
+parsed the sequence and threw it away, so the assistant reported success and
+nothing happened.
+
+On a **macOS agent** it was worse than empty: Claude Code also shells out to
+`pbcopy`, that write succeeds, and the text ends up on the *agent machine's*
+pasteboard — a machine you're not sitting at, where anything running there can
+read it. The agent now shims `pbcopy`/`wl-copy` for its own sessions and sends
+the copy to you instead. Update the agent (`cc-screen-rust update`) and start a
+new session; existing sessions keep the PATH they were launched with.
+
+If the copy still doesn't arrive:
+
+- **Are you driving that session?** A silent write only happens for the pane
+  you're focused on and have typed into recently. Otherwise you get a **Copy**
+  button — look for it above the bottom bar.
+- **Multi-line or unusual text** always takes the button, deliberately.
+- **In `ccs`**, the copy is handed to *your* terminal emulator, which has to
+  support OSC 52 and have it enabled. iTerm2 gates it behind
+  *Settings → General → Selection → "Applications in terminal may access
+  clipboard"*. kitty, WezTerm and Windows Terminal allow it by default.
+- **Under `tmux` or `screen`** the sequence is wrapped in a passthrough the web
+  client doesn't unwrap, so that case still doesn't arrive. Known gap.
+- **Nothing arrives from before you attached.** The replay a fresh attach sends
+  is a picture of the screen, not the byte stream, so a copy made while no
+  client was attached cannot be recovered — and a replay is deliberately not
+  allowed to write your clipboard minutes after the fact.
+
 ## The terminal text looks slightly different
 
 cc-screen renders terminals with WebGL where the browser supports it, and
 falls back to plain DOM rendering where it doesn't (older iOS Safari, some
 VMs, a machine with no GPU access). Antialiasing differs a little between the
 two; everything else — selection, links, scrollback, search — behaves the
-same, and no action is needed. To see which one you're on, open the browser
+same, and no action is needed. (On a **phone**, read "selection" narrowly: touch
+selection of terminal text isn't offered under either renderer. Copying out of a
+session on a phone is the assistant's own copy landing on your clipboard, or the
+copy button in the markdown viewer.) To see which one you're on, open the browser
 console and type:
 
 ```js

@@ -94,6 +94,21 @@ boundaries, honestly:
   one sentence away. Withholding the file browser would have hidden the access,
   not prevented it. **Share a session only with someone you'd trust with the
   files that machine can reach.**
+- **A session you drive can write your clipboard; one you watch cannot.** This
+  is the product's first *outbound* capability — until now sharing risked what a
+  viewer could see, never what the viewed machine could do to the viewer's
+  device. When something inside a session copies text, that copy is delivered to
+  the clipboard of the person **actively driving** that session: focused pane,
+  focused tab, and recent typing. A teammate who merely has the session open
+  never gets a silent clipboard write; they get a button showing exactly what
+  would be copied, and it is frozen from the moment it appears. Text is
+  sanitised first (control characters, bare carriage returns, trailing newlines
+  and direction-override characters removed — the trailing-newline case is what
+  turns a paste into an *execution*), anything altered or multi-line requires
+  that click, copies over 64 KB are announced rather than copied, and a session
+  that floods is rate-limited and then switched off. The **read** direction — a
+  session asking for your clipboard's contents — is never answered by any
+  cc-screen client, and the code that would have to do it does not exist.
 - The **per-machine opt-out** is yours alone (the "Visible to team" toggle),
   whatever your role — no admin can override it — and every flip lands in
   the team's **audit log**, alongside joins, invites, removals, and seat

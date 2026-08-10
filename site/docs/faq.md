@@ -177,6 +177,25 @@ as usual. The rules are in [the ccs terminal client](../tui/#scrolling); if
 the wheel does nothing at all, see
 [Troubleshooting](../troubleshooting/#scrolling-does-nothing-in-a-claude-session).
 
+The web app follows exactly the same three rules, for touch and for the mouse
+wheel: your own scrollback at a shell prompt, the application's view once it has
+taken the screen.
+
+## Why did my copy disappear?
+
+If you copied *inside* a session — Claude's `/copy`, or its copy-on-select — the
+answer used to be "it went nowhere, or to the wrong machine". A terminal copy
+travels as an escape sequence for the terminal to act on, and older cc-screen
+clients discarded it; on a Mac agent, Claude Code's own fallback wrote the
+*agent machine's* pasteboard instead of yours. Both are fixed: the copy now
+lands on the device you're holding, in the web app and in `ccs`. The details,
+including the cases that still need one click, are in
+[Troubleshooting](../troubleshooting/#i-copied-inside-claude-and-my-clipboard-is-empty).
+
+The reverse — a session *reading* your clipboard — is not something cc-screen
+does. Terminals can be asked for their clipboard contents; cc-screen never
+answers, on any client.
+
 ## Is cc-screen open source? What's it built with?
 
 The code lives at
