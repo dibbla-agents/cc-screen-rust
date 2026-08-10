@@ -239,15 +239,16 @@ ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 </code></pre>
-<p>On Windows the two that touch the binary don&#39;t apply: to update, re-run the
-install command above; to remove <code>ccs</code>, delete <code>~\.local\bin\ccs.exe</code> and
-<code>%APPDATA%\cc-screen-tui</code> — Windows won&#39;t let a running program delete
-itself. <code>ccs logout</code> and <code>ccs --help</code> work as listed.</p>
+<p>All four work on Windows as well (from ccs 0.5.5 — on 0.5.4 the two that
+touch the binary fail, so re-run the install command to update). One visible
+difference: <code>ccs uninstall</code> finishes a moment <em>after</em> the program exits.
+Windows won&#39;t let a running program delete itself, so that last step is left
+to a helper that waits for it.</p>
 
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.4 — docs track the latest release</span>
+  <span>v0.5.5 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

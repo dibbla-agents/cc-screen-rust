@@ -203,7 +203,8 @@ ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 ```
 
-On Windows the two that touch the binary don't apply: to update, re-run the
-install command above; to remove `ccs`, delete `~\.local\bin\ccs.exe` and
-`%APPDATA%\cc-screen-tui` — Windows won't let a running program delete
-itself. `ccs logout` and `ccs --help` work as listed.
+All four work on Windows as well (from ccs 0.5.5 — on 0.5.4 the two that
+touch the binary fail, so re-run the install command to update). One visible
+difference: `ccs uninstall` finishes a moment *after* the program exits.
+Windows won't let a running program delete itself, so that last step is left
+to a helper that waits for it.
