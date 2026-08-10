@@ -1,6 +1,6 @@
 [package]
 name = "cc-screen-tui"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 license.workspace = true
 description = "Terminal client for cc-screen-rust"
