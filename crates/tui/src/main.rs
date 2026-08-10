@@ -16,6 +16,7 @@ async fn main() -> Result<()> {
     // otherwise reject them). Unlike the agent/hub, ccs has no service — the
     // binary itself is the install. A session literally named like one of these
     // is unreachable by direct-attach (same shadowing rule as `update`).
+    sweep_parked_exe(); // clear what a previous `ccs update` left behind (Windows)
     match std::env::args().nth(1).as_deref() {
         Some("update") => return run_update(),
         Some("uninstall") => return run_uninstall(),
@@ -225,26 +226,140 @@ async fn run_logout_cmd() -> Result<()> {
     Ok(())
 }
 
-/// `ccs update` — re-run the hosted installer (same `curl | sh` the GitHub
-/// Release serves) to fetch the latest `ccs` binary. The TUI has no service to
-/// restart. `ccs` ships from the `cc-screen-tui` package, so its installer asset
-/// is `cc-screen-tui-installer.sh`.
+/// The installer asset for this platform. `ccs` ships from the `cc-screen-tui`
+/// package, so cargo-dist names them `cc-screen-tui-installer.{sh,ps1}`.
+fn installer_url(windows: bool) -> String {
+    let asset = if windows { "cc-screen-tui-installer.ps1" } else { "cc-screen-tui-installer.sh" };
+    format!("{}/{asset}", cc_screen_protocol::RELEASE_BASE_URL)
+}
+
+/// `(program, args)` that fetches and runs the installer at `url`.
+///
+/// The PowerShell leg carries `-ExecutionPolicy Bypass` **for that child process
+/// only** — nothing on the machine changes. Without it cargo-dist's installer
+/// refuses outright on a default Windows desktop, whose policy blocks scripts;
+/// asking a user to loosen a machine-wide setting to run `ccs update` would be a
+/// far bigger ask than the update itself.
+fn installer_cmd(url: &str, windows: bool) -> (&'static str, Vec<String>) {
+    if windows {
+        (
+            "powershell",
+            vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-Command".into(),
+                format!("irm '{url}' | iex"),
+            ],
+        )
+    } else {
+        (
+            "sh",
+            vec!["-c".into(), format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh")],
+        )
+    }
+}
+
+/// The paste-able one-liner that (re)installs ccs on this platform.
+fn reinstall_hint(windows: bool) -> String {
+    let url = installer_url(windows);
+    if windows {
+        format!("powershell -ExecutionPolicy Bypass -Command \"irm {url} | iex\"")
+    } else {
+        format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh")
+    }
+}
+
+/// Where a running `ccs.exe` is parked while it replaces itself: a sibling with
+/// a `.old` suffix, so the sweep at startup finds it without guessing.
+fn parked_path(exe: &std::path::Path) -> std::path::PathBuf {
+    let mut s = exe.as_os_str().to_os_string();
+    s.push(".old");
+    s.into()
+}
+
+/// Delete the copy a previous `ccs update` parked. Best-effort and silent: the
+/// file is only ever a stale binary, and if it is somehow still locked the next
+/// start tries again. No-op off Windows, where nothing is ever parked.
+fn sweep_parked_exe() {
+    if !cfg!(windows) {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(parked_path(&exe));
+    }
+}
+
+/// `ccs update` — re-run the hosted installer to fetch the latest `ccs` binary.
+/// The TUI has no service to restart.
+///
+/// On Windows the running `.exe` can't be *overwritten* — but it can be
+/// *renamed*, so we move ourselves aside first and let the installer write a
+/// fresh `ccs.exe`; [`sweep_parked_exe`] clears the leftover on the next start.
+/// If the install fails we move the parked copy back: an update that can't
+/// fetch a new build must never leave the machine with no `ccs` at all.
 fn run_update() -> Result<()> {
-    let url = format!("{}/cc-screen-tui-installer.sh", cc_screen_protocol::RELEASE_BASE_URL);
+    let windows = cfg!(windows);
+    let url = installer_url(windows);
     println!("→ downloading the latest ccs from {url}");
-    let cmd = format!("curl --proto '=https' --tlsv1.2 -LsSf {url} | sh");
-    let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status()?;
-    if !status.success() {
-        anyhow::bail!("installer failed (is curl available, and the site reachable?)");
+
+    let parked = if windows { park_running_exe()? } else { None };
+    let (prog, args) = installer_cmd(&url, windows);
+    let ran = std::process::Command::new(prog).args(&args).status();
+    let installed = matches!(&ran, Ok(s) if s.success())
+        && parked.as_ref().is_none_or(|(exe, _)| exe.exists());
+
+    if !installed {
+        if let Some((exe, parked)) = &parked {
+            let _ = std::fs::rename(parked, exe); // put the working binary back
+        }
+        match ran {
+            Ok(_) => anyhow::bail!("installer failed (is the site reachable?)"),
+            Err(e) => anyhow::bail!("couldn't run the installer ({prog}): {e}"),
+        }
     }
     println!("✓ updated ccs. Re-run `ccs` to use the new build.");
     Ok(())
 }
 
+/// Move the running executable aside so a fresh one can be written in its place,
+/// returning `(original, parked)`.
+fn park_running_exe() -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>> {
+    let exe = std::env::current_exe().context("can't locate the running ccs binary")?;
+    let parked = parked_path(&exe);
+    let _ = std::fs::remove_file(&parked); // leftover from an earlier update
+    std::fs::rename(&exe, &parked)
+        .with_context(|| format!("couldn't move {} aside to update it", exe.display()))?;
+    Ok(Some((exe, parked)))
+}
+
+/// The detached helper that removes the running binary once we've exited —
+/// Windows refuses to delete a running program, so the deletion has to outlive
+/// us. Single quotes are PowerShell's literal string; a `'` in the path is
+/// escaped by doubling it.
+fn self_delete_cmd(exe: &std::path::Path) -> (&'static str, Vec<String>) {
+    let path = exe.display().to_string().replace('\'', "''");
+    (
+        "powershell",
+        vec![
+            "-NoProfile".into(),
+            "-ExecutionPolicy".into(),
+            "Bypass".into(),
+            "-Command".into(),
+            format!(
+                "Start-Sleep -Milliseconds 1500; \
+                 Remove-Item -LiteralPath '{path}' -Force -ErrorAction SilentlyContinue"
+            ),
+        ],
+    )
+}
+
 /// `ccs uninstall` — remove the installed binary and its config. ccs runs no
 /// service, so the binary *is* the install: we unlink the running executable
 /// (safe while running on Unix — the inode lives until the process exits) and
-/// drop `~/.config/cc-screen-tui`. Re-install anytime via the hosted one-liner.
+/// drop the config dir. On Windows the unlink can't happen from inside the
+/// running program, so a detached helper does it a moment after we exit.
+/// Re-install anytime via the hosted one-liner.
 fn run_uninstall() -> Result<()> {
     // Config dir first (parent of config.toml) — best-effort, absence is fine.
     if let Some(dir) = config::config_path().as_ref().and_then(|p| p.parent()) {
@@ -255,11 +370,76 @@ fn run_uninstall() -> Result<()> {
         }
     }
     let exe = std::env::current_exe().context("can't locate the ccs binary to remove")?;
-    std::fs::remove_file(&exe).with_context(|| format!("couldn't remove {}", exe.display()))?;
-    println!("✓ removed ccs ({})", exe.display());
-    println!(
-        "  Re-install: curl --proto '=https' --tlsv1.2 -LsSf {}/cc-screen-tui-installer.sh | sh",
-        cc_screen_protocol::RELEASE_BASE_URL
-    );
+    if cfg!(windows) {
+        let (prog, args) = self_delete_cmd(&exe);
+        std::process::Command::new(prog)
+            .args(&args)
+            .spawn()
+            .with_context(|| format!("couldn't schedule the removal of {}", exe.display()))?;
+        println!("✓ removing ccs ({}) — done a moment after this exits", exe.display());
+    } else {
+        std::fs::remove_file(&exe)
+            .with_context(|| format!("couldn't remove {}", exe.display()))?;
+        println!("✓ removed ccs ({})", exe.display());
+    }
+    println!("  Re-install: {}", reinstall_hint(cfg!(windows)));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both legs are built from the same inputs, so the Windows shapes are
+    /// asserted from any host — the platform only picks which one runs.
+    #[test]
+    fn installer_url_picks_the_platform_asset() {
+        assert!(installer_url(true).ends_with("/cc-screen-tui-installer.ps1"));
+        assert!(installer_url(false).ends_with("/cc-screen-tui-installer.sh"));
+        assert!(installer_url(true).starts_with(cc_screen_protocol::RELEASE_BASE_URL));
+    }
+
+    #[test]
+    fn windows_installer_runs_under_a_bypass_policy() {
+        let (prog, args) = installer_cmd("https://x/i.ps1", true);
+        assert_eq!(prog, "powershell");
+        // The Bypass is what makes this work on a stock desktop; if it ever
+        // disappears, `ccs update` silently regresses to "refused to run".
+        assert!(args.windows(2).any(|w| w == ["-ExecutionPolicy", "Bypass"]), "{args:?}");
+        assert_eq!(args.last().unwrap(), "irm 'https://x/i.ps1' | iex");
+    }
+
+    #[test]
+    fn unix_installer_is_unchanged() {
+        let (prog, args) = installer_cmd("https://x/i.sh", false);
+        assert_eq!(prog, "sh");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "curl --proto '=https' --tlsv1.2 -LsSf https://x/i.sh | sh");
+    }
+
+    #[test]
+    fn parked_binary_is_a_sibling_of_the_original() {
+        let exe = std::path::Path::new("/home/u/.local/bin/ccs.exe");
+        let parked = parked_path(exe);
+        assert_eq!(parked.parent(), exe.parent(), "must stay on the same volume to rename");
+        assert_eq!(parked.file_name().unwrap(), "ccs.exe.old");
+    }
+
+    #[test]
+    fn self_delete_targets_the_binary_and_escapes_quotes() {
+        let (prog, args) = self_delete_cmd(std::path::Path::new(r"C:\Users\o'brien\ccs.exe"));
+        assert_eq!(prog, "powershell");
+        let script = args.last().unwrap();
+        assert!(script.contains("Start-Sleep"), "must outlive this process: {script}");
+        // Doubled, so PowerShell reads one literal apostrophe.
+        assert!(script.contains(r"C:\Users\o''brien\ccs.exe"), "{script}");
+    }
+
+    #[test]
+    fn reinstall_hint_is_paste_able_per_platform() {
+        assert!(reinstall_hint(false).starts_with("curl "));
+        let win = reinstall_hint(true);
+        assert!(win.starts_with("powershell -ExecutionPolicy Bypass"), "{win}");
+        assert!(win.contains(".ps1"), "{win}");
+    }
 }
