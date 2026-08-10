@@ -20,6 +20,8 @@ and no per-machine tmux sockets.
 
 ## Install
 
+**macOS and Linux**
+
 ```sh
 curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 ```
@@ -28,7 +30,22 @@ drops `ccs` into `~/.local/bin` and prints the sign-in command. (The generic
 installer, if you'd rather not fetch through the hub:
 `curl --proto '=https' --tlsv1.2 -LsSf
 https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh`.)
-It's a real terminal app — it needs an interactive TTY.
+
+**Windows**
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://app.ccscreen.dev/ccs.ps1 | iex"
+```
+
+drops `ccs.exe` into `~\.local\bin` and adds that to your user PATH — open a
+new terminal afterwards and `ccs` is there. No administrator prompt; it
+installs for your user only. The `-ExecutionPolicy Bypass` prefix applies to
+that one PowerShell process and changes nothing on the machine: a default
+Windows desktop blocks scripts outright, and without the prefix the installer
+stops and says so. Run `ccs` from **Windows Terminal** — the old `conhost`
+console can't draw it.
+
+It's a real terminal app — it needs an interactive TTY, on every platform.
 
 ## Connect (hosted — app.ccscreen.dev)
 
@@ -185,3 +202,8 @@ ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 ```
+
+On Windows the two that touch the binary don't apply: to update, re-run the
+install command above; to remove `ccs`, delete `~\.local\bin\ccs.exe` and
+`%APPDATA%\cc-screen-tui` — Windows won't let a running program delete
+itself. `ccs logout` and `ccs --help` work as listed.

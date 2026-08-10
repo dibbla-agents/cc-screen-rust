@@ -79,6 +79,16 @@ dashboard row to detach it from your account.
 
 - The session shell on Windows is PowerShell; sessions and the file
   browser/editor work the same as on macOS/Linux.
+- To *drive* sessions from this box as well — the whole fleet in a terminal
+  switcher and grid — the `ccs` client is one more command:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -Command "irm https://app.ccscreen.dev/ccs.ps1 | iex"
+  ```
+
+  See [the ccs terminal client](../tui/#install) for signing it in and the
+  keys. It's independent of the agent above — install it on any Windows box
+  you work from, connected machine or not.
 - If you'd rather pass the machine name as an argument (no query string):
 
   ```powershell

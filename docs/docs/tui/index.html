@@ -100,12 +100,23 @@ outbound-only uplink, with agent-aware ready notifications — no inbound SSH
 and no per-machine tmux sockets.</p>
 <p><img src="../img/tui-grid.png" alt="The ccs grid — three sessions from the demo fleet in the left-L layout" loading="lazy" /></p>
 <h2 id="install">Install</h2>
+<p><strong>macOS and Linux</strong></p>
 <pre><code class="language-sh">curl -fsSL https://app.ccscreen.dev/ccs.sh | sh
 </code></pre>
 <p>drops <code>ccs</code> into <code>~/.local/bin</code> and prints the sign-in command. (The generic
 installer, if you&#39;d rather not fetch through the hub:
-<code>curl --proto &#39;=https&#39; --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh</code>.)
-It&#39;s a real terminal app — it needs an interactive TTY.</p>
+<code>curl --proto &#39;=https&#39; --tlsv1.2 -LsSf https://github.com/dibbla-agents/cc-screen-rust/releases/latest/download/cc-screen-tui-installer.sh | sh</code>.)</p>
+<p><strong>Windows</strong></p>
+<pre><code class="language-powershell">powershell -ExecutionPolicy Bypass -Command &quot;irm https://app.ccscreen.dev/ccs.ps1 | iex&quot;
+</code></pre>
+<p>drops <code>ccs.exe</code> into <code>~\.local\bin</code> and adds that to your user PATH — open a
+new terminal afterwards and <code>ccs</code> is there. No administrator prompt; it
+installs for your user only. The <code>-ExecutionPolicy Bypass</code> prefix applies to
+that one PowerShell process and changes nothing on the machine: a default
+Windows desktop blocks scripts outright, and without the prefix the installer
+stops and says so. Run <code>ccs</code> from <strong>Windows Terminal</strong> — the old <code>conhost</code>
+console can&#39;t draw it.</p>
+<p>It&#39;s a real terminal app — it needs an interactive TTY, on every platform.</p>
 <h2 id="connect-hosted-appccscreendev">Connect (hosted — app.ccscreen.dev)</h2>
 <pre><code class="language-sh">ccs activate
 </code></pre>
@@ -228,6 +239,10 @@ ccs logout       # sign this terminal out (revokes its credential)
 ccs uninstall    # remove the ccs binary + config
 ccs --help       # the full flag reference
 </code></pre>
+<p>On Windows the two that touch the binary don&#39;t apply: to update, re-run the
+install command above; to remove <code>ccs</code>, delete <code>~\.local\bin\ccs.exe</code> and
+<code>%APPDATA%\cc-screen-tui</code> — Windows won&#39;t let a running program delete
+itself. <code>ccs logout</code> and <code>ccs --help</code> work as listed.</p>
 
   </main>
 </div>
