@@ -82,6 +82,10 @@ uplink** — only acceptable on a trusted private network.
 | `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Enable "Sign in with Google" (redirect URI `<CCHUB_PUBLIC_URL>/api/auth/google/callback`). | — |
 | `CCHUB_OAUTH_ONLY` | Set to `1` to disable password signup/login (Google only). | `1` |
 | `CCHUB_SUPPORT_EMAIL` | Optional support contact shown at plan-limit walls. | `support@example.com` |
+| `CCHUB_SMTP_URL` | Relay that mails team/share invitations. Unset = the hub sends no mail and everything else works (the copyable invite link is the channel). Needs `CCHUB_PUBLIC_URL` too. | `smtp://user:key@smtp-relay.brevo.com:587` |
+| `CCHUB_MAIL_FROM` | From/envelope address on invite mail; the relay must be authorized for it. Default `cc-screen <invites@ccscreen.dev>`. | `cc-screen <invites@example.com>` |
+| `CCHUB_MAIL_REPLY_TO` | Reply-To on invite mail. Falls back to `CCHUB_SUPPORT_EMAIL`. | `support@example.com` |
+| `CCHUB_MAIL_DIR` | Write each message to a file here instead of sending it (tests/capture). Takes precedence over `CCHUB_SMTP_URL`. | `/tmp/cc-screen-mail` |
 | `CCHUB_SUMMARY_BUDGET` / `CCHUB_SUMMARY_USER_BUDGET` | Session-summary spend caps in USD (fleet-wide / per-user). | `50` / `2` |
 
 The image sets `HOME=/home/app`, so persisted state lives at

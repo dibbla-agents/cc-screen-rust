@@ -62,6 +62,8 @@ pub async fn start_hub(client_auth: Auth, agent_tokens: &[(&str, &str)]) -> Stri
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
         bulk: Default::default(),
         summary: Arc::new(crate::summarizer::Summarizer::disabled()),
+        #[cfg(feature = "multi-tenant")]
+        mailer: Arc::new(crate::mailer::Mailer::disabled()),
         tenancy: crate::state::Tenancy::Single,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -196,6 +198,8 @@ pub async fn start_hub_multi() -> MultiHub {
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
         bulk: Default::default(),
         summary: Arc::new(crate::summarizer::Summarizer::disabled()),
+        #[cfg(feature = "multi-tenant")]
+        mailer: Arc::new(crate::mailer::Mailer::disabled()),
         tenancy: crate::state::Tenancy::Multi(store.clone()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -93,6 +93,31 @@ boundaries, honestly:
   directions immediately; personal shares are untouched. Deleting a team
   erases its membership, invites, grants, and audit history with it.
 
+## Invitations, and the mail that carries them
+
+An invitation — to a team, a machine, or a single session — is a row in the
+hub's database plus a link at `/org-invite/<token>`. Where a hub is
+configured with a mail relay, that link is emailed to the invited address as
+well. What that does and doesn't mean:
+
+- **The link is not access.** It only *identifies* the invitation. Accepting
+  requires being signed in as the invited address, so a forwarded or
+  intercepted link grants nothing on its own — whoever holds it would have to
+  control that mailbox first.
+- **It does disclose what the landing page shows**, to anyone holding it:
+  for a team invite, the team's name and the inviter's email address. Treat
+  it as you'd treat any link you hand someone.
+- **Invitations expire after 14 days**, and cancelling one kills its link
+  immediately — the token stops resolving whether or not it's already sitting
+  in an inbox. Re-inviting mints a fresh token and retires the old link.
+- **Email is long-lived, and it isn't ours.** A mailed invitation stays in
+  the recipient's mailbox (and their provider's backups) long after it
+  expires, and it crossed networks we don't control on the way. That's the
+  trade for an invitation that actually arrives; the 14-day expiry and the
+  sign-in-as-the-invited-address rule are what bound it.
+- A self-hosted hub sends no mail at all unless its operator configures a
+  relay — see [Self-hosting](../self-hosting/#environment-reference).
+
 ## Transport: when TLS is required
 
 The agent fully trusts whatever answers at its hub URL — once connected, it

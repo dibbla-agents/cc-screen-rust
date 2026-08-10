@@ -32,6 +32,11 @@ pub mod org;
 /// routes only register when `billing::is_configured()` (STRIPE_* env present).
 #[cfg(feature = "multi-tenant")]
 pub mod billing;
+/// Transactional mail (proposal 0073) — multi-tenant only, and inert unless
+/// `CCHUB_SMTP_URL` is set. Invite delivery is best-effort discovery on top of
+/// the invite row, never the grant ([0040] §8, [0056] C4).
+#[cfg(feature = "multi-tenant")]
+pub mod mailer;
 pub mod handlers;
 pub mod registry;
 pub mod service;

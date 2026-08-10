@@ -357,6 +357,21 @@ async fn main() {
         cfg.summary_budget_usd.map(|b| format!("${b:.2}")).unwrap_or_else(|| "uncapped".into()),
     );
 
+    // Transactional mail (proposal 0073). Resolved once, here, so the whole
+    // process shares one transport; off unless CCHUB_SMTP_URL (or the
+    // CCHUB_MAIL_DIR capture transport) *and* CCHUB_PUBLIC_URL are both set.
+    #[cfg(feature = "multi-tenant")]
+    let mailer = cc_screen_hub::mailer::Mailer::from_env();
+    #[cfg(feature = "multi-tenant")]
+    tracing::info!(
+        "cc-screen-hub: invite email {}",
+        if mailer.active() {
+            format!("ENABLED (links built on {})", mailer.public_url())
+        } else {
+            "disabled (no CCHUB_SMTP_URL/CCHUB_MAIL_DIR + CCHUB_PUBLIC_URL) — the copyable invite link is the channel".to_string()
+        },
+    );
+
     let hub = HubState {
         registry: Registry::new(),
         agent_tokens: Arc::new(cfg.agent_tokens),
@@ -368,6 +383,8 @@ async fn main() {
         config_dir: cfg.config_dir,
         bulk: Default::default(),
         summary: Arc::new(summarizer),
+        #[cfg(feature = "multi-tenant")]
+        mailer: Arc::new(mailer),
         tenancy,
     };
 
@@ -385,6 +402,11 @@ async fn main() {
                 store.share_sweep().await;
                 // Org invites ride the same timer (proposal 0063 B2).
                 store.org_invite_sweep().await;
+                // Fail-stamp send attempts the process lost (proposal 0073 B2):
+                // the hub has no graceful shutdown, so a restart drops in-flight
+                // spawns and a `sending` row would otherwise read as
+                // "never attempted" forever.
+                store.invite_delivery_sweep().await;
             }
         });
     }

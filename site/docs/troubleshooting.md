@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 nav: Troubleshooting
-description: Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, and proxy 403s.
+description: Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, and proxy 403s.
 ---
 
 # Troubleshooting
@@ -91,6 +91,31 @@ Three usual causes, in order:
 3. **A freshly enrolled machine hasn't propagated.** Normally visibility is
    immediate; in the rare miss, a nightly reconcile heals it. If it's still
    missing the next day, that's a bug — please report it.
+
+## The invite email never arrived
+
+Four usual causes, in order:
+
+1. **It's in the spam folder.** A first message from a sender the recipient
+   has never heard from often lands there. Have them search for
+   `invites@ccscreen.dev` before anything else.
+2. **The address has a typo.** The invitation is stored under exactly what
+   was typed, so `@gmial.com` produces a perfectly valid pending invite that
+   can never arrive. Cancel it and invite again.
+3. **The hub doesn't send mail.** A self-hosted hub mails nothing unless its
+   operator configured a relay (`CCHUB_SMTP_URL` — see
+   [Self-hosting](../self-hosting/#environment-reference)). Nothing else
+   about invites changes; the link is the channel.
+4. **The send failed.** Pending invite rows carry a delivery badge —
+   *sending*, *sent*, *failed*, or *bad address*. A **failed** row gets a
+   **Resend** button. **bad address** means the relay refused that address
+   permanently (no such mailbox, or no such domain); resending can't fix it,
+   so cancel the invite and re-issue it to the right address.
+
+And the answer that always works, in all four cases: **Copy link** next to
+the invite and send it yourself. It's the same invitation the email carries.
+One caveat on the badge — *sent* means the relay accepted the message, not
+that it reached a mailbox; cc-screen doesn't yet hear back about bounces.
 
 ## Assistants are outdated
 

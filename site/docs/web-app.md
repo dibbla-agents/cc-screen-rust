@@ -102,8 +102,13 @@ menu) with another person, as **can view** or **can use**:
 
 - If they already have an account, the share lands in their inbox (the bell
   icon) to accept or decline.
-- If they don't, you get an invite link to send them — the share attaches
+- If they don't, the invitation is what gets them in — the share attaches
   automatically when they sign up with that email.
+
+Either way cc-screen emails the invitation, and either way you also get a
+copyable invite link. Keep that link handy: it's the same invitation, and
+it's the fallback for a spam folder, a typo'd address, or a self-hosted hub
+whose operator hasn't configured a mail relay (those send no mail at all).
 
 You can see everything shared by you and with you on the dashboard's
 **Sharing** card, and revoke (or leave) any of it there. Access stops
@@ -166,8 +171,10 @@ On a team, the dashboard grows a **`~/team` window** — the team's admin
 surface:
 
 - the **member list** with each person's role; owners and admins invite by
-  email (you get a copyable invite link — cc-screen sends no mail) and
-  remove members; the owner changes roles and can transfer ownership.
+  email (cc-screen mails the invitation and hands you a copyable link as
+  well; each pending row shows how delivery went — *sending*, *sent*,
+  *failed* with a **Resend**, or *bad address*) and remove members; the owner
+  changes roles and can transfer ownership.
 - your machines' **Visible to team** toggles (yours to flip, whatever your
   role).
 - the **seats meter** on the plan card — `members / seats` — and, for the

@@ -301,6 +301,23 @@ pub trait Store: Send + Sync {
     /// the outbox with status `"invited"` and the email as the counterpart.
     async fn email_invite_outbox(&self, inviter: &str) -> Vec<EmailInviteRow>;
 
+    /// Would this exact create/re-offer trip the live-invite cap? The **pre-flight**
+    /// `share::create` runs before it branches on whether the address has an
+    /// account (proposal 0073 C1). It exists because the known-account arm calls
+    /// `email_invite_create` *after* `share_create` has already written a row: a
+    /// cap discovered there could only be swallowed, which would make the bound
+    /// reachable in the unknown arm alone — an account-existence oracle ([0042]).
+    /// Same inputs, same counting rule, and the store still enforces it.
+    #[allow(clippy::too_many_arguments)]
+    async fn email_invite_cap_exceeded(
+        &self,
+        inviter: &str,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+    ) -> bool;
+
     // ── orgs (proposal 0063) ───────────────────────────────────────────────────
     /// Create an org with `creator` as its owner (one transaction: orgs insert +
     /// org_members owner row + audit append). Errors if the creator is already in
@@ -346,6 +363,40 @@ pub trait Store: Send + Sync {
     async fn org_invite_by_token(&self, token: &str) -> Option<OrgInviteRow>;
     /// Called from the main.rs sweep loop beside `share_sweep` (0063 B2).
     async fn org_invite_sweep(&self);
+
+    // ── invite delivery (proposal 0073) ───────────────────────────────────────
+    /// Claim a pending invite for a send attempt: stamps `delivery = 'sending'`
+    /// only if the row is still `pending` **and still carries this token**. Returns
+    /// false when a revoke or a re-invite has superseded the attempt, in which case
+    /// the caller must not send. The token is the liveness check (B1).
+    async fn org_invite_mark_sending(&self, id: &str, token: &str) -> bool;
+    /// Stamp the outcome, again guarded on the token. Best-effort: a write failure
+    /// is logged and dropped — losing the receipt must never fail the invitation.
+    async fn org_invite_delivery_record(&self, id: &str, token: &str, delivery: &str);
+    /// The `email_invites` twin. Liveness there is the row's continued existence
+    /// carrying this token: `email_invite_revoke` DELETEs and a re-offer mints a
+    /// fresh token on the same row, so `(id, token)` is the same claim check.
+    async fn email_invite_mark_sending(&self, id: &str, token: &str) -> bool;
+    /// The `email_invites` twin of [`Store::org_invite_delivery_record`].
+    async fn email_invite_delivery_record(&self, id: &str, token: &str, delivery: &str);
+    /// Fail-stamp attempts the process lost. The hub has no graceful shutdown, so
+    /// a restart drops in-flight send tasks; without this a `sending` row would be
+    /// indistinguishable from "never attempted" forever. Runs on the 60s sweep
+    /// timer beside `org_invite_sweep`; only rows older than
+    /// [`DELIVERY_STUCK_AFTER`] are touched, so a live attempt is never stolen.
+    async fn invite_delivery_sweep(&self);
+
+    /// How many invitations this **hub** has emailed since `since` (both invite
+    /// tables). The send ceiling that actually maps to reality: the relay's quota
+    /// is per *account*, not per org (Brevo's free tier is 300/day across the
+    /// whole account), so N orgs each under a per-org ceiling can still exhaust it
+    /// — after which every invitation silently fails to leave the building.
+    async fn invites_emailed_since(&self, since: i64) -> i64;
+
+    /// How many invitations attributable to one org have been emailed since
+    /// `since`: its own org invites plus the share invites its members sent. Two
+    /// indexed COUNTs in one statement.
+    async fn org_invites_emailed_since(&self, org_id: &str, since: i64) -> i64;
 
     // Machine opt-out (0063 §consent) — owner-scoped like delete_agent.
     async fn set_team_visible(&self, owner_user_id: &str, agent_id: &str, visible: bool) -> bool;
@@ -419,6 +470,11 @@ pub struct EmailInviteRow {
     pub created_at: i64,
     pub expires_at: i64,
     pub converted_at: Option<i64>,
+    /// When the last delivery attempt settled (proposal 0073 B2). NULL = no send
+    /// was attempted — the permanent answer on a hub with no mailer.
+    pub emailed_at: Option<i64>,
+    /// `sending|sent|rejected|failed`, or NULL when nothing was attempted.
+    pub delivery: Option<String>,
 }
 
 /// One `orgs` row (proposal 0063), including the 0064 billing mirror columns.
@@ -459,6 +515,11 @@ pub struct OrgInviteRow {
     pub created_at: i64,
     pub responded_at: Option<i64>,
     pub expires_at: i64,
+    /// When the last delivery attempt settled (proposal 0073 B2). NULL = no send
+    /// was attempted — the permanent answer on a hub with no mailer.
+    pub emailed_at: Option<i64>,
+    /// `sending|sent|rejected|failed`, or NULL when nothing was attempted.
+    pub delivery: Option<String>,
 }
 
 /// One `audit_log` row (proposal 0063 Part D).
@@ -751,6 +812,83 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// The id of the email-invite row a create for this `(email, kind, agent,
+    /// session)` would upsert onto, if any — the re-offer target. Shared by
+    /// `email_invite_create` and the cap pre-flight so both agree on which row is
+    /// being refreshed (and therefore which one to exclude from the count).
+    async fn email_invite_existing_id(
+        &self,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+    ) -> Option<String> {
+        sqlx::query(
+            "SELECT id FROM email_invites
+              WHERE email = ?1 AND agent_id = ?2 AND resource_kind = ?3
+                AND ((?4 IS NULL AND session_name IS NULL) OR session_name = ?4)",
+        )
+        .bind(email)
+        .bind(agent_id)
+        .bind(kind)
+        .bind(session)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get("id").ok())
+    }
+
+    /// Live (unconverted, unexpired) email invites for `inviter`, ignoring
+    /// `exclude_id` (pass `""` for none). Rides `idx_email_invites_inviter`.
+    async fn email_invite_live_excluding(&self, inviter: &str, exclude_id: &str) -> i64 {
+        sqlx::query(
+            "SELECT count(*) AS n FROM email_invites
+              WHERE inviter_user_id = ?1 AND converted_at IS NULL AND expires_at > ?2
+                AND id <> ?3",
+        )
+        .bind(inviter)
+        .bind(now_secs() as i64)
+        .bind(exclude_id)
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .and_then(|r| r.try_get::<i64, _>("n").ok())
+        .unwrap_or(0)
+    }
+
+    /// The org-scoped live-invite cap (proposal 0073 C1). Deliberately **not**
+    /// per-inviter, unlike its `email_invites` sibling: `org_invites` has no index
+    /// on `inviter_user_id` (0010 indexes only `email`), so a per-inviter COUNT
+    /// table-scans; the re-offer UPDATE *reassigns* `inviter_user_id`, so a
+    /// per-inviter count isn't even stable across re-offers; and an org-scoped cap
+    /// rides the existing `UNIQUE (org_id, email)` index, matches the abuse model
+    /// (the org is what has the billing relationship) and cannot be reset by
+    /// inviting from a second admin account.
+    ///
+    /// `exclude_id` is the row a re-offer is about to refresh (`""` for a fresh
+    /// insert): a re-offer of an already-pending row doesn't grow the live set, so
+    /// it must never be blocked by the cap it is itself a member of.
+    async fn assert_org_invite_headroom(&self, org_id: &str, exclude_id: &str) -> anyhow::Result<()> {
+        let live: i64 = sqlx::query(
+            "SELECT count(*) AS n FROM org_invites
+              WHERE org_id = ?1 AND status = 'pending' AND expires_at > ?2 AND id <> ?3",
+        )
+        .bind(org_id)
+        .bind(now_secs() as i64)
+        .bind(exclude_id)
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .and_then(|r| r.try_get::<i64, _>("n").ok())
+        .unwrap_or(0);
+        anyhow::ensure!(
+            live < ORG_INVITE_CAP,
+            "CAP:this team has too many pending invitations — cancel some from the team page first"
+        );
+        Ok(())
+    }
+
     /// One `plan_limits` row by name (the org branch of `limits_for` reads the
     /// per-seat 'team' row through this). `None` if unseeded.
     async fn plan_row(&self, plan: &str) -> Option<PlanLimits> {
@@ -875,7 +1013,13 @@ impl Store for SqliteStore {
 
     async fn create_user(&self, email: &str, password: &str) -> anyhow::Result<String> {
         let email = normalize_email(email);
-        anyhow::ensure!(!email.is_empty(), "email is required");
+        // Signup validates too (proposal 0073 C3, tightened after review): the
+        // account's own address is interpolated into every invitation's subject
+        // as `inviter`, and signup never verified — nor even parsed — it, so an
+        // account created as `a@b.com\r\nBcc: x@y` would have fed the mailer
+        // from a path the invite validators never see. This covers the CLI
+        // (`cc-screen-hub user add`) as well.
+        validate_email_address(&email)?;
         // 12-char minimum on public signup, aligned with the hub's own
         // CCWEB_PASSWORD warning bar (proposal 0053 Part E).
         anyhow::ensure!(password.len() >= MIN_PASSWORD_LEN, "password must be at least {MIN_PASSWORD_LEN} characters");
@@ -1877,7 +2021,10 @@ impl Store for SqliteStore {
         anyhow::ensure!(kind == "agent" || kind == "session", "bad resource_kind");
         anyhow::ensure!((kind == "session") == session.is_some(), "session iff session-kind");
         let email = normalize_email(email);
-        anyhow::ensure!(!email.is_empty(), "email is required");
+        // Defense in depth (proposal 0073 C3): both handlers validate at the API
+        // boundary so a bad address 400s before any row is written; this is the
+        // backstop for the CLI and for any future caller.
+        validate_email_address(&email)?;
         let now = now_secs() as i64;
         let expires = now + SHARE_INVITE_TTL;
         let converted_at = converted.then_some(now);
@@ -1886,25 +2033,35 @@ impl Store for SqliteStore {
         // an agent invite is DISTINCT under the UNIQUE index (same discipline as
         // share_invites). A re-offer keeps the row id but mints a FRESH token
         // (the old link dies) and refreshes the TTL.
-        let existing: Option<String> = sqlx::query(
-            "SELECT id FROM email_invites
-              WHERE email = ?1 AND agent_id = ?2 AND resource_kind = ?3
-                AND ((?4 IS NULL AND session_name IS NULL) OR session_name = ?4)",
-        )
-        .bind(&email)
-        .bind(agent_id)
-        .bind(kind)
-        .bind(session)
-        .fetch_optional(&self.pool)
-        .await?
-        .and_then(|r| r.try_get("id").ok());
+        let existing: Option<String> =
+            self.email_invite_existing_id(&email, kind, agent_id, session).await;
+
+        // Abuse bound (proposal 0056 C2, holes closed by 0073 C1): cap the
+        // inviter's LIVE (unconverted, unexpired) email invites. Three things
+        // moved here from below the re-offer early-return:
+        //   * it now runs on the RE-OFFER path too (D2's Resend is a re-offer,
+        //     and re-offers used to be bounded by nothing at all);
+        //   * it no longer skips `converted` (known-account) rows — skipping the
+        //     known arm made the cap reachable in one arm only, which is exactly
+        //     the account-existence oracle [0042] forbids. A pre-converted row
+        //     still never *counts* toward the total, it is merely subject to it;
+        //   * the row this call is about to refresh is excluded from the count,
+        //     so re-offering one of your own live invites is never blocked by
+        //     the cap it is itself a member of.
+        let live = self.email_invite_live_excluding(inviter, existing.as_deref().unwrap_or_default()).await;
+        anyhow::ensure!(
+            live < EMAIL_INVITE_CAP,
+            "CAP:too many pending invitations — cancel some from your outbox first"
+        );
 
         let token = cc_screen_auth::generate_token();
         if let Some(id) = existing {
+            // Same as org_invite_create's re-offer: a fresh token means a fresh
+            // delivery receipt (proposal 0073 B2), never attempt one's.
             sqlx::query(
                 "UPDATE email_invites
                     SET token = ?1, owner_peek = ?2, created_at = ?3, expires_at = ?4,
-                        converted_at = ?5
+                        converted_at = ?5, delivery = NULL, emailed_at = NULL
                   WHERE id = ?6",
             )
             .bind(&token)
@@ -1916,26 +2073,6 @@ impl Store for SqliteStore {
             .execute(&self.pool)
             .await?;
             return Ok((id, token));
-        }
-
-        // Abuse bound (proposal 0056 C2): cap the inviter's LIVE (unconverted,
-        // unexpired) email invites. Pre-converted known-user rows don't count.
-        if !converted {
-            let live: i64 = sqlx::query(
-                "SELECT count(*) AS n FROM email_invites
-                  WHERE inviter_user_id = ?1 AND converted_at IS NULL AND expires_at > ?2",
-            )
-            .bind(inviter)
-            .bind(now)
-            .fetch_one(&self.pool)
-            .await
-            .ok()
-            .and_then(|r| r.try_get::<i64, _>("n").ok())
-            .unwrap_or(0);
-            anyhow::ensure!(
-                live < EMAIL_INVITE_CAP,
-                "CAP:too many pending invitations — cancel some from your outbox first"
-            );
         }
 
         let id = cc_screen_auth::generate_token();
@@ -2043,12 +2180,29 @@ impl Store for SqliteStore {
         rows.iter().filter_map(email_invite_row).collect()
     }
 
+    async fn email_invite_cap_exceeded(
+        &self,
+        inviter: &str,
+        email: &str,
+        kind: &str,
+        agent_id: &str,
+        session: Option<&str>,
+    ) -> bool {
+        let email = normalize_email(email);
+        let existing = self.email_invite_existing_id(&email, kind, agent_id, session).await;
+        self.email_invite_live_excluding(inviter, existing.as_deref().unwrap_or_default()).await
+            >= EMAIL_INVITE_CAP
+    }
+
     // ── orgs (proposal 0063) ───────────────────────────────────────────────────
 
     async fn org_create(&self, creator: &str, name: &str) -> anyhow::Result<String> {
         let name = name.trim();
-        anyhow::ensure!(!name.is_empty(), "a team name is required");
-        anyhow::ensure!(name.len() <= 80, "team name too long");
+        // Proposal 0073 C3: the org name is interpolated into the invitation
+        // subject/body, so a control character in it is a header-injection
+        // vector. Enforced HERE (not just at the route) so `cc-screen-hub org
+        // create` and any future rename go through the same rule.
+        validate_org_name(name)?;
         anyhow::ensure!(
             self.org_for_user(creator).await.is_none(),
             "ONEORG:you're already in a team — leave it before creating another"
@@ -2221,7 +2375,8 @@ impl Store for SqliteStore {
     ) -> anyhow::Result<(String, String, String)> {
         anyhow::ensure!(matches!(role, "admin" | "member"), "invite role must be admin or member");
         let email = normalize_email(email);
-        anyhow::ensure!(!email.is_empty(), "email is required");
+        // Defense in depth (proposal 0073 C3) — the handler already answered 400.
+        validate_email_address(&email)?;
         let now = now_secs() as i64;
         let expires = now + SHARE_INVITE_TTL;
 
@@ -2246,12 +2401,23 @@ impl Store for SqliteStore {
                 return Ok((id, "accepted".into(), token));
             }
             // pending/terminal → (re)offer: refresh to pending with a FRESH token
-            // (the old link dies) and a fresh TTL, like email_invite_create.
+            // (the old link dies) and a fresh TTL, like email_invite_create. The
+            // delivery receipt is cleared in the same statement (proposal 0073
+            // B2), so a re-invite starts clean rather than showing attempt one's.
+            // The org-scoped live-invite cap (0073 C1). Reached only on the
+            // (re)offer path — the `accepted` arm above returns first, and rightly
+            // so: it adds no pending row. That exemption is not an
+            // account-existence oracle either, since "already a member" is a fact
+            // about the caller's OWN org, which `/api/orgs/mine` already shows
+            // them; for every address that is not a member, the cap fires
+            // identically whether or not that address has an account.
+            self.assert_org_invite_headroom(org_id, &id).await?;
             let token = cc_screen_auth::generate_token();
             sqlx::query(
                 "UPDATE org_invites
                     SET status = 'pending', role = ?1, token = ?2, inviter_user_id = ?3,
-                        created_at = ?4, expires_at = ?5, responded_at = NULL
+                        created_at = ?4, expires_at = ?5, responded_at = NULL,
+                        delivery = NULL, emailed_at = NULL
                   WHERE id = ?6",
             )
             .bind(role)
@@ -2265,6 +2431,9 @@ impl Store for SqliteStore {
             return Ok((id, "pending".into(), token));
         }
 
+        if !already_member {
+            self.assert_org_invite_headroom(org_id, "").await?;
+        }
         let id = cc_screen_auth::generate_token();
         let token = cc_screen_auth::generate_token();
         let status = if already_member { "accepted" } else { "pending" };
@@ -2488,6 +2657,108 @@ impl Store for SqliteStore {
         .bind(now - SHARE_INVITE_REAP_AFTER)
         .execute(&self.pool)
         .await;
+    }
+
+    // ── invite delivery (proposal 0073 B2) ────────────────────────────────────
+
+    async fn org_invite_mark_sending(&self, id: &str, token: &str) -> bool {
+        sqlx::query(
+            "UPDATE org_invites SET delivery = 'sending'
+              WHERE id = ?1 AND token = ?2 AND status = 'pending'",
+        )
+        .bind(id)
+        .bind(token)
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false)
+    }
+
+    async fn org_invite_delivery_record(&self, id: &str, token: &str, delivery: &str) {
+        if let Err(e) = sqlx::query(
+            "UPDATE org_invites SET delivery = ?1, emailed_at = ?2 WHERE id = ?3 AND token = ?4",
+        )
+        .bind(delivery)
+        .bind(now_secs() as i64)
+        .bind(id)
+        .bind(token)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!("org_invite_delivery_record({id}): {e}");
+        }
+    }
+
+    async fn email_invite_mark_sending(&self, id: &str, token: &str) -> bool {
+        // No status column here: a revoke DELETEs the row and a re-offer mints a
+        // fresh token on it, so `(id, token)` is the whole liveness check.
+        sqlx::query("UPDATE email_invites SET delivery = 'sending' WHERE id = ?1 AND token = ?2")
+            .bind(id)
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    async fn email_invite_delivery_record(&self, id: &str, token: &str, delivery: &str) {
+        if let Err(e) = sqlx::query(
+            "UPDATE email_invites SET delivery = ?1, emailed_at = ?2 WHERE id = ?3 AND token = ?4",
+        )
+        .bind(delivery)
+        .bind(now_secs() as i64)
+        .bind(id)
+        .bind(token)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!("email_invite_delivery_record({id}): {e}");
+        }
+    }
+
+    async fn invite_delivery_sweep(&self) {
+        // A row whose attempt outlived the process: `sending` is the pre-attempt
+        // stamp, so anything still wearing it long after the row was (re)created
+        // belongs to a task that no longer exists. COALESCE because `emailed_at`
+        // is NULL until an attempt settles — the create time is the attempt time.
+        let cutoff = now_secs() as i64 - DELIVERY_STUCK_AFTER;
+        for table in ["org_invites", "email_invites"] {
+            let sql = format!(
+                "UPDATE {table} SET delivery = 'failed', emailed_at = ?1
+                  WHERE delivery = 'sending' AND COALESCE(emailed_at, created_at) < ?2"
+            );
+            let _ = sqlx::query(&sql).bind(now_secs() as i64).bind(cutoff).execute(&self.pool).await;
+        }
+    }
+
+    async fn invites_emailed_since(&self, since: i64) -> i64 {
+        sqlx::query(
+            "SELECT (SELECT count(*) FROM org_invites   WHERE emailed_at > ?1)
+                  + (SELECT count(*) FROM email_invites WHERE emailed_at > ?1) AS n",
+        )
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .and_then(|r| r.try_get::<i64, _>("n").ok())
+        .unwrap_or(0)
+    }
+
+    async fn org_invites_emailed_since(&self, org_id: &str, since: i64) -> i64 {
+        sqlx::query(
+            "SELECT (SELECT count(*) FROM org_invites
+                      WHERE org_id = ?1 AND emailed_at > ?2)
+                  + (SELECT count(*) FROM email_invites e
+                       JOIN org_members m ON m.user_id = e.inviter_user_id
+                      WHERE m.org_id = ?1 AND e.emailed_at > ?2) AS n",
+        )
+        .bind(org_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .and_then(|r| r.try_get::<i64, _>("n").ok())
+        .unwrap_or(0)
     }
 
     async fn set_team_visible(&self, owner_user_id: &str, agent_id: &str, visible: bool) -> bool {
@@ -2753,12 +3024,103 @@ const SHARE_INVITE_REAP_AFTER: i64 = 7 * 86_400;
 /// Live (unconverted, unexpired) email invites per inviter (proposal 0056 C2's
 /// abuse bound); over it the handler answers 429.
 const EMAIL_INVITE_CAP: i64 = 20;
+/// Live (pending, unexpired) invitations per **org** (proposal 0073 C1) — the
+/// `org_invites` twin of [`EMAIL_INVITE_CAP`], org-scoped rather than
+/// inviter-scoped for the reasons on [`SqliteStore::assert_org_invite_headroom`].
+/// Comfortably above any real team's onboarding batch; over it the handler
+/// answers 429 through `store_err`'s `CAP:` arm.
+const ORG_INVITE_CAP: i64 = 25;
+/// Invitations one org may have *emailed* in a rolling 24h (proposal 0073 C1).
+/// Unlike the two live-invite caps this bounds mail, not rows: over it the
+/// invitation is still created and the copyable link still returned — only the
+/// send is skipped. Inert on a hub with no mailer (nothing is ever sent).
+pub const ORG_MAIL_PER_DAY: i64 = 100;
+/// The same ceiling for the whole hub, sized under Brevo's free-tier 300/day
+/// account quota with headroom for the password-reset mail this transport will
+/// eventually also carry. The per-org ceiling cannot substitute for it: the
+/// quota is per relay *account*, so N orgs each under their own ceiling still
+/// exhaust it.
+pub const HUB_MAIL_PER_DAY: i64 = 250;
 /// Public-signup password minimum, aligned with the CCWEB_PASSWORD warning bar
 /// (proposal 0053 Part E).
 pub const MIN_PASSWORD_LEN: usize = 12;
+/// How long a `delivery = 'sending'` stamp may stand before the sweep calls it
+/// `failed` (proposal 0073 B2). Comfortably past the mailer's 20s `SEND_TIMEOUT`,
+/// so only an attempt whose process is gone is ever fail-stamped.
+const DELIVERY_STUCK_AFTER: i64 = 300;
 
-fn normalize_email(email: &str) -> String {
+/// The one normalization every email-keyed lookup and insert goes through.
+/// `pub(crate)` so the two invite handlers can address the mail to the same
+/// string the row is keyed by (proposal 0073 B1).
+pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// Is this a C0 control character (U+0000–U+001F) or DEL? These are the header
+/// -injection alphabet: a bare `\r`/`\n` in a value the mailer interpolates can
+/// start a header of the attacker's choosing (`Bcc:` is the classic).
+pub(crate) fn is_control_char(c: char) -> bool {
+    (c as u32) < 0x20 || c == '\u{7f}'
+}
+
+/// The address check the two invite endpoints run **at the API boundary**, so a
+/// malformed address answers 400 before an invite row is written (proposal 0073
+/// C3 — before this, `normalize_email` was `trim().to_lowercase()` and the only
+/// other check was `!is_empty()`, so `victim@x.com\r\nBcc: …` was accepted and
+/// persisted, with the browser's `<input type="email">` the entire defense).
+///
+/// The rules, applied to the normalized (trimmed, lowercased) value:
+///   * non-empty, and at most 254 bytes (RFC 5321's path limit);
+///   * **exactly one** `@`, with a non-empty local part and a non-empty domain;
+///   * no C0 control character and no DEL anywhere;
+///   * no `,` and no `;` — the address-list separators;
+///   * no whitespace, `<` or `>` — i.e. a **bare** address, never the
+///     `Display Name <a@b.com>` form. That form passes every other rule here and
+///     `lettre` accepts it, but the envelope would carry `a@b.com` while the
+///     `To:` header carried attacker-chosen display text into the invitee's
+///     client, and the *stored* value would stop being a bare address — which
+///     matters because the accept flow compares an authenticated account's email
+///     against exactly this string ([0056] C4).
+///
+/// Note what it deliberately does **not** require: a dot in the domain. A
+/// self-hosted hub on a corporate LAN legitimately invites `bob@intranet`, and
+/// rejecting that would break a hub that sends no mail at all. Deliverability is
+/// not this function's job; injection defense is. `lettre`'s typed builder would
+/// also catch these, but a bad address must never reach the database in the first
+/// place, and resting a whole class of injection on one library's parser is an
+/// assumption that survives right up until someone switches transports.
+pub(crate) fn validate_email_address(email: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!email.is_empty(), "email is required");
+    anyhow::ensure!(email.len() <= 254, "email address is too long");
+    anyhow::ensure!(
+        !email.chars().any(is_control_char),
+        "email address contains a control character"
+    );
+    anyhow::ensure!(
+        !email.contains(',') && !email.contains(';'),
+        "email address contains a separator character"
+    );
+    anyhow::ensure!(
+        !email.chars().any(char::is_whitespace) && !email.contains('<') && !email.contains('>'),
+        "email address must be a plain address, without a display name"
+    );
+    let mut parts = email.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        anyhow::bail!("email address must contain exactly one @");
+    };
+    anyhow::ensure!(!local.is_empty() && !domain.is_empty(), "email address is not a valid address");
+    Ok(())
+}
+
+/// The org-name check (proposal 0073 C3): the name is interpolated into an
+/// invitation's subject and body, so a `\r\n` in it is the same injection vector
+/// as one in the address. `org_create` accepted any characters within 80 —
+/// control codes included — before this.
+pub(crate) fn validate_org_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "a team name is required");
+    anyhow::ensure!(name.len() <= 80, "team name too long");
+    anyhow::ensure!(!name.chars().any(is_control_char), "team name contains a control character");
+    Ok(())
 }
 
 /// A user code as typed/stored: uppercased with separators stripped, so "wdjb-mjht"
@@ -2822,6 +3184,8 @@ fn org_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<OrgInviteRow> {
         created_at: r.try_get("created_at").ok()?,
         responded_at: r.try_get::<Option<i64>, _>("responded_at").ok().flatten(),
         expires_at: r.try_get("expires_at").ok()?,
+        emailed_at: r.try_get::<Option<i64>, _>("emailed_at").ok().flatten(),
+        delivery: r.try_get::<Option<String>, _>("delivery").ok().flatten(),
     })
 }
 
@@ -3031,6 +3395,8 @@ fn email_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<EmailInviteRow> {
         created_at: r.try_get("created_at").ok()?,
         expires_at: r.try_get("expires_at").ok()?,
         converted_at: r.try_get::<Option<i64>, _>("converted_at").ok().flatten(),
+        emailed_at: r.try_get::<Option<i64>, _>("emailed_at").ok().flatten(),
+        delivery: r.try_get::<Option<String>, _>("delivery").ok().flatten(),
     })
 }
 
@@ -3133,6 +3499,155 @@ mod tests {
         assert!(err.starts_with("CAP:"), "got: {err}");
         // A re-offer of an existing live invite is NOT blocked by the cap.
         assert!(s.email_invite_create(&alice, "g0@x.com", "agent", &agent, None, false, false).await.is_ok());
+    }
+
+    /// Proposal 0073 C1: the two holes the 0056 cap left open. The `converted`
+    /// (known-account) arm is now subject to the same bound — a cap reachable in
+    /// one arm only is an account-existence oracle — and the pre-flight the share
+    /// handler runs before it branches agrees with the store, row for row.
+    #[tokio::test]
+    async fn email_invite_cap_covers_the_known_account_arm() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        assert!(!s.email_invite_cap_exceeded(&alice, "bob@x.com", "agent", &agent, None).await);
+        for i in 0..EMAIL_INVITE_CAP {
+            s.email_invite_create(&alice, &format!("g{i}@x.com"), "agent", &agent, None, false, false)
+                .await
+                .unwrap();
+        }
+        // The pre-flight and the store agree, in BOTH arms.
+        assert!(s.email_invite_cap_exceeded(&alice, "bob@x.com", "agent", &agent, None).await);
+        assert!(s.email_invite_cap_exceeded(&alice, "stranger@x.com", "agent", &agent, None).await);
+        let err = s
+            .email_invite_create(&alice, "bob@x.com", "agent", &agent, None, false, true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("CAP:"), "the known-account arm is bounded too; got: {err}");
+        // …and a re-offer of a live row still isn't, in either place.
+        assert!(!s.email_invite_cap_exceeded(&alice, "g0@x.com", "agent", &agent, None).await);
+        let _ = bob;
+    }
+
+    /// Proposal 0073 C1: `org_invites` gets a live-invite cap, scoped to the ORG
+    /// (not the inviter — the re-offer UPDATE reassigns `inviter_user_id`, so a
+    /// per-inviter count isn't even stable, and a second admin account would reset
+    /// it). Signalled with the `CAP:` prefix `store_err` maps to 429.
+    #[tokio::test]
+    async fn org_invite_cap_is_org_scoped_and_survives_a_second_admin() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        let org = s.org_create(&alice, "acme").await.unwrap();
+        for i in 0..ORG_INVITE_CAP {
+            s.org_invite_create(&org, &alice, &format!("c{i}@x.com"), "member").await.unwrap();
+        }
+        let err = s
+            .org_invite_create(&org, &alice, "one-too-many@x.com", "member")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("CAP:"), "got: {err}");
+        // A second admin inviting into the SAME org gets the same answer — the cap
+        // is not per-inviter, so it can't be reset by switching accounts.
+        let err = s.org_invite_create(&org, &bob, "also-too-many@x.com", "member").await.unwrap_err();
+        assert!(err.to_string().starts_with("CAP:"), "got: {err}");
+        // A re-offer of one of the live invites is never blocked by the cap it is
+        // itself a member of (the row under refresh is excluded from the count).
+        assert!(s.org_invite_create(&org, &alice, "c0@x.com", "member").await.is_ok());
+        // Cancel one and the headroom comes back.
+        let outbox = s.org_invite_outbox(&org).await;
+        let victim = outbox.iter().find(|r| r.email == "c1@x.com").unwrap().id.clone();
+        s.org_invite_revoke(&org, &victim).await;
+        assert!(s.org_invite_create(&org, &alice, "fresh@x.com", "member").await.is_ok());
+    }
+
+    /// Proposal 0073 C3: the address validator. Injection defense, not
+    /// deliverability — note that `bob@intranet` (a self-hosted hub on a corporate
+    /// LAN) is deliberately still accepted.
+    #[test]
+    fn email_address_validator_rejects_injection_not_intranets() {
+        for ok in ["bob@intranet", "a@b", "alice@example.com", "a.b+c@sub.example.co.uk"] {
+            assert!(validate_email_address(ok).is_ok(), "should accept {ok}");
+        }
+        for bad in [
+            "",
+            "victim@x.com\r\nbcc: attacker@x.com",
+            "victim@x.com\nbcc: attacker@x.com",
+            "victim@x.com\u{7f}",
+            "a@b,c@d",
+            "a@b;c@d",
+            "no-at-sign",
+            "two@at@signs",
+            "@nolocal.com",
+            "nodomain@",
+            // The display-name form: one `@`, no control characters, no
+            // separators — it passes every other rule and `lettre` accepts it,
+            // but the envelope would carry `victim@x.com` while the `To:` header
+            // carried attacker-chosen text, and the stored value would stop being
+            // the bare address the accept flow compares against.
+            "attacker <victim@x.com>",
+            "victim@x.com>",
+            "bcc: x <victim@x.com>",
+            "victim@exa mple.com",
+            "victim @x.com",
+        ] {
+            assert!(validate_email_address(bad).is_err(), "should reject {bad:?}");
+        }
+        // ≤254 bytes.
+        let long = format!("{}@x.com", "a".repeat(250));
+        assert!(validate_email_address(&long).is_err(), "254-byte ceiling");
+        let just_fits = format!("{}@x.com", "a".repeat(248));
+        assert!(validate_email_address(&just_fits).is_ok(), "{} bytes", just_fits.len());
+    }
+
+    /// Proposal 0073 C3: an org name is interpolated into an invitation body, so a
+    /// control character in it is the same injection vector. Enforced in the store
+    /// so the CLI's `org create` is covered too.
+    #[tokio::test]
+    async fn org_name_rejects_control_characters() {
+        assert!(validate_org_name("acme").is_ok());
+        assert!(validate_org_name("acme \u{e9}quipe — ok").is_ok());
+        assert!(validate_org_name("acme\r\nBcc: attacker@x").is_err());
+        assert!(validate_org_name("acme\u{0}").is_err());
+        assert!(validate_org_name("   ").is_err());
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        assert!(s.org_create(&alice, "acme\r\nBcc: attacker@x").await.is_err(), "refused at create");
+        assert!(s.org_create(&alice, "acme").await.is_ok());
+    }
+
+    /// Proposal 0073 C1: the two send ceilings read `emailed_at`, so they count
+    /// only invitations that were actually mailed — a hub with no mailer counts
+    /// zero forever and nothing about its behaviour changes.
+    #[tokio::test]
+    async fn emailed_since_counts_both_tables_and_scopes_to_the_org() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        let org = s.org_create(&alice, "acme").await.unwrap();
+        let since = now_secs() as i64 - 86_400;
+        assert_eq!(s.invites_emailed_since(since).await, 0, "nothing sent ⇒ no ceiling pressure");
+        assert_eq!(s.org_invites_emailed_since(&org, since).await, 0);
+
+        let (oid, _st, otok) = s.org_invite_create(&org, &alice, "carol@x.com", "member").await.unwrap();
+        s.org_invite_delivery_record(&oid, &otok, "sent").await;
+        let (eid, etok) = s
+            .email_invite_create(&alice, "ghost@x.com", "agent", &agent, None, false, false)
+            .await
+            .unwrap();
+        s.email_invite_delivery_record(&eid, &etok, "sent").await;
+
+        assert_eq!(s.invites_emailed_since(since).await, 2, "hub-wide spans both tables");
+        assert_eq!(
+            s.org_invites_emailed_since(&org, since).await,
+            2,
+            "an org's own invites plus its members' share invites"
+        );
+        // A window that starts after the stamps sees nothing.
+        assert_eq!(s.invites_emailed_since(now_secs() as i64 + 60).await, 0);
     }
 
     // The §4.1 keystone's data half: a token resolves to its OWNER's agent and
@@ -3832,6 +4347,109 @@ mod tests {
         let n: i64 = sqlx::query("SELECT count(*) AS n FROM audit_log")
             .fetch_one(&s.pool).await.unwrap().try_get("n").unwrap();
         assert_eq!(n, 0, "audit dies with the org (CASCADE)");
+    }
+
+    // ── Proposal 0073: the delivery receipt ───────────────────────────────────
+
+    /// One org invite's receipt across its whole life: absent until a send is
+    /// attempted, claimed-then-stamped by an attempt, cleared by a re-invite, and
+    /// **unwritable by a superseded or revoked attempt** — the guard the spawned
+    /// send in `org::invite_create` rides on (0073 B1/B2).
+    #[tokio::test]
+    async fn org_invite_delivery_receipt_is_token_guarded() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        let org = seed_org(&s, &alice, 3).await;
+        let row = |id: String| {
+            let s = &s;
+            let org = org.clone();
+            async move { s.org_invite_outbox(&org).await.into_iter().find(|r| r.id == id).unwrap() }
+        };
+
+        // A fresh invite carries no receipt: NULL means "no send was attempted",
+        // which is the permanent answer on a hub with no mailer.
+        let (id, st, tok1) = s.org_invite_create(&org, &alice, "ghost@x.com", "member").await.unwrap();
+        assert_eq!(st, "pending");
+        let r = row(id.clone()).await;
+        assert_eq!((r.delivery.as_deref(), r.emailed_at), (None, None));
+
+        // Claim → 'sending' (the pre-attempt stamp), then the outcome + a time.
+        assert!(s.org_invite_mark_sending(&id, &tok1).await);
+        assert_eq!(row(id.clone()).await.delivery.as_deref(), Some("sending"));
+        s.org_invite_delivery_record(&id, &tok1, "sent").await;
+        let r = row(id.clone()).await;
+        assert_eq!(r.delivery.as_deref(), Some("sent"));
+        assert!(r.emailed_at.is_some());
+
+        // A re-invite keeps the row, mints a FRESH token, and clears the receipt.
+        let (id2, st2, tok2) = s.org_invite_create(&org, &alice, "GHOST@x.com", "member").await.unwrap();
+        assert_eq!((id2.as_str(), st2.as_str()), (id.as_str(), "pending"));
+        assert_ne!(tok2, tok1);
+        let r = row(id.clone()).await;
+        assert_eq!((r.delivery.as_deref(), r.emailed_at), (None, None), "a re-invite starts clean");
+
+        // Attempt one is now superseded: it can neither claim nor stamp.
+        assert!(!s.org_invite_mark_sending(&id, &tok1).await);
+        s.org_invite_delivery_record(&id, &tok1, "failed").await;
+        assert_eq!(row(id.clone()).await.delivery, None, "the superseded attempt writes nothing");
+
+        // A revoke inside the send window kills the live token's claim too.
+        assert!(s.org_invite_mark_sending(&id, &tok2).await);
+        s.org_invite_revoke(&org, &id).await;
+        assert!(!s.org_invite_mark_sending(&id, &tok2).await, "revoked ⇒ no send");
+        // That leaves the row wearing the pre-attempt stamp with no task behind it
+        // — exactly what a restart mid-send leaves. The sweep fail-stamps it once
+        // it is stale (the hub has no graceful shutdown).
+        assert_eq!(row(id.clone()).await.delivery.as_deref(), Some("sending"));
+        s.invite_delivery_sweep().await;
+        assert_eq!(row(id.clone()).await.delivery.as_deref(), Some("sending"), "a fresh attempt is never stolen");
+        let _ = sqlx::query("UPDATE org_invites SET created_at = ?1 WHERE id = ?2")
+            .bind(now_secs() as i64 - DELIVERY_STUCK_AFTER - 60)
+            .bind(&id)
+            .execute(&s.pool)
+            .await;
+        s.invite_delivery_sweep().await;
+        let r = row(id.clone()).await;
+        assert_eq!(r.delivery.as_deref(), Some("failed"), "a lost attempt becomes visible");
+        assert!(r.emailed_at.is_some());
+    }
+
+    /// The `email_invites` twin. Liveness there is the row + its token: a revoke
+    /// DELETEs it and a re-offer mints a fresh token on it.
+    #[tokio::test]
+    async fn email_invite_delivery_receipt_is_token_guarded() {
+        let s = SqliteStore::in_memory().await;
+        let alice = seed_user(&s, "alice@x.com").await;
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        let live = |id: String| {
+            let s = &s;
+            let alice = alice.clone();
+            async move { s.email_invite_outbox(&alice).await.into_iter().find(|r| r.id == id) }
+        };
+
+        let (id, tok1) =
+            s.email_invite_create(&alice, "ghost@x.com", "agent", &agent, None, false, false).await.unwrap();
+        assert_eq!(live(id.clone()).await.unwrap().delivery, None);
+
+        assert!(s.email_invite_mark_sending(&id, &tok1).await);
+        s.email_invite_delivery_record(&id, &tok1, "rejected").await;
+        let r = live(id.clone()).await.unwrap();
+        assert_eq!(r.delivery.as_deref(), Some("rejected"));
+        assert!(r.emailed_at.is_some());
+
+        // Re-offer: same row, fresh token, cleared receipt; attempt one is dead.
+        let (id2, tok2) =
+            s.email_invite_create(&alice, "ghost@x.com", "agent", &agent, None, false, false).await.unwrap();
+        assert_eq!(id2, id);
+        assert_eq!(live(id.clone()).await.unwrap().delivery, None);
+        assert!(!s.email_invite_mark_sending(&id, &tok1).await);
+        s.email_invite_delivery_record(&id, &tok1, "sent").await;
+        assert_eq!(live(id.clone()).await.unwrap().delivery, None, "the superseded attempt writes nothing");
+
+        // A revoke removes the row outright, so the claim fails there too.
+        assert!(s.email_invite_revoke(&alice, &id).await);
+        assert!(!s.email_invite_mark_sending(&id, &tok2).await);
+        assert!(live(id).await.is_none());
     }
 
     // ── Proposal 0064: org-targeted billing writes ────────────────────────────

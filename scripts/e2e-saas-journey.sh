@@ -19,6 +19,8 @@
 #   docker rm -f e2e-box
 #   # and on the hub origin host, delete the throwaway account(s):
 #   #   cc-screen-hub user delete "<the e2e+…@ccscreen.dev email the run printed>"
+#   # --gate also leaves an e2e-known-…@ccscreen.test account and the org it
+#   # invited into (deleting the owner reaps the org's rows by CASCADE)
 #   # (no cookie-authed account-delete endpoint exists yet — 0056 may add one)
 set -eu
 
@@ -49,6 +51,15 @@ post_json() {
   : > "$BODY"
 }
 
+# GET $HUB$1; extra curl args after that. Same "<status>\n<body>" shape.
+get_json() {
+  path="$1"; shift
+  curl -sS -o "$BODY" -w '%{http_code}' "$HUB$path" "$@" || true
+  printf '\n'
+  cat "$BODY" 2>/dev/null || true
+  : > "$BODY"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # --gate: probe the 0053 Part E ([0042] P0) items against $HUB. These must PASS
 # before the signup URL is promoted publicly (landing page / README). The
@@ -66,15 +77,20 @@ if [ "${1:-}" = "--gate" ]; then
         -e 's/:true/:B/g' -e 's/:false/:B/g'
   }
 
-  say "gate 1/3: account enumeration — the duplicate-email failure must be generic"
-  # A create-account endpoint that succeeds by minting a session cannot make
+  say "gate 1/3: account enumeration — signup AND invite must both stay silent about an address"
+  # Two legs, because there are two endpoints that know whether an address has an
+  # account. (a) signup, which has always known; and (b) the invite sites, which
+  # since 0073 also SEND — and a send is an observable the answer can differ in.
+  #
+  # (a) A create-account endpoint that succeeds by minting a session cannot make
   # success and duplicate-email byte-identical without an email-verification
-  # step (v1 ships no mailer), so the P0 bar (0053 Part E / 0042) is: every
+  # step. The hub now HAS a mailer (0073) but deliberately ships no verification
+  # mail (0073 Non-Goals), so the P0 bar (0053 Part E / 0042) is unchanged: every
   # server-side signup failure — duplicate email included — answers with ONE
   # generic status + body that never confirms the address exists, and the
   # per-IP throttle (gate 3) bounds probing. Assert exactly that.
   # Setup: mint an account so an "existing email" exists.
-  setup="$(post_json /api/signup "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}")"
+  setup="$(post_json /api/signup "{\"email\":\"$EMAIL\",\"password\":\"$PW\"}" -c "$JAR")"
   setup_status="$(printf '%s' "$setup" | head -1)"
   case "$setup_status" in
     2*) : ;;
@@ -103,7 +119,93 @@ if [ "${1:-}" = "--gate" ]; then
     echo "  attempt 2 → $dup2_status  $(printf '%s' "$r_dup2" | tail -1)"
     gate_rc=1
   fi
-  echo "(teardown: the probe created account $EMAIL)"
+
+  # (b) The invite arms. [0056] C2's no-oracle rule used to be cheap to hold:
+  # the address with no account got nothing at all, so there was nothing to
+  # compare. 0073 makes both arms *send*, which is the stronger property and the
+  # riskier one — a mailer that skips the ghost arm (or the known one) turns the
+  # invite endpoint into the enumeration oracle this gate exists to catch. So the
+  # assertion is now: same response shape AND same mail evidence.
+  #
+  # "Mail evidence" is read from the OWNER'S OUTBOX (GET /api/orgs/invites), not
+  # from the create response — the create response deliberately carries no
+  # delivery field at all (0073 D1), and that is itself asserted below. `delivery`
+  # is null when the hub has no mailer configured, which is still evidence: what
+  # must never happen is the two arms differing.
+  #
+  # Both probe addresses are on the RFC 2606 reserved TLD `.test` on purpose: a
+  # real relay refuses both arms identically — which is precisely the property
+  # under test — so a gate run costs the sending domain no bounce and no mailbox
+  # anywhere receives a probe.
+  gate1b_ok=1
+  known="e2e-known-$(date +%s)@ccscreen.test"   # signs up → the "has an account" arm
+  ghost="e2e-ghost-$(date +%s)@ccscreen.test"   # never signs up → the invitation's whole point
+  org_name="e2e-gate-$(date +%s)"
+  r_known_signup="$(post_json /api/signup "{\"email\":\"$known\",\"password\":\"$PW\"}")"
+  r_org="$(post_json /api/orgs "{\"name\":\"$org_name\"}" -b "$JAR" -c "$JAR")"
+  org_status="$(printf '%s' "$r_org" | head -1)"
+  if [ "$(printf '%s' "$r_known_signup" | head -1)" != "200" ] || [ "$org_status" != "200" ]; then
+    echo "SKIP: invite-arm leg needs an account + an org (signup $(printf '%s' "$r_known_signup" | head -1), org $org_status) — $(printf '%s' "$r_org" | tail -1)"
+  else
+    r_inv_known="$(post_json /api/orgs/invites "{\"email\":\"$known\"}" -b "$JAR" -c "$JAR")"
+    r_inv_ghost="$(post_json /api/orgs/invites "{\"email\":\"$ghost\"}" -b "$JAR" -c "$JAR")"
+    known_status="$(printf '%s' "$r_inv_known" | head -1)"
+    ghost_status="$(printf '%s' "$r_inv_ghost" | head -1)"
+    known_shape="$(printf '%s' "$r_inv_known" | tail -1 | shape)"
+    ghost_shape="$(printf '%s' "$r_inv_ghost" | tail -1 | shape)"
+    [ "$known_status" = "$ghost_status" ] && [ "$known_shape" = "$ghost_shape" ] || gate1b_ok=0
+    # No delivery field may leak into the create response — that is the field an
+    # attacker would read without ever needing the owner's outbox.
+    if printf '%s%s' "$r_inv_known" "$r_inv_ghost" | grep -qiE '"(emailed|emailed_at|delivery)"'; then
+      gate1b_ok=0
+      echo "  (the invite create response carries a delivery field — 0073 D1 says it must not)"
+    fi
+    # The send is SPAWNED, never awaited, so the receipt lands shortly AFTER the
+    # 200: poll the outbox for up to 30s rather than reading it once — reading it
+    # immediately would compare two nulls and prove nothing. `delivery_of` pulls
+    # one row's value out of the array without needing jq on the operator's box.
+    delivery_of() { printf '%s' "$1" | tr '}' '\n' | grep -F "$2" | grep -o '"delivery":[^,}]*' | head -1 || true; }
+    known_del=""; ghost_del=""; i=1
+    while [ "$i" -le 30 ]; do
+      outbox="$(get_json /api/orgs/invites -b "$JAR" | tail -1)"
+      known_del="$(delivery_of "$outbox" "$known")"
+      ghost_del="$(delivery_of "$outbox" "$ghost")"
+      # Keep waiting while either row is unwritten, still null (no attempt has
+      # been recorded yet) or mid-flight; a hub with no mailer never leaves that
+      # state and simply falls out of the loop with both rows null.
+      case "$known_del$ghost_del" in
+        ""|*sending*|*null*) : ;;
+        *) break ;;
+      esac
+      sleep 1
+      i=$((i + 1))
+    done
+    if [ "$known_del" != "$ghost_del" ]; then
+      gate1b_ok=0
+      echo "  (the two arms report DIFFERENT delivery state: known=$known_del ghost=$ghost_del)"
+    fi
+    if [ "$gate1b_ok" = 1 ]; then
+      echo "PASS: both invite arms answer $known_status with the same shape and the same mail evidence ($known_del)"
+    else
+      echo "FAIL: the invite arms are distinguishable — the mailer is an account-existence oracle:"
+      echo "  has an account → $known_status  $(printf '%s' "$r_inv_known" | tail -1)  [$known_del]"
+      echo "  no account     → $ghost_status  $(printf '%s' "$r_inv_ghost" | tail -1)  [$ghost_del]"
+      gate_rc=1
+    fi
+    # What the hub says it can do (0073 D1), as context for the line above. A hub
+    # advertising mail:true that recorded nothing for EITHER arm is not an oracle
+    # — the arms still match — but it is worth naming, because it means no
+    # receipt reached the outbox.
+    mail_flag="$(get_json /api/me -b "$JAR" | tail -1 | grep -o '"mail":[a-z]*' | head -1 || true)"
+    case "$mail_flag:$known_del" in
+      '"mail":true:'|'"mail":true:"delivery":null')
+        echo "  (NOTE: $HUB reports mail:true but neither arm recorded a delivery within 30s — check 0073 B2)" ;;
+      '"mail":false:'*)
+        echo "  (this hub has no mail transport: mail:false, both arms null — the copyable link is the only channel)" ;;
+      *) : ;;
+    esac
+  fi
+  echo "(teardown: the probe created accounts $EMAIL and $known, and the org \"$org_name\")"
 
   say "gate 2/3: password policy — a 9-char password on public signup must be rejected"
   weak="e2e+$(date +%s)-weak@ccscreen.dev"

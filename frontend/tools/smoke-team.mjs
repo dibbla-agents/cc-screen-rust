@@ -26,9 +26,15 @@
 //                   member list, the PlanCard seats-meter text ("2 / 3"), and
 //                   NO admin actions (the member side of the split);
 //   as A (owner):   the TeamCard invite form's success state shows a copyable
-//                   /org-invite/ link; the seat picker cannot step below 3
-//                   (only when billing is configured — without Stripe the
-//                   seats-purchase UI deliberately doesn't render).
+//                   /org-invite/ link AND the hub actually mailed the invite
+//                   (0073: CCHUB_MAIL_DIR puts the mailer on its capture
+//                   transport, so the message lands in a file — no relay, no
+//                   network); the seat picker cannot step below 3 (only when
+//                   billing is configured — without Stripe the seats-purchase
+//                   UI deliberately doesn't render);
+//   no-mailer hub:  the same hub restarted WITHOUT CCHUB_MAIL_DIR — /api/me
+//                   reports mail:false and the invite form still hands back a
+//                   copyable link, which is the self-hoster's whole path.
 //
 // Env:
 //   HUB_BIN   path to a multi-tenant cc-screen-hub binary
@@ -38,7 +44,7 @@
 //   CHROME    chromium executable for Playwright (as smoke.mjs)
 import { chromium } from "playwright";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,21 +64,50 @@ const orgName = `smoke-team-${ts}`;
 const machine = `smoke-m1-${ts}`;
 
 // ── seed: start the hub and drive the same API e2e-team.sh uses ─────────────
+const maildir = join(tmp, "mail");
 const hubEnv = {
   ...process.env,
   CCHUB_DATABASE_URL: `sqlite://${db}`,
   CCWEB_CONFIG_DIR: join(tmp, "hub-config"),
   CCHUB_PUBLIC_URL: base,
+  // 0073's capture transport: each message is written to this dir as an .eml
+  // instead of being sent. It takes precedence over CCHUB_SMTP_URL, and
+  // CCHUB_PUBLIC_URL (above) is what keeps the mailer from disabling itself.
+  CCHUB_MAIL_DIR: maildir,
 };
 // Team must work without Stripe (0064 graceful absence) — scrub any leaked keys.
-for (const k of Object.keys(hubEnv)) if (k.startsWith("STRIPE_")) delete hubEnv[k];
-const hub = spawn(hubBin, ["--addr", `127.0.0.1:${port}`], { env: hubEnv, stdio: "ignore" });
+// Same discipline for the mail keys: a relay credential sitting in the
+// operator's shell must never make this smoke test send real mail.
+for (const k of Object.keys(hubEnv))
+  if (k.startsWith("STRIPE_") || (k.startsWith("CCHUB_MAIL_") && k !== "CCHUB_MAIL_DIR") || k === "CCHUB_SMTP_URL")
+    delete hubEnv[k];
+let hub = spawn(hubBin, ["--addr", `127.0.0.1:${port}`], { env: hubEnv, stdio: "ignore" });
 
 function cleanup() {
   try { hub.kill(); } catch {}
   rmSync(tmp, { recursive: true, force: true });
 }
 process.on("exit", cleanup);
+
+// Captured messages, newest last. The send is SPAWNED, never awaited (org.rs
+// invite_create), so the file lands shortly AFTER the 200 — always wait for it
+// rather than reading the directory straight away.
+function mails() {
+  try { return readdirSync(maildir).filter((f) => f.endsWith(".eml")).sort(); } catch { return []; }
+}
+// Body text of a captured message, with quoted-printable soft line breaks
+// unfolded (an absolute invite URL sits right at the 76-column wrap).
+function mailText(name) {
+  return readFileSync(join(maildir, name), "utf8").replace(/\r/g, "").replace(/=\n/g, "");
+}
+async function waitMail(n, ms = 10000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (mails().length >= n) return mails();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return mails();
+}
 
 async function waitReady() {
   for (let i = 0; i < 60; i++) {
@@ -268,9 +303,12 @@ try {
   await pageA.goto(base, { waitUntil: "networkidle" });
   await openDashboard(pageA).catch(() => fail("owner dashboard shows no ~/team window"));
 
-  // Invite form success state: submit an address with no account → the
-  // copyable /org-invite/ link is the delivery channel (the hub sends no mail).
+  // Invite form success state: submit an address with no account. On this hub
+  // the invite goes out BOTH ways (0073) — the hub mails it, and the copyable
+  // /org-invite/ link stays the fallback that always works. Assert both: the
+  // link in the UI, and a captured message carrying that same link.
   const inviteAddr = `smoke-c-${ts}@ccscreen.test`;
+  const mailsBefore = mails().length;
   try {
     await pageA.getByPlaceholder("name@example.com").fill(inviteAddr);
     await pageA.getByRole("button", { name: "Invite", exact: true }).click();
@@ -279,6 +317,22 @@ try {
   } catch {
     fail("invite form success state never showed a copyable /org-invite/ link");
   }
+  // The mail twin. Spawned, not awaited — hence waitMail's bounded poll.
+  const after = await waitMail(mailsBefore + 1);
+  if (after.length <= mailsBefore) {
+    fail(`clicking Invite captured no message in ${maildir} within 10s`);
+  } else {
+    const text = mailText(after[after.length - 1]);
+    if (!text.includes(`To: ${inviteAddr}`))
+      fail(`the captured message is not addressed to ${inviteAddr}`);
+    if (!/\/org-invite\/[A-Za-z0-9_-]+/.test(text))
+      fail("the captured invite message carries no /org-invite/ link");
+    if (!text.includes(base))
+      fail(`the mailed link is not absolute against ${base} (a relative or localhost link is worse than no mail)`);
+  }
+  // The capability this hub advertises to the UI (0073 D1).
+  const meA = await api(ua, "GET", "/api/me");
+  if (meA.json?.mail !== true) fail("/api/me does not report mail:true on a hub with a mail transport");
 
   // Seat picker floor: only rendered when Stripe billing is configured — on
   // this Stripe-less hub the purchase UI must be absent (graceful absence).
@@ -305,9 +359,46 @@ try {
   if (errsA.length) fail("owner pass JS errors: " + errsA.join("; "));
   await ctxA.close();
 
+  // ── Pass 3 — the self-hoster's hub: no mail transport at all ──────────────
+  // The same database and the same org, restarted with the mailer unconfigured
+  // (0073's off-by-default contract, the shape 0058 set for Stripe). Nothing may
+  // be sent, and the copyable link — the only delivery channel such a hub has —
+  // must still be there.
+  hub.kill();
+  const plainEnv = { ...hubEnv };
+  delete plainEnv.CCHUB_MAIL_DIR;
+  hub = spawn(hubBin, ["--addr", `127.0.0.1:${port}`], { env: plainEnv, stdio: "ignore" });
+  await waitReady();
+  // Re-login rather than betting on a cookie surviving the process swap.
+  must((await api(ua, "POST", "/api/login", { email: A, secret: pw })).status === 200, "A re-login after the restart");
+  const meOff = await api(ua, "GET", "/api/me");
+  if (meOff.json?.mail !== false)
+    fail("/api/me reports mail:true on a hub with no mail transport");
+  const mailsAtRestart = mails().length;
+
+  const errsOff = [];
+  const { ctx: ctxOff, page: pageOff } = await signedInPage(ua, errsOff);
+  await pageOff.goto(base, { waitUntil: "networkidle" });
+  await openDashboard(pageOff).catch(() => fail("no-mailer hub: owner dashboard shows no ~/team window"));
+  const inviteAddr2 = `smoke-d-${ts}@ccscreen.test`;
+  try {
+    await pageOff.getByPlaceholder("name@example.com").fill(inviteAddr2);
+    await pageOff.getByRole("button", { name: "Invite", exact: true }).click();
+    await pageOff.getByText(/\/org-invite\//).first().waitFor({ timeout: 8000 });
+    await pageOff.getByRole("button", { name: "Copy link" }).waitFor({ timeout: 4000 });
+  } catch {
+    fail("no-mailer hub: the invite form dropped the copyable /org-invite/ link");
+  }
+  // An unconfigured mailer spawns no send at all, so the count cannot move.
+  await new Promise((r) => setTimeout(r, 1000));
+  if (mails().length !== mailsAtRestart)
+    fail(`no-mailer hub captured ${mails().length - mailsAtRestart} message(s) — the mailer is not inert`);
+  if (errsOff.length) fail("no-mailer pass JS errors: " + errsOff.join("; "));
+  await ctxOff.close();
+
   if (!failed)
     console.log(
-      "SMOKE-TEAM PASS (team row + ~/shared summary, TeamCard, seats meter, invite link, action split)"
+      "SMOKE-TEAM PASS (team row + ~/shared summary, TeamCard, seats meter, invite link + mailed invite, no-mailer fallback, action split)"
     );
 } catch (e) {
   fail(e.message);

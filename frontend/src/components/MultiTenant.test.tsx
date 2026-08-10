@@ -2,13 +2,22 @@
 // (Part A1). The LimitCard assertions are static renders; the ActivatePage
 // flows drive the real component against a mocked api module (the "mocked 402"
 // approve path and the success path offering "Start your first session").
+// Proposal 0073 D3 adds the first TeamInviteForm coverage (both `me.mail`
+// states) and pins the seats LimitCard's "sent again" copy, plus the pure
+// delivery-badge mapping behind the pending-invite rows.
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ActivatePage, LimitCard } from "./MultiTenant";
-import type { MePlan } from "../api";
+import {
+  ActivatePage,
+  LimitCard,
+  TeamInviteForm,
+  canResendInvite,
+  deliveryBadge,
+} from "./MultiTenant";
+import type { MeInfo, MePlan } from "../api";
 
 vi.mock("../api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../api")>();
@@ -16,9 +25,10 @@ vi.mock("../api", async (importOriginal) => {
     ...mod,
     approveDevice: vi.fn(),
     listAgents: vi.fn().mockResolvedValue([]),
+    createOrgInvite: vi.fn(),
   };
 });
-import { approveDevice, listAgents } from "../api";
+import { approveDevice, createOrgInvite, listAgents } from "../api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -66,6 +76,137 @@ describe("LimitCard (proposals 0056 Part B / 0058 C2)", () => {
     const bare = renderToStaticMarkup(<LimitCard what="sessions" />);
     expect(bare).toContain("a limited number of");
     expect(bare).not.toContain("mailto:");
+  });
+
+  // Proposal 0073 D3: the seats card's reassurance reads differently once
+  // "sent" means something, so pin it. It is the one LimitCard branch that was
+  // never asserted.
+  it("renders the seats card with the 'sent again' reassurance", () => {
+    const teamPlan: MePlan = {
+      name: "team",
+      maxAgents: 50,
+      maxSessions: 200,
+      agents: 3,
+      seats: 3,
+      members: 3,
+      orgId: "o1",
+      orgRole: "owner",
+    };
+    const html = renderToStaticMarkup(
+      <LimitCard plan={teamPlan} what="seats" support="erik@dibbla.com" billing />
+    );
+    expect(html).toContain("Plan limit reached");
+    expect(html).toContain("seats are all in use");
+    expect(html).toContain("Add seats");
+    expect(html).toContain("pending invites can simply be sent again");
+    // The seats branch is its own card — never the machines/sessions copy.
+    expect(html).not.toContain("Unlink a machine");
+
+    // A plain member sees the owner's address instead of the portal button.
+    const member = renderToStaticMarkup(
+      <LimitCard
+        plan={{ ...teamPlan, orgRole: "member", ownerEmail: "boss@x.com" }}
+        what="seats"
+        billing
+      />
+    );
+    expect(member).toContain("boss@x.com");
+    expect(member).not.toContain("Add seats");
+  });
+});
+
+// ── Delivery state (proposal 0073 D2) ────────────────────────────────────────
+
+describe("invite delivery badge (proposal 0073 D2)", () => {
+  it("maps every delivery state, with NULL staying today's 'invited'", () => {
+    expect(deliveryBadge(null)).toBe("invited");
+    expect(deliveryBadge(undefined)).toBe("invited");
+    expect(deliveryBadge("sending")).toBe("sending");
+    expect(deliveryBadge("sent")).toBe("sent");
+    expect(deliveryBadge("failed")).toBe("failed");
+    expect(deliveryBadge("rejected")).toBe("bad address");
+    // A newer hub's unknown value degrades to the pre-mailer rendering rather
+    // than showing a raw token.
+    expect(deliveryBadge("quarantined")).toBe("invited");
+  });
+
+  it("offers Resend for a transient failure only — never for a permanent refusal", () => {
+    expect(canResendInvite("failed")).toBe(true);
+    // `rejected` is permanent: retrying cannot succeed and spends send quota.
+    expect(canResendInvite("rejected")).toBe(false);
+    expect(canResendInvite("sent")).toBe(false);
+    expect(canResendInvite("sending")).toBe(false);
+    expect(canResendInvite(null)).toBe(false);
+    expect(canResendInvite(undefined)).toBe(false);
+  });
+});
+
+// ── TeamInviteForm success copy, both hub shapes (proposal 0073 D2/D3) ───────
+
+describe("TeamInviteForm success copy (proposal 0073 D2)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  const me = (mail: boolean): MeInfo => ({
+    multiTenant: true,
+    googleEnabled: false,
+    authenticated: true,
+    email: "admin@x.com",
+    mail,
+  });
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  async function invite(mail: boolean): Promise<string> {
+    vi.mocked(createOrgInvite).mockResolvedValue({
+      id: "i1",
+      status: "pending",
+      inviteUrl: "/org-invite/tok-a",
+    });
+    await act(async () => root.render(<TeamInviteForm me={me(mail)} onInvited={() => {}} />));
+    const input = container.querySelector("input[type=email]") as HTMLInputElement;
+    await act(async () => setInputValue(input, "new@x.com"));
+    const form = container.querySelector("form")!;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    return container.innerHTML;
+  }
+
+  it("keeps today's sentence byte-for-byte on a hub with no mailer", async () => {
+    const html = await invite(false);
+    expect(html).toContain("Invitation created for");
+    expect(html).toContain("new@x.com");
+    expect(html).toContain("ll see it when they sign in");
+    expect(html).toContain("You can also send them this link:");
+    expect(html).not.toContain("emailing");
+    // The link is the ONLY channel here, so it had better be there.
+    expect(html).toContain("/org-invite/tok-a");
+    expect(html).toContain("Copy link");
+  });
+
+  it("says the invite is being emailed (present progressive) on a mail hub, link intact", async () => {
+    const html = await invite(true);
+    expect(html).toContain("Invitation created for");
+    expect(html).toContain("emailing them, and they");
+    expect(html).toContain("ll see it when they sign in");
+    expect(html).toContain("arrive, send them this link:");
+    // The send is spawned after the response — no past-tense claim is honest yet.
+    expect(html).not.toContain("we emailed them");
+    expect(html).not.toContain("Invitation sent");
+    // Same prominence for the fallback link on both hubs.
+    expect(html).toContain("/org-invite/tok-a");
+    expect(html).toContain("Copy link");
   });
 });
 

@@ -7,6 +7,7 @@
 //! `--features multi-tenant`.
 #![cfg(feature = "multi-tenant")]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cc_screen_auth::Auth;
@@ -64,6 +65,24 @@ async fn start_hub_labeled(
     bob_label: &str,
     bob_sessions: &[&str],
 ) -> (String, Arc<SqliteStore>) {
+    let (base, store, _maildir) = start_hub_full(alice_label, alice_sessions, bob_label, bob_sessions, true).await;
+    (base, store)
+}
+
+/// The same harness with the mailer switchable, handing back the **maildir** as
+/// well (proposal 0073 E1). `mail = true` is the capture transport every other
+/// test already runs on; `mail = false` builds the hub a self-hoster gets —
+/// [`Mailer::disabled`], no transport at all — and still returns the directory
+/// the capture transport *would* have written to, so a test can prove nothing was
+/// ever written there. Added beside `start_hub_labeled` rather than replacing it
+/// so no existing caller has to grow a third binding it does not use.
+async fn start_hub_full(
+    alice_label: &str,
+    alice_sessions: &[&str],
+    bob_label: &str,
+    bob_sessions: &[&str],
+    mail: bool,
+) -> (String, Arc<SqliteStore>, PathBuf) {
     let tmp = std::env::temp_dir().join(format!("ccr-hub-mt-{}-{}", std::process::id(), now_nanos()));
     let _ = std::fs::create_dir_all(&tmp);
     let store = SqliteStore::connect(&format!("sqlite://{}/hub.db", tmp.display()))
@@ -87,6 +106,12 @@ async fn start_hub_labeled(
     std::mem::forget((_rxa, _rxb));
 
     let store = Arc::new(store);
+    let maildir = tmp.join("mail");
+    let mailer = if mail {
+        cc_screen_hub::mailer::Mailer::capturing(maildir.clone())
+    } else {
+        cc_screen_hub::mailer::Mailer::disabled()
+    };
     let hub = HubState {
         registry,
         agent_tokens: Arc::new(Default::default()),
@@ -99,12 +124,30 @@ async fn start_hub_labeled(
         push: Arc::new(cc_screen_push::Push::new(&tmp)),
         bulk: Default::default(),
         summary: Arc::new(cc_screen_hub::summarizer::Summarizer::disabled()),
+        // Capture transport (proposal 0073 A3): every message this hub emits
+        // lands as an `.eml` file under `<tmp>/mail`, so the invite tests assert
+        // on real message bodies with no network and no SMTP container. The
+        // `mail = false` hub takes `Mailer::disabled()` instead — the same hub a
+        // self-hoster who configures no transport runs.
+        mailer: Arc::new(mailer),
         tenancy: Tenancy::Multi(store.clone()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, cc_screen_hub::build_router(hub)).await.unwrap() });
-    (format!("{addr}"), store)
+    (format!("{addr}"), store, maildir)
+}
+
+/// The default two-tenant hub plus its maildir (proposal 0073 E1).
+async fn start_hub_capturing() -> (String, Arc<SqliteStore>, PathBuf) {
+    start_hub_full("laptop", &["claude-a"], "laptop", &["claude-b"], true).await
+}
+
+/// The self-hoster's hub: identical in every way except that it has **no mail
+/// transport** (proposal 0073 E1). The returned path is the maildir that would
+/// have been used, and must stay empty.
+async fn start_hub_no_mail() -> (String, Arc<SqliteStore>, PathBuf) {
+    start_hub_full("laptop", &["claude-a"], "laptop", &["claude-b"], false).await
 }
 
 fn now_nanos() -> u128 {
@@ -997,6 +1040,74 @@ async fn org_routes_are_tenant_scoped() {
     assert_eq!(pending.len(), 1, "invite untouched by the refused actions");
 }
 
+/// Proposal 0073 B1/B2: a delivery attempt that a **re-invite or a revoke**
+/// superseded writes nothing — the receipt in the outbox can only ever come from
+/// the attempt that still owns the token. Also pins the two halves of the
+/// no-oracle contract this proposal must not move: the create response keeps its
+/// exact `{id, status, invite_url}` shape (an `emailed` field would be a fresh
+/// account-existence oracle), while `delivery` is read back from the outbox,
+/// which is inviter-scoped and asymmetric by design.
+#[tokio::test]
+async fn superseded_invite_send_writes_nothing() {
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let token_of = |url: &str| url.rsplit('/').next().unwrap_or_default().to_string();
+
+    // ── the share path: the receipt lives on the email-invite row ──────────────
+    let s1 = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost@x.com", "machine": "laptop" })).await;
+    assert!(s1.status().is_success(), "share create: {}", s1.status());
+    let s1: serde_json::Value = s1.json().await.unwrap();
+    let (share_id, share_tok1) = (s1["id"].as_str().unwrap().to_string(), token_of(s1["invite_url"].as_str().unwrap()));
+    // A re-offer keeps the row and mints a fresh token: attempt one is dead.
+    let s2 = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost@x.com", "machine": "laptop" })).await;
+    let s2: serde_json::Value = s2.json().await.unwrap();
+    assert_eq!(s2["id"], s1["id"], "same email-invite row");
+    assert_ne!(token_of(s2["invite_url"].as_str().unwrap()), share_tok1, "fresh token");
+    assert!(!store.email_invite_mark_sending(&share_id, &share_tok1).await, "superseded ⇒ no send");
+
+    // ── the org path ──────────────────────────────────────────────────────────
+    let created = post_json(&client, &base, &alice, "/api/orgs", serde_json::json!({ "name": "team-a" })).await;
+    assert!(created.status().is_success(), "org create: {}", created.status());
+
+    let inv = post_json(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "ghost@x.com" })).await;
+    assert!(inv.status().is_success(), "invite create: {}", inv.status());
+    let inv: serde_json::Value = inv.json().await.unwrap();
+    let obj = inv.as_object().unwrap();
+    assert_eq!(obj.len(), 3, "the create response shape does not move: {inv}");
+    for k in ["id", "status", "invite_url"] {
+        assert!(obj.contains_key(k), "missing {k} in {inv}");
+    }
+    assert!(obj.get("emailed").is_none(), "an `emailed` field would be an account-existence oracle");
+    let (id, tok1) = (inv["id"].as_str().unwrap().to_string(), token_of(inv["invite_url"].as_str().unwrap()));
+
+    // Re-invite: same row, fresh token — whatever attempt one was doing is void.
+    let again = post_json(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "ghost@x.com" })).await;
+    let again: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(again["id"], inv["id"]);
+    let tok2 = token_of(again["invite_url"].as_str().unwrap());
+    assert_ne!(tok2, tok1, "a re-invite mints a fresh token");
+
+    // The superseded attempt can neither claim the row nor stamp an outcome on it.
+    assert!(!store.org_invite_mark_sending(&id, &tok1).await, "superseded ⇒ no send");
+    store.org_invite_delivery_record(&id, &tok1, "failed").await;
+
+    // The outbox exposes `delivery` for the UI — and never attempt one's verdict.
+    let outbox = get_json(&client, &base, &alice, "/api/orgs/invites").await;
+    let row = outbox.as_array().unwrap().iter().find(|r| r["id"] == inv["id"]).expect("invite in the outbox");
+    assert!(row.get("delivery").is_some(), "the outbox carries `delivery` (null until a send is attempted)");
+    assert_ne!(row["delivery"], serde_json::json!("failed"), "the superseded attempt wrote nothing");
+
+    // A revoke inside the send window kills the live attempt's claim too.
+    let rev = post_json(&client, &base, &alice, &format!("/api/orgs/invites/{id}/revoke"), serde_json::json!({})).await;
+    assert!(rev.status().is_success(), "revoke: {}", rev.status());
+    assert!(!store.org_invite_mark_sending(&id, &tok2).await, "a revoked invite is never mailed");
+}
+
 /// Favorites are per-tenant (the 0042 candidate-finding-#1 fix): what A saves,
 /// B never sees, and each tenant round-trips their own list independently.
 #[tokio::test]
@@ -1087,4 +1198,624 @@ async fn device_flow_kinds_never_cross() {
         .await
         .unwrap();
     assert!(tok["client_token"].is_string(), "own-kind redeem still works: {tok}");
+}
+
+// ── Proposal 0073 Part C — the abuse bounds that ship with the send ───────────
+
+/// POST with an explicit `X-Forwarded-For`. The invite window (like signup's and
+/// the device flow's) is a **process-wide** per-source bucket shared by every hub
+/// in this binary, so each bounds test must claim its own source or it would
+/// spend — and be spent by — its neighbours' budget.
+async fn post_json_from(
+    client: &reqwest::Client,
+    base: &str,
+    cookie: &str,
+    path: &str,
+    body: serde_json::Value,
+    source: &str,
+) -> reqwest::Response {
+    client
+        .post(format!("http://{base}{path}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .header("x-forwarded-for", source)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// C1: a loop of org-invite POSTs from one account hits the org-scoped live-invite
+/// cap and answers **429, not 400** — i.e. `store_err` grew its `CAP:` arm, and the
+/// prefix never reaches the client.
+#[tokio::test]
+async fn org_invite_loop_is_capped_with_429() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.1.1";
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "cap-team" }), src).await.status().is_success());
+
+    let mut capped: Option<reqwest::Response> = None;
+    for i in 0..40 {
+        let r = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+            serde_json::json!({ "email": format!("cap{i}@x.com") }), src).await;
+        if r.status() != reqwest::StatusCode::OK {
+            capped = Some(r);
+            break;
+        }
+    }
+    let r = capped.expect("an unbounded loop of invite POSTs is the whole bug");
+    assert_eq!(r.status(), reqwest::StatusCode::TOO_MANY_REQUESTS, "a cap is 429, never 400");
+    let body = r.text().await.unwrap();
+    assert!(!body.starts_with("CAP:"), "the store's prefix must never reach the client: {body}");
+    assert!(
+        body.contains("this team has too many pending invitations"),
+        "the LIVE-INVITE cap is what fired here, not the looser per-source window: {body}"
+    );
+}
+
+/// C1: the same for `POST /api/shares` — and it fires identically in both arms,
+/// so the bound is never an account-existence oracle. `bob@x.com` HAS an account;
+/// `stranger@x.com` does not; at the cap both answer 429 with the same body.
+#[tokio::test]
+async fn share_invite_loop_is_capped_identically_in_both_arms() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.2.1";
+
+    let mut capped = None;
+    for i in 0..40 {
+        let r = post_json_from(&client, &base, &alice, "/api/shares",
+            serde_json::json!({ "grantee_email": format!("scap{i}@x.com"), "machine": "laptop" }), src).await;
+        if r.status() != reqwest::StatusCode::OK {
+            capped = Some(r);
+            break;
+        }
+    }
+    let r = capped.expect("the share endpoint must be bounded too");
+    assert_eq!(r.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let unknown_body = r.text().await.unwrap();
+    assert!(!unknown_body.starts_with("CAP:"), "prefix leaked: {unknown_body}");
+    assert!(
+        unknown_body.contains("too many pending invitations"),
+        "the live-invite cap fired, not the looser per-source window: {unknown_body}"
+    );
+
+    // The known-account arm — the one the 0056 cap skipped entirely (it passes
+    // `converted = true`) — answers with the same status and the same body.
+    let known = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "laptop" }), src).await;
+    assert_eq!(known.status(), reqwest::StatusCode::TOO_MANY_REQUESTS, "no arm is exempt from the cap");
+    assert_eq!(known.text().await.unwrap(), unknown_body, "no oracle: same body in both arms");
+}
+
+/// C1: a loop of **Resends** on one invite is bounded too (a re-offer used to
+/// return before the cap block was even reached), and — the explicit acceptance
+/// criterion — reading the invite outbox is never throttled, because the window
+/// lives inside the POST handler and not on the combined route.
+#[tokio::test]
+async fn resend_loop_is_bounded_but_the_outbox_never_is() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.3.1";
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "resend-team" }), src).await.status().is_success());
+
+    // Every POST here is a RE-OFFER of the same invitation (same org, same
+    // address): it never grows the live set, so only the per-source window bounds
+    // it. Without that window this loop would run forever.
+    let mut refused = None;
+    for _ in 0..60 {
+        let r = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+            serde_json::json!({ "email": "resend@x.com" }), src).await;
+        if r.status() != reqwest::StatusCode::OK {
+            refused = Some(r);
+            break;
+        }
+    }
+    let r = refused.expect("an unbounded Resend loop is a mail amplifier");
+    assert_eq!(r.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("slow down"), "the per-source window is what bounds a re-offer loop: {body}");
+
+    // …and the GET half of the same combined route is untouched by it.
+    let outbox = client
+        .get(format!("http://{base}/api/orgs/invites"))
+        .header(reqwest::header::COOKIE, &alice)
+        .header("x-forwarded-for", src)
+        .send()
+        .await
+        .unwrap();
+    assert!(outbox.status().is_success(), "reading the invite outbox is never throttled");
+    let rows: serde_json::Value = outbox.json().await.unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "the re-offers all landed on one row");
+}
+
+/// C3: header/body injection is refused at the boundary — an org name carrying
+/// `\r\nBcc:` is refused at create, an address carrying it answers 400 **before**
+/// any row is written, and `bob@intranet` (a self-hosted hub on a LAN) still works.
+#[tokio::test]
+async fn injection_shaped_names_and_addresses_are_refused() {
+    let (base, _store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.4.1";
+
+    // The org name — interpolated into the invitation body.
+    let evil_org = post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "acme\r\nBcc: attacker@x" }), src).await;
+    assert_eq!(evil_org.status(), reqwest::StatusCode::BAD_REQUEST, "a control char in a team name");
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "acme" }), src).await.status().is_success());
+
+    // The address, on BOTH invite endpoints.
+    let evil = "victim@x.com\r\nBcc: attacker@x.com";
+    let org_bad = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": evil }), src).await;
+    assert_eq!(org_bad.status(), reqwest::StatusCode::BAD_REQUEST);
+    let share_bad = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": evil, "machine": "laptop" }), src).await;
+    assert_eq!(share_bad.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // …and nothing was persisted by either refusal.
+    let outbox = get_json(&client, &base, &alice, "/api/orgs/invites").await;
+    assert!(outbox.as_array().unwrap().is_empty(), "400 before the invite row is written: {outbox}");
+    let shares = get_json(&client, &base, &alice, "/api/shares/outbox").await;
+    assert!(shares.as_array().unwrap().is_empty(), "400 before the invite row is written: {shares}");
+
+    // Deliverability is not the validator's job: a dotless corporate domain is
+    // a legitimate invitee on a self-hosted hub and must still be accepted.
+    let intranet = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "bob@intranet" }), src).await;
+    assert!(intranet.status().is_success(), "bob@intranet: {}", intranet.status());
+}
+
+/// C1: the send ceilings. They bound **mail**, not rows — an invitation over one
+/// is still created and its copyable link still returned; only the send is
+/// skipped, and `delivery` stays NULL, which is exactly what the 0013 migration
+/// defines NULL to mean ("no send was attempted"). Because the ceiling is checked
+/// in the handler *before* the spawn, a capped invite spawns no task at all.
+///
+/// The pressure here is seeded onto a **different org**, so the only bound that
+/// can fire is the hub-wide one — the ceiling that maps to reality, since the
+/// relay's quota is per account and N orgs each under a per-org ceiling can still
+/// exhaust it.
+#[tokio::test]
+async fn a_hub_wide_send_ceiling_skips_the_send_but_keeps_the_invitation() {
+    let (base, store) = start_hub_with(&["claude-a"], &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.6.1";
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "sender-team" }), src).await.status().is_success());
+
+    // Control: with the harness's capture transport and no pressure, an invite IS
+    // mailed — so a NULL `delivery` below means something.
+    let first = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "first@x.com" }), src).await;
+    assert!(first.status().is_success());
+    let first_id = first.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    let delivery_of = |id: String| {
+        let (client, base, alice) = (client.clone(), base.clone(), alice.clone());
+        async move {
+            let outbox = get_json(&client, &base, &alice, "/api/orgs/invites").await;
+            outbox.as_array().unwrap().iter()
+                .find(|r| r["id"] == serde_json::json!(id))
+                .and_then(|r| r["delivery"].as_str().map(str::to_string))
+        }
+    };
+    let mut settled = None;
+    for _ in 0..60 {
+        if let Some(d) = delivery_of(first_id.clone()).await {
+            settled = Some(d);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(settled.is_some(), "the control invite was mailed and stamped a receipt");
+
+    // Seed a *different* org past the hub-wide ceiling. `status='revoked'` keeps
+    // these rows out of the live-invite cap, so the only thing they move is the
+    // 24h mail count.
+    let bob_id = store.user_id_by_email("bob@x.com").await.unwrap();
+    let noisy = store.org_create(&bob_id, "noisy-team").await.unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    for i in 0..cc_screen_hub::db::HUB_MAIL_PER_DAY {
+        sqlx::query(
+            "INSERT INTO org_invites
+               (id, token, org_id, inviter_user_id, email, role, status, created_at, expires_at, emailed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'member', 'revoked', ?6, ?7, ?6)",
+        )
+        .bind(format!("seed-{i}"))
+        .bind(format!("seed-tok-{i}"))
+        .bind(&noisy)
+        .bind(&bob_id)
+        .bind(format!("seed{i}@x.com"))
+        .bind(now)
+        .bind(now + 86_400)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    // Alice's own org is nowhere near its per-org ceiling, but the hub is over its
+    // account-wide one: the invitation is created, the link is returned, no send.
+    let second = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "second@x.com" }), src).await;
+    assert_eq!(second.status(), reqwest::StatusCode::OK, "a send ceiling never fails the invitation");
+    let second: serde_json::Value = second.json().await.unwrap();
+    assert!(second["invite_url"].as_str().is_some_and(|u| u.contains("/org-invite/")),
+        "the copyable link — the channel that always worked — is still there: {second}");
+    let second_id = second["id"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(delivery_of(second_id).await, None, "over the ceiling ⇒ no task was ever spawned");
+}
+
+// ── Proposal 0073 Part E1 — the send, asserted on real captured messages ──────
+
+/// Everything the maildir holds right now, oldest first: the capture filename is
+/// a zero-padded nanosecond stamp plus a monotonic sequence, so a lexical sort is
+/// chronological. A missing directory is an empty maildir, not an error — a hub
+/// with no transport never creates one.
+fn maildir_messages(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    files.sort();
+    files.iter().filter_map(|p| std::fs::read_to_string(p).ok()).collect()
+}
+
+/// Wait for the maildir to hold `want` messages, then let it settle and hand back
+/// everything it holds.
+///
+/// The send is `tokio::spawn`ed and never awaited ("the delivery decision" §2 — a
+/// 20s `SEND_TIMEOUT` has no business on a request path), so the capture file
+/// appears shortly *after* the HTTP response returns; reading the directory
+/// straight after the POST is exactly the flake this helper exists to prevent.
+/// It is a bounded poll rather than a fixed sleep in both directions: it returns
+/// as soon as the mail lands, and the short settle afterwards is what lets a
+/// caller assert `== want` and mean it — a second, unwanted message shows up as
+/// `want + 1` instead of being raced past.
+async fn mail_captured(dir: &Path, want: usize) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && maildir_messages(dir).len() < want {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    maildir_messages(dir)
+}
+
+/// The header block of a captured message, lowercased and newline-normalized.
+fn mail_headers(raw: &str) -> String {
+    raw.split("\r\n\r\n").next().unwrap_or_default().replace("\r\n", "\n").to_lowercase()
+}
+
+/// The body of a captured message, with quoted-printable soft line breaks joined
+/// back up so a wrapped URL — or a token that straddles a fold — compares as one
+/// string.
+fn mail_body(raw: &str) -> String {
+    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(raw);
+    body.replace("=\r\n", "").replace("=\n", "")
+}
+
+/// Every recipient header line (`to:`/`cc:`/`bcc:`) in a captured message. Only
+/// lines that start at column 0 count — a folded continuation is indented, and is
+/// part of the header above it, not a new one.
+fn recipient_headers(raw: &str) -> Vec<String> {
+    mail_headers(raw)
+        .lines()
+        .filter(|l| l.starts_with("to:") || l.starts_with("cc:") || l.starts_with("bcc:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The **logical** header names of a captured message. A folded continuation line
+/// (RFC 5322 marks one with leading whitespace) belongs to the header above it and
+/// is deliberately not counted as a new header — that distinction is the entire
+/// subject of the injection test.
+fn header_names(raw: &str) -> Vec<String> {
+    mail_headers(raw)
+        .lines()
+        .filter(|l| !l.starts_with(' ') && !l.starts_with('\t'))
+        .filter_map(|l| l.split_once(':').map(|(name, _)| name.trim().to_string()))
+        .collect()
+}
+
+/// The invite token as the **recipient** reads it: out of the message body, not
+/// out of the create response. `path` is `/invite/` or `/org-invite/`.
+fn token_in(body: &str, path: &str) -> String {
+    let at = body.find(path).unwrap_or_else(|| panic!("no {path} link in the message:\n{body}"));
+    body[at + path.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// E1 (1): the mailer is not the account-existence oracle [0042] and [0056] C2
+/// exist to prevent. Inviting an address that HAS an account and one that does
+/// not produces **one message each**, and the two are the same message once the
+/// address and the token are substituted out — the Rust twin of
+/// `ShareForm.test.tsx`'s normalize-and-compare on the rendered copy.
+#[tokio::test]
+async fn invite_mails_both_arms_identically() {
+    let (base, _store, maildir) = start_hub_capturing().await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.7.1";
+
+    // This test owns both addresses. `bob@x.com` is shared with half the file and
+    // the destination frequency cap (C1) is a process-global bucket, so borrowing
+    // him would make the known arm's message count depend on test ordering.
+    let known = "known-e1@x.com";
+    let ghost = "ghost-e1@x.com";
+    let _ = signup_ok(&client, &base, known, "known-e1-password", "10.73.7.2").await;
+
+    let a = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": known, "machine": "laptop" }), src).await;
+    let b = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": ghost, "machine": "laptop" }), src).await;
+    assert_eq!(a.status(), reqwest::StatusCode::OK, "known arm");
+    assert_eq!(b.status(), reqwest::StatusCode::OK, "unknown arm");
+    let (aj, bj) = (a.json::<serde_json::Value>().await.unwrap(), b.json::<serde_json::Value>().await.unwrap());
+    let tok_of = |v: &serde_json::Value| v["invite_url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    let (a_tok, b_tok) = (tok_of(&aj), tok_of(&bj));
+
+    let msgs = mail_captured(&maildir, 2).await;
+    assert_eq!(msgs.len(), 2, "exactly one message per invitation, in both arms");
+    let addressed_to = |email: &str| {
+        msgs.iter()
+            .find(|m| mail_headers(m).contains(&format!("to: {email}")))
+            .unwrap_or_else(|| panic!("no message addressed to {email}"))
+            .clone()
+    };
+    let (a_msg, b_msg) = (addressed_to(known), addressed_to(ghost));
+
+    // The subject does not branch on the outcome at all — it carries neither the
+    // recipient nor the token, so it must be byte-identical.
+    let subject = |raw: &str| {
+        mail_headers(raw).lines().find(|l| l.starts_with("subject:")).unwrap_or_default().to_string()
+    };
+    assert_eq!(subject(&a_msg), subject(&b_msg), "the subject is the same in both arms");
+
+    // …and so is the body, once the two things that legitimately differ are
+    // normalized away. Anything else — a "they already have an account" line, a
+    // different call to action — would be the oracle, readable by anyone who can
+    // type two addresses into the invite form.
+    let normalize = |raw: &str, email: &str, tok: &str| mail_body(raw).replace(email, "EMAIL").replace(tok, "TOKEN");
+    let (a_norm, b_norm) = (normalize(&a_msg, known, &a_tok), normalize(&b_msg, ghost, &b_tok));
+    assert!(a_norm.contains("TOKEN"), "the token really was substituted: {a_norm}");
+    assert_eq!(a_norm, b_norm, "the two invitation bodies differ only by address + token");
+}
+
+/// E1 (2): [0056] C4 as a test — *"the link is not an access capability"*. Mail
+/// makes a forwarded or archived token far more likely, so this property is what
+/// makes mailing one acceptable at all: a **different** authenticated account
+/// holding the mailed token gets nothing, on either invite surface.
+#[tokio::test]
+async fn mailed_token_is_not_a_capability() {
+    let (base, _store, maildir) = start_hub_capturing().await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+    let src = "10.73.8.1";
+
+    // ── the share link ────────────────────────────────────────────────────────
+    let created = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost-e2@x.com", "machine": "laptop" }), src).await;
+    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    let msgs = mail_captured(&maildir, 1).await;
+    assert_eq!(msgs.len(), 1, "one invitation, one message");
+    let token = token_in(&mail_body(&msgs[0]), "/invite/");
+    assert_eq!(
+        token,
+        created.json::<serde_json::Value>().await.unwrap()["invite_url"].as_str().unwrap().rsplit('/').next().unwrap(),
+        "the mailed link is the invitation's own link"
+    );
+
+    // Bob reads the link while signed in as himself. The read resolves — the
+    // token identifies the invitation, that is its whole job…
+    let info = client
+        .get(format!("http://{base}/api/invite/{token}"))
+        .header(reqwest::header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status(), reqwest::StatusCode::OK);
+    assert_eq!(info.json::<serde_json::Value>().await.unwrap()["email"], "ghost-e2@x.com");
+
+    // …and grants him nothing: no invite attached, no session, no attach.
+    assert!(get_json(&client, &base, &bob, "/api/shares/inbox").await.as_array().unwrap().is_empty(),
+        "a forwarded token attaches nothing to the wrong account");
+    assert_eq!(session_names(&client, &base, &bob).await, vec!["claude-b"], "no access to alice's machine");
+    assert!(!can_attach(&base, &bob, "claude-a").await);
+
+    // The refusal is about identity, not a burnt token: the invited address still
+    // converts the very same token the normal way.
+    let ghost = signup_ok(&client, &base, "ghost-e2@x.com", "ghost-e2-password", "10.73.8.2").await;
+    assert_eq!(get_json(&client, &base, &ghost, "/api/shares/inbox").await.as_array().unwrap().len(), 1,
+        "the addressee's own signup converts it");
+
+    // ── the team link ─────────────────────────────────────────────────────────
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "capability-team" }), src).await.status().is_success());
+    let inv = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "ghost-e2-team@x.com" }), src).await;
+    assert_eq!(inv.status(), reqwest::StatusCode::OK);
+    let inv_id = inv.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    let msgs = mail_captured(&maildir, 2).await;
+    assert_eq!(msgs.len(), 2, "one message per invitation here too");
+    let org_token = token_in(&mail_body(&msgs[1]), "/org-invite/");
+
+    // Bob resolves the team link…
+    let info = client
+        .get(format!("http://{base}/api/org-invite/{org_token}"))
+        .header(reqwest::header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status(), reqwest::StatusCode::OK);
+    assert_eq!(info.json::<serde_json::Value>().await.unwrap()["email"], "ghost-e2-team@x.com");
+
+    // …and is still in no team: the link put nothing in his inbox, and accepting
+    // the invitation it names is refused because he is not the addressee.
+    assert!(get_json(&client, &base, &bob, "/api/orgs/invites/inbox").await.as_array().unwrap().is_empty(),
+        "the mailed team link attaches nothing to the wrong account");
+    assert_eq!(
+        post_json(&client, &base, &bob, &format!("/api/orgs/invites/{inv_id}/accept"), serde_json::json!({})).await.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "holding the token is not being the addressee"
+    );
+    assert_eq!(get_resp(&client, &base, &bob, "/api/orgs/mine").await.status(), reqwest::StatusCode::NOT_FOUND,
+        "still in no team");
+}
+
+/// E1 (3): the self-hoster's hub. With no transport configured the mailer is
+/// inert — nothing captured, no task spawned, `delivery` left NULL (the 0013
+/// migration's "no send was attempted") — and the create response is byte-shape
+/// identical, still carrying the copyable link that has always been the channel.
+#[tokio::test]
+async fn disabled_mailer_writes_nothing_and_still_returns_a_link() {
+    let (base, store, maildir) = start_hub_no_mail().await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.9.1";
+    assert!(post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": "self-hosted-team" }), src).await.status().is_success());
+
+    // The team invite: 200 with exactly {id, status, invite_url}.
+    let inv = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "self-host-e3@x.com" }), src).await;
+    assert_eq!(inv.status(), reqwest::StatusCode::OK, "no mailer is not an error");
+    let inv: serde_json::Value = inv.json().await.unwrap();
+    let obj = inv.as_object().unwrap();
+    assert_eq!(obj.len(), 3, "the response shape does not move on a mail-less hub: {inv}");
+    for k in ["id", "status", "invite_url"] {
+        assert!(obj.contains_key(k), "missing {k} in {inv}");
+    }
+    let org_token = inv["invite_url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    assert!(inv["invite_url"].as_str().unwrap().contains("/org-invite/") && !org_token.is_empty());
+
+    // The share invite, same story.
+    let share = post_json_from(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "ghost-e3@x.com", "machine": "laptop" }), src).await;
+    assert_eq!(share.status(), reqwest::StatusCode::OK);
+    let share: serde_json::Value = share.json().await.unwrap();
+    let share_token = share["invite_url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    assert!(share["invite_url"].as_str().unwrap().contains("/invite/") && !share_token.is_empty());
+
+    // Both links are usable — this is the channel, not a decoration.
+    assert!(client.get(format!("http://{base}/api/org-invite/{org_token}")).send().await.unwrap().status().is_success());
+    assert!(client.get(format!("http://{base}/api/invite/{share_token}")).send().await.unwrap().status().is_success());
+
+    // Nothing was written and nothing was spawned. The assertion is a negative, so
+    // the wait is a floor on how long a spawned send would have had to appear —
+    // generous next to the ~ms a capture write takes.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(maildir_messages(&maildir).is_empty(), "a hub with no transport captures nothing");
+    assert!(!maildir.exists(), "…and never even creates the directory");
+
+    // `delivery` is NULL on both rows: no send was attempted, which is exactly
+    // what the column means and what the outbox shows the inviter.
+    let outbox = get_json(&client, &base, &alice, "/api/orgs/invites").await;
+    let row = outbox.as_array().unwrap().iter().find(|r| r["id"] == inv["id"]).expect("invite in the outbox");
+    assert!(row["delivery"].is_null(), "no transport ⇒ delivery stays NULL: {row}");
+    let (delivery, emailed_at) = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
+        "SELECT delivery, emailed_at FROM email_invites",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(delivery.is_none() && emailed_at.is_none(), "the share row was never stamped either");
+}
+
+/// E1 (4): `/api/me` reports what this hub can actually do — the twin of the
+/// `billing:false` assertion. The frontend branches its invite copy on it (D2),
+/// so a hub that cannot mail must never claim it can.
+#[tokio::test]
+async fn me_reports_mail_false_without_a_transport() {
+    let client = reqwest::Client::new();
+
+    let (base, _store, _maildir) = start_hub_no_mail().await;
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let me = get_json(&client, &base, &alice, "/api/me").await;
+    assert_eq!(me["mail"], serde_json::Value::Bool(false), "no transport → mail:false");
+
+    let (base, _store, _maildir) = start_hub_capturing().await;
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let me = get_json(&client, &base, &alice, "/api/me").await;
+    assert_eq!(me["mail"], serde_json::Value::Bool(true), "a configured transport → mail:true");
+}
+
+/// E1 (5): an org name carrying `\r\nBcc:` can never add a recipient.
+///
+/// Two halves, because C3 closed the front door: the HTTP path is **refused at
+/// create**, so the name can no longer reach the mailer that way at all — which
+/// is the stronger outcome, and is asserted here rather than assumed. To keep the
+/// structural defense covered anyway (a future rename endpoint, a hand-edited
+/// database, a migration from an older hub that had no validator), the second
+/// half seeds the poisoned name straight into the tables with SQL — `org_create`
+/// validates too, so raw SQL is the only way past both — and drives a real invite
+/// through the real handler and the real mailer.
+#[tokio::test]
+async fn an_injected_org_name_cannot_add_a_recipient() {
+    let (base, store, maildir) = start_hub_capturing().await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let src = "10.73.10.1";
+    let evil = "Acme\r\nBcc: x@y";
+
+    // Half one: the name never gets in through the front door (C3).
+    let refused = post_json_from(&client, &base, &alice, "/api/orgs",
+        serde_json::json!({ "name": evil }), src).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST, "a control char in a team name is refused");
+
+    // Half two: seed it anyway, past both validators, and mail an invitation.
+    let alice_id = store.user_id_by_email("alice@x.com").await.unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    sqlx::query("INSERT INTO orgs (id, name, plan, created_at) VALUES ('evil-org', ?1, 'team', ?2)")
+        .bind(evil)
+        .bind(now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO org_members (org_id, user_id, role, created_at) VALUES ('evil-org', ?1, 'owner', ?2)")
+        .bind(&alice_id)
+        .bind(now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let inv = post_json_from(&client, &base, &alice, "/api/orgs/invites",
+        serde_json::json!({ "email": "victim-e5@x.com" }), src).await;
+    assert_eq!(inv.status(), reqwest::StatusCode::OK);
+
+    let msgs = mail_captured(&maildir, 1).await;
+    assert_eq!(msgs.len(), 1, "one invitation, one message — never a second copy");
+    let headers = mail_headers(&msgs[0]);
+    assert_eq!(
+        recipient_headers(&msgs[0]),
+        vec!["to: victim-e5@x.com".to_string()],
+        "exactly one recipient — the CRLF never became a header separator:\n{}",
+        msgs[0]
+    );
+    assert!(!header_names(&msgs[0]).iter().any(|n| n == "bcc" || n == "cc"), "no injected recipient header: {headers}");
+    // What the encoder actually does is worth pinning, because "the Bcc bytes are
+    // gone" would be the wrong assertion: lettre RFC 2047-encodes the word holding
+    // the CRLF (`=?utf-8?b?…?=`) and the words after it survive as plain text on a
+    // *folded continuation* — leading whitespace, so RFC 5322 reads them as more of
+    // the Subject. Inert either way; the thing that must never happen is a line
+    // starting a header of the attacker's choosing.
+    for line in headers.lines().filter(|l| l.contains("x@y")) {
+        assert!(
+            line.starts_with(' ') || line.starts_with('\t'),
+            "the injected fragment reached the start of a header line: {line}"
+        );
+    }
+    // The bytes are still *in* the message — as inert body/subject text, which is
+    // the whole point: lettre's typed builder encodes them instead of splicing.
+    assert!(mail_body(&msgs[0]).contains("Bcc: x@y"), "the name is delivered as text, not as a header");
 }

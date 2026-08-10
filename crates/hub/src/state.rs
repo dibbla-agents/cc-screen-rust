@@ -94,6 +94,14 @@ pub struct HubState {
     /// answers agents' `SummaryRequest`s by calling Haiku. Shared so the running
     /// budget tally is one place.
     pub summary: Arc<crate::summarizer::Summarizer>,
+    /// Transactional mailer (proposal 0073): the one outbound channel, resolved
+    /// once at startup. Held here rather than re-read from env per call like
+    /// `oauth`/`billing`, because the multi-tenant suite runs many hubs in one
+    /// process and a process-global mailer could not be both on (capture) and
+    /// off (the self-hoster's path) in a single run. `Mailer::disabled()`
+    /// everywhere but `main`, exactly the split `Summarizer` has.
+    #[cfg(feature = "multi-tenant")]
+    pub mailer: Arc<crate::mailer::Mailer>,
     /// Tenancy mode (proposal 0001). `Single` (the default) = today's behavior;
     /// `Multi` carries the backing store. Selected once at startup.
     pub tenancy: Tenancy,
@@ -545,6 +553,8 @@ mod tests {
             push: Arc::new(cc_screen_push::Push::new(&std::env::temp_dir())),
             bulk: crate::bulk::BulkRegistry::default(),
             summary: Arc::new(crate::summarizer::Summarizer::disabled()),
+            #[cfg(feature = "multi-tenant")]
+            mailer: Arc::new(crate::mailer::Mailer::disabled()),
             tenancy: Tenancy::Single,
         }
     }

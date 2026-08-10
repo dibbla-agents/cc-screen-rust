@@ -200,6 +200,15 @@ pub async fn me(State(hub): State<HubState>, headers: HeaderMap) -> Response {
                     "plan": plan,
                     "supportEmail": support,
                     "billing": billing_enabled(),
+                    // Can this hub emit mail (proposal 0073 D1)? A per-hub
+                    // capability, identical for every caller and saying nothing
+                    // about any address — the same shape as `billing: false`
+                    // telling the seat-checkout button not to render. Deliberately
+                    // NOT in the unauthenticated body below: /api/me is exempt from
+                    // the auth gate, and there is no reason to tell the open
+                    // internet that this hub sends mail from an authenticated
+                    // domain.
+                    "mail": hub.mailer.active(),
                 });
                 if let Some(org) = org_block {
                     body["org"] = org;

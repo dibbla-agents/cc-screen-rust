@@ -2,7 +2,9 @@
 // point (a machine row, a session's menu, the identity bar). Styled to the
 // MultiTenant terminal aesthetic. Sharing is an *invite*: committing creates a
 // pending grant the recipient must accept ([0040]); we show a brief confirmation
-// then close.
+// then close. Whether that confirmation says the hub is emailing the invitee is
+// decided by the `mail` capability prop ([0073] D2) — per hub, never per
+// address; the copyable link stays the centerpiece in both states.
 
 import { useState } from "react";
 import { createShare } from "../api";
@@ -22,10 +24,18 @@ export default function ShareForm({
   subject,
   onClose,
   onShared,
+  mail = false,
 }: {
   subject: ShareSubject;
   onClose: () => void;
   onShared?: () => void;
+  /// `me.mail` — whether THIS HUB has a mailer configured (proposal 0073 D1).
+  /// There is no React context in this app, so it is prop-drilled from `App`
+  /// (and, for the machine row, from `Dashboard` → `MachineRow`). Optional and
+  /// defaulted to false so a hub that sends nothing — and every existing test
+  /// render — keeps today's copy byte-for-byte. It is a per-hub capability,
+  /// never a per-address signal: nothing below branches on the invitee.
+  mail?: boolean;
 }) {
   const [email, setEmail] = useState("");
   const [peek, setPeek] = useState(false);
@@ -63,14 +73,28 @@ export default function ShareForm({
   if (done) {
     // ONE success message for both outcomes — whether the address already has
     // an account is deliberately not disclosed (proposal 0056 C2 / [0042]).
-    // No email is sent by the hub (v1): the copyable link is how the invite
-    // travels, so it is the visual centerpiece.
+    // Two lead sentences, chosen ONLY by the per-hub `mail` capability
+    // (proposal 0073 D2), never by anything about the invitee. Present
+    // progressive on purpose: the send is spawned after the response is built,
+    // so "we emailed them" would be untrue at this instant and flatly wrong for
+    // a send that fails twenty seconds later — the outbox badge is the only
+    // surface that claims an outcome. In BOTH states the copyable link keeps
+    // its position and prominence: it is the fallback for a bounce, a spam
+    // folder, a typo'd domain, and every hub with no mailer at all.
     return (
       <div className="rounded-lg border border-amber/30 bg-amber/10 px-3 py-2.5 text-xs text-amber">
-        <div>
-          Invitation created for <span className="font-semibold">{email.trim()}</span> — they'll see it
-          when they sign in. You can also send them this link:
-        </div>
+        {mail ? (
+          <div>
+            Invitation created for <span className="font-semibold">{email.trim()}</span> — we're
+            emailing them, and they'll see it when they sign in. If it doesn't arrive, send them this
+            link:
+          </div>
+        ) : (
+          <div>
+            Invitation created for <span className="font-semibold">{email.trim()}</span> — they'll see it
+            when they sign in. You can also send them this link:
+          </div>
+        )}
         {inviteUrl && (
           <div className="mt-2 flex items-stretch gap-1.5">
             <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
@@ -83,7 +107,10 @@ export default function ShareForm({
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
-              className="shrink-0 rounded-md border border-amber/60 px-2.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+              /* min-h-11 + py (proposal 0073 Mobile/touch): `items-stretch`
+                 alone left this ~28px tall, and it is the control the user
+                 reaches for exactly when the mail didn't arrive. */
+              className="min-h-11 shrink-0 rounded-md border border-amber/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
             >
               {copied ? "Copied!" : "Copy link"}
             </button>
@@ -92,7 +119,7 @@ export default function ShareForm({
         <button
           type="button"
           onClick={onClose}
-          className="mt-2 rounded-md px-1.5 py-1 text-[11px] text-slate-400 transition hover:text-slate-200"
+          className="mt-2 min-h-11 rounded-md px-1.5 py-1 text-[11px] text-slate-400 transition hover:text-slate-200"
         >
           Done
         </button>
@@ -126,7 +153,9 @@ export default function ShareForm({
         className={inputCls}
       />
       {!isSession ? (
-        <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-slate-400">
+        // The whole label is the hit area, so min-h-11 on it (not the 14px box)
+        // is what makes the checkbox reachable on a phone (0073 Mobile/touch).
+        <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-2 text-[11px] text-slate-400">
           <input
             type="checkbox"
             checked={peek}
@@ -143,14 +172,14 @@ export default function ShareForm({
         <button
           type="button"
           onClick={onClose}
-          className="rounded-md px-2.5 py-1.5 text-xs text-slate-400 transition hover:text-slate-200"
+          className="min-h-11 rounded-md px-2.5 py-1.5 text-xs text-slate-400 transition hover:text-slate-200"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={busy || !email.trim()}
-          className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className="min-h-11 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? "…" : "Share"}
         </button>

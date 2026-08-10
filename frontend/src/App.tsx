@@ -2694,6 +2694,11 @@ export default function App() {
               subject={shareTarget}
               onClose={() => setShareTarget(null)}
               onShared={refreshReceivedShares}
+              /* Whether THIS hub emails the invite (proposal 0073 D1) — a
+                 per-hub capability off /api/me, drilled in because there is no
+                 context in this app. Absent on a hub with no mailer, where the
+                 copyable link stays the only channel. */
+              mail={me?.mail}
             />
           </div>
         </div>

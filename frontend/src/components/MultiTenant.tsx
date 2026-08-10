@@ -802,9 +802,14 @@ function MachineRow({
   onChanged,
   onUpdate,
   onStartSession,
+  mail,
 }: {
   a: AgentInfo;
   onChanged: () => void;
+  /// `me.mail` (proposal 0073 D1), drilled one hop from `Dashboard` purely so
+  /// the row's ShareForm can pick its success copy. There is no context in this
+  /// app; a narrow optional boolean is the whole dependency.
+  mail?: boolean;
   /// Open the "Update coding assistants" flow scoped to this machine (0049).
   /// The per-machine case belongs here, where per-machine administration
   /// already lives; the top-bar button remains the whole-fleet action.
@@ -902,7 +907,12 @@ function MachineRow({
 
       {sharing && (
         <div className="mt-3">
-          <ShareForm subject={{ title: a.machine, machine: a.machine }} onClose={() => setSharing(false)} onShared={onChanged} />
+          <ShareForm
+            subject={{ title: a.machine, machine: a.machine }}
+            onClose={() => setSharing(false)}
+            onShared={onChanged}
+            mail={mail}
+          />
         </div>
       )}
 
@@ -1295,7 +1305,10 @@ function SeatPicker({
 // POST /api/orgs/invites: email in, ONE success state for both arms (account or
 // not — no account-existence oracle) with the copyable /org-invite link as the
 // centerpiece. A 402 seat-cap answer renders the seats LimitCard beneath.
-function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }) {
+// Proposal 0073 D2: the success card's lead sentence is chosen by `me.mail` —
+// the per-hub mailer capability — and by nothing else. Exported for the tests
+// that cover both states.
+export function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"member" | "admin">("member");
   const [busy, setBusy] = useState(false);
@@ -1330,10 +1343,23 @@ function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }
   if (done) {
     return (
       <div className="rounded-lg border border-amber/30 bg-amber/10 px-3 py-2.5 text-xs text-amber">
-        <div>
-          Invitation created for <span className="font-semibold">{done.email}</span> — they'll see it
-          when they sign in. You can also send them this link:
-        </div>
+        {/* Two lead sentences, chosen ONLY by the per-hub `mail` capability
+            (0073 D2) — never by whether the invitee already has an account.
+            Present progressive because the send is spawned after the response
+            is built: the outbox badge is the only surface that claims an
+            outcome. The link keeps its prominence in both states. */}
+        {me.mail ? (
+          <div>
+            Invitation created for <span className="font-semibold">{done.email}</span> — we're
+            emailing them, and they'll see it when they sign in. If it doesn't arrive, send them this
+            link:
+          </div>
+        ) : (
+          <div>
+            Invitation created for <span className="font-semibold">{done.email}</span> — they'll see it
+            when they sign in. You can also send them this link:
+          </div>
+        )}
         {done.inviteUrl && (
           <div className="mt-2 flex items-stretch gap-1.5">
             <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
@@ -1346,7 +1372,10 @@ function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
-              className="shrink-0 rounded-md border border-amber/60 px-2.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+              /* min-h-11 + py (0073 Mobile/touch): `items-stretch` alone left
+                 this ~28px tall — the hardest thing on the card to hit, and the
+                 one the user reaches for when the mail didn't arrive. */
+              className="min-h-11 shrink-0 rounded-md border border-amber/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
             >
               {copied ? "Copied!" : "Copy link"}
             </button>
@@ -1411,6 +1440,73 @@ function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () => void }
         <LimitCard plan={me.plan} what="seats" support={me.supportEmail} billing={me.billing ?? false} />
       )}
     </form>
+  );
+}
+
+// The pending-invite badge (proposal 0073 D2) — the outbox's `delivery` column
+// rendered in GrantRow's existing pill, no new colour and (deliberately) no
+// spinner or animated "sending…": the dashboard is on screen for hours and its
+// rule is that nothing on it animates infinitely, because colour carries the
+// same information. An absent/NULL delivery is today's `invited` — the correct
+// and permanent answer for every row minted before the mailer existed and for
+// every hub that never configures one, so an older hub renders unchanged.
+export function deliveryBadge(delivery?: string | null): string {
+  switch (delivery) {
+    case "sending":
+      return "sending";
+    case "sent":
+      return "sent";
+    case "failed":
+      return "failed";
+    case "rejected":
+      // A permanent refusal from the relay — the address or its domain does not
+      // exist. Named for the human, not the SMTP verb.
+      return "bad address";
+    default:
+      return "invited";
+  }
+}
+
+// Resend is offered for `failed` ONLY. `rejected` is permanent: retrying cannot
+// succeed and each attempt spends the account's send quota, so the affordance
+// must not be there to tempt anyone.
+export function canResendInvite(delivery?: string | null): boolean {
+  return delivery === "failed";
+}
+
+// The Resend control (proposal 0073 D2), living in GrantRow's `extra` slot.
+// It re-invites through the ordinary create endpoint: a re-invite already mints
+// a fresh token and kills the old link, so this is an operation the UI has
+// always had, spelled differently. min-h-11 like every other touch target here.
+function ResendInvite({
+  email,
+  role,
+  onDone,
+}: {
+  email: string;
+  role: string;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await createOrgInvite(email, role === "admin" ? "admin" : "member");
+        } catch {
+          /* the row's own delivery state is the report — nothing to invent here */
+        }
+        setBusy(false);
+        onDone();
+      }}
+      className="min-h-11 shrink-0 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-accent hover:text-accent disabled:opacity-40"
+      title="Send the invitation again (this mints a fresh link and retires the old one)"
+    >
+      {busy ? "…" : "Resend"}
+    </button>
   );
 }
 
@@ -1721,7 +1817,12 @@ function TeamCard({ me, onChanged }: { me: MeInfo; onChanged?: () => void }) {
                   {i.role === "admin" ? " · as admin" : ""}
                 </>
               }
-              badge="invited"
+              badge={deliveryBadge(i.delivery)}
+              extra={
+                canResendInvite(i.delivery) ? (
+                  <ResendInvite email={i.email} role={i.role} onDone={reload} />
+                ) : undefined
+              }
               actionLabel="Cancel"
               confirmText={`Cancel the invitation for ${i.email}?`}
               onConfirm={async () => {
@@ -1841,6 +1942,11 @@ function humanizeAudit(e: OrgAuditEntry): string {
         : `${actor} changed the role of ${t || "a member"}`;
     case "invite.created":
       return `${actor} invited ${t || "someone"}`;
+    // Proposal 0073 B1 — the mailer's durable trail. The actor is the hub
+    // itself, so the line names the recipient the way invite.created does
+    // rather than pretending a person pressed send.
+    case "invite.emailed":
+      return `${actor} emailed the invitation to ${t || "someone"}`;
     case "invite.declined":
       return `${actor} declined an invitation`;
     case "invite.revoked":
@@ -2071,6 +2177,7 @@ export function Dashboard({
                   onChanged={reload}
                   onUpdate={onUpdateAssistants}
                   onStartSession={onStartSession}
+                  mail={me.mail}
                 />
               ))}
             </ul>

@@ -136,6 +136,14 @@ with 0 seats is dormant: it exists, but nobody can join and members keep
 their personal plans — so creating one never changes anyone's entitlements
 until you set seats.
 
+**Invites, and mail.** Your hub sends no email at all unless you bring a
+relay — set `CCHUB_SMTP_URL` (and `CCHUB_PUBLIC_URL`, so the link in the body
+is absolute) and it mails team and share invitations; leave it unset and the
+hub behaves exactly as it did before, the way billing is simply off without
+Stripe keys. Inviting works either way: creating an invitation always hands
+the inviter a copyable link, which is the whole channel on a hub with no
+relay and the fallback on one with it.
+
 ## Docker
 
 Both images are published to GHCR on every release:
@@ -217,6 +225,10 @@ Hub (`~/.config/cc-screen-hub/web.env`):
 | `STRIPE_PRICE_PRO_MONTHLY` / `STRIPE_PRICE_PRO_ANNUAL` | the Pro price ids (required if billing is on) |
 | `STRIPE_PRICE_TEAM_MONTHLY` / `STRIPE_PRICE_TEAM_ANNUAL` | the per-seat Team price ids. **Optional even with billing on**: unset → Pro-only billing, the Team checkout answers 400 and its UI doesn't render — teams themselves keep working (CLI seats) |
 | `STRIPE_PRICE_TEAM_FOUNDER` | optional founder-cohort per-seat price (like `STRIPE_PRICE_PRO_FOUNDER` for Pro) |
+| `CCHUB_SMTP_URL` | multi-tenant only: the relay that mails team and share invitations, e.g. `smtp://user:key@smtp-relay.brevo.com:587`. Unset → the hub sends no mail and everything else works (the copyable invite link is the channel). Needs `CCHUB_PUBLIC_URL` as well — without an absolute base the mailer stays off rather than mail a relative link |
+| `CCHUB_MAIL_FROM` | From/envelope address on that mail (default `cc-screen <invites@ccscreen.dev>`); your relay must be authorized to send as it |
+| `CCHUB_MAIL_REPLY_TO` | Reply-To on that mail; falls back to `CCHUB_SUPPORT_EMAIL`, so a confused invitee's reply reaches a human |
+| `CCHUB_MAIL_DIR` | write each message to a file in this directory instead of sending it (what the test harnesses use); takes precedence over `CCHUB_SMTP_URL` |
 | `CCWEB_ALLOWED_ORIGINS` | extra allowed browser Origin/Host values, comma-separated |
 | `CCWEB_ALLOW_UNAUTHENTICATED_REMOTE` | `1` → allow a routable bind with client auth off |
 | `CCWEB_CSP` | override the embedded app's Content-Security-Policy |

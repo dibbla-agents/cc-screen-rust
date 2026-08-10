@@ -10,6 +10,7 @@
 //!   org.created            member.joined          member.left
 //!   member.removed         member.role_changed    invite.created
 //!   invite.declined        invite.revoked         invite.expired   (sweep; actor NULL)
+//!   invite.emailed         (0073 B1; actor NULL — the mailer, not a human)
 //!   machine.visibility_changed                    org.seats_changed
 //!   share.created          share.revoked          (actor is an org member; share.rs)
 //!   billing.checkout       billing.subscription   (0064's webhook/checkout path)
@@ -77,11 +78,17 @@ fn is_admin(role: &str) -> bool {
 }
 
 /// Map the store's prefixed error vocabulary to HTTP: `SEATS:` → 402 (the plan-
-/// limit convention), `ONEORG:`/`OWNER:` → 409, anything else → 400.
+/// limit convention), `CAP:` → 429, `ONEORG:`/`OWNER:` → 409, anything else → 400.
 fn store_err(e: anyhow::Error) -> Response {
     let msg = e.to_string();
     if let Some(m) = msg.strip_prefix("SEATS:") {
         return (StatusCode::PAYMENT_REQUIRED, m.to_string()).into_response();
+    }
+    // Abuse bounds (proposal 0073 C1) speak `CAP:`, the vocabulary `share.rs`
+    // already maps inline. Without this arm a cap would surface to the client as
+    // `400 "CAP:this team has too many pending invitations…"` — prefix and all.
+    if let Some(m) = msg.strip_prefix("CAP:") {
+        return (StatusCode::TOO_MANY_REQUESTS, m.to_string()).into_response();
     }
     if let Some(m) = msg.strip_prefix("ONEORG:") {
         return (StatusCode::CONFLICT, m.to_string()).into_response();
@@ -170,6 +177,14 @@ pub struct OrgInviteReq {
 /// no account yet) answer the same `{id, status, invite_url}` shape — the 0042
 /// account-existence-oracle fix, carried over from `share::create`.
 pub async fn invite_create(State(hub): State<HubState>, headers: HeaderMap, Json(req): Json<OrgInviteReq>) -> Response {
+    // The per-source window (proposal 0073 C1) lives INSIDE the handler, not as a
+    // layer: `/api/orgs/invites` is a combined route (`post(invite_create)
+    // .get(invite_outbox)`), and throttling the GET would rate-limit an ordinary
+    // dashboard read. Same bucket as `share::create`, so alternating endpoints
+    // buys no extra budget.
+    if crate::share::invite_rate_limited(&cc_screen_auth::source_key(&headers)) {
+        return (StatusCode::TOO_MANY_REQUESTS, "too many invitations — slow down").into_response();
+    }
     let (store, actor, org, role) = match actor_org(&hub, &headers).await {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -177,8 +192,17 @@ pub async fn invite_create(State(hub): State<HubState>, headers: HeaderMap, Json
     if !is_admin(&role) {
         return (StatusCode::FORBIDDEN, "only a team owner or admin can invite").into_response();
     }
+    // Address validation at the API boundary (proposal 0073 C3) — 400 before the
+    // invite row is written, not after the store has already persisted
+    // `victim@x.com\r\nBcc: …`.
+    let email = crate::db::normalize_email(&req.email);
+    if let Err(e) = crate::db::validate_email_address(&email) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
     let invite_role = req.role.as_deref().unwrap_or("member");
-    let (id, status, token) = match store.org_invite_create(&org.id, &actor, &req.email, invite_role).await {
+    // The org-scoped live-invite cap is enforced in the store and speaks `CAP:`,
+    // which `store_err` now maps to 429.
+    let (id, status, token) = match store.org_invite_create(&org.id, &actor, &email, invite_role).await {
         Ok(v) => v,
         Err(e) => return store_err(e),
     };
@@ -187,22 +211,50 @@ pub async fn invite_create(State(hub): State<HubState>, headers: HeaderMap, Json
             &org.id,
             Some(&actor),
             "invite.created",
-            Some(req.email.trim()),
+            Some(email.as_str()),
             Some(&format!("{{\"role\":\"{invite_role}\"}}")),
         )
         .await;
-    // Best-effort push when the address already has an account (the copyable
-    // link is the channel otherwise — the hub sends no mail, 0058's ops fact).
-    if let Some(grantee) = hub.user_id_by_email(&req.email).await {
-        let inviter_email = hub.user_email(&actor).await.unwrap_or_default();
-        hub.push
-            .notify_scoped(
-                Some(&grantee),
-                "Team invitation",
-                &format!("{inviter_email} invited you to join {}", org.name),
-                "org-invite",
-            )
-            .await;
+    // Hoisted out of the push arm (proposal 0073, "the delivery decision" §2):
+    // mail needs it in both arms, and doing this lookup only when the address has
+    // an account was itself a timing signal.
+    let inviter_email = hub.user_email(&actor).await.unwrap_or_default();
+    // Best-effort push when the address already has an account (mail below is the
+    // other discovery channel; the copyable link is the one that always works).
+    // Spawned like `uplink_server.rs:187` — `notify_scoped` is a blocking FCM/APNs
+    // call, and awaiting it here would add hundreds of milliseconds in the
+    // account-exists arm alone.
+    if let Some(grantee) = hub.user_id_by_email(&email).await {
+        let (push, body) = (hub.push.clone(), format!("{inviter_email} invited you to join {}", org.name));
+        tokio::spawn(async move {
+            push.notify_scoped(Some(&grantee), "Team invitation", &body, "org-invite").await;
+        });
+    }
+    // Mail the invite (proposal 0073). Spawned, never awaited: SEND_TIMEOUT is 20s
+    // and an invitation that is already durably created must not fail on a relay
+    // hiccup. Re-reads the row inside the task because a revoke or a re-invite can
+    // land inside that window — the token is the liveness check.
+    //
+    // The send ceilings (0073 C1) are checked HERE, before the spawn, so an
+    // invitation over one spawns no task at all. They never fail the invitation —
+    // the row and the copyable link stand; only the send is skipped.
+    if status == "pending"
+        && !token.is_empty()
+        && hub.mailer.active()
+        && crate::share::may_send_invite_mail(&store, Some(&org.id), &email).await
+    {
+        let (mailer, store) = (hub.mailer.clone(), store.clone());
+        let (id, token, org_id, org_name) = (id.clone(), token.clone(), org.id.clone(), org.name.clone());
+        let (to, inviter) = (email.clone(), inviter_email.clone());
+        tokio::spawn(async move {
+            let (subject, body) = crate::mailer::org_invite_message(&org_name, &inviter, &org_invite_url(&token));
+            if !store.org_invite_mark_sending(&id, &token).await {
+                return; // revoked or superseded — this attempt writes nothing
+            }
+            let outcome = mailer.send(&to, &subject, &body).await;
+            store.org_invite_delivery_record(&id, &token, outcome.as_str()).await;
+            store.audit_append(&org_id, None, "invite.emailed", Some(&to), Some(&outcome.detail())).await;
+        });
     }
     (StatusCode::OK, Json(json!({ "id": id, "status": status, "invite_url": org_invite_url(&token) })))
         .into_response()
@@ -505,6 +557,12 @@ fn invite_view(row: &OrgInviteRow, admin: bool) -> Value {
     });
     if admin {
         v["inviteUrl"] = json!(org_invite_url(&row.token));
+        // Delivery state (proposal 0073 B2/D2) — `sending|sent|rejected|failed`,
+        // or null when no send was attempted (no mailer, or a pre-0073 row). Only
+        // on the management surface: it is the inviter's receipt, and it is read
+        // back HERE rather than from the create response precisely so it can never
+        // be an account-existence oracle.
+        v["delivery"] = json!(row.delivery);
     }
     v
 }

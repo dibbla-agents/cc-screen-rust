@@ -28,7 +28,7 @@ path = "src/main.rs"
 # any per-tenant code, and behaves byte-for-byte as today. The SaaS hub is this
 # *same* crate built with `--features multi-tenant`, not a fork — every other PR
 # must keep the default (no-feature) build green.
-multi-tenant = ["dep:sqlx", "dep:argon2", "dep:async-trait"]
+multi-tenant = ["dep:sqlx", "dep:argon2", "dep:async-trait", "dep:lettre"]
 # In-process hub + fake-agent test doubles (proposal 0059 B1), exported as
 # `cc_screen_hub::test_support`. OFF by default so a normal hub build never
 # compiles them; the hub's own e2e suite and the `ccs` TUI harness turn it on.
@@ -69,6 +69,12 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 argon2 = { version = "0.5", optional = true }
 # async methods on the `db::Store` trait object (dyn dispatch needs boxing).
 async-trait = { version = "0.1", optional = true }
+# Transactional mail (proposal 0073), behind `multi-tenant`. Optional + off by
+# default at runtime too: no CCHUB_SMTP_URL, no mailer, and the hub behaves
+# exactly as it did before — the copyable invite link stays the channel. Pure
+# rustls like the rest of the tree (tokio1-rustls-tls pulls webpki-roots + ring);
+# no system OpenSSL, so `native-tls` is off with default-features.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "webpki-roots", "builder", "hostname"], optional = true }
 # Only pulled into the lib by `test-support` (the fake agent speaks the agent↔hub
 # WS as a tungstenite client). Still a dev-dependency below for the hub's own
 # tests that don't go through `test_support` (e.g. the multi-tenant suite).

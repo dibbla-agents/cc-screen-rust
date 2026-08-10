@@ -8,13 +8,17 @@
 #
 #   build cc-screen-hub --features multi-tenant
 #   → run it on a free loopback port with CCHUB_DATABASE_URL=sqlite://$TMP/hub.db
+#     and CCHUB_MAIL_DIR=$TMP/mail — 0073's capture transport, which writes each
+#     invite message to a file instead of sending it, so the mail assertions in
+#     step 4 need neither a relay nor a network (loopback stays the only hop)
 #   → drive the whole org/membership/visibility/limits lifecycle over HTTP
 #   → SQL-assert the rows (sqlite3), including the final CASCADE teardown.
 #
-# The steps map to 0063 E1 (+ the 0065 Part F visibility legs):
+# The steps map to 0063 E1 (+ the 0065 Part F visibility legs, + 0073 E1's mail):
 #    1. owner signs up, creates the org (dormant, 0 seats)
 #    2. machines enrolled for owner + member A (pre-join, via the admin CLI)
 #    3. invite member A (existing account) and B (no account) — uniform responses
+#       AND uniform mail (0073's capture transport writes both messages to a dir)
 #    4. zero-seat accept → 402 ("no seats yet")
 #    5. `cc-screen-hub org seats` sets 3 — CLI + SQL + audit assert
 #    6. A accepts → member row + member.joined audit row (SQL asserts)
@@ -109,16 +113,27 @@ trap 'teardown' EXIT
 
 # Stripe must be ABSENT: the point of this harness is that Team works without
 # it (seats via the admin CLI, billing:false). Also drop any inherited hub env.
+# The CCHUB_SMTP_URL / CCHUB_MAIL_* scrub is the same discipline applied to the
+# 0073 mailer: a stray relay credential in the operator's shell must never turn
+# this harness into something that sends real mail. CCHUB_MAIL_DIR is then set
+# BELOW, deliberately, and wins over CCHUB_SMTP_URL by construction (mailer.rs).
 unset STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET \
       STRIPE_PRICE_PRO_MONTHLY STRIPE_PRICE_PRO_ANNUAL STRIPE_PRICE_PRO_FOUNDER \
       STRIPE_PRICE_TEAM_MONTHLY STRIPE_PRICE_TEAM_ANNUAL STRIPE_PRICE_TEAM_FOUNDER \
       STRIPE_FOUNDER_DEADLINE STRIPE_MANAGED_PAYMENTS \
       ANTHROPIC_API_KEY CCHUB_SUPPORT_EMAIL CCHUB_OAUTH_ONLY \
       GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET \
+      CCHUB_SMTP_URL CCHUB_MAIL_DIR CCHUB_MAIL_FROM CCHUB_MAIL_REPLY_TO \
+      CCHUB_MAIL_FOOTER \
       CCWEB_PASSWORD CCWEB_API_TOKEN CCHUB_AGENT_TOKENS 2>/dev/null || true
 export CCHUB_DATABASE_URL="sqlite://$DB"
 export CCWEB_CONFIG_DIR="$TMP/hub-config"
 export CCHUB_PUBLIC_URL="$HUB"
+# 0073's capture transport: every message is written here as an .eml instead of
+# being sent. Together with CCHUB_PUBLIC_URL (which the mailer REQUIRES — an
+# unset base disables it entirely) this is the whole mail configuration.
+MAILDIR="$TMP/mail"
+export CCHUB_MAIL_DIR="$MAILDIR"
 
 say "0/15: start a local multi-tenant hub on $HUB (db $DB)"
 "$HUB_BIN" --addr "127.0.0.1:$PORT" >"$TMP/hub.log" 2>&1 &
@@ -181,6 +196,36 @@ body_has() {
   esac
 }
 
+# ── captured-mail helpers (0073 E1) ─────────────────────────────────────────
+# The send is SPAWNED, never awaited (org.rs invite_create), so the .eml lands
+# shortly AFTER the 200 comes back. Every assertion below therefore waits for a
+# count with a bounded timeout instead of reading the directory immediately —
+# reading it straight away is the one way to make these checks flaky.
+mail_count() { ls -1 "$MAILDIR"/*.eml 2>/dev/null | wc -l | tr -d ' '; }
+# wait_mail N → 0 once at least N messages have been captured (~10s ceiling).
+wait_mail() {
+  local want="$1" i=0
+  while [ "$i" -lt 100 ]; do
+    if [ "$(mail_count)" -ge "$want" ]; then return 0; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+# mail_to ADDRESS → how many captured messages are addressed to ADDRESS.
+mail_to() { grep -lF "To: $1" "$MAILDIR"/*.eml 2>/dev/null | wc -l | tr -d ' '; }
+# mail_body_has ADDRESS SUBSTRING → 0 when ADDRESS's message carries SUBSTRING.
+# Bodies can be quoted-printable, so soft line breaks (a trailing "=") are
+# unfolded first: a 60-odd-character invite URL sits right at the 76-col wrap.
+mail_body_has() {
+  local f
+  for f in $(grep -lF "To: $1" "$MAILDIR"/*.eml 2>/dev/null); do
+    if tr -d '\r' <"$f" | awk '{ if (sub(/=$/, "")) printf "%s", $0; else print }' | grep -qF "$2"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 TS="$(date +%s)"
 PW="e2e-$(openssl rand -hex 12 2>/dev/null || echo "fallback-password-$TS")"
 O="e2e-o-$TS@ccscreen.test";  JAR_O="$TMP/jar-o"
@@ -229,7 +274,10 @@ hubcli user agent "$A" "$M2" >/dev/null || die "user agent $A $M2 failed"
 pass "enrolled $M1 (owner) and $M2 (A)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-say "4/15: invite A (existing account) and B (no account) — uniform responses"
+say "4/15: invite A (existing account) and B (no account) — uniform responses + uniform mail"
+[ "$(mail_count)" = "0" ] \
+  && pass "4 no mail captured before the first invite" \
+  || badfl "4 maildir is not empty before the first invite ($(mail_count) files)"
 req POST /api/orgs/invites "$JAR_O" "{\"email\":\"$A\"}"
 expect "4" "invite A" 200
 INV_A_KEYS="$(printf '%s' "$RESP" | jq -cS 'keys')"
@@ -244,6 +292,30 @@ else
   badfl "4 invite arms differ: A=$INV_A_KEYS B=$INV_B_KEYS status=$INV_B_STATUS url=$INV_B_URL"
 fi
 B_TOKEN="${INV_B_URL##*/}"
+# The mail twin of the shape assertion above (0073 E1). The create response
+# deliberately carries no `emailed` field, so the only way the mailer could
+# become the account-existence oracle this step exists to catch is by sending in
+# one arm and not the other — assert EQUAL counts, and that B (the arm that used
+# to get nothing at all) received a message carrying B's own invite token.
+if wait_mail 2; then
+  MAIL_A="$(mail_to "$A")"; MAIL_B="$(mail_to "$B")"
+  if [ "$MAIL_A" = "$MAIL_B" ] && [ "$MAIL_A" = "1" ]; then
+    pass "4 both arms mailed exactly once (A=$MAIL_A, B=$MAIL_B — no delivery-side oracle)"
+  else
+    badfl "4 invite arms mailed differently: A=$MAIL_A B=$MAIL_B (captures: $(mail_count))"
+  fi
+  [ "$(mail_count)" = "2" ] \
+    && pass "4 exactly 2 messages captured for 2 invites" \
+    || badfl "4 expected 2 captured messages, found $(mail_count)"
+  mail_body_has "$B" "$B_TOKEN" \
+    && pass "4 B's message carries B's invite token" \
+    || badfl "4 B's captured message does not carry B's token ($B_TOKEN)"
+  mail_body_has "$B" "$INV_B_URL" \
+    && pass "4 B's message carries the absolute invite link $INV_B_URL" \
+    || badfl "4 B's captured message lacks the absolute invite URL"
+else
+  badfl "4 only $(mail_count) message(s) captured in $MAILDIR within 10s (want 2)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 say "5/15: zero-seat gate — A's accept on the dormant org → 402 'no seats yet'"
@@ -473,8 +545,11 @@ expect "14" "admin O leaves" 204
 say "15/15: the audit log — full vocabulary present, paging strictly descending"
 req GET "/api/orgs/audit?limit=100" "$JAR_A"
 expect "15" "owner reads the audit log" 200
-for action in org.created org.seats_changed invite.created member.joined \
-              invite.declined invite.revoked member.role_changed \
+# invite.emailed is 0073's — appended by the spawned send task, actor NULL (the
+# mailer, not a human). It is in the fixed list because a vocabulary this loop
+# does not name is a vocabulary nothing checks.
+for action in org.created org.seats_changed invite.created invite.emailed \
+              member.joined invite.declined invite.revoked member.role_changed \
               machine.visibility_changed member.removed member.left; do
   n="$(printf '%s' "$RESP" | jq --arg a "$action" '[.[] | select(.action == $a)] | length')"
   [ "${n:-0}" -ge 1 ] 2>/dev/null \

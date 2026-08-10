@@ -74,10 +74,11 @@ binaries, no feature gap in the core product. See
 ## Can I share access with a teammate?
 
 Yes — share a whole machine or a single session, as "can view" or "can use".
-If the invitee has no account yet, you get an invite link to send them; the
-share attaches when they sign up with that email. Revoke any time from the
-dashboard's Sharing card. Or skip the one-off shares and start a **team** —
-everyone on it sees everyone's sessions automatically, view-only. See
+cc-screen emails the invitation and hands you a copyable link as well; if the
+invitee has no account yet, the share attaches when they sign up with that
+email. Revoke any time from the dashboard's Sharing card. Or skip the one-off
+shares and start a **team** — everyone on it sees everyone's sessions
+automatically, view-only. See
 [Using the web app → Sharing](../web-app/#sharing).
 
 ## How do teams work?
@@ -99,6 +100,21 @@ is refused until someone adds seats (the owner or an admin, from Billing) —
 nothing is lost, the invite just waits. Removing a member frees their seat
 instantly. Reducing the seat count never removes members: if you drop below
 the current member count, the team just can't grow until it's back under.
+
+## What's in the invite email, and what does clicking the link do?
+
+Plain text, one message per invitation: who invited you, what to (a team, a
+machine, or a single session), the team's consent sentence verbatim when it's
+a team, and one link. No tracking pixel, no attachments, no reminders, and
+nothing else is ever sent to that address.
+
+The link only *identifies* the invitation — it grants nothing on its own.
+Accepting means signing in with the address that was invited, so a forwarded
+link gets the forwarder's friend nowhere. Invites expire after 14 days, and
+whoever sent it can cancel it sooner; either way the link stops working. If
+the mail never turns up, ask the sender for the copyable link — it's the same
+invitation, and it's the only channel on a self-hosted hub whose operator
+hasn't configured a mail relay.
 
 ## Does it work on phones?
 

@@ -186,6 +186,13 @@ export interface MeInfo {
   // or false on a self-hosted hub — the client renders the mailto fallback and
   // no checkout buttons. The JSON field name is exactly `billing`.
   billing?: boolean;
+  // Whether this hub has a transactional mailer configured (proposal 0073 D1),
+  // i.e. whether an invite is actually emailed. A per-hub CAPABILITY, identical
+  // for every caller and saying nothing about any address — never an
+  // account-existence oracle. Absent/false on a hub with no mailer, where the
+  // copyable invite link stays the only channel. Present only in the
+  // AUTHENTICATED /api/me body; the anonymous fallback omits it.
+  mail?: boolean;
 }
 
 // An HTTP failure that keeps its status code, so callers can branch on e.g. a
@@ -533,6 +540,13 @@ export interface OrgInvite {
   createdAt: number;
   expiresAt?: number | null;
   inviteUrl?: string;
+  // Mail-delivery state for this invite (proposal 0073 B2/D2). null/absent =
+  // no send was attempted, which is the permanent and correct answer for every
+  // row minted before the mailer existed and on every hub without one.
+  // "sending" = claimed for an attempt; "sent" = the relay accepted it;
+  // "failed" = transient failure (Resend is offered); "rejected" = a permanent
+  // refusal (bad address — Resend is deliberately NOT offered).
+  delivery?: "sending" | "sent" | "failed" | "rejected" | string | null;
 }
 
 // One of MY machines with the per-machine team-visibility opt-out flag (the
