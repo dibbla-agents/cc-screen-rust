@@ -198,6 +198,19 @@ the notifications button hides until then.</li>
 active, and has a &quot;send a test&quot; action.</li>
 </ul>
 <p><figure><img src="../img/mobile-notifications.png" alt="The notification bell in the switcher header" loading="lazy" /><figcaption>The bell lives in the switcher header — it shows whether push is active and can send a test notification.</figcaption></figure></p>
+<h2 id="swiping-does-nothing-on-my-phone">Swiping does nothing on my phone</h2>
+<p>Same cause as the entry below, in the web app. Claude Code&#39;s <strong>fullscreen
+renderer</strong> draws on the terminal&#39;s alternate screen — which keeps no scrollback
+at all — and takes the mouse, so a swipe had nothing to move. <strong>cc-screen 0.5.6
+and newer</strong> hand the swipe to the application instead, so a drag scrolls
+<em>Claude&#39;s own</em> transcript, and a flick coasts. Reload the tab (twice, if the
+PWA served you the old bundle) after your hub has been updated.</p>
+<p>The trap is that this is <strong>rolled out per install</strong>, not per version: the same
+Claude Code build can use the fullscreen renderer on one machine and the classic
+one on another, and it can flip on a machine at any time — the decision is
+cached in <code>~/.claude.json</code>, and Claude persists <code>&quot;tui&quot;</code> into
+<code>~/.claude/settings.json</code> once the renderer has been active. So &quot;it works on my
+other machine&quot; says nothing. If you&#39;re stuck on an older cc-screen, <code>/tui default</code> inside Claude switches that install back to the classic renderer.</p>
 <h2 id="scrolling-does-nothing-in-a-claude-session">Scrolling does nothing in a Claude session</h2>
 <p>In a <code>ccs</code> pane, that&#39;s Claude Code&#39;s <strong>fullscreen renderer</strong> (Claude Code
 2.1.89 and newer, and the default for fresh installs): it draws on the
@@ -218,12 +231,46 @@ prints into the normal screen and scrolls with the pane — inside Claude:</p>
 there (it still works for the rest of the page). Use <strong><code>Ctrl+B /</code></strong> — the
 find bar over the focused pane — or the magnifier button in the header on a
 phone. Enter / Shift+Enter cycle matches, Esc closes.</p>
+<h2 id="i-copied-inside-claude-and-my-clipboard-is-empty">I copied inside Claude and my clipboard is empty</h2>
+<p>Which machine&#39;s clipboard? That&#39;s the whole question.</p>
+<p>Every copy Claude Code performs — <code>/copy</code>, copy-on-select, <code>Ctrl+C</code> on a
+selection inside its own UI, <code>/export → Clipboard</code> — is emitted to the terminal
+for the terminal to act on. <strong>cc-screen 0.5.6 and newer act on it</strong>: the text
+lands on the clipboard of the device you&#39;re actually holding. Older clients
+parsed the sequence and threw it away, so the assistant reported success and
+nothing happened.</p>
+<p>On a <strong>macOS agent</strong> it was worse than empty: Claude Code also shells out to
+<code>pbcopy</code>, that write succeeds, and the text ends up on the <em>agent machine&#39;s</em>
+pasteboard — a machine you&#39;re not sitting at, where anything running there can
+read it. The agent now shims <code>pbcopy</code>/<code>wl-copy</code> for its own sessions and sends
+the copy to you instead. Update the agent (<code>cc-screen-rust update</code>) and start a
+new session; existing sessions keep the PATH they were launched with.</p>
+<p>If the copy still doesn&#39;t arrive:</p>
+<ul>
+<li><strong>Are you driving that session?</strong> A silent write only happens for the pane
+you&#39;re focused on and have typed into recently. Otherwise you get a <strong>Copy</strong>
+button — look for it above the bottom bar.</li>
+<li><strong>Multi-line or unusual text</strong> always takes the button, deliberately.</li>
+<li><strong>In <code>ccs</code></strong>, the copy is handed to <em>your</em> terminal emulator, which has to
+support OSC 52 and have it enabled. iTerm2 gates it behind
+<em>Settings → General → Selection → &quot;Applications in terminal may access
+clipboard&quot;</em>. kitty, WezTerm and Windows Terminal allow it by default.</li>
+<li><strong>Under <code>tmux</code> or <code>screen</code></strong> the sequence is wrapped in a passthrough the web
+client doesn&#39;t unwrap, so that case still doesn&#39;t arrive. Known gap.</li>
+<li><strong>Nothing arrives from before you attached.</strong> The replay a fresh attach sends
+is a picture of the screen, not the byte stream, so a copy made while no
+client was attached cannot be recovered — and a replay is deliberately not
+allowed to write your clipboard minutes after the fact.</li>
+</ul>
 <h2 id="the-terminal-text-looks-slightly-different">The terminal text looks slightly different</h2>
 <p>cc-screen renders terminals with WebGL where the browser supports it, and
 falls back to plain DOM rendering where it doesn&#39;t (older iOS Safari, some
 VMs, a machine with no GPU access). Antialiasing differs a little between the
 two; everything else — selection, links, scrollback, search — behaves the
-same, and no action is needed. To see which one you&#39;re on, open the browser
+same, and no action is needed. (On a <strong>phone</strong>, read &quot;selection&quot; narrowly: touch
+selection of terminal text isn&#39;t offered under either renderer. Copying out of a
+session on a phone is the assistant&#39;s own copy landing on your clipboard, or the
+copy button in the markdown viewer.) To see which one you&#39;re on, open the browser
 console and type:</p>
 <pre><code class="language-js">window.__ccRenderer   // &quot;webgl&quot; or &quot;dom&quot;
 </code></pre>

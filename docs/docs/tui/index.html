@@ -233,6 +233,45 @@ full-screen.</p>
 <p>Attaching to a session that&#39;s <em>already</em> running a full-screen app keeps the
 scrollback from before that app started — quit the app and the earlier output
 is still there, and still scrollable.</p>
+<h3 id="copying-out-of-a-session">Copying out of a session</h3>
+<p>When something inside a session copies text — Claude Code&#39;s <code>/copy</code>, its
+copy-on-select, <code>/export → Clipboard</code> — <code>ccs</code> hands that copy to <strong>your own
+terminal emulator</strong>, which puts it on the clipboard of the machine you&#39;re
+sitting at. That works over SSH, where a clipboard tool on the remote box would
+be useless (and would write the wrong machine&#39;s clipboard anyway).</p>
+<p>Your emulator has to support OSC 52 and have it enabled:</p>
+<table>
+<thead>
+<tr>
+<th>Emulator</th>
+<th>Out of the box</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>kitty, WezTerm, Windows Terminal, Alacritty</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>iTerm2</td>
+<td><strong>off by default</strong> — <em>Settings → General → Selection → &quot;Applications in terminal may access clipboard&quot;</em></td>
+</tr>
+<tr>
+<td>Terminal.app</td>
+<td>no</td>
+</tr>
+<tr>
+<td>GNOME Terminal / VTE</td>
+<td>recent versions, yes</td>
+</tr>
+</tbody></table>
+<p>An emulator that doesn&#39;t support it simply does nothing — you never see escape
+sequence garbage in the pane. Two deliberate limits: a copy made before you
+attached can&#39;t be recovered (the reattach replay is a picture of the screen, not
+the byte stream), and a session asking to <em>read</em> your clipboard is always
+refused.</p>
+<p>Selecting text with the mouse inside <code>ccs</code> is a separate thing, and unchanged:
+<code>ccs</code> captures the mouse for wheel scrolling, so use your terminal&#39;s own
+<strong>Shift+drag</strong> to select and copy the normal way.</p>
 <h2 id="maintenance">Maintenance</h2>
 <pre><code class="language-sh">ccs update       # fetch the latest ccs build
 ccs logout       # sign this terminal out (revokes its credential)

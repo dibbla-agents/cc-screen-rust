@@ -136,6 +136,44 @@ of the page — can&#39;t see the characters. And a detail people notice: the
 terminal cursor doesn&#39;t blink. That&#39;s deliberate; a blinking caret repaints
 the page forever and costs real battery, and it was never part of what the
 remote agent sends.</p>
+<h2 id="copying-text-out-of-a-session">Copying text out of a session</h2>
+<p>Three ways, depending on who is doing the copying.</p>
+<p><strong>You select, you copy.</strong> Drag across terminal text and press <strong>⌘C</strong> (Mac) or
+<strong>Ctrl+C</strong> (Linux/Windows). With no selection, Ctrl+C still goes through to the
+session as an interrupt — that never changed.</p>
+<p><strong>When a full-screen app has taken the terminal</strong>, a plain drag is a <em>mouse
+gesture that belongs to the app</em> (Claude Code&#39;s full-screen renderer, <code>htop</code>,
+<code>lazygit</code> and friends all ask for the mouse), so it selects nothing. Hold
+<strong>⌥ Option</strong> on a Mac browser, <strong>Shift</strong> everywhere else, and drag — or click
+<strong>Select text</strong> in the corner of the pane, which lets a plain drag select until
+you turn it off. The pane tells you which modifier applies; it is the
+<em>browser&#39;s</em> platform that decides, not the machine the session runs on.</p>
+<p><strong>The assistant copies.</strong> When something inside the session copies — Claude
+Code&#39;s <code>/copy</code>, its copy-on-select, <code>Ctrl+C</code> on a selection inside its own UI,
+<code>/export → Clipboard</code> — the text now lands on <strong>your</strong> clipboard, on the device
+you&#39;re holding. It used to be thrown away, or (on a Mac agent) land on the
+<em>agent machine&#39;s</em> clipboard while the assistant told you it had worked.</p>
+<p>A few rules keep that from being a way for a session to write your clipboard
+whenever it likes:</p>
+<ul>
+<li>Only the session you are <strong>actively driving</strong> — focused pane, focused tab,
+and you&#39;ve typed into it recently — gets a silent write. A session you are
+merely <em>watching</em>, including a teammate&#39;s, never writes your clipboard on its
+own; you get a <strong>Copy</strong> button instead, showing exactly what it would copy.</li>
+<li>Multi-line text, and anything that had control characters or
+direction-override characters removed, always takes the button, never the
+silent path.</li>
+<li>Very large copies (over 64 KB) are announced, not copied.</li>
+<li>A session that copies over and over is rate-limited and then switched off,
+with a notice you can re-enable.</li>
+<li>The reverse direction — a session <strong>reading</strong> your clipboard — is not
+implemented and won&#39;t be. That request is ignored, always.</li>
+</ul>
+<p>Scrolling behaves the same way, split by who owns the screen: on a phone, a
+swipe scrolls the terminal&#39;s own scrollback normally, and scrolls the
+<strong>application&#39;s</strong> view when a full-screen app has taken over. On the desktop
+the mouse wheel does the same — the app&#39;s own view while it&#39;s running, the
+browser&#39;s scrollback outside it.</p>
 <h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
 <p>Every machine gets a built-in file browser and editor, confined to that
 machine&#39;s home directory. The tree is live (it follows filesystem changes as

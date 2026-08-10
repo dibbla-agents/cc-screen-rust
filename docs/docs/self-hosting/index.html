@@ -409,6 +409,36 @@ auto-accepts same-origin, raw IPs, <code>localhost</code>, and <code>*.ts.net</c
 <td>override the embedded app&#39;s Content-Security-Policy</td>
 </tr>
 </tbody></table>
+<h2 id="the-clipboard-shim">The clipboard shim</h2>
+<p><code>cc-screen-rust install</code> (and <code>install-shim</code>) writes one small script into
+<code>~/.local/bin</code> under five names — <code>xclip</code>, <code>wl-paste</code>, <code>pbpaste</code>, <code>pbcopy</code>,
+<code>wl-copy</code>. That directory is first on the PATH of every session the agent
+launches, so inside a session those names resolve to the shim and everywhere
+else on the box they don&#39;t.</p>
+<p>It handles the two clipboard directions a session actually needs:</p>
+<ul>
+<li><strong>In.</strong> An image you paste from the web UI is staged by the agent; when the
+assistant shells out to <code>xclip</code>/<code>wl-paste</code>/<code>pbpaste</code> to read a clipboard
+image, the shim serves it. This is what makes Ctrl-V work on a headless box
+with no X11 or Wayland at all.</li>
+<li><strong>Out.</strong> When something inside a session copies <em>text</em>, the shim sends it to
+the user&#39;s own clipboard as a terminal escape sequence instead of writing this
+machine&#39;s. That matters most on macOS, where the assistant&#39;s own <code>pbcopy</code>
+fallback otherwise succeeds and leaves the text on a shared machine&#39;s
+pasteboard.</li>
+</ul>
+<p>Two guarantees worth knowing about:</p>
+<ul>
+<li>The copy branch is guarded on <code>$CCWEB_SESSION</code>, which only the agent sets. Run
+<code>pbcopy</code> yourself in a normal shell on that machine and you get the real
+<code>pbcopy</code>, byte for byte.</li>
+<li>Anything the shim doesn&#39;t own — text paste, <code>-o</code>/<code>-i</code>, an image copy — is
+handed to the next matching tool on the PATH, resolved at run time. A real
+<code>xclip</code> in <code>/usr/bin</code> is shadowed for agent sessions, never overwritten; a
+foreign file already sitting in <code>~/.local/bin</code> under one of those names is
+moved aside to <code>&lt;name&gt;.pre-ccshim</code> once, not clobbered.</li>
+</ul>
+<p>Reinstalling is idempotent. The shim is POSIX-only — Windows agents skip it.</p>
 <h2 id="updating">Updating</h2>
 <p>Each binary re-runs its hosted installer and (for the services) restarts onto
 the new build:</p>

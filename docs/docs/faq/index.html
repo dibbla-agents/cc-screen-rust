@@ -223,6 +223,21 @@ shell prompt the wheel scrolls the pane&#39;s own multi-thousand-line scrollback
 as usual. The rules are in <a href="../tui/#scrolling">the ccs terminal client</a>; if
 the wheel does nothing at all, see
 <a href="../troubleshooting/#scrolling-does-nothing-in-a-claude-session">Troubleshooting</a>.</p>
+<p>The web app follows exactly the same three rules, for touch and for the mouse
+wheel: your own scrollback at a shell prompt, the application&#39;s view once it has
+taken the screen.</p>
+<h2 id="why-did-my-copy-disappear">Why did my copy disappear?</h2>
+<p>If you copied <em>inside</em> a session — Claude&#39;s <code>/copy</code>, or its copy-on-select — the
+answer used to be &quot;it went nowhere, or to the wrong machine&quot;. A terminal copy
+travels as an escape sequence for the terminal to act on, and older cc-screen
+clients discarded it; on a Mac agent, Claude Code&#39;s own fallback wrote the
+<em>agent machine&#39;s</em> pasteboard instead of yours. Both are fixed: the copy now
+lands on the device you&#39;re holding, in the web app and in <code>ccs</code>. The details,
+including the cases that still need one click, are in
+<a href="../troubleshooting/#i-copied-inside-claude-and-my-clipboard-is-empty">Troubleshooting</a>.</p>
+<p>The reverse — a session <em>reading</em> your clipboard — is not something cc-screen
+does. Terminals can be asked for their clipboard contents; cc-screen never
+answers, on any client.</p>
 <h2 id="is-cc-screen-open-source-what39s-it-built-with">Is cc-screen open source? What&#39;s it built with?</h2>
 <p>The code lives at
 <a href="https://github.com/dibbla-agents/cc-screen-rust">github.com/dibbla-agents/cc-screen-rust</a>.
