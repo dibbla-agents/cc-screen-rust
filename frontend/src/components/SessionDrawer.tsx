@@ -512,6 +512,18 @@ function SessionDrawer({
     return () => window.removeEventListener("keydown", handler, { capture: true });
   }, [open, pane, keyboardActive, mode, view, cursor, query, onClose, activate]);
 
+  // Rows render while open, and for the length of the close transition. In the
+  // `pane` variant (proposal 0026) the drawer is permanently open, so this is
+  // always true there. NB `sidebarWidth` is derived from the session data, not
+  // from the rendered rows, so the closed width is unaffected.
+  //
+  // MUST stay above the early return below: `useOpenOrClosing` is a hook (0068),
+  // and the phone variant's closed render returns before this point — calling it
+  // after would make the hook count differ between the open and closed renders,
+  // which React 19 refuses ("Rendered fewer hooks than expected", minified #300)
+  // by tearing down the whole tree.
+  const body = useOpenOrClosing(open, 200);
+
   // Phone full-screen drawer unmounts when closed. The sidebar variant stays
   // mounted so its slide-out transition can play (its effects are gated on
   // `open`, so a mounted-but-closed sidebar is inert). The pane variant is the
@@ -542,12 +554,6 @@ function SessionDrawer({
   // Content-sized width for the sidebar (see `sidebarWidth`); the phone/embedded
   // /pane variants fill their parent, so they take no inline width.
   const rootStyle = sidebar ? { width: sidebarWidth } : undefined;
-
-  // Rows render while open, and for the length of the close transition. In the
-  // `pane` variant (proposal 0026) the drawer is permanently open, so this is
-  // always true there. NB `sidebarWidth` is derived from the session data, not
-  // from the rendered rows, so the closed width is unaffected.
-  const body = useOpenOrClosing(open, 200);
 
   // ── Create mode: the in-sidebar search-first create flow (proposal 0016). ──
   if (mode === "create") {
