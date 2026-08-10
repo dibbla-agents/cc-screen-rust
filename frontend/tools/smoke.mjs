@@ -11,7 +11,9 @@ const base = process.env.BASE || "http://127.0.0.1:8840";
 const exe = process.env.CHROME;
 // Short name of the throwaway session to drive (never a live one).
 const session = process.env.SESSION || "smoketest";
-// Full tmux name, for asserting the swipe actually scrolled (copy-mode).
+// Full tmux name. The swipe assertion no longer uses it (proposal 0031 repaired
+// that one); the SIGINT capture-pane check still does — repairing the rest of
+// this harness's tmux assumptions stays [0066] Part E's deferred job.
 const tmuxSession = process.env.TMUX_SESSION || `claude-${session}`;
 
 // GL is ENABLED here (software rasterizer): the terminals adopt the WebGL
@@ -324,6 +326,30 @@ async function domFallbackPass() {
 }
 
 try {
+  // Record everything the client puts on the terminal WebSocket. Proposals
+  // 0031 C and 0077 A both turn on "what exactly reached the PTY" — the touch
+  // ladder must send mouse/arrow bytes on the alternate screen and NOTHING on
+  // the normal buffer, and the OSC 52 handler must never answer a query. An
+  // init script is the only place this can be installed before the app
+  // connects. Binary frames are decoded too: input can travel either way.
+  await page.addInitScript(() => {
+    window.__ccWire = [];
+    const send = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      try {
+        if (typeof data === "string") {
+          const m = JSON.parse(data);
+          if (m && m.t === "i") window.__ccWire.push(m.d);
+        } else {
+          window.__ccWire.push(new TextDecoder().decode(data));
+        }
+      } catch {}
+      return send.call(this, data);
+    };
+  });
+  // The OSC 52 step reads the clipboard back; net-new harness setup (this suite
+  // granted no clipboard permissions before).
+  await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
   await page.goto(base, { waitUntil: "networkidle" });
 
   // No last session => switcher auto-opens.
@@ -413,25 +439,126 @@ try {
   const selectionOk = typeof xtermSelection === "string" && xtermSelection.length > 0;
 
 
-  // Swipe-to-scroll: a finger drag DOWN over the terminal should scroll back
-  // (tmux enters copy-mode). Simulated via CDP touch events.
+  // ── Touch scroll: the [0069] ladder in the browser (proposal 0031 A+C) ─────
+  //
+  // The old assertion here checked that *tmux* had entered copy-mode. The
+  // backend has been tmux-free for months, so it could not have been validating
+  // the scrollLines() path it was meant to guard — the swipe was effectively
+  // untested. It now asserts on the terminal itself, and on what the gesture
+  // puts on the wire, which is what actually differs per rung.
   const cdp = await page.context().newCDPSession(page);
-  const touch = (type, y) =>
+  const touch = (type, y, x = 195) =>
     cdp.send("Input.dispatchTouchEvent", {
       type,
-      touchPoints: type === "touchEnd" ? [] : [{ x: 195, y }],
+      touchPoints: type === "touchEnd" ? [] : [{ x, y }],
     });
-  await touch("touchStart", 250);
-  for (let y = 250; y <= 600; y += 35) {
+  const swipe = async (from = 250, to = 600, step = 35) => {
+    await touch("touchStart", from);
+    for (let y = from; y <= to; y += step) {
+      await touch("touchMove", y);
+      await page.waitForTimeout(25);
+    }
+    await touch("touchEnd", to);
+    await page.waitForTimeout(400);
+  };
+  // How far the viewport sits above live output. >0 means real scrollback moved.
+  const viewportOffset = () =>
+    page.evaluate(() => {
+      const b = window.__ccTerm?.buffer?.active;
+      return b ? b.baseY - b.viewportY : -1;
+    });
+  const wireSince = async (n = 0) =>
+    page.evaluate((from) => (window.__ccWire || []).slice(from), n);
+  // Put the child into a known mode by typing at its prompt.
+  const shell = async (cmd) => {
+    await page.locator(".xterm").first().click({ position: { x: 50, y: 100 } });
+    await page.keyboard.type(cmd);
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(500);
+  };
+
+  // 1. touch_scroll_normal_buffer — the viewport moves, and the gesture puts
+  //    NOTHING on the wire. A mis-gated ladder types arrow keys into a shell.
+  const normalFrom = (await wireSince()).length;
+  await swipe();
+  const scrolled = (await viewportOffset()) > 0;
+  const normalBufferSilent = (await wireSince(normalFrom)).length === 0;
+  await page.evaluate(() => window.__ccTerm?.scrollToBottom());
+
+  // 2. touch_scroll_alt_mouse — alternate screen + SGR mouse reporting is the
+  //    Claude-fullscreen case: the drag speaks the app's own protocol and must
+  //    NOT move the local viewport (the alt buffer has no scrollback to move).
+  await shell("printf '\\033[?1049h\\033[?1006h\\033[?1002h'");
+  const altMouseFrom = (await wireSince()).length;
+  await swipe();
+  const altMouseWire = (await wireSince(altMouseFrom)).join("");
+  const altMouseOk = /\x1b\[<6[45];\d+;\d+M/.test(altMouseWire);
+  const { cols: altCols, rows: altRows } = await page.evaluate(() => ({
+    cols: window.__ccTerm?.cols ?? 0,
+    rows: window.__ccTerm?.rows ?? 0,
+  }));
+  const coordsInRange = [...altMouseWire.matchAll(/\x1b\[<6[45];(\d+);(\d+)M/g)].every(
+    (m) => +m[1] >= 1 && +m[1] <= altCols && +m[2] >= 1 && +m[2] <= altRows
+  );
+  const altViewportPinned = (await viewportOffset()) === 0;
+
+  // 3. wheel_alt_screen_forwards (C4) — the desktop wheel over the same session
+  //    already forwards as SGR reports; pinned so it can't break quietly.
+  const wheelFrom = (await wireSince()).length;
+  await page.locator(".xterm").first().hover();
+  await page.mouse.wheel(0, -300);
+  await page.waitForTimeout(300);
+  const wheelOk = /\x1b\[<6[45];/.test((await wireSince(wheelFrom)).join(""));
+
+  // 4. touch_scroll_fling_clamp (C3) — a fast fling stops emitting when the
+  //    momentum decays: no backlog the application keeps chewing through long
+  //    after the finger has left the glass.
+  const flingFrom = (await wireSince()).length;
+  await touch("touchStart", 700);
+  for (let y = 700; y >= 120; y -= 90) {
     await touch("touchMove", y);
-    await page.waitForTimeout(25);
+    await page.waitForTimeout(8);
   }
-  await touch("touchEnd", 600);
-  await page.waitForTimeout(400);
-  const inMode = execFileSync("tmux", [
-    "display-message", "-p", "-t", tmuxSession, "#{pane_in_mode}",
-  ]).toString().trim();
-  const scrolled = inMode === "1";
+  await touch("touchEnd", 120);
+  await page.waitForTimeout(1200);
+  const afterFling = (await wireSince(flingFrom)).length;
+  await page.waitForTimeout(1200);
+  const flingSettled = (await wireSince(flingFrom)).length === afterFling;
+
+  // 5. touch_scroll_alt_arrows — the alternate screen WITHOUT mouse reporting
+  //    (less, a plain vim) pages the application with arrow keys instead.
+  await shell("printf '\\033[?1002l\\033[?1006l'");
+  const arrowsFrom = (await wireSince()).length;
+  await swipe();
+  const arrowsWire = (await wireSince(arrowsFrom)).join("");
+  const altArrowsOk = /\x1b(\[|O)[AB]/.test(arrowsWire) && !/\x1b\[</.test(arrowsWire);
+
+  // 6. touch_scroll_alt_exit — leaving the alternate screen returns the swipe to
+  //    local scrollback within one gesture, no reload (the onBufferChange path).
+  await shell("printf '\\033[?1049l'");
+  await swipe();
+  const altExitOk = (await viewportOffset()) > 0;
+  await page.evaluate(() => window.__ccTerm?.scrollToBottom());
+
+  // ── OSC 52: a copy performed INSIDE the session (proposal 0077 A/E) ────────
+  //
+  // The headline flow: the session emits the sequence Claude Code emits on
+  // every copy, and the BROWSER's clipboard ends up holding the text. The
+  // driver gate is satisfied because this client has been typing into this
+  // focused pane throughout — which is the point of the gate.
+  await shell("printf '\\033]52;c;U01PS0VfQ0xJUA==\\007'"); // "SMOKE_CLIP"
+  await page.waitForTimeout(800);
+  const clipText = await page.evaluate(() =>
+    navigator.clipboard.readText().catch(() => "")
+  );
+  const osc52WriteOk = clipText === "SMOKE_CLIP";
+
+  // The query form must NEVER be answered. The assertion is on the wire: a real
+  // answer would be ESC]52;c;<base64>BEL travelling UP it.
+  const queryFrom = (await wireSince()).length;
+  await shell("printf '\\033]52;c;?\\007'");
+  await page.waitForTimeout(500);
+  const osc52QuerySilent = !/\x1b\]52;/.test((await wireSince(queryFrom)).join(""));
 
   // Image paste: open the sheet, choose a real PNG, send -> POST /api/clip.
   // Scope to the image sheet's input (accept="image/*") — the footer's Upload
@@ -609,7 +736,17 @@ try {
   else if (strayWs.length) fail(`attached a session before the user picked: ${strayWs.join(", ")}`);
   else if (!sigintOk) fail("Ctrl+C with no selection did not reach the shell as SIGINT (copy intercept regressed)");
   else if (!selectionOk) fail("Shift+drag did not produce an xterm.js selection (term.getSelection() empty)");
-  else if (!scrolled) fail("swipe did not scroll the terminal (tmux not in copy-mode)");
+  else if (!scrolled) fail("swipe did not scroll the terminal viewport (0031 rung 1)");
+  else if (!normalBufferSilent) fail("swipe on the NORMAL buffer put input on the wire (0031 C rung 1 must send nothing)");
+  else if (!altMouseOk) fail("swipe on a mouse-reporting alt screen sent no SGR wheel reports (0031 C rung 2)");
+  else if (!coordsInRange) fail("SGR wheel reports carried coordinates outside 1..cols / 1..rows (0031 C2)");
+  else if (!altViewportPinned) fail("swipe on the alt screen moved the local viewport (it has no scrollback)");
+  else if (!wheelOk) fail("desktop wheel stopped forwarding to a mouse-reporting alt screen (0031 C4)");
+  else if (!flingSettled) fail("a fling kept emitting input after the momentum decayed (0031 C3 clamp)");
+  else if (!altArrowsOk) fail("alt screen without mouse reporting did not page with arrow keys (0031 C rung 3)");
+  else if (!altExitOk) fail("leaving the alt screen did not return the swipe to local scrollback (onBufferChange)");
+  else if (!osc52WriteOk) fail("OSC 52 from the session did not reach the browser clipboard (0077 A)");
+  else if (!osc52QuerySilent) fail("the client answered an OSC 52 query — the read form must NEVER be answered (0077 A1)");
   else if (clipCalls < 1) fail(`expected a /api/clip image upload, got ${clipCalls}`);
   else if (!api.some((a) => a.startsWith("POST /api/upload?"))) fail("phone Upload button never POSTed /api/upload");
   else if (!uploadOk) fail("phone upload didn't land in the session cwd");
@@ -634,7 +771,7 @@ try {
     if (process.exitCode === 1) throw new Error("idle/renderer pass failed");
     await domFallbackPass();
     if (process.exitCode === 1) throw new Error("DOM fallback pass failed");
-    console.log("SMOKE PASS (swipe scrolled into copy-mode; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK)");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

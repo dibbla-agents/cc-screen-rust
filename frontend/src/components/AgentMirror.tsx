@@ -5,6 +5,15 @@ import { SearchAddon } from "@xterm/addon-search";
 import { wsURL } from "../api";
 import { attachRenderer } from "../xtermRenderer";
 import TerminalFindBar from "./TerminalFindBar";
+import { makeOsc52Handler } from "../osc52Handler";
+import {
+  ATTACH_QUIET_MS,
+  claimClipboardSurface,
+  noteSessionInput,
+  publishClipboardWrote,
+  releaseClipboardSurface,
+  sessionKey,
+} from "../osc52Bus";
 
 export type ConnState = "connecting" | "open" | "closed";
 
@@ -109,6 +118,11 @@ interface Props {
   // renderer (proposal 0068 Part E).
   searchSignal?: number;
   onState: (s: ConnState) => void;
+  // Surface the mirror's xterm.js Terminal upward, exactly as TerminalView
+  // does, so the global ⌘C/Ctrl+C copy handler can read a selection made in
+  // the editor's agent column. Without it, selecting text here and pressing
+  // ⌘C copied the grid pane's stale selection instead (proposal 0077 Part B).
+  onTerm?: (term: Terminal | null) => void;
 }
 
 // AgentMirror — a live (read-only, or interactive under `control`) view of an
@@ -133,6 +147,7 @@ export default function AgentMirror({
   recalibrateSignal,
   searchSignal = 0,
   onState,
+  onTerm,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -141,6 +156,15 @@ export default function AgentMirror({
   const [findOpen, setFindOpen] = useState(false);
   const controlRef = useRef(control);
   controlRef.current = control;
+  // OSC 52 state (proposal 0077 Part A) — see TerminalView for the rationale.
+  // The mirror opens its OWN socket onto the same session, so without the
+  // one-acting-surface arbiter a single copy would be delivered twice.
+  const keyRef = useRef(sessionKey(session, machine));
+  keyRef.current = sessionKey(session, machine);
+  const labelRef = useRef("");
+  labelRef.current = machine ? `${session} · ${machine}` : session;
+  const surfaceToken = useRef({}).current;
+  const quietUntilRef = useRef(0);
   // Grid size + target font in a ref so the calibrate/zoom helpers read fresh
   // values without re-subscribing anything.
   const sizeRef = useRef({ cols, rows, maxFontSize });
@@ -207,6 +231,11 @@ export default function AgentMirror({
       fontSize: fitFontSize(c, r, host.clientWidth, host.clientHeight, cellRatios(FONT_FAMILY), zoomCeiling()),
       scrollback: 5000,
       allowProposedApi: true,
+      // Same force-selection rule as the grid terminals: without this, ⌥-drag
+      // silently does not apply in the editor's agent column while a fullscreen
+      // TUI owns the mouse, and the column cannot be selected from at all
+      // (proposal 0077 Part B).
+      macOptionClickForcesSelection: true,
       // Same palette as the grid terminals (TerminalView) so the mirror is
       // visually identical to what you'd see in a pane.
       theme: {
@@ -228,18 +257,46 @@ export default function AgentMirror({
     const disposeRenderer = attachRenderer(term);
     term.resize(c, r);
     termRef.current = term;
+    onTerm?.(term);
+
+    // OSC 52 (proposal 0077 Part A). While the editor overlay is open the
+    // mirror IS the active surface for its session — the grid pane behind it is
+    // not — so it claims the arbiter on mount and releases on close.
+    claimClipboardSurface(keyRef.current, surfaceToken);
+    const oscSub = term.parser.registerOscHandler(
+      52,
+      makeOsc52Handler({
+        key: () => keyRef.current,
+        label: () => labelRef.current,
+        token: surfaceToken,
+        // The mirror is only mounted while the overlay is open, so being
+        // mounted is the eligibility test. Driving still needs focus + recent
+        // input, which in this column means `control` is engaged.
+        eligible: () => true,
+        focused: () =>
+          !!term.textarea &&
+          document.activeElement === term.textarea &&
+          (typeof document.hasFocus !== "function" || document.hasFocus()),
+        quietUntil: () => quietUntilRef.current,
+        onWrote: (bytes) => publishClipboardWrote({ label: labelRef.current, bytes }),
+      })
+    );
 
     // Typing → stdin, but only while in control. Wired once and gated by the
     // ref so toggling control never tears the socket down. Read-only mode
     // swallows input even if a click focuses the terminal.
     const dataSub = term.onData((d) => {
       if (!controlRef.current) return;
+      noteSessionInput(keyRef.current); // 0077 A4: this client is driving
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: "i", d }));
     });
 
     return () => {
       dataSub.dispose();
+      oscSub.dispose();
+      onTerm?.(null);
+      releaseClipboardSurface(keyRef.current, surfaceToken);
       disposeRenderer();
       term.dispose();
       termRef.current = null;
@@ -266,12 +323,22 @@ export default function AgentMirror({
       ws.onopen = () => {
         backoff = 500;
         onState("open");
+        // 0077 A10: replayed attach backlog must not write the clipboard.
+        quietUntilRef.current = Date.now() + ATTACH_QUIET_MS;
         pendingCalibrate = true;
       };
       ws.onmessage = (e) => {
         const term = termRef.current;
-        if (e.data instanceof ArrayBuffer) term?.write(new Uint8Array(e.data));
-        else if (typeof e.data === "string") term?.write(e.data);
+        if (e.data instanceof ArrayBuffer) {
+          const u8 = new Uint8Array(e.data);
+          if (u8.length >= 2 && u8[0] === 0x1b && u8[1] === 0x63) {
+            quietUntilRef.current = Date.now() + ATTACH_QUIET_MS; // RIS = resync
+          }
+          term?.write(u8);
+        } else if (typeof e.data === "string") {
+          if (e.data.startsWith("\x1bc")) quietUntilRef.current = Date.now() + ATTACH_QUIET_MS;
+          term?.write(e.data);
+        }
         if (pendingCalibrate) {
           pendingCalibrate = false;
           calibrate();

@@ -50,6 +50,7 @@ import {
 import ShareForm from "./ShareForm";
 import { RefreshIcon, ShareIcon } from "../icons";
 import { usePoll } from "../poll";
+import { writeClipboard } from "../util";
 
 // One-time injected keyframes/texture (kept out of tailwind.config to avoid a
 // build-config change). Rendered once by <Backdrop/>.
@@ -922,7 +923,7 @@ function MachineRow({
           <code className="block break-all font-mono text-xs text-slate-200">{token}</code>
           <button
             onClick={() => {
-              navigator.clipboard?.writeText(token);
+              void writeClipboard(token).catch(() => {});
             }}
             className="mt-2 text-[11px] text-accent hover:underline"
           >
@@ -1368,7 +1369,7 @@ export function TeamInviteForm({ me, onInvited }: { me: MeInfo; onInvited: () =>
             <button
               type="button"
               onClick={() => {
-                if (done.inviteUrl) navigator.clipboard?.writeText(done.inviteUrl);
+                if (done.inviteUrl) void writeClipboard(done.inviteUrl).catch(() => {});
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
@@ -2320,7 +2321,7 @@ export function Dashboard({
             </code>
             <button
               onClick={() => {
-                navigator.clipboard?.writeText(installCmd);
+                void writeClipboard(installCmd).catch(() => {});
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}

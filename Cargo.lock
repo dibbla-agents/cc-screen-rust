@@ -513,6 +513,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "cc-screen-auth",
  "cc-screen-hub",
  "cc-screen-protocol",

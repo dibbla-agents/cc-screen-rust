@@ -48,6 +48,8 @@ import UploadSheet from "./components/UploadSheet";
 import LoginScreen from "./components/LoginScreen";
 import { AuthScreen, ActivatePage, Dashboard, InviteLanding } from "./components/MultiTenant";
 import ToastHost, { type ToastHostHandle } from "./components/ToastHost";
+import ClipboardOfferHost from "./components/ClipboardOfferHost";
+import { noteUserCopy } from "./osc52Bus";
 import InboxButton from "./components/InboxButton";
 import UpdateAssistants from "./components/UpdateAssistants";
 import ShareForm, { type ShareSubject } from "./components/ShareForm";
@@ -507,6 +509,11 @@ export default function App() {
   // re-render of App doesn't invalidate the memoized panes (proposal 0068 C).
   const setPaneTerm = useCallback((idx: number, t: Terminal | null) => {
     termsRef.current[idx] = t;
+  }, []);
+  // The editor overlay's agent mirror, when one is mounted (proposal 0077 B).
+  const agentTermRef = useRef<Terminal | null>(null);
+  const setAgentTerm = useCallback((t: Terminal | null) => {
+    agentTermRef.current = t;
   }, []);
   // The phone renders a single TerminalView, but it reports into the ACTIVE
   // pane's slot (see the comment at that call site) — so these bind to `active`.
@@ -1475,7 +1482,24 @@ export default function App() {
         !isXtermPlumbing;
       if (isRealInput) return;
 
-      const term = termsRef.current[activeRef.current];
+      // A live PROSE selection wins. The reading view and the status view render
+      // real text over a grid that stays mounted behind them, so without this
+      // check ⌘C on a paragraph copied whatever stale selection the terminal
+      // underneath still held (proposal 0077 Part B). Terminal selections are
+      // xterm's own, not the document's, so a document selection anchored
+      // outside .xterm is unambiguously prose — let the browser copy it.
+      const docSel = window.getSelection?.();
+      if (docSel && !docSel.isCollapsed && docSel.toString().trim()) {
+        const node = docSel.anchorNode;
+        const el = node instanceof Element ? node : node?.parentElement ?? null;
+        if (!el?.closest?.(".xterm")) return;
+      }
+
+      // The editor's agent mirror is a second terminal on screen; when the
+      // selection is there, that is what the user means to copy.
+      const paneTerm = termsRef.current[activeRef.current];
+      const mirror = agentTermRef.current;
+      const term = mirror?.hasSelection?.() ? mirror : paneTerm;
       const selection = term?.getSelection?.() ?? "";
 
       if (!selection) {
@@ -1502,6 +1526,9 @@ export default function App() {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
+      // 0077 A10: a copy the user just made must not be swapped out from under
+      // them by an arriving OSC 52 before they get to paste it.
+      noteUserCopy();
       writeClipboard(selection)
         .then(() => {
           // Match OS conventions: silent on success. Clearing the xterm
@@ -2663,6 +2690,9 @@ export default function App() {
             // over the viewer; onDirtyChange feeds the source-side switch guard.
             onOpenSwitcher={isDesktop ? () => setDrawerOpen(true) : undefined}
             onDirtyChange={onEditorDirtyChange}
+            // Proposal 0077 B: the mirror's xterm, so ⌘C can copy a selection
+            // made in the editor's agent column.
+            onAgentTerm={setAgentTerm}
             // Proposal 0027: Ctrl+B f bumps this to focus the in-tree Find bar.
             focusSearchSeq={editor.focusSearchSeq}
             // Proposal 0038: Ctrl+B / bumps this to focus the tree-filter field.
@@ -2754,6 +2784,13 @@ export default function App() {
         onOpen={(name) => { openSessionByName(name).catch(() => {}); }}
         onOverflow={() => setDrawerOpen(true)}
       />
+
+      {/* Clipboard writes arriving FROM a session (proposal 0077 Part A): the
+          click-to-copy recovery toast for anything we refuse to write
+          silently, the confirmation for one we did, and the sticky banner a
+          flooding session earns. Separate from the toast below because that
+          one is a single pointer-events-none slot and cannot host a button. */}
+      <ClipboardOfferHost />
 
       {/* Transient feedback (paste confirmation, future one-shots). */}
       {toast && (

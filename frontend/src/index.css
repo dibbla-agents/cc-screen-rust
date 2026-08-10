@@ -61,6 +61,19 @@ body {
   padding-top: env(safe-area-inset-top);
 }
 
+/* The terminal owns every touch inside it (cc-screen-saas proposal 0031,
+   Strategy A.1). Without this the browser's own pan/zoom/text-selection gesture
+   recognizer is live during the opening of every swipe and is free to claim the
+   touch before our handler does — which is why a swipe starting over the
+   cursor-positioned .xterm-helper-textarea used to twitch and stall while one
+   starting over bare canvas scrolled. The app shell is already overflow:hidden,
+   so nothing else here wants to pan; pinch-zoom on a terminal is not a gesture
+   we owe anyone. Force-selection drags (⌥/Shift) are mouse-level and unaffected. */
+.cc-term-host,
+.cc-term-host .xterm {
+  touch-action: none;
+}
+
 /* The xterm viewport should fill its container and scroll on touch. */
 .xterm,
 .xterm .xterm-viewport {

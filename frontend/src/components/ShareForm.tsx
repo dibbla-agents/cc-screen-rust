@@ -8,6 +8,7 @@
 
 import { useState } from "react";
 import { createShare } from "../api";
+import { writeClipboard } from "../util";
 
 const inputCls =
   "w-full rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-accent focus:ring-2 focus:ring-accent/25";
@@ -103,7 +104,7 @@ export default function ShareForm({
             <button
               type="button"
               onClick={() => {
-                navigator.clipboard?.writeText(inviteUrl);
+                void writeClipboard(inviteUrl).catch(() => {});
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}

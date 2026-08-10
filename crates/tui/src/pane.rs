@@ -3,10 +3,12 @@
 //! gives a real multi-thousand-line scrollback grid (unlike vt100, whose view
 //! was capped at one screen), so the wheel scrolls back through full history.
 
-use alacritty_terminal::event::VoidListener;
+use std::sync::{Arc, Mutex};
+
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor};
 use cc_screen_protocol::SNAPSHOT_RESET;
 use ratatui::buffer::Buffer;
@@ -48,9 +50,118 @@ impl Dimensions for TermSize {
     }
 }
 
-fn new_term(cols: u16, rows: u16) -> Term<VoidListener> {
+/// Largest clipboard write we will forward, mirroring the web client's cap
+/// (cc-screen-saas proposal 0077 A8). Far above any real `/copy`, far below
+/// anything that would make the user's terminal emulator unhappy.
+const CLIP_CAP: usize = 64 * 1024;
+
+/// Captures the clipboard writes a *session* performs — the OSC 52 sequences
+/// Claude Code and friends emit on every copy (proposal 0077 Part C).
+///
+/// Until now these landed in a `VoidListener`: alacritty decoded the sequence,
+/// checked the `Osc52::OnlyCopy` gate, emitted `Event::ClipboardStore` — and the
+/// event went nowhere, so every copy performed inside a session was silently
+/// lost. The app drains this between frames and re-emits the sequence on the
+/// TUI's own stdout, letting the user's terminal emulator perform the write.
+///
+/// Two rules live here rather than at the emission site, because this is where
+/// the type information still exists:
+///
+///   - **`Selection` writes are dropped.** alacritty's `clipboard_store` maps
+///     `c` to `Clipboard` but conflates `p` (primary) and `s` into `Selection`,
+///     so forwarding those would PROMOTE a primary-selection write to the
+///     user's system clipboard — exactly what Part A refuses.
+///   - **`ClipboardLoad` is ignored explicitly.** The `Osc52::OnlyCopy` config
+///     already denies the read/query form upstream, but the denied branch there
+///     literally contains the code to format a reply, so the invariant is
+///     pinned here rather than assumed.
+#[derive(Clone, Default)]
+pub struct ClipListener {
+    pending: Arc<Mutex<Vec<String>>>,
+}
+
+impl ClipListener {
+    /// Take everything captured since the last call.
+    pub fn drain(&self) -> Vec<String> {
+        match self.pending.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Normalise clipboard text arriving from a session, the same way the web
+/// client does (proposal 0077 A2). The text is attacker-influenceable by
+/// construction — the assistant runs with `--dangerously-skip-permissions`, so
+/// a prompt injection anywhere in its input yields arbitrary bytes on the PTY —
+/// and the auto-execute vector is a trailing newline or a bare CR pasted into a
+/// shell, which no size cap addresses.
+///
+/// CRLF → LF, bare CR dropped, all other C0/C1 controls and DEL stripped
+/// (`\t` and `\n` survive), bidi overrides/isolates stripped, trailing
+/// whitespace-only lines stripped.
+pub fn sanitize_clipboard(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // CRLF collapses to LF; a bare CR is dropped outright.
+                if chars.peek() == Some(&'\n') {
+                    continue;
+                }
+            }
+            '\t' | '\n' => out.push(c),
+            '\u{061c}' | '\u{200e}' | '\u{200f}' => {}
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            c if (c as u32) < 0x20 || c == '\u{7f}' || ((c as u32) >= 0x80 && (c as u32) <= 0x9f) => {}
+            c => out.push(c),
+        }
+    }
+    // Trailing whitespace-only lines, including the final newline itself.
+    while out.ends_with(' ') || out.ends_with('\t') || out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+impl EventListener for ClipListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                if text.is_empty() || text.len() > CLIP_CAP {
+                    return; // empty = "clear the clipboard"; we never do that
+                }
+                let text = sanitize_clipboard(&text);
+                if text.is_empty() {
+                    return;
+                }
+                if let Ok(mut q) = self.pending.lock() {
+                    // A queue, not a mailbox: bounded so a flood can't grow
+                    // without limit between frames.
+                    if q.len() < 8 {
+                        q.push(text);
+                    }
+                }
+            }
+            // Selection-typed writes (OSC 52 `p`/`s`) and every read request
+            // stay here. See the type doc.
+            _ => {}
+        }
+    }
+}
+
+fn new_term(cols: u16, rows: u16, clip: ClipListener) -> Term<ClipListener> {
     let size = TermSize { cols: cols.max(1) as usize, rows: rows.max(1) as usize };
-    Term::new(Config::default(), &size, VoidListener) // Config::default → 10000 lines history
+    let config = Config {
+        // EXPLICIT, not inherited from Default: this is the setting that denies
+        // the OSC 52 *read* form (`ESC]52;c;?`), which would otherwise turn any
+        // program's stdout into a clipboard exfiltration channel. It is
+        // load-bearing, so it is written down.
+        osc52: Osc52::OnlyCopy,
+        ..Config::default() // → 10000 lines history
+    };
+    Term::new(config, &size, clip)
 }
 
 pub struct Pane {
@@ -62,7 +173,10 @@ pub struct Pane {
     /// Part of the box's identity so the same session name on two machines stays
     /// distinct.
     pub machine: String,
-    term: Term<VoidListener>,
+    term: Term<ClipListener>,
+    /// The sink the emulator hands captured OSC 52 writes to (0077 Part C).
+    /// Held here so a rebuilt emulator keeps the same queue.
+    clip: ClipListener,
     processor: Processor,
     cols: u16,
     rows: u16,
@@ -87,11 +201,13 @@ impl Pane {
         task: JoinHandle<()>,
     ) -> Self {
         let (cols, rows) = (cols.max(1), rows.max(1));
+        let clip = ClipListener::default();
         Self {
             id,
             session,
             machine,
-            term: new_term(cols, rows),
+            term: new_term(cols, rows, clip.clone()),
+            clip,
             processor: Processor::new(),
             cols,
             rows,
@@ -124,11 +240,25 @@ impl Pane {
     /// clear-history payload — rebuild the emulator from scratch so the replayed
     /// history reconstructs cleanly with no stale state.
     pub fn process(&mut self, bytes: &[u8]) {
-        if bytes.starts_with(SNAPSHOT_RESET) {
-            self.term = new_term(self.cols, self.rows);
+        let snapshot = bytes.starts_with(SNAPSHOT_RESET);
+        if snapshot {
+            self.term = new_term(self.cols, self.rows, self.clip.clone());
             self.processor = Processor::new();
         }
         self.processor.advance(&mut self.term, bytes);
+        if snapshot {
+            // A (re)attach snapshot replays the session's recent output
+            // verbatim, so an OSC 52 emitted minutes ago would otherwise write
+            // the user's clipboard "just now". Same rule as the web client's
+            // attach quiet period (0077 A10).
+            let _ = self.clip.drain();
+        }
+    }
+
+    /// Take the clipboard writes this session performed since the last call
+    /// (0077 Part C). Drained by the event loop between frames.
+    pub fn take_clipboard(&mut self) -> Vec<String> {
+        self.clip.drain()
     }
 
     pub fn set_state(&mut self, s: ConnState) {
@@ -432,4 +562,98 @@ mod tests {
         p.scroll_to_live();
         assert_eq!(p.scroll_offset(), 0);
     }
+
+    // ── OSC 52 clipboard forwarding (proposal 0077 Part C) ───────────────────
+
+    fn osc52(text: &str) -> Vec<u8> {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        format!("\x1b]52;c;{b64}\x07").into_bytes()
+    }
+
+    #[tokio::test]
+    async fn captures_a_clipboard_write_from_the_session() {
+        let mut p = pane(20, 4);
+        p.process(&osc52("hello from claude"));
+        assert_eq!(p.take_clipboard(), vec!["hello from claude".to_string()]);
+        // Draining is destructive: the same copy is not delivered twice.
+        assert!(p.take_clipboard().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_sequence_leaves_no_mark_on_the_frame() {
+        let mut p = pane(10, 2);
+        p.process(b"hi");
+        let before = render(&p, 10, 2);
+        p.process(&osc52("clipboard payload"));
+        assert_eq!(render(&p, 10, 2), before, "OSC 52 must not paint anything");
+    }
+
+    #[tokio::test]
+    async fn the_query_form_is_denied_and_writes_nothing_back() {
+        // Osc52::OnlyCopy denies `clipboard_load` upstream, so a `?` payload
+        // produces no re-emission AND no PTY write. The TUI is structurally
+        // immune to the read form; this pins it (0077 Part C).
+        let mut p = pane(20, 4);
+        p.process(b"\x1b]52;c;?\x07");
+        assert!(p.take_clipboard().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_selection_typed_write_is_dropped_not_promoted() {
+        // alacritty conflates OSC 52 `p` and `s` into ClipboardType::Selection.
+        // Forwarding one would promote a primary-selection write to the user's
+        // system clipboard, which Part A refuses.
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"primary only");
+        let mut p = pane(20, 4);
+        p.process(format!("\x1b]52;p;{b64}\x07").as_bytes());
+        assert!(p.take_clipboard().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_snapshot_does_not_write_the_clipboard() {
+        // A (re)attach snapshot replays recent output verbatim; an OSC 52 from
+        // minutes ago must not land on the clipboard "just now" (0077 A10).
+        let mut p = pane(20, 4);
+        let mut chunk = SNAPSHOT_RESET.to_vec();
+        chunk.extend_from_slice(&osc52("stale copy"));
+        p.process(&chunk);
+        assert!(p.take_clipboard().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversize_write_is_ignored() {
+        let mut p = pane(20, 4);
+        p.process(&osc52(&"x".repeat(CLIP_CAP + 1)));
+        assert!(p.take_clipboard().is_empty());
+    }
+
+    #[test]
+    fn sanitize_strips_the_attacker_shaped_vectors() {
+        // The same A2 vectors the web client's vitest pins, so the two clients
+        // cannot drift on what a session is allowed to put on a clipboard.
+        assert_eq!(sanitize_clipboard("rm -rf /\n"), "rm -rf /");
+        assert_eq!(sanitize_clipboard("echo hi\rrm -rf /"), "echo hirm -rf /");
+        assert_eq!(sanitize_clipboard("a\r\nb"), "a\nb");
+        assert_eq!(sanitize_clipboard("a\u{1}b\u{7f}c\u{9b}d"), "abcd");
+        assert_eq!(sanitize_clipboard("safe\u{202e}txt.exe"), "safetxt.exe");
+        assert_eq!(sanitize_clipboard("payload\n\n   \n"), "payload");
+        assert_eq!(sanitize_clipboard("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[tokio::test]
+    async fn a_captured_write_is_sanitised_before_it_is_queued() {
+        let mut p = pane(20, 4);
+        p.process(&osc52("rm -rf /\n"));
+        assert_eq!(p.take_clipboard(), vec!["rm -rf /".to_string()]);
+    }
+
+    #[test]
+    fn the_re_emitted_sequence_is_re_encoded_from_the_decoded_text() {
+        let mut out = Vec::new();
+        crate::term::write_osc52(&mut out, "hello").unwrap();
+        assert_eq!(out, b"\x1b]52;c;aGVsbG8=\x07");
+    }
+
 }

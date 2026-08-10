@@ -58,6 +58,29 @@ in one seam:
 10. **Two credentials never cross.** Client credentials (cookie / client token)
     and agent uplink tokens are separate namespaces; each is refused on the
     other's surface (pinned by `client_token_flow_end_to_end`).
+11. **Output fan-out inside the permitted set is a CLIENT-CAPABILITY surface,
+    not only a visibility one** (proposal 0077). Everything above reasons about
+    who may *reach* an agent. Terminal output raises a second question this file
+    did not previously ask: what that output can *do* to each person receiving
+    it. One PTY fans out to every attached client (`registry.rs` channel map,
+    keyed by `ChannelId` alone — the attaching user's identity is not stored on
+    the channel, so "who is on channel 7" is unrecoverable after
+    `resolve_scoped` returns), `may_see_session` admits owner + agent-grantees +
+    session-grantees + every team-grantee at once, and the assistant on the far
+    end runs with permissions skipped. So a byte stream that can be influenced
+    by a prompt injection reaches every viewer, and any *capability* keyed off
+    that stream is granted to all of them simultaneously.
+    The rule: **a capability derived from session output must be gated on the
+    receiving client's own state, in the client, never on the fact that the
+    output was delivered.** OSC 52 clipboard delivery is the first such
+    capability and the worked example — it is honoured only for the client
+    actively driving that session (focused pane, focused document, recent
+    input), which is a property the hub cannot express and must not try to.
+    The hub itself is unchanged by this: it still never parses terminal output,
+    and adding a filter here would be the wrong fix (it would have to
+    understand the emulator's state, and it would still not know who is
+    watching). This is a [0042] Stream F addendum — Stream F inventories
+    hub-global singletons and never analysed output fan-out.
 
 ## Route inventory
 

@@ -37,6 +37,9 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# 0077 Part C: re-encode a captured clipboard write as OSC 52 for the host
+# terminal. Same version the rest of the workspace pins.
+base64 = "0.22"
 
 [dev-dependencies]
 # The e2e harness (proposal 0059 B3/B4) drives a real `App` against an in-process

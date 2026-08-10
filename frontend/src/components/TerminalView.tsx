@@ -6,8 +6,24 @@ import { SearchAddon } from "@xterm/addon-search";
 import { wsURL } from "../api";
 import { attachRenderer } from "../xtermRenderer";
 import TerminalFindBar from "./TerminalFindBar";
+import { makeOsc52Handler } from "../osc52Handler";
+import {
+  ATTACH_QUIET_MS,
+  claimClipboardSurface,
+  noteSessionInput,
+  publishClipboardWrote,
+  releaseClipboardSurface,
+  sessionKey,
+} from "../osc52Bus";
 
 export type ConnState = "connecting" | "open" | "closed";
+
+// The BROWSER's platform, not the session host's: the force-selection modifier
+// is xterm.js's, and xterm.js runs here. A Mac browser attached to a Linux
+// agent still needs ⌥.
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPad|iPhone|iPod/i.test(navigator.userAgent);
+const isCoarse = () =>
+  typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
 
 interface Props {
   session: string;
@@ -56,6 +72,36 @@ function TerminalView({
   const wsRef = useRef<WebSocket | null>(null);
   const fitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [findOpen, setFindOpen] = useState(false);
+
+  // ── clipboard + gesture state (proposals 0077, 0031) ───────────────────────
+  //
+  // Everything the OSC 52 handler and the touch ladder read lives in refs: both
+  // run outside React's render cycle (an xterm parser callback and a
+  // requestAnimationFrame loop) and must see the CURRENT value, not the one
+  // captured when their effect was built.
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const keyRef = useRef(sessionKey(session, machine));
+  keyRef.current = sessionKey(session, machine);
+  const labelRef = useRef("");
+  labelRef.current = machine ? `${session} · ${machine}` : session;
+  // A5: this surface's identity in the one-acting-surface arbiter.
+  const surfaceToken = useRef({}).current;
+  // A10: no OSC 52 handling before this timestamp (attach / Lagged resync).
+  const quietUntilRef = useRef(0);
+  // 0031 C1: the alternate screen, cached off onBufferChange so flush() (which
+  // runs ~40×/s) never walks the buffer object graph.
+  const altRef = useRef(false);
+  // The last touch point, for the 1-based cell a mouse report carries.
+  const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
+  // 0077 B2: while on, a plain drag selects even though the application owns
+  // the mouse. Mirrored into a ref for the capture-phase pointer shim.
+  const [selectMode, setSelectMode] = useState(false);
+  const selectModeRef = useRef(false);
+  selectModeRef.current = selectMode;
+  // 0077 B1: does the attached application have mouse tracking on? Drives the
+  // "how do I select text here" affordance.
+  const [mouseMode, setMouseMode] = useState(false);
 
   // Build the terminal once.
   useEffect(() => {
@@ -118,8 +164,49 @@ function TerminalView({
     // mounted/most-recently active pane wins; harmless in production.
     (window as unknown as { __ccTerm?: Terminal }).__ccTerm = term;
 
+    // OSC 52 — a copy performed INSIDE the session (proposal 0077 Part A).
+    // xterm.js 5.5 ships no built-in handler for 52, so without this the
+    // assistant's every /copy, copy-on-select and Ctrl+C is parsed and thrown
+    // away. The handler is built from the pure payload module plus the runtime
+    // gates; it returns `true` synchronously (never a Promise — see A9), so the
+    // sequence is consumed and the parser never stalls on a clipboard write.
+    // Note the module it comes from has no way to write to the PTY, which is
+    // what makes the `?` query form structurally unanswerable (A1).
+    const oscSub = term.parser.registerOscHandler(
+      52,
+      makeOsc52Handler({
+        key: () => keyRef.current,
+        label: () => labelRef.current,
+        token: surfaceToken,
+        eligible: () => activeRef.current,
+        // A4: DOM focus on THIS terminal and a focused document. xterm 5.5
+        // exposes no public focus event, but `textarea` is public API.
+        focused: () =>
+          !!term.textarea &&
+          document.activeElement === term.textarea &&
+          (typeof document.hasFocus !== "function" || document.hasFocus()),
+        quietUntil: () => quietUntilRef.current,
+        onWrote: (bytes) => publishClipboardWrote({ label: labelRef.current, bytes }),
+      })
+    );
+
+    // 0031 C1: cache the active buffer so the touch ladder can branch on it
+    // cheaply, and re-read the mouse mode with it — Claude Code's fullscreen
+    // renderer flips `?1049` and the mouse modes in the same burst, so the
+    // buffer change is the cheapest reliable trigger for the 0077 B1
+    // affordance (there is no mode-change event in xterm 5.5).
+    altRef.current = term.buffer.active.type === "alternate";
+    const bufSub = term.buffer.onBufferChange(() => {
+      altRef.current = term.buffer.active.type === "alternate";
+      window.setTimeout(refreshMouseMode, 60);
+    });
+    refreshMouseMode();
+
     return () => {
       onTerm?.(null);
+      oscSub.dispose();
+      bufSub.dispose();
+      releaseClipboardSurface(keyRef.current, surfaceToken);
       disposeRenderer();
       term.dispose();
       termRef.current = null;
@@ -158,6 +245,18 @@ function TerminalView({
     const ta = hostRef.current?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
     if (ta) ta.focus({ preventScroll: true });
     else term.focus();
+  }
+
+  // Does the attached application have mouse tracking on? When it does, xterm
+  // hands a plain drag to the application instead of starting a selection, so
+  // the shipped ⌘C/Ctrl+C copy path has nothing to copy unless the user knows
+  // the force-selection modifier (proposal 0077 Part B). Re-read on buffer
+  // change and on pointer-down — xterm 5.5 has no mode-change event, and
+  // polling for one would be exactly the idle work 0068 removed.
+  function refreshMouseMode() {
+    const term = termRef.current;
+    if (!term) return;
+    setMouseMode(term.modes.mouseTrackingMode !== "none");
   }
 
   function sendResize() {
@@ -228,6 +327,10 @@ function TerminalView({
         backoff = 500;
         onState("open");
         const term = termRef.current!;
+        // 0077 A10: the attach snapshot replays the session's recent output
+        // verbatim, so an OSC 52 emitted minutes ago would otherwise write the
+        // clipboard "just now". Stay quiet until the backlog has drained.
+        quietUntilRef.current = Date.now() + ATTACH_QUIET_MS;
         applyFit();
         // Always report the size on (re)attach, even if applyFit found no change
         // — the server needs it to register this client in its min-size pool.
@@ -241,8 +344,16 @@ function TerminalView({
       };
       ws.onmessage = (e) => {
         if (e.data instanceof ArrayBuffer) {
-          termRef.current?.write(new Uint8Array(e.data));
+          const u8 = new Uint8Array(e.data);
+          // A chunk that STARTS with the RIS reset is a snapshot replay — a
+          // fresh attach or a Lagged resync. Same rule as onopen: replayed
+          // backlog must not write the clipboard (0077 A10).
+          if (u8.length >= 2 && u8[0] === 0x1b && u8[1] === 0x63) {
+            quietUntilRef.current = Date.now() + ATTACH_QUIET_MS;
+          }
+          termRef.current?.write(u8);
         } else if (typeof e.data === "string") {
+          if (e.data.startsWith("\x1bc")) quietUntilRef.current = Date.now() + ATTACH_QUIET_MS;
           termRef.current?.write(e.data);
         }
       };
@@ -306,6 +417,11 @@ function TerminalView({
     // Direct typing in the terminal -> stdin over the WebSocket.
     const term = termRef.current!;
     const dataSub = term.onData((d) => {
+      // 0077 A4: this client is DRIVING this session — keystrokes, pastes and
+      // the touch ladder's mouse reports all count, because all three are the
+      // user acting on that session with their own hands. Watching a session
+      // you never touch never qualifies, which is the whole point of the gate.
+      noteSessionInput(keyRef.current);
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ t: "i", d }));
@@ -391,22 +507,69 @@ function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Swipe-to-scroll with inertia. Phones emit no wheel events, and because the
-  // agents run under `tmux mouse on`, xterm forwards wheel-to-app rather than
-  // scrolling its own viewport — so a finger drag does nothing on its own. We
-  // map the drag to tmux scrollback directly: finger pixels convert ~1:1 to
-  // lines (content tracks the finger), batched per animation frame and sent as
-  // {t:"s",n} so tmux scrolls an exact n lines. On release, leftover velocity
-  // coasts with decay — a long/fast flick travels far, a short drag barely
-  // moves. Direction is direct-manipulation: drag down reveals older output.
+  // Swipe-to-scroll with inertia (cc-screen-saas proposal 0031, Strategies A
+  // and C — they ship together and neither works alone).
+  //
+  // Phones emit no wheel events, so a finger drag needs a custom handler. Two
+  // things were wrong with the old one:
+  //
+  //   A — it claimed the gesture LATE. `touchstart` was passive and the first
+  //   8px of every swipe was swallowed by the tap deadband before
+  //   preventDefault() ever fired, and there was no `touch-action` on the host,
+  //   so the opening of every swipe leaked to the browser's gesture recognizer
+  //   and to whatever xterm layer sat under the start point — the
+  //   cursor-positioned .xterm-helper-textarea, a WebLinks span. That is why a
+  //   swipe starting at the edge scrolled and one starting in the middle
+  //   twitched and stalled. Now: `touch-action: none` on the host (index.css)
+  //   plus capture-phase stopPropagation from touchstart. We deliberately do
+  //   NOT preventDefault on touchstart — the browser's compatibility mouse
+  //   events for a *tap* are how tap-to-focus and Claude Code's own click
+  //   targets work; only a classified drag (past the deadband) cancels them.
+  //
+  //   C — its sink was a no-op wherever it mattered most. `scrollLines()` on
+  //   the ALTERNATE buffer does nothing at all (the alt buffer is built with
+  //   hasScrollback=false), and Claude Code's fullscreen renderer lives there.
+  //   flush() is now the same three-rung precedence ladder [0069] shipped in
+  //   the ccs TUI, so both clients behave identically in front of the same
+  //   child application: normal buffer → xterm's scrollback; alt screen with
+  //   mouse reporting → SGR wheel reports; alt screen without → arrow keys.
+  //
+  // Direction stays direct-manipulation: drag down reveals older output.
   useEffect(() => {
     const host = hostRef.current!;
 
     const GAIN = 5; // lines scrolled per finger-line of travel (>1 = faster)
+    // Rungs 2 and 3 are not free: every line is a keystroke or a mouse report
+    // the APPLICATION must parse and act on, and GAIN plus a momentum fling
+    // routinely produces dozens of lines per flush. Matches [0069]'s MOUSE_STEP
+    // of 3 reports per wheel notch, which is the feel these apps are tuned for.
+    // The surplus is DISCARDED, never carried — a one-second fling must not
+    // queue input the TUI keeps chewing through after the finger has left.
+    const MAX_STEPS_PER_FLUSH = 3;
     const cellPx = () => {
       const term = termRef.current;
       const h = host.clientHeight;
       return term && term.rows > 0 ? Math.max(8, h / term.rows) : 18;
+    };
+
+    // The 1-based cell a mouse report names, clamped inside the pane. The
+    // momentum phase flushes AFTER touchend, so the point is cached during the
+    // drag; with none (an early flush) we report the pane centre — Claude Code
+    // and htop both scroll the pane the report lands in, and the centre is
+    // always inside it.
+    const reportCell = (term: Terminal) => {
+      const clamp = (n: number, hi: number) => Math.max(1, Math.min(Math.max(1, hi), n));
+      const rect = term.element?.getBoundingClientRect();
+      const pt = lastTouchRef.current;
+      if (!rect || rect.width < 1 || rect.height < 1 || !pt) {
+        return { col: clamp(Math.ceil(term.cols / 2), term.cols), row: clamp(Math.ceil(term.rows / 2), term.rows) };
+      }
+      const cw = rect.width / Math.max(1, term.cols);
+      const ch = rect.height / Math.max(1, term.rows);
+      return {
+        col: clamp(Math.floor((pt.x - rect.left) / cw) + 1, term.cols),
+        row: clamp(Math.floor((pt.y - rect.top) / ch) + 1, term.rows),
+      };
     };
 
     let pending = 0; // fractional lines awaiting flush (+ = back into history)
@@ -420,15 +583,43 @@ function TerminalView({
         return;
       }
       const whole = Math.trunc(pending);
-      if (whole !== 0) {
-        pending -= whole;
-        lastFlush = now;
-        // tmux-free backend: scrollback lives in xterm.js (fed by the live byte
-        // stream), so scroll the viewport directly instead of the old
-        // server-side {t:"s"} copy-mode round-trip. whole>0 = back into history
-        // (older); xterm scrollLines(negative) scrolls up toward older output.
-        termRef.current?.scrollLines(-whole);
+      if (whole === 0) return;
+      pending -= whole; // the surplus over the clamp below is DISCARDED with it
+      lastFlush = now;
+      const term = termRef.current;
+      if (!term) return;
+
+      // Rung 1 — the normal buffer, or an alt viewport the user has scrolled
+      // back locally: xterm's own scrollback, exactly as before. This rung
+      // fails CLOSED: anything the ladder doesn't recognise moves pixels, never
+      // bytes. whole>0 = back into history (older); scrollLines(negative)
+      // scrolls up toward older output.
+      const buf = term.buffer.active;
+      if (!altRef.current || buf.viewportY !== buf.baseY) {
+        term.scrollLines(-whole);
+        return;
       }
+
+      const up = whole > 0; // finger down => older output => wheel up
+      const n = Math.min(Math.abs(whole), MAX_STEPS_PER_FLUSH);
+
+      // Rung 2 — the alternate screen AND the application is reading the mouse
+      // (Claude Code's fullscreen renderer, htop, lazygit): speak its protocol.
+      // term.input() fires onData, which is the same {t:"i"} path a keystroke
+      // takes — no new wire message, no hub or agent change.
+      if (term.modes.mouseTrackingMode !== "none") {
+        const { col, row } = reportCell(term);
+        const btn = up ? 64 : 65; // SGR wheel-up / wheel-down
+        term.input(`\x1b[<${btn};${col};${row}M`.repeat(n), false);
+        return;
+      }
+
+      // Rung 3 — the alternate screen without mouse reporting (less, a plain
+      // vim): alternate-scroll arrows. xterm.js 5.5 does not implement DECSET
+      // ?1007 at all, so the client owns this rung; the encoding follows the
+      // application-cursor-keys mode the child asked for.
+      const app = term.modes.applicationCursorKeysMode;
+      term.input((up ? (app ? "\x1bOA" : "\x1b[A") : (app ? "\x1bOB" : "\x1b[B")).repeat(n), false);
     };
     const schedule = () => {
       if (!raf) raf = requestAnimationFrame(flush);
@@ -451,20 +642,30 @@ function TerminalView({
       if (e.touches.length !== 1) return;
       stopMomentum(); // a new touch halts a coasting fling
       startY = lastY = e.touches[0].clientY;
+      lastTouchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       scrolling = false;
       samples = [{ t: performance.now(), y: lastY }];
+      // Strategy A: own the gesture from the FIRST touch. Capture-phase
+      // stopPropagation keeps xterm's own touch handlers, the
+      // cursor-positioned .xterm-helper-textarea and any WebLinks span from
+      // starting a competing interaction. No preventDefault here — see the
+      // header comment: a tap's compatibility mouse events are load-bearing.
+      e.stopPropagation();
     };
     const onMove = (e: TouchEvent) => {
       if (e.touches.length !== 1) return;
       const y = e.touches[0].clientY;
       const dy = y - lastY;
       lastY = y;
-      if (!scrolling && Math.abs(y - startY) < 8) return; // let taps focus
-      scrolling = true;
-      // Capture phase + stop/prevent so xterm doesn't start a selection drag
-      // or the page rubber-band.
-      e.preventDefault();
+      lastTouchRef.current = { x: e.touches[0].clientX, y };
+      // Suppression starts at touchstart; the deadband now only CLASSIFIES.
+      // Below it we still keep the event to ourselves, but leave it
+      // cancellable-but-uncancelled so a tap still becomes a click report —
+      // that is how tapping a permission prompt inside Claude Code works.
       e.stopPropagation();
+      if (!scrolling && Math.abs(y - startY) < 8) return; // still could be a tap
+      scrolling = true;
+      e.preventDefault(); // classified as a drag: no click, no rubber-band
       pending += (dy / cellPx()) * GAIN; // finger down (dy>0) => scroll back
       samples.push({ t: performance.now(), y });
       if (samples.length > 6) samples.shift();
@@ -494,19 +695,80 @@ function TerminalView({
       momentum = requestAnimationFrame(step);
     };
 
-    host.addEventListener("touchstart", onStart, { passive: true });
+    const cap = { capture: true } as EventListenerOptions;
+    host.addEventListener("touchstart", onStart, { capture: true, passive: false });
     host.addEventListener("touchmove", onMove, { capture: true, passive: false });
     host.addEventListener("touchend", onEnd, { passive: true });
     host.addEventListener("touchcancel", onEnd, { passive: true });
     return () => {
       stopMomentum();
       if (raf) cancelAnimationFrame(raf);
-      host.removeEventListener("touchstart", onStart);
-      host.removeEventListener("touchmove", onMove, { capture: true } as EventListenerOptions);
+      host.removeEventListener("touchstart", onStart, cap);
+      host.removeEventListener("touchmove", onMove, cap);
       host.removeEventListener("touchend", onEnd);
       host.removeEventListener("touchcancel", onEnd);
     };
   }, []);
+
+  // 0077 B2 — the "Select text" toggle. xterm.js exposes no option to suppress
+  // mouse reporting, and its force-selection test reads e.altKey/e.shiftKey
+  // directly, so the only way in is to re-dispatch each mouse event with the
+  // platform's force-selection modifier set and cancel the original. Scoped to
+  // the host, off by default, and a no-op the rest of the time — when the
+  // toggle is off the mouse reports a TUI legitimately needs still reach it.
+  useEffect(() => {
+    const host = hostRef.current!;
+    const FORCED = "__ccForcedSelection";
+    const relay = (e: MouseEvent) => {
+      if (!selectModeRef.current) return;
+      const marked = e as MouseEvent & { [FORCED]?: boolean };
+      if (marked[FORCED]) return; // our own clone, on its way to xterm
+      if (IS_MAC ? e.altKey : e.shiftKey) return; // already a force-selection drag
+      e.preventDefault();
+      e.stopPropagation();
+      const clone = new MouseEvent(e.type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        screenX: e.screenX,
+        screenY: e.screenY,
+        button: e.button,
+        buttons: e.buttons,
+        detail: e.detail,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        altKey: IS_MAC ? true : e.altKey,
+        shiftKey: IS_MAC ? e.shiftKey : true,
+      }) as MouseEvent & { [FORCED]?: boolean };
+      clone[FORCED] = true;
+      e.target?.dispatchEvent(clone);
+    };
+    const types: (keyof HTMLElementEventMap)[] = ["mousedown", "mousemove", "mouseup"];
+    types.forEach((t) => host.addEventListener(t, relay as EventListener, true));
+    return () => types.forEach((t) => host.removeEventListener(t, relay as EventListener, true));
+  }, []);
+
+  // Keep the B1 affordance honest without polling: a pointer-down is the moment
+  // just before a user tries to select, and it is free.
+  useEffect(() => {
+    const host = hostRef.current!;
+    const onDown = () => refreshMouseMode();
+    host.addEventListener("pointerdown", onDown, true);
+    return () => host.removeEventListener("pointerdown", onDown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A5: the active pane is this session's acting clipboard surface. The editor
+  // overlay's AgentMirror claims it while it is open (it is what the user is
+  // actually looking at) and hands it back on close.
+  useEffect(() => {
+    if (!active) return;
+    const key = sessionKey(session, machine);
+    claimClipboardSurface(key, surfaceToken);
+    return () => releaseClipboardSurface(key, surfaceToken);
+  }, [active, session, machine, surfaceToken]);
 
   // Padding only on top + left: visual breathing room between the pane
   // border and the first character / first line. The padding is on a
@@ -518,9 +780,35 @@ function TerminalView({
   // box; the host's h-full w-full then reports correct dimensions.
   // bg-bar (= #0f1720, the xterm theme background) makes the padding
   // strip blend in — no two-tone gutter.
+  // 0077 B1: when the application owns the mouse, a plain drag is a mouse
+  // report and creates no selection — so the shipped ⌘C/Ctrl+C copy has nothing
+  // to copy. The escape hatch has always existed; it was discoverable only
+  // through a one-shot toast. Name it, for the BROWSER's platform, whenever it
+  // applies. Meaningless on touch, so it does not render there.
+  const showSelectHint = active && mouseMode && !isCoarse();
+
   return (
     <div className="relative h-full w-full bg-bar pl-2 pt-1.5">
-      <div ref={hostRef} className="h-full w-full" />
+      <div ref={hostRef} className="cc-term-host h-full w-full" />
+      {showSelectHint && (
+        <div className="pointer-events-none absolute bottom-1 right-2 z-10 flex items-center gap-1.5 text-[10px] text-slate-500">
+          <span>{IS_MAC ? "⌥" : "Shift"}-drag to select</span>
+          <button
+            type="button"
+            onClick={() => setSelectMode((v) => !v)}
+            title={
+              selectMode
+                ? "Plain drag selects text (the app stops seeing the mouse)"
+                : "Let a plain drag select text in this pane"
+            }
+            className={`pointer-events-auto rounded border border-edge px-1.5 py-0.5 ${
+              selectMode ? "bg-accent text-bar" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Select text
+          </button>
+        </div>
+      )}
       {findOpen && <TerminalFindBar search={searchRef} onClose={closeFind} />}
     </div>
   );

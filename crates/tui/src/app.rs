@@ -698,6 +698,10 @@ const SCROLL_TOP: isize = 1_000_000;
 
 pub struct App {
     rest: Rest,
+    /// Where a session's own clipboard writes are re-emitted (0077 Part C).
+    /// `None` = the real stdout, which is what production wants; a test hands
+    /// in a buffer, because a `TestBackend` run has no terminal to write to.
+    clip_sink: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     cfg: Config,
     tools: Vec<ToolInfo>,
     /// Connected agents (hub mode). Empty + `hub_mode == false` means a direct,
@@ -789,6 +793,7 @@ impl App {
         let prefix = input::parse_prefix(&cfg.prefix);
         Self {
             rest,
+            clip_sink: None,
             cfg,
             tools: Vec::new(),
             machines: Vec::new(),
@@ -869,8 +874,42 @@ impl App {
                 break;
             }
             self.draw(term)?;
+            // BETWEEN frames, never inside one: hand the session's own clipboard
+            // writes to the user's terminal emulator (0077 Part C). The frame is
+            // already flushed, and OSC 52 moves no cursor and changes no screen
+            // state, so this cannot corrupt what was just drawn.
+            self.flush_clipboard();
         }
         Ok(())
+    }
+
+    /// Re-emit every clipboard write the attached sessions performed since the
+    /// last frame (0077 Part C). Public so the e2e harness can step it the same
+    /// way it steps `handle_msg`/`draw`.
+    pub fn flush_clipboard(&mut self) {
+        let pending: Vec<String> = self
+            .panes
+            .iter_mut()
+            .flatten()
+            .flat_map(|p| p.take_clipboard())
+            .collect();
+        for text in pending {
+            match &self.clip_sink {
+                Some(buf) => {
+                    if let Ok(mut b) = buf.lock() {
+                        let _ = crate::term::write_osc52(&mut *b, &text);
+                    }
+                }
+                None => crate::term::emit_osc52(&text),
+            }
+        }
+    }
+
+    /// Redirect Part C's OSC 52 emission into a buffer instead of stdout. Test
+    /// seam: a `TestBackend` run has no terminal to write to, and asserting on
+    /// the real stdout of a test process is not a thing.
+    pub fn set_clip_sink(&mut self, buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        self.clip_sink = Some(buf);
     }
 
     // ── driver pieces, shared by `run_with` and the e2e harness (0059 B3) ────────

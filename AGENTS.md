@@ -254,8 +254,10 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   port; (2) **this agent over HTTP** (`$CCWEB_CLIP_URL` = the agent's *real* bind,
   NOT loopback, empty under `--hub-only`); (3) the legacy **Go** `cc-screen-web`;
   (4) the **Mac** clip-server (`:9999`). `clip_put` writes both the file and the
-  in-memory slot on stage. Any non-image op (text copy/paste, `-o`/`-i`, text
-  `--list-types`) **defers to the real tool** (next PATH match via `type -aP`).
+  in-memory slot on stage. Any non-image op (text paste, `-o`/`-i`, text
+  `--list-types`) **defers to the real tool** (next PATH match via `type -aP`) —
+  **amended by 0077 D1**, which takes ownership of the text *copy* branch
+  (`pbcopy`/`wl-copy`) inside a cc-screen session.
   Why the file matters: clients reach sessions **through the hub**, the hub *does*
   relay `/api/clip` (bulk proxy → the agent stages it over the uplink), but a
   hub-only agent has no local HTTP for the shim to read back — the file closes
@@ -278,6 +280,60 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   PNG, `507` quota, `503` PTY write failed (rollback only on a proven
   zero-byte write). No hub/wire change — the dispatch is agent-local. See
   `cc-screen-saas` proposal 0066.
+- **Text clipboard: copy travels OUT in-band, and only to the driver (0077).**
+  The image direction above is *inbound*; this is the opposite one, and it is
+  the product's first **outbound** capability — session output can now act on
+  the viewer's device. Four rules, all load-bearing:
+  **(1) In-band, no new route.** A copy performed inside a session is the OSC 52
+  the assistant already emits (`ESC]52;c;<b64>BEL`); the agent
+  (`src/engine.rs` → `src/attach.rs`) and the hub relay terminal output
+  verbatim, so the bytes already arrive — nothing in `crates/protocol` changed.
+  A pre-attach sequence is unrecoverable by construction: `snapshot()`
+  re-serializes grid state, not the byte stream.
+  **(2) The read form is never answered.** `frontend/src/osc52.ts` imports
+  nothing and has no send path — the refusal is *structural*, not a `?` check
+  that `;p;?` or a base64-encoded `?` could slip past — and `crates/tui`
+  sets `Osc52::OnlyCopy` explicitly. A vitest reads the module's source to pin
+  it. **Never give that module access to a socket, a `Terminal`, or `fetch`.**
+  **(3) Delivered to the DRIVING client only, never to every attached viewer.**
+  One PTY fans out to every attached human ([0063] team sessions are
+  read-only-*visible* by default and there is no per-connection observer flag —
+  [0014] removed it), and the assistant runs `--dangerously-skip-permissions`,
+  so a prompt injection yields arbitrary OSC 52. The silent tier therefore needs
+  the active pane + DOM focus + a focused document + recent input from this
+  client (`frontend/src/osc52Bus.ts`); everything else — a watcher, a multi-line
+  payload, anything sanitisation altered — becomes a frozen click-to-copy toast.
+  Plus: sanitisation (bare CR / trailing newline / C0-C1 / bidi), a 64 KiB cap,
+  a per-session rate limit that disables after a flood, quiet periods after
+  attach and after the user's own copy, and one acting surface per session (the
+  grid pane and the editor's `AgentMirror` hold two sockets onto the same
+  session — without the arbiter one copy is delivered twice).
+  **(4) The agent never writes its OWN clipboard.** `SHIM_NAMES` gained
+  `pbcopy`/`wl-copy` (`src/service.rs`); the shim's copy branch base64s stdin to
+  `/dev/tty` as OSC 52, **guarded on `$CCWEB_SESSION`** so the machine owner's
+  own `pbcopy` outside a session is untouched. Before this, a macOS agent's
+  `pbcopy` succeeded and left the text on a shared machine's pasteboard while
+  the assistant reported success.
+  `ccs` re-emits on its own stdout for the host emulator to act on — it does
+  **not** link a clipboard crate (a headless SSH box has no display server; the
+  outer terminal does), and drops `Selection`-typed writes so a `p` store is
+  never promoted. See `cc-screen-saas` proposal 0077.
+- **The touch/wheel scroll ladder is one ladder, in both clients (0031/0069).**
+  `flush()` in `TerminalView.tsx` is a three-rung precedence ladder copied from
+  [0069]'s TUI implementation, not re-decided: normal buffer (or a locally
+  scrolled-back viewport) → `scrollLines()`; alternate screen + mouse reporting
+  → SGR wheel reports; alternate screen without → arrow keys, encoded per
+  `applicationCursorKeysMode`. Rung 1 **fails closed** — anything unrecognised
+  moves pixels, never bytes — and rungs 2/3 are clamped to 3 steps per flush
+  with the surplus *discarded*, because every step is input a real program must
+  parse. It rides `term.input()` → the existing `{t:"i"}`, so no protocol
+  change. The gesture half is as load-bearing as the sink: `touch-action: none`
+  on `.cc-term-host` plus capture-phase `stopPropagation` from `touchstart`,
+  and **no `preventDefault` until the 8px deadband classifies a drag** — a tap's
+  compatibility mouse events are what make tap-to-click work inside Claude
+  Code's TUI. Which renderer a session uses is a per-install remote rollout
+  gate, not a version or an OS, so both states must be tested. See proposal
+  0031 (Strategies A + C).
 - **An idle web client must draw nothing (0068).** The tab is the product's
   primary surface and stays open for days, so *continuous* work in the frontend
   is a bug: **no infinite CSS animation** outside a loading state (no cursor

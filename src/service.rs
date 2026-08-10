@@ -18,9 +18,12 @@ const LAUNCHD_LABEL: &str = "com.dibbla.cc-screen-rust";
 const WINDOWS_TASK_NAME: &str = "cc-screen-rust";
 
 /// The clipboard shim, embedded at build time. Written verbatim into
-/// ~/.local/bin as xclip / wl-paste / pbpaste so a Ctrl-V image paste from the
-/// web UI reaches the agent (proposal 0007). The script dispatches on its own
-/// basename, so the same bytes serve all three names. Single source of truth:
+/// ~/.local/bin under every name in `SHIM_NAMES`; the script dispatches on its
+/// own basename, so the same bytes serve all of them. Two directions:
+/// xclip / wl-paste / pbpaste answer a Ctrl-V image paste staged by the web UI
+/// (proposal 0007), and pbcopy / wl-copy send a text copy performed INSIDE a
+/// session to the user's own clipboard as OSC 52 instead of writing this
+/// machine's (proposal 0077 D1). Single source of truth:
 /// `scripts/clip-shim.sh`.
 /// POSIX-only: Windows has no xclip/wl-paste/pbpaste, so the shim (and its
 /// machinery) is compiled out there; image paste is a documented Windows
@@ -30,7 +33,7 @@ const CLIP_SHIM: &str = include_str!("../scripts/clip-shim.sh");
 /// The tool names the shim is installed as. Each is the next-on-PATH real tool's
 /// shadow for agent sessions only (~/.local/bin is first on the session PATH).
 #[cfg(not(windows))]
-const SHIM_NAMES: &[&str] = &["xclip", "wl-paste", "pbpaste"];
+const SHIM_NAMES: &[&str] = &["xclip", "wl-paste", "pbpaste", "pbcopy", "wl-copy"];
 
 // Wait for the bound (tailnet) IP to exist before starting, so a boot where
 // Tailscale comes up late doesn't crash-loop the bind. Loopback/wildcard skip
@@ -450,14 +453,14 @@ fn write_utf16le_bom(path: &Path, s: &str) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-// ── clipboard shim (proposal 0007) ─────────────────────────────────────────
+// ── clipboard shim (proposals 0007 in, 0077 D1 out) ────────────────────────
 
 /// Marker line every copy of our shim carries; lets a re-install tell its own
 /// shim apart from a user's real tool that happens to share the name.
 #[cfg(not(windows))]
 const SHIM_MARKER: &str = "cc-screen-rust clipboard shim";
 
-/// Install the clipboard shim into ~/.local/bin as xclip / wl-paste / pbpaste.
+/// Install the clipboard shim into ~/.local/bin under every `SHIM_NAMES` entry.
 ///
 /// Idempotent: a re-install rewrites our shim and is a no-op when already
 /// current. We only ever write inside ~/.local/bin (first on the session PATH),
@@ -477,9 +480,9 @@ pub fn install_shim() -> Result<(), String> {
     let dir = home().join(".local").join("bin");
     let wrote = write_shims_into(&dir)?;
     if wrote.is_empty() {
-        println!("→ clipboard image-paste shim already current (~/.local/bin/{})", SHIM_NAMES.join(", "));
+        println!("→ clipboard shim already current (~/.local/bin/{})", SHIM_NAMES.join(", "));
     } else {
-        println!("→ clipboard image-paste shim installed (~/.local/bin/{})", wrote.join(", "));
+        println!("→ clipboard shim installed (~/.local/bin/{})", wrote.join(", "));
     }
     Ok(())
 }
@@ -589,7 +592,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    // Wire the clipboard image-paste shim (best-effort: a failure here must not
+    // Wire the clipboard shim (best-effort: a failure here must not
     // abort an otherwise-good service install).
     if let Err(e) = install_shim() {
         eprintln!("→ warning: clipboard shim not installed: {e}");
@@ -961,4 +964,91 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Proposal 0077 D1: the copy shim must be invisible outside a cc-screen
+    /// session and must never write THIS machine's clipboard inside one.
+    ///
+    /// `~/.local/bin` is on the machine owner's interactive PATH too, so a
+    /// shimmed `pbcopy` that always intercepted would break their own copy for
+    /// every program on the box. The guard is `$CCWEB_SESSION`, and this drives
+    /// the real script through `bash` to prove it: with a fake "real" pbcopy
+    /// next on PATH, the deferral is observable as the file it writes.
+    #[cfg(not(windows))]
+    #[test]
+    fn copy_shim_guards_on_ccweb_session() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        if Command::new("bash").arg("-c").arg("true").status().is_err() {
+            return; // no bash on this box — nothing to assert
+        }
+
+        let root = std::env::temp_dir().join(format!("ccr-copyshim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shim_dir = root.join("shim");
+        let real_dir = root.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        write_shims_into(&shim_dir).unwrap();
+
+        // The "real" pbcopy the shim must fall through to.
+        let captured = root.join("captured.txt");
+        let real = real_dir.join("pbcopy");
+        std::fs::write(
+            &real,
+            format!("#!/bin/sh\ncat > {}\n", captured.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Keep the system PATH on the end: the shim shells out to basename /
+        // readlink / base64, and a PATH of just these two dirs would make it
+        // fail for a reason that has nothing to do with what we're asserting.
+        let sys_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let path = format!("{}:{}:{}", shim_dir.display(), real_dir.display(), sys_path);
+        let run = |session: Option<&str>| {
+            let mut cmd = Command::new(shim_dir.join("pbcopy"));
+            cmd.env("PATH", &path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            match session {
+                Some(s) => cmd.env("CCWEB_SESSION", s),
+                None => cmd.env_remove("CCWEB_SESSION"),
+            };
+            let mut child = cmd.spawn().unwrap();
+            child.stdin.as_mut().unwrap().write_all(b"copied text").unwrap();
+            let _ = child.wait().unwrap();
+        };
+
+        // Outside a session: byte-for-byte the real tool.
+        run(None);
+        assert_eq!(
+            std::fs::read_to_string(&captured).unwrap(),
+            "copied text",
+            "outside a cc-screen session the shim must defer to the real pbcopy"
+        );
+
+        // Inside one: the copy is delivered in-band (OSC 52 on /dev/tty, which
+        // this test process does not have — the point is that it did NOT reach
+        // the machine's own clipboard).
+        std::fs::remove_file(&captured).unwrap();
+        run(Some("claude-x"));
+        assert!(
+            !captured.exists(),
+            "inside a session the copy must NOT land on the agent machine's clipboard"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shim is installed under both directions' names (0007 in, 0077 out).
+    #[cfg(not(windows))]
+    #[test]
+    fn shim_names_cover_both_directions() {
+        for name in ["xclip", "wl-paste", "pbpaste", "pbcopy", "wl-copy"] {
+            assert!(SHIM_NAMES.contains(&name), "{name} missing from SHIM_NAMES");
+        }
+    }
+
 }

@@ -23,6 +23,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { writeClipboard } from "../util";
+import { noteUserCopy } from "../osc52Bus";
 
 // A DecoSpec is a plain description of one decoration. `type`:
 //   - "replace": hide the range entirely (syntax marks off the cursor line)
@@ -430,6 +431,7 @@ class CopyButtonWidget extends WidgetType {
     btn.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
+      noteUserCopy(); // 0077 A10: don't let a session's OSC 52 swap this out
       writeClipboard(this.text)
         .then(() => {
           btn.textContent = "Copied";

@@ -1454,6 +1454,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // Proposal 0077 Part E. A copy performed INSIDE a session travels to the
+    // client in-band, as the OSC 52 bytes the assistant already emits — there is
+    // no new route and no new wire message, which is only true for as long as
+    // the agent keeps relaying terminal output verbatim. This pins that: the
+    // sequence must reach a live subscriber byte-for-byte, with no filtering, no
+    // OSC allowlist, and no rewriting.
+    //
+    // It also documents the known limit the proposal accepts: `snapshot()`
+    // re-serializes GRID STATE, so a sequence emitted before a client attached
+    // (or during a Lagged resync) is unrecoverable by construction. Only
+    // sequences emitted while a client is attached are deliverable.
+    #[tokio::test]
+    async fn osc52_survives_the_broadcast_path_but_not_the_snapshot() {
+        let tmp = std::env::temp_dir().join(format!("ccr-osc52-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // aGkgdGhlcmU= is "hi there". Emitted after a beat so a client is
+        // attached before it lands — the deliverable case.
+        let tool = shell_tool("printf BEFORE_MARK; sleep 1; printf '\\033]52;c;aGkgdGhlcmU=\\007'; sleep 3");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let sess = state.get(&name).unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let (snap, mut rx) = sess.attach();
+
+        // Collect the live stream for long enough to see the sequence.
+        let mut live: Vec<u8> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await {
+                Ok(Ok(chunk)) => {
+                    live.extend_from_slice(&chunk);
+                    if live.windows(4).any(|w| w == b"]52;") {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => continue,
+            }
+        }
+        let live_s = String::from_utf8_lossy(&live).into_owned();
+        assert!(
+            live_s.contains("\u{1b}]52;c;aGkgdGhlcmU=\u{7}"),
+            "OSC 52 must reach an attached client verbatim; saw {live_s:?}"
+        );
+
+        // The documented limit: the snapshot is grid state, so a pre-attach
+        // sequence is gone. (BEFORE_MARK, printed at the same time, IS there —
+        // it painted a cell.)
+        let snap_s = String::from_utf8_lossy(&snap);
+        assert!(snap_s.contains("BEFORE_MARK"));
+        assert!(
+            !snap_s.contains("]52;"),
+            "a snapshot re-serializes grid state; it cannot carry an escape sequence"
+        );
+
+        sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // A spawned session must carry the clipboard contract env (proposal 0007):
     // `CCWEB_CLIP_URL` (where the shim fetches a staged paste) and `CCWEB_SESSION`
     // (so it scopes the fetch). We prove it end-to-end by having the child echo

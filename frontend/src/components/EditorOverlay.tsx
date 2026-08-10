@@ -51,6 +51,8 @@ import { toggleTaskAt } from "../editor/livePreview";
 import EditorTree from "./EditorTree";
 import MoveDialog from "./MoveDialog";
 import AgentMirror, { type ConnState } from "./AgentMirror";
+import type { Terminal } from "@xterm/xterm";
+import { noteUserCopy } from "../osc52Bus";
 
 // pdf.js is heavy and only needed for PDFs — keep it (and its worker) out of the
 // editor's chunk, loaded only when a PDF is first opened.
@@ -125,6 +127,9 @@ interface Props {
   // Tree-filter focus signal (proposal 0038). Like `focusSearchSeq` but for the
   // `Ctrl+B /` chord: each bump focuses the in-tree "Filter tree" field.
   focusTreeFilterSeq?: number;
+  // The editor's agent mirror hands its xterm.js Terminal up so App's global
+  // copy handler can read a selection made in this column (proposal 0077 B).
+  onAgentTerm?: (term: Terminal | null) => void;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -227,6 +232,7 @@ export default function EditorOverlay({
   onDirtyChange,
   focusSearchSeq = 0,
   focusTreeFilterSeq = 0,
+  onAgentTerm,
 }: Props) {
   // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
   // on open; switchable via the header dropdown (multi-machine only).
@@ -1850,6 +1856,7 @@ export default function EditorOverlay({
               onToggleControl={() => setAgentControl((v) => !v)}
               onEngageControl={() => setAgentControl(true)}
               onConn={setAgentConn}
+              onTerm={onAgentTerm}
             />
           </div>
         )}
@@ -2063,6 +2070,7 @@ function AgentColumn({
   onToggleControl,
   onEngageControl,
   onConn,
+  onTerm,
 }: {
   session: string | null;
   machine: string;
@@ -2075,6 +2083,7 @@ function AgentColumn({
   onToggleControl: () => void;
   onEngageControl: () => void;
   onConn: (c: ConnState) => void;
+  onTerm?: (term: Terminal | null) => void;
 }) {
   const dot =
     conn === "open" ? "bg-emerald-400" : conn === "connecting" ? "bg-amber" : "bg-red-500";
@@ -2141,6 +2150,7 @@ function AgentColumn({
             recalibrateSignal={recalibrate}
             searchSignal={findSignal}
             onState={onConn}
+            onTerm={onTerm}
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-xs text-slate-600">
@@ -2166,6 +2176,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const onCopy = useCallback(() => {
     const text = ref.current?.innerText ?? "";
     if (!text) return;
+    noteUserCopy(); // 0077 A10: don't let a session's OSC 52 swap this out
     writeClipboard(text)
       .then(() => {
         setCopied(true);
