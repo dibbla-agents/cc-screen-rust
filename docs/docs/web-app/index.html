@@ -166,9 +166,13 @@ menu) with another person, as <strong>can view</strong> or <strong>can use</stro
 <ul>
 <li>If they already have an account, the share lands in their inbox (the bell
 icon) to accept or decline.</li>
-<li>If they don&#39;t, you get an invite link to send them — the share attaches
+<li>If they don&#39;t, the invitation is what gets them in — the share attaches
 automatically when they sign up with that email.</li>
 </ul>
+<p>Either way cc-screen emails the invitation, and either way you also get a
+copyable invite link. Keep that link handy: it&#39;s the same invitation, and
+it&#39;s the fallback for a spam folder, a typo&#39;d address, or a self-hosted hub
+whose operator hasn&#39;t configured a mail relay (those send no mail at all).</p>
 <p>You can see everything shared by you and with you on the dashboard&#39;s
 <strong>Sharing</strong> card, and revoke (or leave) any of it there. Access stops
 immediately on revoke.</p>
@@ -225,8 +229,10 @@ Windows. See the <a href="../quickstart/">Quickstart</a>.</li>
 surface:</p>
 <ul>
 <li>the <strong>member list</strong> with each person&#39;s role; owners and admins invite by
-email (you get a copyable invite link — cc-screen sends no mail) and
-remove members; the owner changes roles and can transfer ownership.</li>
+email (cc-screen mails the invitation and hands you a copyable link as
+well; each pending row shows how delivery went — <em>sending</em>, <em>sent</em>,
+<em>failed</em> with a <strong>Resend</strong>, or <em>bad address</em>) and remove members; the owner
+changes roles and can transfer ownership.</li>
 <li>your machines&#39; <strong>Visible to team</strong> toggles (yours to flip, whatever your
 role).</li>
 <li>the <strong>seats meter</strong> on the plan card — <code>members / seats</code> — and, for the

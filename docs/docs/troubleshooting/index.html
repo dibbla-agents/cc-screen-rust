@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Troubleshooting — cc-screen docs</title>
-<meta name="description" content="Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, and proxy 403s." />
+<meta name="description" content="Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, and proxy 403s." />
 <meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -153,6 +153,29 @@ free seat for that.</li>
 immediate; in the rare miss, a nightly reconcile heals it. If it&#39;s still
 missing the next day, that&#39;s a bug — please report it.</li>
 </ol>
+<h2 id="the-invite-email-never-arrived">The invite email never arrived</h2>
+<p>Four usual causes, in order:</p>
+<ol>
+<li><strong>It&#39;s in the spam folder.</strong> A first message from a sender the recipient
+has never heard from often lands there. Have them search for
+<code>invites@ccscreen.dev</code> before anything else.</li>
+<li><strong>The address has a typo.</strong> The invitation is stored under exactly what
+was typed, so <code>@gmial.com</code> produces a perfectly valid pending invite that
+can never arrive. Cancel it and invite again.</li>
+<li><strong>The hub doesn&#39;t send mail.</strong> A self-hosted hub mails nothing unless its
+operator configured a relay (<code>CCHUB_SMTP_URL</code> — see
+<a href="../self-hosting/#environment-reference">Self-hosting</a>). Nothing else
+about invites changes; the link is the channel.</li>
+<li><strong>The send failed.</strong> Pending invite rows carry a delivery badge —
+<em>sending</em>, <em>sent</em>, <em>failed</em>, or <em>bad address</em>. A <strong>failed</strong> row gets a
+<strong>Resend</strong> button. <strong>bad address</strong> means the relay refused that address
+permanently (no such mailbox, or no such domain); resending can&#39;t fix it,
+so cancel the invite and re-issue it to the right address.</li>
+</ol>
+<p>And the answer that always works, in all four cases: <strong>Copy link</strong> next to
+the invite and send it yourself. It&#39;s the same invitation the email carries.
+One caveat on the badge — <em>sent</em> means the relay accepted the message, not
+that it reached a mailbox; cc-screen doesn&#39;t yet hear back about bounces.</p>
 <h2 id="assistants-are-outdated">Assistants are outdated</h2>
 <p>Use the <strong>Update</strong> button on the machine&#39;s dashboard row — it updates the
 CLIs first (a failed update leaves the machine untouched), then gracefully

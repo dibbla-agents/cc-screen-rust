@@ -234,6 +234,13 @@ cc-screen-hub org info   &lt;name-or-id&gt;           # seats, status, member li
 with 0 seats is dormant: it exists, but nobody can join and members keep
 their personal plans — so creating one never changes anyone&#39;s entitlements
 until you set seats.</p>
+<p><strong>Invites, and mail.</strong> Your hub sends no email at all unless you bring a
+relay — set <code>CCHUB_SMTP_URL</code> (and <code>CCHUB_PUBLIC_URL</code>, so the link in the body
+is absolute) and it mails team and share invitations; leave it unset and the
+hub behaves exactly as it did before, the way billing is simply off without
+Stripe keys. Inviting works either way: creating an invitation always hands
+the inviter a copyable link, which is the whole channel on a hub with no
+relay and the fallback on one with it.</p>
 <h2 id="docker">Docker</h2>
 <p>Both images are published to GHCR on every release:</p>
 <pre><code class="language-sh">docker pull ghcr.io/dibbla-agents/cc-screen-hub:latest     # the front door
@@ -372,6 +379,22 @@ auto-accepts same-origin, raw IPs, <code>localhost</code>, and <code>*.ts.net</c
 <tr>
 <td><code>STRIPE_PRICE_TEAM_FOUNDER</code></td>
 <td>optional founder-cohort per-seat price (like <code>STRIPE_PRICE_PRO_FOUNDER</code> for Pro)</td>
+</tr>
+<tr>
+<td><code>CCHUB_SMTP_URL</code></td>
+<td>multi-tenant only: the relay that mails team and share invitations, e.g. <code>smtp://user:key@smtp-relay.brevo.com:587</code>. Unset → the hub sends no mail and everything else works (the copyable invite link is the channel). Needs <code>CCHUB_PUBLIC_URL</code> as well — without an absolute base the mailer stays off rather than mail a relative link</td>
+</tr>
+<tr>
+<td><code>CCHUB_MAIL_FROM</code></td>
+<td>From/envelope address on that mail (default <code>cc-screen &lt;invites@ccscreen.dev&gt;</code>); your relay must be authorized to send as it</td>
+</tr>
+<tr>
+<td><code>CCHUB_MAIL_REPLY_TO</code></td>
+<td>Reply-To on that mail; falls back to <code>CCHUB_SUPPORT_EMAIL</code>, so a confused invitee&#39;s reply reaches a human</td>
+</tr>
+<tr>
+<td><code>CCHUB_MAIL_DIR</code></td>
+<td>write each message to a file in this directory instead of sending it (what the test harnesses use); takes precedence over <code>CCHUB_SMTP_URL</code></td>
 </tr>
 <tr>
 <td><code>CCWEB_ALLOWED_ORIGINS</code></td>

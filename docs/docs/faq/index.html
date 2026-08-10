@@ -141,10 +141,11 @@ binaries, no feature gap in the core product. See
 <a href="../self-hosting/">Self-hosting</a>.</p>
 <h2 id="can-i-share-access-with-a-teammate">Can I share access with a teammate?</h2>
 <p>Yes — share a whole machine or a single session, as &quot;can view&quot; or &quot;can use&quot;.
-If the invitee has no account yet, you get an invite link to send them; the
-share attaches when they sign up with that email. Revoke any time from the
-dashboard&#39;s Sharing card. Or skip the one-off shares and start a <strong>team</strong> —
-everyone on it sees everyone&#39;s sessions automatically, view-only. See
+cc-screen emails the invitation and hands you a copyable link as well; if the
+invitee has no account yet, the share attaches when they sign up with that
+email. Revoke any time from the dashboard&#39;s Sharing card. Or skip the one-off
+shares and start a <strong>team</strong> — everyone on it sees everyone&#39;s sessions
+automatically, view-only. See
 <a href="../web-app/#sharing">Using the web app → Sharing</a>.</p>
 <h2 id="how-do-teams-work">How do teams work?</h2>
 <p>You join by accepting an email invite, and the invite states the deal before
@@ -162,6 +163,18 @@ is refused until someone adds seats (the owner or an admin, from Billing) —
 nothing is lost, the invite just waits. Removing a member frees their seat
 instantly. Reducing the seat count never removes members: if you drop below
 the current member count, the team just can&#39;t grow until it&#39;s back under.</p>
+<h2 id="what39s-in-the-invite-email-and-what-does-clicking-the-link-do">What&#39;s in the invite email, and what does clicking the link do?</h2>
+<p>Plain text, one message per invitation: who invited you, what to (a team, a
+machine, or a single session), the team&#39;s consent sentence verbatim when it&#39;s
+a team, and one link. No tracking pixel, no attachments, no reminders, and
+nothing else is ever sent to that address.</p>
+<p>The link only <em>identifies</em> the invitation — it grants nothing on its own.
+Accepting means signing in with the address that was invited, so a forwarded
+link gets the forwarder&#39;s friend nowhere. Invites expire after 14 days, and
+whoever sent it can cancel it sooner; either way the link stops working. If
+the mail never turns up, ask the sender for the copyable link — it&#39;s the same
+invitation, and it&#39;s the only channel on a self-hosted hub whose operator
+hasn&#39;t configured a mail relay.</p>
 <h2 id="does-it-work-on-phones">Does it work on phones?</h2>
 <p>That&#39;s half the point. The web app is a PWA — <strong>Add to Home Screen</strong> gives
 you an app icon, full-screen terminals sized to the phone, the file

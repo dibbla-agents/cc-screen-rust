@@ -170,6 +170,30 @@ changes.</li>
 directions immediately; personal shares are untouched. Deleting a team
 erases its membership, invites, grants, and audit history with it.</li>
 </ul>
+<h2 id="invitations-and-the-mail-that-carries-them">Invitations, and the mail that carries them</h2>
+<p>An invitation — to a team, a machine, or a single session — is a row in the
+hub&#39;s database plus a link at <code>/org-invite/&lt;token&gt;</code>. Where a hub is
+configured with a mail relay, that link is emailed to the invited address as
+well. What that does and doesn&#39;t mean:</p>
+<ul>
+<li><strong>The link is not access.</strong> It only <em>identifies</em> the invitation. Accepting
+requires being signed in as the invited address, so a forwarded or
+intercepted link grants nothing on its own — whoever holds it would have to
+control that mailbox first.</li>
+<li><strong>It does disclose what the landing page shows</strong>, to anyone holding it:
+for a team invite, the team&#39;s name and the inviter&#39;s email address. Treat
+it as you&#39;d treat any link you hand someone.</li>
+<li><strong>Invitations expire after 14 days</strong>, and cancelling one kills its link
+immediately — the token stops resolving whether or not it&#39;s already sitting
+in an inbox. Re-inviting mints a fresh token and retires the old link.</li>
+<li><strong>Email is long-lived, and it isn&#39;t ours.</strong> A mailed invitation stays in
+the recipient&#39;s mailbox (and their provider&#39;s backups) long after it
+expires, and it crossed networks we don&#39;t control on the way. That&#39;s the
+trade for an invitation that actually arrives; the 14-day expiry and the
+sign-in-as-the-invited-address rule are what bound it.</li>
+<li>A self-hosted hub sends no mail at all unless its operator configures a
+relay — see <a href="../self-hosting/#environment-reference">Self-hosting</a>.</li>
+</ul>
 <h2 id="transport-when-tls-is-required">Transport: when TLS is required</h2>
 <p>The agent fully trusts whatever answers at its hub URL — once connected, it
 executes what the hub sends. So:</p>
