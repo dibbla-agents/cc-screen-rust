@@ -166,8 +166,11 @@ the current member count, the team just can&#39;t grow until it&#39;s back under
 <h2 id="what39s-in-the-invite-email-and-what-does-clicking-the-link-do">What&#39;s in the invite email, and what does clicking the link do?</h2>
 <p>Plain text, one message per invitation: who invited you, what to (a team, a
 machine, or a single session), the team&#39;s consent sentence verbatim when it&#39;s
-a team, and one link. No tracking pixel, no attachments, no reminders, and
-nothing else is ever sent to that address.</p>
+a team, and one link. No attachments, no reminders, and nothing else is ever
+sent to that address. One caveat we&#39;d rather not have: our mail provider
+rewrites the message as HTML and adds an open-tracking pixel on the way out. We
+don&#39;t use what it reports and can&#39;t turn it off on our current plan — see
+<a href="../security/#invitations-and-the-mail-that-carries-them">Security</a>.</p>
 <p>The link only <em>identifies</em> the invitation — it grants nothing on its own.
 Accepting means signing in with the address that was invited, so a forwarded
 link gets the forwarder&#39;s friend nowhere. Invites expire after 14 days, and
