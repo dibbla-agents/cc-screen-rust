@@ -291,6 +291,14 @@ pub struct SessionBody {
     session: String,
 }
 
+/// What a failed `resolve_*` actually means. The old wording ("no online machine
+/// for that request") named only ONE of the three reasons the resolver returns
+/// `None`, and it named the one that is usually false: a session-share grantee
+/// opening a file got told the machine was offline while it sat plainly online in
+/// the same UI. An authorization refusal must not describe itself as an outage.
+const UNRESOLVED: &str =
+    "no machine matched that request — it may be offline, ambiguous, or outside what you have access to (try ?machine=)";
+
 /// Resolve the target agent (by explicit `machine`, else by `session` owner / the
 /// single online machine — for machine-less clients like the PWA), send the op,
 /// await the reply. The `Err` arm is a ready-made HTTP error response.
@@ -301,9 +309,10 @@ async fn route(
     session: Option<&str>,
     cmd: Cmd,
 ) -> Result<CmdResult, Response> {
-    let agent = hub.registry.resolve_scoped(scope, machine, session).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
-    })?;
+    let agent = hub
+        .registry
+        .resolve_scoped(scope, machine, session)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, UNRESOLVED).into_response())?;
     agent.request(cmd).await.map_err(|e| match e {
         RequestErr::Offline => (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response(),
         RequestErr::Timeout => (StatusCode::GATEWAY_TIMEOUT, "agent did not respond").into_response(),
@@ -563,9 +572,10 @@ fn update_target_caps(
     machine: &str,
     needs_install: bool,
 ) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
-    let agent = hub.registry.resolve_scoped(scope, machine, None).ok_or_else(|| {
-        (StatusCode::NOT_FOUND, "no online machine for that request (try ?machine=)").into_response()
-    })?;
+    let agent = hub
+        .registry
+        .resolve_scoped(scope, machine, None)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, UNRESOLVED).into_response())?;
     if !scope.owns_agent(&agent) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -775,7 +785,21 @@ async fn file_route(
     op: &str,
     args: Value,
 ) -> Response {
-    match route(hub, scope, machine, session, Cmd::File { op: op.to_string(), args }).await {
+    // The file surface resolves with `resolve_browsable`, not `resolve_scoped`:
+    // any grant on the agent (agent / session / team) reaches it, because every
+    // one of them already carries attach — and attach is keyboard input into an
+    // assistant running with `--dangerously-skip-permissions`, which can read and
+    // write the same files. See `Visibility::may_browse_agent`. Lifecycle ops
+    // above still go through `route`/`may_use_agent`.
+    let cmd = Cmd::File { op: op.to_string(), args };
+    let routed = match hub.registry.resolve_browsable(scope, machine, session) {
+        Some(agent) => agent.request(cmd).await.map_err(|e| match e {
+            RequestErr::Offline => (StatusCode::SERVICE_UNAVAILABLE, "machine offline").into_response(),
+            RequestErr::Timeout => (StatusCode::GATEWAY_TIMEOUT, "agent did not respond").into_response(),
+        }),
+        None => Err((StatusCode::NOT_FOUND, UNRESOLVED).into_response()),
+    };
+    match routed {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Ok) => StatusCode::NO_CONTENT.into_response(),
         Ok(CmdResult::Error { code, msg }) => {

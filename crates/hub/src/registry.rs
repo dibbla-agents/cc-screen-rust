@@ -184,6 +184,25 @@ impl Visibility {
         }
     }
 
+    /// May the caller reach this agent's **file surface** (browse / read / write /
+    /// download / search)? True for the owner, and for anyone holding any grant on
+    /// the agent — an agent grant, a session grant, or a team grant.
+    ///
+    /// Strictly wider than [`may_use_agent`](Self::may_use_agent), and
+    /// deliberately so: every one of those grants already carries attach, attach
+    /// carries keyboard input (0014 removed view-only), and the thing on the other
+    /// end is an assistant CLI running with `--dangerously-skip-permissions`. A
+    /// grantee can already ask it to print or edit any file under the owner's
+    /// `$HOME`, so gating the file browser on `may_use_agent` withheld nothing and
+    /// only produced a confusing 404. The confidentiality boundary that actually
+    /// holds is the agent's `$HOME` confinement, which is unchanged.
+    ///
+    /// This is NOT the gate for lifecycle (create/kill/restore) or administration
+    /// — those stay on `may_use_agent` / `may_admin_agent`.
+    pub fn may_browse_agent(&self, agent: &AgentConn) -> bool {
+        self.has_any_visibility(agent)
+    }
+
     /// May the caller VIEW/attach this specific session on this agent? True if they
     /// may use the agent, OR a session-grant (or a session-share-back) names exactly
     /// this session.
@@ -515,14 +534,54 @@ impl Registry {
         machine: &str,
         session: Option<&str>,
     ) -> Option<Arc<AgentConn>> {
+        self.resolve_with(vis, machine, session, Visibility::may_use_agent)
+    }
+
+    /// As [`resolve_scoped`](Self::resolve_scoped), but for the **file surface**
+    /// (browse / read / write / download / search), where the session-less
+    /// fallback is [`Visibility::may_browse_agent`] instead of `may_use_agent`.
+    ///
+    /// Why the file endpoints are gated differently from create/kill/restore: a
+    /// session grant already carries **keyboard input** to that session
+    /// (`client_ws` attaches through `may_see_session`, and 0014 removed the
+    /// view-only gate), and the session it attaches to is an assistant CLI
+    /// launched with `--dangerously-skip-permissions`. Anyone holding a session
+    /// share can therefore already read and write anything under the owner's
+    /// `$HOME` by typing a request into the terminal. Refusing them the file
+    /// browser bought no confidentiality — it only made the product look broken
+    /// (`no online machine for that request` on a machine that was plainly
+    /// online) and pushed the same access through a less legible path.
+    ///
+    /// Lifecycle stays on `may_use_agent`: a session-grantee still cannot create,
+    /// kill or restore sessions on someone else's box, and administration is
+    /// narrower still (`may_admin_agent`, 0049).
+    pub fn resolve_browsable(
+        &self,
+        vis: &Visibility,
+        machine: &str,
+        session: Option<&str>,
+    ) -> Option<Arc<AgentConn>> {
+        self.resolve_with(vis, machine, session, Visibility::may_browse_agent)
+    }
+
+    /// The shared body of the two resolvers above. `agent_ok` is the predicate
+    /// applied when there is no `session` to pin against; with one, both use
+    /// `may_see_session`.
+    fn resolve_with(
+        &self,
+        vis: &Visibility,
+        machine: &str,
+        session: Option<&str>,
+        agent_ok: fn(&Visibility, &AgentConn) -> bool,
+    ) -> Option<Arc<AgentConn>> {
         let g = self.inner.lock().unwrap();
         // The per-request visibility filter: a session pins to `may_see_session`,
-        // otherwise the agent must be usable as a whole.
+        // otherwise the caller-supplied agent-scope predicate decides.
         let allowed = |a: &&Arc<AgentConn>| {
             a.online()
                 && match session {
                     Some(s) => vis.may_see_session(a, s),
-                    None => vis.may_use_agent(a),
+                    None => agent_ok(vis, a),
                 }
         };
         if !machine.is_empty() {
@@ -955,10 +1014,19 @@ mod tests {
         // But the machine is listed so the UI can render where `shared` lives.
         assert_eq!(r.machines_for(&bob).len(), 1);
 
+        // …but the FILE surface does resolve for him: `resolve_browsable` is the
+        // gate there, because attaching to `shared` already gives him keyboard
+        // input to an assistant that can cat and edit the same files. Refusing
+        // here bought nothing and produced a 404 that blamed the machine.
+        assert!(r.resolve_browsable(&bob, "laptop", None).is_some(), "session grant reaches files");
+        assert!(r.resolve_browsable(&bob, "", None).is_some());
+
         // A third user with no grant sees nothing.
         let carol = Visibility::user("carol");
         assert!(r.all_sessions_for(&carol).is_empty());
         assert!(r.machines_for(&carol).is_empty());
+        assert!(r.resolve_browsable(&carol, "laptop", None).is_none(), "no grant, no files");
+        assert!(r.resolve_browsable(&carol, "", None).is_none());
     }
 
     // Proposal 0065 A2: a team grant is machine-wide VIEW — lists the machine,
@@ -986,6 +1054,11 @@ mod tests {
         assert!(r.resolve_scoped(&bob, "", None).is_none());
         assert!(!bob.may_use_agent(&a));
         assert!(!bob.owns_agent(&a));
+        // The file surface, however, follows the attach right: a team grant
+        // attaches to every session on the box, so it browses the box's files
+        // too. Wider than the session share above — worth knowing when granting.
+        assert!(bob.may_browse_agent(&a));
+        assert!(r.resolve_browsable(&bob, "laptop", None).is_some());
 
         // Precedence: a personal agent grant beside the team grant yields
         // use-level access; a team grant absorbs named-session grants.

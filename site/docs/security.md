@@ -76,15 +76,24 @@ default**, and the invite states exactly that before you accept. The
 boundaries, honestly:
 
 - Team visibility grants **view-level** access only: teammates see your
-  machines and can open your sessions, but *control* — creating sessions on
-  your machine, file uploads, admin actions — always requires an explicit
-  "can use" share from you. Team grants run through the same default-deny
-  visibility predicate as personal shares; there is no separate, wider code
-  path.
+  machines and can open your sessions, but *creating* sessions on your machine
+  and *admin* actions (updating its assistants, restarting its terminals)
+  always require an explicit "can use" share from you. Team grants run through
+  the same default-deny visibility predicate as personal shares; there is no
+  separate, wider code path.
 - **One honest caveat**: "read-level" is a scope, not a keystroke filter. A
   teammate who opens one of your live sessions gets a real terminal — typing
   into it works, exactly as with a personal session share. If a session
   shouldn't be typed into by teammates, hide that machine from the team.
+- **Files follow that same line, deliberately.** Anyone you share with — a
+  whole machine, a single session, or team visibility — can also browse, read,
+  edit, download and upload files on that machine, within the agent's `$HOME`
+  confinement. That is wider than the session they were given, and it is not an
+  oversight: the terminal they can already type into is an assistant running
+  with permissions skipped, so "print that file" or "edit that file" was always
+  one sentence away. Withholding the file browser would have hidden the access,
+  not prevented it. **Share a session only with someone you'd trust with the
+  files that machine can reach.**
 - The **per-machine opt-out** is yours alone (the "Visible to team" toggle),
   whatever your role — no admin can override it — and every flip lands in
   the team's **audit log**, alongside joins, invites, removals, and seat

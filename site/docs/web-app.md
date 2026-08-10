@@ -104,6 +104,11 @@ menu) with another person, as **can view** or **can use**:
   icon) to accept or decline.
 - If they don't, the invitation is what gets them in — the share attaches
   automatically when they sign up with that email.
+- Either way they get the machine's **files** too — the tree, the editor,
+  download and upload — even when you shared a single session. They can already
+  ask the assistant in that terminal to print or change anything it can reach,
+  so the file browser gives them nothing new; see
+  [Security](../security/#teams) before sharing.
 
 Either way cc-screen emails the invitation, and either way you also get a
 copyable invite link. Keep that link handy: it's the same invitation, and

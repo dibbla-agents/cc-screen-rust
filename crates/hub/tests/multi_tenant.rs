@@ -339,6 +339,66 @@ async fn agent_share_invite_accept_revoke_end_to_end() {
     );
 }
 
+/// A session-share grantee reaches the machine's **file surface** — and still
+/// cannot run lifecycle ops on it.
+///
+/// The gate for files is `resolve_browsable` / `may_browse_agent`, not
+/// `may_use_agent`. The reason is that the session grant already carries attach,
+/// attach is keyboard input (0014 removed view-only), and the far end is an
+/// assistant launched with `--dangerously-skip-permissions` — so the grantee can
+/// already have it print or edit any file under the owner's `$HOME`. Gating the
+/// browser on `may_use_agent` withheld nothing and answered "no online machine
+/// for that request" about a machine that was online, which is what this test
+/// exists to keep from coming back.
+///
+/// The fake agents in this harness never reply, so a routed op ends in 504 after
+/// `REQUEST_TIMEOUT`. That is the assertion: **anything but 404** means the hub
+/// authorized the request and tried to relay it. Both probes run concurrently so
+/// the timeout is paid once.
+#[tokio::test]
+async fn session_share_reaches_files_but_not_lifecycle() {
+    let (base, _store) = start_hub_labeled("alice-box", &["claude-a", "claude-a2"], "bob-box", &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+
+    // Alice shares ONE session; bob accepts.
+    let created = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "alice-box", "session": "claude-a" })).await;
+    let invite_id = created.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert!(post_json(&client, &base, &bob, &format!("/api/shares/{invite_id}/accept"), serde_json::json!({})).await.status().is_success());
+
+    let nf = reqwest::StatusCode::NOT_FOUND;
+    // The file surface: reading a file, and listing a folder the session's cwd
+    // does not name. Neither carries `?session=`, which is exactly the shape the
+    // PWA sends (`readFile` has no session parameter at all) and exactly what
+    // used to 404.
+    let (read, dirs) = tokio::join!(
+        get_resp(&client, &base, &bob, "/api/file/read?machine=alice-box&path=/etc/hostname"),
+        get_resp(&client, &base, &bob, "/api/dirs?machine=alice-box"),
+    );
+    assert_ne!(read.status(), nf, "a session grantee must reach file/read");
+    assert_ne!(dirs.status(), nf, "…and the folder listing behind the tree");
+
+    // But lifecycle is unchanged: he may not create or restore on alice's box.
+    let create = post_json(&client, &base, &bob, "/api/session?machine=alice-box",
+        serde_json::json!({ "name": "bobs-session", "tool": "shell", "dir": "/tmp" })).await;
+    assert_eq!(create.status(), nf, "a session grant must not create sessions");
+    assert_eq!(
+        get_resp(&client, &base, &bob, "/api/sessions/restorable?machine=alice-box").await.status(),
+        nf,
+        "…nor reach restore",
+    );
+
+    // And a stranger still gets nothing — the widening is grant-scoped, not global.
+    let carol = signup_ok(&client, &base, "carol@x.com", "carolpass12-long", "9.9.9.9").await;
+    assert_eq!(
+        get_resp(&client, &base, &carol, "/api/file/read?machine=alice-box&path=/etc/hostname").await.status(),
+        nf,
+        "no grant, no files",
+    );
+}
+
 /// A *session* share exposes only the named session (not the rest of the box);
 /// decline blocks it; a re-offer + accept grants it; Leave gives it back.
 #[tokio::test]

@@ -112,8 +112,17 @@ pub async fn proxy(State(hub): State<HubState>, req: Request) -> Response {
         .get::<crate::registry::Visibility>()
         .cloned()
         .unwrap_or(crate::registry::Visibility::All);
-    let Some(agent) = hub.registry.resolve_scoped(&scope, &machine, session.as_deref()) else {
-        return (StatusCode::NOT_FOUND, "no online machine for that request").into_response();
+    // `resolve_browsable`, not `resolve_scoped`: this is the same file surface as
+    // the browse/read endpoints (download, upload, clipboard-image), and the
+    // download arrow sits on every row of the tree a session-grantee can already
+    // list. Gating it on `may_use_agent` 404'd it for exactly the people the
+    // sharing model means to let in. See `Visibility::may_browse_agent`.
+    let Some(agent) = hub.registry.resolve_browsable(&scope, &machine, session.as_deref()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            "no machine matched that request — it may be offline, ambiguous, or outside what you have access to",
+        )
+            .into_response();
     };
     let target_machine = agent.machine_id.clone();
     let headers: Vec<(String, String)> = req

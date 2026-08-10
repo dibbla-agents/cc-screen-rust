@@ -581,6 +581,15 @@ fn handle_cmd(cmd: &Cmd, sessions: &Arc<Mutex<Vec<SessionInfo>>>) -> CmdResult {
             CmdResult::Restorable(vec![mk("restore-me"), mk("restore-too")])
         }
         Cmd::Restore => CmdResult::Ok,
+        // A canned file surface, so a test can prove the hub *routed* a file op
+        // to the agent rather than refusing it at the gate. The real agent reads
+        // the disk (under `$HOME` confinement); the double just echoes the op and
+        // path back, which is enough to tell a 200 from a 404.
+        Cmd::File { op, args } => CmdResult::Json(serde_json::json!({
+            "op": op,
+            "path": args.get("path").and_then(|p| p.as_str()).unwrap_or_default(),
+            "content": "fake-agent file body",
+        })),
         _ => CmdResult::Ok,
     }
 }
