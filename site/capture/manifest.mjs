@@ -171,11 +171,12 @@ export default [
     usedBy: ["tui.md"],
     note:
       "The ccs full-screen switcher over the staged demo scene (B5). ccs " +
-      "needs a real TTY, so the recipe is tui-shot.sh: ccs in a 132x10 tmux " +
+      "needs a real TTY, so the recipe is tui-shot.sh: ccs in a 120x14 tmux " +
       "pane (isolated HOME, signed in to the demo account via `ccs activate` " +
-      "+ POST /api/device/approve), clear the boot box to land in the " +
-      "switcher, then `tui-shot.sh snap … --cols 132 --font-size 10.7 " +
-      "--line-height 16` (tmux capture-pane -e → ansi2png.mjs → 2x PNG, " +
+      "+ POST /api/device/approve), attach a second session so the 0078 " +
+      "`Recent` section is real (not staged), clear the box to land in the " +
+      "switcher, then `tui-shot.sh snap … --cols 120 --font-size 11.8 " +
+      "--line-height 17.7` (tmux capture-pane -e → ansi2png.mjs → 2x PNG, " +
       "pngquant).",
   },
   {
@@ -327,7 +328,7 @@ export default [
     viewport: { width: 460, height: 783 },
     scale: 2,
     auth: "demo",
-    steps: [{ waitFor: "text=Docs site" }, { wait: 1200 }],
+    steps: [], // drivers/mobile-sessions.mjs
     out: [
       "site/web/src/assets/img/mobile-sessions.png",
       "site/docs/img/mobile-sessions.png",
@@ -336,7 +337,9 @@ export default [
     note:
       "Session switcher on a phone (auto-opens when no session is attached). " +
       "All sessions live on pine — offline harebell has none by design, so " +
-      "'both machines' isn't honestly stageable on the Free scene.",
+      "'both machines' isn't honestly stageable on the Free scene. The driver " +
+      "works in two sessions first so the 0078 `Recent` section is real rather " +
+      "than staged; the session it ends in is excluded from it, by design.",
   },
   {
     id: "mobile-agent",
