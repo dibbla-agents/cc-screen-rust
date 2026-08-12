@@ -1106,6 +1106,11 @@ function SessionDrawer({
         <span className="text-slate-500">🔎</span>
         <input
           ref={filterRef}
+          // In the pane variant this field autofocuses whenever its pane is
+          // active, so App's shouldSkipShortcut must not treat it as a document
+          // — otherwise focusing an empty pane kills the whole Ctrl+B prefix.
+          // See docs/proposals/0081-pane-focus-navigation.md Part C.
+          data-pane-filter={pane ? "" : undefined}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search sessions, actions…"

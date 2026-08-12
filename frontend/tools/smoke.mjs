@@ -126,11 +126,13 @@ async function desktopEditorPass() {
   });
   try {
     await dpage.goto(base, { waitUntil: "networkidle" });
-    // Desktop shows an inline picker in the empty pane — mount the throwaway
-    // session so the pane gets its top-right chrome (the editor button).
-    await dpage.getByText("Empty pane", { exact: false }).waitFor({ timeout: 8000 });
-    await dpage.getByRole("button", { name: new RegExp(session) }).first().click({ timeout: 8000 });
-    await dpage.waitForSelector('[title="open"]', { timeout: 10000 });
+    // Desktop shows the real switcher in the empty pane ([0026]) — mount the
+    // throwaway session so the pane gets its top-right chrome (the editor
+    // button). Wait on the session's own row, not on placeholder copy: the old
+    // `getByText("Empty pane")` matched nothing (that string lives only in code
+    // comments) and burned its 8 s timeout on every run.
+    await dpage.getByRole("button", { name: new RegExp(session) }).first().click({ timeout: 15000 });
+    await dpage.waitForSelector('[data-conn="open"]', { timeout: 10000 });
     // The pane chrome auto-hides; hover to reveal it, then click the per-pane
     // "Open file editor" button (the entry point we're testing).
     await dpage.locator(".xterm").first().hover();
@@ -184,7 +186,7 @@ async function mountDesktopSession(dpage) {
   // The empty pane renders the real switcher, so the session's own row is the
   // thing to wait for (its copy is stable; the pane's placeholder text is not).
   await dpage.getByRole("button", { name: new RegExp(session) }).first().click({ timeout: 15000 });
-  await dpage.waitForSelector('[title="open"]', { timeout: 10000 });
+  await dpage.waitForSelector('[data-conn="open"]', { timeout: 10000 });
 }
 
 // ── Proposal 0068 ─────────────────────────────────────────────────────────────
@@ -317,7 +319,7 @@ async function recentSectionPass() {
 
     // Work in `first` for longer than the 1s dwell gate, then switch to `second`.
     await dpage.getByRole("button", { name: new RegExp(first) }).first().click({ timeout: 15000 });
-    await dpage.waitForSelector('[title="open"]', { timeout: 10000 });
+    await dpage.waitForSelector('[data-conn="open"]', { timeout: 10000 });
     await dpage.waitForTimeout(1600);
     await dpage.keyboard.press("Control+b");
     await dpage.keyboard.press("s");
@@ -436,8 +438,8 @@ try {
   // Pick our throwaway session (never the live ones).
   await page.getByText(session, { exact: false }).first().click({ timeout: 8000 });
 
-  // WebSocket attach should reach "open" (header status dot title).
-  await page.waitForSelector('[title="open"]', { timeout: 10000 });
+  // WebSocket attach should reach "open" (header status dot's `data-conn`).
+  await page.waitForSelector('[data-conn="open"]', { timeout: 10000 });
 
   // Control bar: arrows + Enter inject via /api/key.
   await page.getByRole("button", { name: "↑" }).click();

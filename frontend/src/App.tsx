@@ -138,17 +138,31 @@ function isModifierKey(k: string): boolean {
 }
 
 // shouldSkipShortcut returns true when focus is in a real text input (compose
-// textarea, favourites search, etc.) — but NOT when focus is in xterm.js's
-// hidden helper textarea, which is technically a textarea but is really just
-// the terminal. See AGENTS.md "xterm.js routes all keystrokes through a hidden
-// <textarea>" for the full footgun explanation.
+// textarea, favourites search, etc.) — but NOT when focus is in a *pane
+// control*, a field that lives inside a pane and that the pane's own chords
+// must keep working over. Two of those:
+//
+//   - xterm.js's hidden helper textarea, which is technically a textarea but is
+//     really just the terminal. See AGENTS.md "xterm.js routes all keystrokes
+//     through a hidden <textarea>" for the full footgun explanation.
+//   - the empty pane's session filter ([0026]), which autofocuses whenever its
+//     pane is active (SessionDrawer's `keyboardActive` effect). Treating it as a
+//     document made the whole Ctrl+B prefix vanish the moment you focused an
+//     empty pane: no ⌃B → back out, no ⌃B l, no ⌃B s. This guard runs before the
+//     isCtrlB check, so the prefix was not merely inert — it was invisible.
+//     See docs/proposals/0081-pane-focus-navigation.md Part C.
+//
+// Everything else — compose, favourites search, rename, the sidebar filter —
+// still swallows the prefix, which is what [0016] wanted.
 function shouldSkipShortcut(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
   const tag = t?.tagName?.toLowerCase();
-  const isXtermPlumbing = !!t?.classList?.contains("xterm-helper-textarea");
+  const isPaneControl =
+    !!t?.classList?.contains("xterm-helper-textarea") ||
+    t?.hasAttribute?.("data-pane-filter") === true;
   return (
     (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
-    !isXtermPlumbing
+    !isPaneControl
   );
 }
 
@@ -1147,9 +1161,15 @@ export default function App() {
       const lay = layoutRef.current;
       const cur = activeRef.current;
       if (k === "ArrowLeft" || k === "ArrowRight") {
-        if (lay > 1) {
+        // Count, not id: `Layout` is 1..6 but layout 5 has 2 panes and layout 6
+        // has 3 (TileGrid PANE_COUNT). Wrapping modulo the id produced an
+        // out-of-range index that setActive's clamp pinned back onto the last
+        // pane, so Ctrl+B → was a dead key in exactly those two layouts (← wrapped
+        // by accident). See docs/proposals/0081-pane-focus-navigation.md Part A.
+        const n = paneCount(lay);
+        if (n > 1) {
           const delta = k === "ArrowRight" ? 1 : -1;
-          setActive((cur + delta + lay) % lay);
+          setActive((cur + delta + n) % n);
         }
         return;
       }
@@ -1321,8 +1341,23 @@ export default function App() {
           return;
         }
         if (k === "s" || k === "S") {
+          // Shift discriminates inside this one case rather than adding a second
+          // `if (k === "S")` further down — a later uppercase-only case is
+          // unreachable, which is how [0041]'s share chord shipped dead: every
+          // ⌃B ⇧S since has opened the drawer. Mirrors the ⌃B c / ⌃B ⇧C pattern
+          // below. See docs/proposals/0081-pane-focus-navigation.md Part B.
           stop();
           clearArm();
+          if (e.shiftKey) {
+            // Share the focused pane's session (proposal 0041). Multi-tenant
+            // only; on a single-tenant hub, or on an empty pane, this is a
+            // deliberate no-op rather than a surprise drawer.
+            if (meRef.current?.multiTenant) {
+              const ref = panesRef.current[activeRef.current];
+              if (ref) openShareFor(ref);
+            }
+            return;
+          }
           openDrawer();
           return;
         }
@@ -1388,17 +1423,6 @@ export default function App() {
           stop();
           clearArm();
           setRenameSeq((n) => n + 1);
-          return;
-        }
-        if (k === "S") {
-          // Share the focused pane's session (proposal 0041). Shift-S, since
-          // lowercase `s` already opens the drawer. Multi-tenant only.
-          stop();
-          clearArm();
-          if (meRef.current?.multiTenant) {
-            const ref = panesRef.current[activeRef.current];
-            if (ref) openShareFor(ref);
-          }
           return;
         }
         if (k === "Escape") {
@@ -2389,7 +2413,16 @@ export default function App() {
             );
           })()}
 
-        <span className={`h-2.5 w-2.5 rounded-full ${dot}`} title={statusTitle(headerStatus)} />
+        {/* `data-conn` is the WebSocket attach state of the active pane, exposed
+            for the smoke harness only (no visual effect). This dot used to carry
+            it as `title`, until the title became the agent's *status*; the E2E
+            waits on `[title="open"]` silently stopped matching anything and sat
+            on their timeouts. See docs/proposals/0081-pane-focus-navigation.md. */}
+        <span
+          className={`h-2.5 w-2.5 rounded-full ${dot}`}
+          title={statusTitle(headerStatus)}
+          data-conn={conn}
+        />
 
         {/* Session-status overview (proposal 0022): what every session needs, at a
             glance. Always available (phone + desktop). */}
