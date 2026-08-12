@@ -149,7 +149,12 @@ dashboard row to detach it from your account.</p>
 <h2 id="notes">Notes</h2>
 <ul>
 <li><p>The session shell on Windows is PowerShell; sessions and the file
-browser/editor work the same as on macOS/Linux.</p>
+browser/editor work the same as on macOS/Linux, with one exception: a
+Windows machine reports each session&#39;s <strong>launch</strong> directory rather than the
+directory it is currently in. So <code>cd</code>-ing inside a session doesn&#39;t move the
+file tree, and if you rename the folder a session started in, the machine
+reports no folder for it until you start a fresh session there. On Linux and
+macOS the working directory is tracked live.</p>
 </li>
 <li><p>To <em>drive</em> sessions from this box as well — the whole fleet in a terminal
 switcher and grid — the <code>ccs</code> client is one more command:</p>

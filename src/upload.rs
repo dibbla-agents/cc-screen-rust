@@ -19,12 +19,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
-use crate::confine::{resolve_create_under, resolve_existing_under, safe_rel};
+use crate::confine::{resolve_create_under, safe_rel, try_resolve_existing_under, Resolved};
 use crate::engine::AppState;
 
 type R = Result<Response, (StatusCode, String)>;
 fn e(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
     (code, msg.into())
+}
+
+/// Resolve an existing path under `root`, splitting escape (403) from gone (404)
+/// — see `files::resolve_path` and proposal 0079 Part A.
+fn resolve_dir(root: &Path, p: &str, outside: &str, gone: &str) -> Result<PathBuf, (StatusCode, String)> {
+    try_resolve_existing_under(root, p).map_err(|r| match r {
+        Resolved::Outside => e(StatusCode::FORBIDDEN, outside),
+        Resolved::Missing => e(StatusCode::NOT_FOUND, gone),
+    })
 }
 
 fn upload_root(app: &AppState, session: &str) -> Result<PathBuf, (StatusCode, String)> {
@@ -33,8 +42,19 @@ fn upload_root(app: &AppState, session: &str) -> Result<PathBuf, (StatusCode, St
         return Ok(app.inner.home.clone());
     }
     let sess = app.get(session).ok_or_else(|| e(StatusCode::NOT_FOUND, "unknown session"))?;
-    resolve_existing_under(&app.inner.home, &sess.live_cwd())
-        .ok_or_else(|| e(StatusCode::FORBIDDEN, "session cwd outside home"))
+    let cwd = sess.live_cwd();
+    // 0079 D1: an agent that can't read the session's cwd says so, rather than
+    // handing a stale path to the resolver (which used to answer 403 — the exact
+    // renamed-folder case for a terminal-pane drop).
+    if cwd.trim().is_empty() {
+        return Err(e(StatusCode::NOT_FOUND, format!("session cwd unknown: {session}")));
+    }
+    resolve_dir(
+        &app.inner.home,
+        &cwd,
+        "session cwd outside home",
+        "session cwd no longer exists",
+    )
 }
 
 // ── POST /api/upload/check ───────────────────────────────────────────────────
@@ -51,7 +71,7 @@ pub struct CheckReq {
 pub async fn upload_check(State(app): State<AppState>, Json(req): Json<CheckReq>) -> R {
     let home = app.inner.home.clone();
     let root = upload_root(&app, &req.session)?;
-    let dir = resolve_existing_under(&root, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
+    let dir = resolve_dir(&root, &req.dir, "dir outside allowed root", "dir not found")?;
     let mut exists: Vec<String> = Vec::new();
     for n in &req.names {
         let Some(rel) = safe_rel(n) else { continue };
@@ -102,9 +122,11 @@ pub async fn upload(
 ) -> R {
     let home = app.inner.home.clone();
     let root = upload_root(&app, &q.session)?;
-    let dir = resolve_existing_under(&root, &q.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside allowed root"))?;
+    let dir = resolve_dir(&root, &q.dir, "dir outside allowed root", "dir not found")?;
+    // Non-existence is now caught by the resolver above (404), so this arm is
+    // what it always meant: the path is there but isn't a directory.
     if !dir.is_dir() {
-        return Err(e(StatusCode::BAD_REQUEST, "dir does not exist"));
+        return Err(e(StatusCode::BAD_REQUEST, "not a directory"));
     }
 
     let mut modes: HashMap<String, String> = HashMap::new();

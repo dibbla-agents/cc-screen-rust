@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { resolveWatchDir, buildTreeFilter, type DirContents, type TreeSection } from "./dirTree";
+import {
+  resolveWatchDir,
+  rebasePath,
+  rebaseExpanded,
+  buildTreeFilter,
+  type DirContents,
+  type TreeSection,
+} from "./dirTree";
 import type { DirEntry, FileEntry } from "../api";
 
 // resolveWatchDir maps an /api/watch frame's `dir` to the cache key to re-list.
@@ -33,6 +40,86 @@ describe("resolveWatchDir", () => {
     // A pathological cache holding both shapes: the as-is key wins.
     const both = new Set(["/a/", "/a"]);
     expect(resolveWatchDir("/a/", (k) => both.has(k))).toBe("/a/");
+  });
+});
+
+// rebasePath is the substitution that makes a renamed project folder invisible
+// (proposal 0079 Part C). It must move what genuinely sits under the old cwd,
+// refuse everything else, and never invent a path shape that [0034]'s watch
+// lookup would silently drop.
+describe("rebasePath", () => {
+  const from = "/home/u/proj-a";
+  const to = "/home/u/proj-b";
+
+  it("moves a file under the old cwd onto the new one", () => {
+    expect(rebasePath("/home/u/proj-a/notes.md", from, to)).toBe("/home/u/proj-b/notes.md");
+  });
+
+  it("moves a deeply nested path, preserving the whole relative tail", () => {
+    expect(rebasePath("/home/u/proj-a/src/x/y.ts", from, to)).toBe("/home/u/proj-b/src/x/y.ts");
+  });
+
+  it("moves the cwd itself", () => {
+    expect(rebasePath(from, from, to)).toBe(to);
+  });
+
+  it("refuses a path that only shares a name prefix — not a path component", () => {
+    // The bug a plain startsWith() would ship: proj-a2 is a sibling, not a child.
+    expect(rebasePath("/home/u/proj-a2/notes.md", from, to)).toBeNull();
+  });
+
+  it("refuses a path outside the cwd — its relationship to it was incidental", () => {
+    expect(rebasePath("/home/u/notes/todo.md", from, to)).toBeNull();
+  });
+
+  it("refuses when the cwd hasn't changed, so an unchanged session costs nothing", () => {
+    expect(rebasePath("/home/u/proj-a/notes.md", from, from)).toBeNull();
+    expect(rebasePath("/home/u/proj-a/notes.md", from, from + "/")).toBeNull();
+  });
+
+  it("refuses when either end is missing (a pre-0079 entry has no cwd)", () => {
+    expect(rebasePath("/home/u/proj-a/notes.md", "", to)).toBeNull();
+    expect(rebasePath("/home/u/proj-a/notes.md", from, "")).toBeNull();
+    expect(rebasePath("", from, to)).toBeNull();
+  });
+
+  it("normalizes trailing slashes on both ends — no '//' in the result", () => {
+    // [0034]'s path-shape trap: a double slash reads fine and then never
+    // matches a watch frame or a cache key again.
+    expect(rebasePath("/home/u/proj-a/notes.md", from + "/", to + "/")).toBe(
+      "/home/u/proj-b/notes.md"
+    );
+    expect(rebasePath("/home/u/proj-a/notes.md", from, to + "/")).not.toContain("//");
+  });
+});
+
+describe("rebaseExpanded", () => {
+  const from = "/home/u/proj-a";
+  const to = "/home/u/proj-b";
+
+  it("carries the expansion over to the renamed folder", () => {
+    expect(rebaseExpanded([from, `${from}/src`, `${from}/src/deep`], from, to)).toEqual([
+      to,
+      `${to}/src`,
+      `${to}/src/deep`,
+    ]);
+  });
+
+  it("keeps entries that don't rebase rather than dropping them", () => {
+    expect(rebaseExpanded([`${from}/src`, "/home/u/notes"], from, to)).toEqual([
+      `${to}/src`,
+      "/home/u/notes",
+    ]);
+  });
+
+  it("is a no-op when there's nothing to rebase onto", () => {
+    const paths = [from, `${from}/src`];
+    expect(rebaseExpanded(paths, "", to)).toEqual(paths);
+    expect(rebaseExpanded(paths, from, from)).toEqual(paths);
+  });
+
+  it("de-duplicates when two entries collapse onto one path", () => {
+    expect(rebaseExpanded([`${from}/src`, `${to}/src`], from, to)).toEqual([`${to}/src`]);
   });
 });
 

@@ -1227,11 +1227,17 @@ export class FileNotEditable extends Error {
 }
 
 // readFile loads a text file's contents for the editor. Throws FileNotEditable
-// on a binary file (415), or a generic Error otherwise.
+// on a binary file (415), or an ApiError otherwise.
+//
+// Every file endpoint below throws ApiError rather than a bare Error (proposal
+// 0079 B1): the message is unchanged, so every existing errMsg() call site
+// renders identically, but `e.status` is now available — which is what lets the
+// editor tell "that path is gone" (404) from "that path is refused" (403) and
+// heal instead of latching onto a dead path forever.
 export async function readFile(path: string, machine?: string): Promise<FileReadResp> {
   const r = await fetch(withMachine(`/api/file/read?path=${encodeURIComponent(path)}`, machine));
   if (r.status === 415) throw new FileNotEditable();
-  if (!r.ok) throw new Error((await r.text()).trim() || `read: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `read: ${r.status}`);
   return r.json();
 }
 
@@ -1257,7 +1263,7 @@ export async function writeFile(
     body: JSON.stringify({ path, content, baseMtime: baseMtime ?? 0 }),
   });
   if (r.status === 409) throw new FileChangedOnDisk();
-  if (!r.ok) throw new Error((await r.text()).trim() || `write: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `write: ${r.status}`);
   return r.json();
 }
 
@@ -1269,7 +1275,7 @@ export async function deleteFile(path: string, machine?: string): Promise<void> 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path }),
   });
-  if (!r.ok) throw new Error((await r.text()).trim() || `delete: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `delete: ${r.status}`);
 }
 
 // makeDir creates a folder named `name` inside `dir` (both under $HOME).
@@ -1279,7 +1285,7 @@ export async function makeDir(dir: string, name: string, machine?: string): Prom
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dir, name }),
   });
-  if (!r.ok) throw new Error((await r.text()).trim() || `mkdir: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `mkdir: ${r.status}`);
 }
 
 // removeDir deletes a folder (under $HOME). By default only an empty folder is
@@ -1291,7 +1297,7 @@ export async function removeDir(path: string, recursive = false, machine?: strin
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, recursive }),
   });
-  if (!r.ok && r.status !== 204) throw new Error((await r.text()).trim() || `rmdir: ${r.status}`);
+  if (!r.ok && r.status !== 204) throw new ApiError(r.status, (await r.text()).trim() || `rmdir: ${r.status}`);
 }
 
 // renamePath renames a file or folder in place (same parent dir) to `name`.
@@ -1303,7 +1309,7 @@ export async function renamePath(path: string, name: string, machine?: string): 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, name }),
   });
-  if (!r.ok) throw new Error((await r.text()).trim() || `rename: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `rename: ${r.status}`);
   return r.json();
 }
 
@@ -1318,7 +1324,7 @@ export async function movePath(path: string, dest: string, machine?: string): Pr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path, dest }),
   });
-  if (!r.ok) throw new Error((await r.text()).trim() || `move: ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `move: ${r.status}`);
   return r.json();
 }
 

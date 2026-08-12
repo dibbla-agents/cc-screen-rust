@@ -181,6 +181,15 @@ machine's home directory. The tree is live (it follows filesystem changes as
 your agent works), and the editor previews markdown — handy for reading the
 plan or review docs agents produce.
 
+The editor remembers the file you had open per session, and it follows the
+session's folder: rename that folder — from the terminal, from the agent, from
+another client — and reopening the editor puts you back on the same file at its
+new location, with a short note saying so. (On Linux and macOS machines; a
+Windows machine reports the folder it started in, so see the note on the
+[Windows install](../install-windows/) page.) When a file is genuinely gone, the
+editor drops to the folder with a grey notice rather than an error, and forgets
+it — so it won't greet you with the same failure next time.
+
 ![Coworking on a file next to a live session](../img/web-cowork.png)
 
 ![The editor on a phone](../img/mobile-editor.png)

@@ -480,6 +480,7 @@ dependencies = [
  "cc-screen-summary",
  "futures-util",
  "http",
+ "libc",
  "mime_guess",
  "notify-debouncer-mini",
  "portable-pty",

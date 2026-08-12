@@ -277,11 +277,16 @@ pub struct RootQuery {
 
 pub async fn session_root(State(app): State<AppState>, Query(q): Query<RootQuery>) -> Json<Value> {
     let home = app.inner.home.to_string_lossy().to_string();
+    // $HOME stands in both when the session lookup fails and when the agent
+    // can't read a cwd for it (0079 D1: `live_cwd()` answers "" rather than a
+    // path it knows is wrong). The client feeds `root` straight back into the
+    // path endpoints, so an empty root would resolve to nothing.
     let root = q
         .session
         .as_deref()
         .and_then(|s| app.get(s))
         .map(|s| s.live_cwd())
+        .filter(|c| !c.trim().is_empty())
         .unwrap_or_else(|| home.clone());
     // `machine` lets a direct client (no hub) name this box in its UI. In hub
     // mode the client uses `/api/machines` instead (the hub's relay of this route

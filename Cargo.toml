@@ -78,6 +78,20 @@ cc-screen-summary = { path = "crates/summary" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 http = "1"
 
+# macOS has no /proc, so `Session::live_cwd` used to fall back to the launch dir
+# forever — a Mac agent reported the wrong folder after any `cd` and a
+# permanently wrong one after a rename (proposal 0079 D2). `proc_pidinfo(
+# PROC_PIDVNODEPATHINFO)` is the kernel's answer to the same question
+# /proc/<pid>/cwd answers, and libc already declares it plus the struct it
+# fills. 0079 D2 recommended the `libproc` wrapper instead; that crate runs
+# bindgen at build time against a HARDCODED CommandLineTools SDK include path,
+# which would make every mac release build depend on libclang and on one
+# particular Xcode layout. One documented `unsafe` FFI call is the smaller
+# risk. (Shelling out to `lsof`, the other alternative 0079 weighs, would put a
+# fork/exec on a function called on every session-list poll.)
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [profile.release]
 opt-level = 2
 

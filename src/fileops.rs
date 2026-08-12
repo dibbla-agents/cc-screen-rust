@@ -13,13 +13,36 @@ use cc_screen_protocol::hub::CmdResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::confine::{atomic_write, resolve_create_under, resolve_existing_under};
+use crate::confine::{atomic_write, resolve_create_under, try_resolve_existing_under, Resolved};
 use crate::engine::AppState;
 
 const MAX_EDIT_BYTES: u64 = 5 << 20;
 
 fn err(code: u16, msg: impl Into<String>) -> CmdResult {
     CmdResult::Error { code, msg: msg.into() }
+}
+
+/// Resolve an existing path under the confinement root, mapping the typed
+/// failure onto a status code (proposal 0079 Part A). Mirror of
+/// `files::resolve_path` — the two file planes are independent implementations,
+/// so the change lands twice on purpose. `403` means escaped the root and never
+/// discloses existence; `404` means inside the root but gone.
+fn resolve_path(home: &Path, p: &str, outside: &str) -> Result<PathBuf, CmdResult> {
+    try_resolve_existing_under(home, p).map_err(|r| match r {
+        Resolved::Outside => err(403, outside),
+        Resolved::Missing => err(404, "not found"),
+    })
+}
+
+/// The live cwd of a named session, or `404` when the agent cannot read one
+/// (0079 Part D1). Never falls back to $HOME.
+fn session_cwd(app: &AppState, name: &str) -> Result<String, CmdResult> {
+    let Some(sess) = app.get(name) else { return Err(err(404, "unknown session")) };
+    let cwd = sess.live_cwd();
+    if cwd.trim().is_empty() {
+        return Err(err(404, format!("session cwd unknown: {name}")));
+    }
+    Ok(cwd)
 }
 
 fn home(app: &AppState) -> PathBuf {
@@ -81,8 +104,9 @@ struct PathArgs {
 fn dirs(app: &AppState, args: Value) -> CmdResult {
     let a: PathArgs = serde_json::from_value(args).unwrap_or_default();
     let home = home(app);
-    let Some(dir) = resolve_existing_under(&home, &a.path) else {
-        return err(403, "path outside home");
+    let dir = match resolve_path(&home, &a.path, "path outside home") {
+        Ok(d) => d,
+        Err(c) => return c,
     };
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -119,10 +143,13 @@ struct DirSearchArgs {
 fn dirs_search(app: &AppState, args: Value) -> CmdResult {
     let a: DirSearchArgs = serde_json::from_value(args).unwrap_or_default();
     let home = home(app);
-    let Some(root) = resolve_existing_under(&home, &a.root) else {
-        return err(403, "path outside home");
+    let root = match resolve_path(&home, &a.root, "path outside home") {
+        Ok(r) => r,
+        Err(c) => return c,
     };
-    let recent: HashSet<PathBuf> = app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect();
+    // A session whose cwd the agent can't read reports "" (0079 D1) — not a path.
+    let recent: HashSet<PathBuf> =
+        app.list().iter().map(|s| s.live_cwd()).filter(|c| !c.is_empty()).map(PathBuf::from).collect();
     let hits = crate::dirsearch::search(&home, &root, &a.q, &recent, crate::dirsearch::Kind::Dirs);
     CmdResult::Json(crate::dirsearch::results_json(&home, &root, &hits))
 }
@@ -145,14 +172,18 @@ fn files_search(app: &AppState, args: Value) -> CmdResult {
     let home = home(app);
     let mut root = a.root.trim().to_string();
     if root.is_empty() && !a.session.trim().is_empty() {
-        if let Some(sess) = app.get(a.session.trim()) {
-            root = sess.live_cwd();
+        match session_cwd(app, a.session.trim()) {
+            Ok(c) => root = c,
+            Err(c) => return c,
         }
     }
-    let Some(root) = resolve_existing_under(&home, &root) else {
-        return err(403, "path outside home");
+    let root = match resolve_path(&home, &root, "path outside home") {
+        Ok(r) => r,
+        Err(c) => return c,
     };
-    let recent: HashSet<PathBuf> = app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect();
+    // A session whose cwd the agent can't read reports "" (0079 D1) — not a path.
+    let recent: HashSet<PathBuf> =
+        app.list().iter().map(|s| s.live_cwd()).filter(|c| !c.is_empty()).map(PathBuf::from).collect();
     let hits = crate::dirsearch::search(&home, &root, &a.q, &recent, crate::dirsearch::Kind::Files);
     CmdResult::Json(crate::dirsearch::files_results_json(&home, &root, &hits))
 }
@@ -164,16 +195,17 @@ fn files(app: &AppState, args: Value) -> CmdResult {
     // Resolution order: path → session cwd → share dir.
     let mut q_path = a.path.trim().to_string();
     if q_path.is_empty() && !a.session.trim().is_empty() {
-        match app.get(a.session.trim()) {
-            Some(sess) => q_path = sess.live_cwd(),
-            None => return err(404, "unknown session"),
+        match session_cwd(app, a.session.trim()) {
+            Ok(c) => q_path = c,
+            Err(c) => return c,
         }
     }
     if q_path.is_empty() {
         q_path = share.to_string_lossy().into_owned();
     }
-    let Some(dir) = resolve_existing_under(&home, &q_path) else {
-        return err(403, "path outside home");
+    let dir = match resolve_path(&home, &q_path, "path outside home") {
+        Ok(d) => d,
+        Err(c) => return c,
     };
     let rd = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -213,12 +245,16 @@ fn files(app: &AppState, args: Value) -> CmdResult {
 }
 
 /// A path arg that must resolve under home AND not be home itself (read/write/
-/// delete target a file, never the home dir).
+/// delete target a file, never the home dir). Home-as-a-file is a "not a regular
+/// file" condition rather than a confinement one, so it keeps its `403` instead
+/// of sliding into the new `404` (0079 A5).
 fn resolve_file(app: &AppState, raw: &str) -> Result<PathBuf, CmdResult> {
     let home = home(app);
-    resolve_existing_under(&home, raw)
-        .filter(|p| *p != home)
-        .ok_or_else(|| err(403, "path outside home"))
+    let path = resolve_path(&home, raw, "path outside home")?;
+    if path == home {
+        return Err(err(403, "path outside home"));
+    }
+    Ok(path)
 }
 
 fn read(app: &AppState, args: Value) -> CmdResult {
@@ -339,8 +375,9 @@ fn mkdir(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(dir) = resolve_existing_under(&home, &a.dir) else {
-        return err(403, "dir outside home");
+    let dir = match resolve_path(&home, &a.dir, "dir outside home") {
+        Ok(d) => d,
+        Err(c) => return c,
     };
     let name = a.name.trim();
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
@@ -367,8 +404,9 @@ fn rmdir(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(dir) = resolve_existing_under(&home, &a.path) else {
-        return err(403, "path outside home");
+    let dir = match resolve_path(&home, &a.path, "path outside home") {
+        Ok(d) => d,
+        Err(c) => return c,
     };
     if dir == home {
         return err(400, "refusing to delete home");
@@ -396,8 +434,9 @@ fn rename(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(src) = resolve_existing_under(&home, &a.path) else {
-        return err(403, "path outside home");
+    let src = match resolve_path(&home, &a.path, "path outside home") {
+        Ok(s) => s,
+        Err(c) => return c,
     };
     if src == home {
         return err(400, "refusing to rename home");
@@ -440,11 +479,13 @@ fn move_path(app: &AppState, args: Value) -> CmdResult {
         Err(e) => return err(400, e.to_string()),
     };
     let home = home(app);
-    let Some(src) = resolve_existing_under(&home, &a.path) else {
-        return err(403, "path outside home");
+    let src = match resolve_path(&home, &a.path, "path outside home") {
+        Ok(s) => s,
+        Err(c) => return c,
     };
-    let Some(dst_dir) = resolve_existing_under(&home, &a.dest) else {
-        return err(403, "dest outside home");
+    let dst_dir = match resolve_path(&home, &a.dest, "dest outside home") {
+        Ok(d) => d,
+        Err(c) => return c,
     };
     if src == home {
         return err(400, "refusing to move home");
@@ -625,6 +666,45 @@ mod tests {
             let r = run(&app, "dirs", json!({ "path": bad }));
             assert!(matches!(r, CmdResult::Error { code: 403, .. }), "{bad} should be 403: {r:?}");
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A path INSIDE the root that is simply gone answers 404 — not the 403 that
+    /// used to accuse an ordinary `mv` of a confinement violation (proposal 0079
+    /// Part A). $HOME-as-a-file keeps its 403: that's "not a regular file", not
+    /// a confinement failure (A5).
+    #[test]
+    fn missing_paths_inside_home_are_404_not_403() {
+        let tmp = std::env::temp_dir().join(format!("ccr-fileops-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let app = app(&tmp);
+        let gone = tmp.join("proj-renamed-away/notes.md").to_string_lossy().into_owned();
+        let gone_dir = tmp.join("proj-renamed-away").to_string_lossy().into_owned();
+
+        for (op, args) in [
+            ("dirs", json!({ "path": gone_dir })),
+            ("files", json!({ "path": gone_dir })),
+            ("read", json!({ "path": gone })),
+            ("delete", json!({ "path": gone })),
+            ("rmdir", json!({ "path": gone_dir })),
+            ("rename", json!({ "path": gone, "name": "x.md" })),
+            ("move", json!({ "path": gone, "dest": tmp.join("proj").to_string_lossy() })),
+            ("move", json!({ "path": tmp.join("proj").to_string_lossy(), "dest": gone_dir })),
+        ] {
+            let r = run(&app, op, args);
+            assert!(matches!(r, CmdResult::Error { code: 404, .. }), "{op} on a gone path → 404: {r:?}");
+        }
+
+        // …while everything outside the root stays one undifferentiated 403,
+        // whether or not it exists.
+        for bad in ["/etc/passwd", "/etc/definitely-not-here-0079"] {
+            let r = run(&app, "read", json!({ "path": bad }));
+            assert!(matches!(r, CmdResult::Error { code: 403, .. }), "{bad} → 403: {r:?}");
+        }
+        let r = run(&app, "read", json!({ "path": tmp.to_string_lossy() }));
+        assert!(matches!(r, CmdResult::Error { code: 403, .. }), "home as a file → 403: {r:?}");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

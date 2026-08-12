@@ -99,10 +99,13 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
         }
         Cmd::SessionRoot { session } => {
             let home = app.inner.home.to_string_lossy().to_string();
+            // Same $HOME stand-in as the REST twin for an unknown or unreadable
+            // cwd — an empty root would resolve to nothing client-side (0079 D1).
             let root = session
                 .as_deref()
                 .and_then(|s| app.get(s))
                 .map(|s| s.live_cwd())
+                .filter(|c| !c.trim().is_empty())
                 .unwrap_or_else(|| home.clone());
             CmdResult::SessionRoot { root, home }
         }

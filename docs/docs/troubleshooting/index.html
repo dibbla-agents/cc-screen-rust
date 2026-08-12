@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Troubleshooting — cc-screen docs</title>
-<meta name="description" content="Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, and proxy 403s." />
+<meta name="description" content="Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, an editor stuck on &quot;path outside home&quot;, and proxy 403s." />
 <meta name="theme-color" content="#0b111a" />
 <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -294,6 +294,17 @@ console and type:</p>
 <p>A tab that starts on WebGL can move to <code>&quot;dom&quot;</code> on its own if the browser
 drops the GPU context (iOS does this when a tab is backgrounded). That&#39;s the
 fallback working as designed, not a fault.</p>
+<h2 id="path-outside-home-when-opening-the-editor">&quot;path outside home&quot; when opening the editor</h2>
+<p>Nothing left your home directory. That message is what an <strong>older machine</strong>
+answers for a file that has simply <em>moved</em> — you renamed the folder your session
+is working in, or deleted the file — and it keeps answering it every time you
+open the editor, because the editor remembers the file you had open.</p>
+<p><strong>Fix:</strong> update the agent on that machine (<code>cc-screen-rust update</code>, then start a
+fresh session, or use the machine&#39;s dashboard row). A current machine says &quot;not found&quot;
+for a path that&#39;s gone, and a current web app repairs it for you: it reopens the
+same file at its new location after a folder rename, and drops to the folder with
+a grey notice when the file is really gone. In the meantime, clicking any file in
+the tree clears the banner for that session.</p>
 <h2 id="the-page-looks-stale-after-an-update">The page looks stale after an update</h2>
 <p>The web app is a PWA; after a deploy the service worker can serve the old
 bundle for one more load. Close and reopen the app (or reload twice).</p>

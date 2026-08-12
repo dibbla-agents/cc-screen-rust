@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -655,17 +655,96 @@ impl Session {
         }
     }
 
-    /// The session's live working dir (the agent may have `cd`'d). Read from
-    /// /proc, falling back to the launch dir — the analogue of tmux's
-    /// #{pane_current_path}.
+    /// The session's live working dir (the agent may have `cd`'d) — the analogue
+    /// of tmux's `#{pane_current_path}`. Asked of the kernel where we can
+    /// (`/proc/<pid>/cwd` on Linux, `proc_pidinfo` on macOS), falling back to the
+    /// directory the session was launched in.
+    ///
+    /// **It never returns a path it knows is wrong** (proposal 0079 D1). Both
+    /// sources can go stale under an ordinary `mv`: `/proc` hands back a literal
+    /// `"<path> (deleted)"` string for an unlinked cwd, and `launch_dir` is
+    /// captured once at spawn and never re-read. Either way the answer is `""`,
+    /// the established "unknown" sentinel on the wire (`SessionInfo.cwd` is
+    /// `skip_serializing_if = "String::is_empty"`, see 0025) — which the path
+    /// endpoints turn into a `404` rather than silently rooting a session's file
+    /// tree at `$HOME`, and the display surfaces render without a folder crumb.
     pub fn live_cwd(&self) -> String {
         if let Some(pid) = self.pid {
-            if let Ok(p) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-                return p.to_string_lossy().into_owned();
+            if let Some(p) = proc_cwd(pid) {
+                if Path::new(&p).is_dir() {
+                    return p;
+                }
             }
         }
-        self.launch_dir.clone()
+        // The launch dir is the fallback, but only when it is still there — a
+        // renamed launch dir is the input that used to produce the "path outside
+        // home" 403 on /api/files?session=…
+        if !self.launch_dir.is_empty() && Path::new(&self.launch_dir).is_dir() {
+            return self.launch_dir.clone();
+        }
+        String::new()
     }
+}
+
+/// The kernel's view of `pid`'s current working directory, or `None` where we
+/// have no way to ask (or the answer is known-stale). See [`Session::live_cwd`].
+#[cfg(target_os = "linux")]
+fn proc_cwd(pid: u32) -> Option<String> {
+    let link = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    let s = link.to_string_lossy().into_owned();
+    // An unlinked cwd reads back as "<path> (deleted)". That is a message, not a
+    // path — treat it as gone rather than feeding it to the confinement resolver.
+    if s.ends_with(" (deleted)") {
+        return None;
+    }
+    Some(s)
+}
+
+/// macOS has no `/proc`; `proc_pidinfo(PROC_PIDVNODEPATHINFO)` answers the same
+/// question. Before this a Mac agent reported its *launch* dir forever, so the
+/// file tree pointed at the wrong folder after any `cd` (proposal 0079 D2).
+#[cfg(target_os = "macos")]
+fn proc_cwd(pid: u32) -> Option<String> {
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is
+    // exactly that large and fully initialized (zeroed) beforehand. We read it
+    // only when the call reports it filled the whole struct, and no pointer
+    // outlives this frame. A dead pid yields -1/0, not a write.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast::<libc::c_void>(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    // vip_path is a NUL-terminated C string in a fixed MAXPATHLEN buffer, typed
+    // as [[c_char; 32]; 32] only because libc predates const generics.
+    let bytes: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|&c| c as u8)
+        .take_while(|&c| c != 0)
+        .collect();
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Everywhere else (Windows today — see proposal 0045, which owns the real-cwd
+/// query there) we have no kernel query, so `live_cwd` uses its verified
+/// launch-dir fallback.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn proc_cwd(_pid: u32) -> Option<String> {
+    None
 }
 
 /// Output pump: blocking-read the PTY and fan out to the emulator + broadcast.
@@ -1237,6 +1316,50 @@ mod tests {
         }
     }
 
+
+    /// Proposal 0079 D1. `live_cwd()` must never hand out a path it knows is
+    /// wrong: on a kernel we can ask (`/proc`, `proc_pidinfo`) it follows the
+    /// session through a rename, and when the directory is gone it answers the
+    /// `""` sentinel rather than a stale path or `/proc`'s `" (deleted)"` string
+    /// — which the file endpoints used to answer as `403 path outside home`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_cwd_follows_a_rename_and_empties_when_the_dir_is_gone() {
+        let tmp = std::env::temp_dir().join(format!("ccr-livecwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let proj_a = tmp.join("proj-a");
+        let proj_b = tmp.join("proj-b");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        let tool = shell_tool("sleep 30");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "work", &proj_a.to_string_lossy(), vec![], false, true).unwrap();
+        let sess = state.get(&name).unwrap();
+        let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        assert_eq!(real(std::path::Path::new(&sess.live_cwd())), real(&proj_a));
+
+        // The rename the whole proposal is about. Where we can ask the kernel,
+        // the reported cwd moves with the session.
+        std::fs::rename(&proj_a, &proj_b).unwrap();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(real(std::path::Path::new(&sess.live_cwd())), real(&proj_b), "cwd follows the rename");
+
+        // Gone for good: no path, no " (deleted)" marker, no stale launch dir.
+        std::fs::remove_dir_all(&proj_b).unwrap();
+        let cwd = sess.live_cwd();
+        assert!(cwd.is_empty(), "a deleted cwd reports the unknown sentinel, got {cwd:?}");
+
+        sess.kill();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // Proposal 0050 C3. `restore_all`'s own comment says a session skipped for a
     // missing CLI comes back once the CLI is installed — nothing performed that

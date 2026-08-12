@@ -132,6 +132,54 @@ export function resolveWatchDir(dir: string, has: (key: string) => boolean): str
   return null;
 }
 
+const trimSlash = (p: string): string => (p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p);
+
+// Re-point a remembered path from the cwd it was recorded under onto the
+// session's current cwd — the string substitution that makes a renamed project
+// folder invisible (proposal 0079 Part C). It is the same prefix rewrite
+// `ctxRename` / `onMoveNode` already perform for a move the app itself made
+// ([0012]); the only new thing is applying it to a rename that happened out of
+// band.
+//
+// Returns null — meaning "not rebasable, leave it alone" — when either cwd is
+// missing, when they're the same, or when the path isn't under `from`. That last
+// guard is deliberate: a remembered path elsewhere in $HOME (you navigated out of
+// the project into ~/notes) has only an incidental relationship to the cwd, and
+// moving it would be a guess.
+//
+// Both ends are trailing-slash-normalized before comparison and concatenation.
+// That is not cosmetic: [0034] documents that the tree's cache key, the watched
+// dir and the reported cwd can normalize differently, and a mismatch is dropped
+// silently by `resolveWatchDir`'s `has()` guard — so a rebase that invented a
+// double slash would produce a path that reads fine and never receives a watch
+// frame again.
+export function rebasePath(path: string, from: string, to: string): string | null {
+  if (!path || !from || !to) return null;
+  const a = trimSlash(from);
+  const b = trimSlash(to);
+  if (a === b) return null;
+  if (path === a) return b;
+  if (!path.startsWith(a + "/")) return null;
+  return b + path.slice(a.length);
+}
+
+// The expanded-folder set is the other half of "where you were", and it rebases
+// by the same rule (0079 C6). Unlike the open file this needs no verification
+// step — a wrong entry costs an unexpanded folder, and per-folder load failures
+// are already swallowed — so paths that don't rebase are simply kept as they are.
+export function rebaseExpanded(paths: string[], from: string, to: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const next = rebasePath(p, from, to) ?? p;
+    if (!seen.has(next)) {
+      seen.add(next);
+      out.push(next);
+    }
+  }
+  return out;
+}
+
 // useDirTree owns the cache/expand/loading state and the lazy fetches. It
 // bootstraps on `open` (a /api/files listing gives share + home; one section
 // auto-expands per `opts.autoExpand`), and exposes `toggle` for both section
@@ -179,6 +227,13 @@ export function useDirTree(
   const expandedRef = useRef<Set<string>>(expanded);
   expandedRef.current = expanded;
   const prevKeyRef = useRef<string | null>(null);
+  // The cwd this expansion belongs to, saved alongside it (proposal 0079 C2).
+  // `useDirTree` owns the field rather than `EditorOverlay` because `projectPath`
+  // is this hook's state, and because the tree persists a session's `expanded`
+  // even when the editor never opened a file there — the common phone case, and
+  // exactly the sessions C6's rebase would otherwise silently no-op on.
+  const projectPathRef = useRef("");
+  projectPathRef.current = projectPath;
 
   // Real-time filesystem watch (shared with the editor's open-file watcher via
   // the returned `watch` handle). Active only while the tree is `open`.
@@ -271,17 +326,24 @@ export function useDirTree(
     // value, which is exactly the outgoing state we want to keep.
     const curKey = viewerKey(machine, currentSession);
     if (prevKeyRef.current && prevKeyRef.current !== curKey) {
-      writeViewerState(prevKeyRef.current, { expanded: [...expandedRef.current] });
+      writeViewerState(prevKeyRef.current, {
+        expanded: [...expandedRef.current],
+        // Only when we have one — an empty projectPath is "not resolved yet",
+        // not "the cwd is now nothing", and must not overwrite a good record.
+        ...(projectPathRef.current ? { cwd: projectPathRef.current } : {}),
+      });
     }
     prevKeyRef.current = curKey;
     // Restore this session's remembered open folders (best-effort: a folder that
     // no longer exists just renders nothing). Captured before the wipe so the
     // async loads below can fan it back out.
-    const remembered = currentSession ? readViewerState(curKey)?.expanded ?? [] : [];
+    const stored = currentSession ? readViewerState(curKey) : null;
+    const rememberedRaw = stored?.expanded ?? [];
+    const storedCwd = stored?.cwd ?? "";
     // Re-fetch each remembered folder (except the already-loaded root) so its and
     // its children's rows repaint. Swallow per-folder failures — a folder that's
     // since been deleted just stays empty rather than rejecting.
-    const loadRemembered = (rootPath: string) => {
+    const loadRemembered = (rootPath: string, remembered: string[]) => {
       for (const p of remembered) {
         if (p && p !== rootPath) void loadByPath(p).catch(() => {});
       }
@@ -302,8 +364,13 @@ export function useDirTree(
       loadBySession(currentSession)
         .then((r) => {
           setProjectPath(r.path);
+          // The session's folder may have been renamed while we were away; the
+          // listing is rooted at the NEW path, so carry the remembered expansion
+          // over to it rather than leaving the project section looking empty
+          // (0079 C6). A no-op when nothing moved.
+          const remembered = rebaseExpanded(rememberedRaw, storedCwd, r.path);
           setExpanded(new Set([r.path, ...remembered]));
-          loadRemembered(r.path);
+          loadRemembered(r.path, remembered);
         })
         .catch((e) => setErrs((p) => ({ ...p, project: errMsg(e) })));
       return;
@@ -311,8 +378,8 @@ export function useDirTree(
     loadByPath("")
       .then((r) => {
         const base = autoExpand === "share" ? [r.path] : [];
-        setExpanded(new Set([...base, ...remembered]));
-        loadRemembered(r.path);
+        setExpanded(new Set([...base, ...rememberedRaw]));
+        loadRemembered(r.path, rememberedRaw);
       })
       .catch((e) => setErrs((p) => ({ ...p, share: errMsg(e) })));
   }, [open, autoExpand, currentSession, machine, loadByPath, loadBySession]);
@@ -325,7 +392,10 @@ export function useDirTree(
     if (!open) return;
     const flush = () => {
       if (prevKeyRef.current) {
-        writeViewerState(prevKeyRef.current, { expanded: [...expandedRef.current] });
+        writeViewerState(prevKeyRef.current, {
+          expanded: [...expandedRef.current],
+          ...(projectPathRef.current ? { cwd: projectPathRef.current } : {}),
+        });
       }
     };
     const onVis = () => { if (document.visibilityState === "hidden") flush(); };

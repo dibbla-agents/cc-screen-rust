@@ -78,7 +78,12 @@ dashboard row to detach it from your account.
 ## Notes
 
 - The session shell on Windows is PowerShell; sessions and the file
-  browser/editor work the same as on macOS/Linux.
+  browser/editor work the same as on macOS/Linux, with one exception: a
+  Windows machine reports each session's **launch** directory rather than the
+  directory it is currently in. So `cd`-ing inside a session doesn't move the
+  file tree, and if you rename the folder a session started in, the machine
+  reports no folder for it until you start a fresh session there. On Linux and
+  macOS the working directory is tracked live.
 - To *drive* sessions from this box as well — the whole fleet in a terminal
   switcher and grid — the `ccs` client is one more command:
 

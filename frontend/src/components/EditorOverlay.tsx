@@ -30,6 +30,7 @@ import {
   searchFiles,
   FileNotEditable,
   FileChangedOnDisk,
+  ApiError,
   type FileEntry,
   type FileSearchResult,
   type MachineInfo,
@@ -42,10 +43,11 @@ import {
   canOpenInEditor,
   fmtAge,
   useDirTree,
+  rebasePath,
   type DirTreeOpts,
   type TreeCtxInfo,
 } from "./dirTree";
-import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
+import { pruneViewerState, readViewerState, writeViewerState, viewerKey } from "./viewerState";
 import MarkdownEditor from "./MarkdownEditor";
 import { toggleTaskAt } from "../editor/livePreview";
 import EditorTree from "./EditorTree";
@@ -195,6 +197,22 @@ const loadAgentOpen = () => localStorage.getItem(AGENT_OPEN_KEY) !== "0";
 
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
+// The overlay's one transient pill slot: upload progress/result, and proposal
+// 0079's "your file moved" notice. Extracted so the two share a single fixed
+// position instead of overlapping at `bottom-6 left-1/2` — the caller decides
+// which one is showing, and an in-flight upload wins.
+function Pill({ children }: { children: ReactNode }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="pointer-events-none absolute bottom-6 left-1/2 z-[80] flex max-w-[90%] -translate-x-1/2 items-center gap-2.5 rounded-full border border-edge bg-bar/95 px-4 py-2 text-sm shadow-xl backdrop-blur"
+    >
+      {children}
+    </div>
+  );
+}
+
 // The editor reads the tree as a working-tree (vault) view, not a download
 // browser: the project root sits on top under its bare name and opens on its
 // own when the overlay mounts; Home and the share dropbox stay below, closed.
@@ -246,6 +264,24 @@ export default function EditorOverlay({
   // is mounted (reading view, PDF, empty).
   const editorViewRef = useRef<EditorView | null>(null);
   const [activePath, setActivePath] = useState<string | null>(initialPath);
+  // ── Proposal 0079: a remembered path that has moved must not latch ─────────
+  // Provenance. A path the USER asked for (a Files-sheet tap) must fail loudly;
+  // a path the APP guessed (restored from the per-session memory) is the app's
+  // problem to clean up. This holds the most recent guessed path, so the load
+  // effect's catch can tell the two apart.
+  const guessedPathRef = useRef<string | null>(null);
+  // A guessed path that came back 404. Held (spinner still up) instead of
+  // erroring, until the tree reports the session's current cwd and the rebase
+  // effect can try the same file at its new location — see B2's ordering note:
+  // healing on arrival would prune the path before Part C ever saw it.
+  const [pendingRebase, setPendingRebase] = useState<string | null>(null);
+  // Bumped to re-run the load effect for the same path (the rebase gave up, so
+  // put the original back through the loader — which will now heal).
+  const [loadSeq, setLoadSeq] = useState(0);
+  // One rebase attempt per path, or a candidate that also 404s would loop.
+  const rebaseTriedRef = useRef<string | null>(null);
+  // The grey, non-error pill: what happened, not what went wrong.
+  const [notice, setNotice] = useState("");
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(""); // last-saved/loaded content (for dirty)
   const [baseMtime, setBaseMtime] = useState(0);
@@ -748,6 +784,7 @@ export default function EditorOverlay({
   useEffect(() => {
     if (!open) return;
     if (initialPath) {
+      guessedPathRef.current = null; // the user asked for this one
       setActivePath(initialPath);
       return;
     }
@@ -757,6 +794,7 @@ export default function EditorOverlay({
     const restored = isDesktop
       ? readViewerState(viewerKey(fileMachine, session))?.activePath ?? null
       : null;
+    guessedPathRef.current = restored; // guessed: heal it rather than shout (0079 B2)
     setActivePath(restored);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialPath]);
@@ -780,6 +818,13 @@ export default function EditorOverlay({
       writeViewerState(prevSessionKey.current, { activePath: activePathRef.current });
       prevSessionKey.current = sessionKey;
       const restored = readViewerState(sessionKey)?.activePath ?? null;
+      // Guessed on EVERY form factor — unlike the fresh-open restore above, this
+      // one has never been desktop-gated, which is why the latch was reachable
+      // on a phone with no tree beside the editor to escape to (0079 B2).
+      guessedPathRef.current = restored;
+      setNotice("");
+      setPendingRebase(null);
+      rebaseTriedRef.current = null;
       setActivePath(restored);
       if (!restored) setTreePanelOpen(true); // phone: surface the tree
     }
@@ -849,21 +894,117 @@ export default function EditorOverlay({
         setName(r.name);
         setStatus("ready");
         setReading(false);
+        // A path that has loaded once is no longer a guess: if it disappears
+        // later and the user clicks it again, that's a request, and it must
+        // fail loudly rather than heal silently (0079 B2).
+        guessedPathRef.current = null;
+        rebaseTriedRef.current = null;
       })
       .catch((e) => {
         if (cancelled) return;
         if (e instanceof FileNotEditable) {
           setName(basename(activePath));
           setStatus("noteditable");
-        } else {
-          setError(errMsg(e));
-          setStatus("error");
+          return;
         }
+        // Proposal 0079 B2. A 404 on a path the APP restored is not an error —
+        // the folder under this session was probably renamed. Hold the spinner
+        // and hand off to the rebase effect; only heal (drop to the tree, grey
+        // pill, prune the memory) once that has had its chance. A path the USER
+        // opened, and any other status — 403, 409, 415 — still fails loudly.
+        const gone = e instanceof ApiError && e.status === 404;
+        const guessed = guessedPathRef.current === activePath;
+        if (gone && guessed) {
+          if (rebaseTriedRef.current !== activePath) {
+            rebaseTriedRef.current = activePath;
+            setPendingRebase(activePath);
+            setStatus("loading"); // B2: an existing status, already a spinner
+            return;
+          }
+          heal(activePath);
+          return;
+        }
+        setError(errMsg(e));
+        setStatus("error");
       });
     return () => {
       cancelled = true;
     };
-  }, [open, activePath, fileMachine]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activePath, fileMachine, loadSeq]);
+
+  // Give up on a remembered path: land on the tree with a grey notice and forget
+  // the entry NOW, rather than leaving the flush to write the dead path back on
+  // close — which is what made "path outside home" permanent (0079 B4).
+  function heal(dead: string) {
+    setNotice(`${basename(dead)} isn't there any more — showing the folder.`);
+    guessedPathRef.current = null;
+    rebaseTriedRef.current = null;
+    setActivePath(null);
+    setTreePanelOpen(true);
+    pruneViewerState(viewerKey(fileMachine, session));
+  }
+
+  // Proposal 0079 C3/C4 — rebase the held path onto the session's current cwd.
+  // Keyed on the tree resolving `projectPath`, so it never races the load effect:
+  // the stale read is issued synchronously off `activePath` while `projectPath`
+  // is still "" and only lands inside an async .then, so the read almost always
+  // loses that race. B2's hold is what keeps the path alive until we get here.
+  useEffect(() => {
+    if (!open || !pendingRebase) return;
+    const to = tree.projectPath;
+    if (!to) {
+      // Still resolving — keep holding, but not forever. If the tree never
+      // reports a cwd (the session's folder is gone, or there's no session to
+      // anchor on) the spinner has to resolve into the heal rather than spin.
+      // When it does arrive this effect re-runs and the cleanup drops the timer.
+      const t = window.setTimeout(() => {
+        setPendingRebase(null);
+        setLoadSeq((n) => n + 1);
+      }, 4000);
+      return () => window.clearTimeout(t);
+    }
+    const from = readViewerState(viewerKey(fileMachine, session))?.cwd ?? "";
+    const candidate = rebasePath(pendingRebase, from, to);
+    setPendingRebase(null);
+    if (!candidate) {
+      // Nothing to rebase onto (no recorded cwd, unchanged cwd, or the path sat
+      // outside the project). Put the original back through the loader; it will
+      // take the heal branch this time.
+      setLoadSeq((n) => n + 1);
+      return;
+    }
+    let cancelled = false;
+    // Verify before adopting: the rebase never produces a path we haven't just
+    // read successfully.
+    readFile(candidate, fileMachine)
+      .then(() => {
+        if (cancelled) return;
+        setNotice(
+          `${basename(from)} was renamed to ${basename(to)} — reopened ${basename(candidate)} there.`
+        );
+        guessedPathRef.current = candidate;
+        setActivePath(candidate);
+      })
+      .catch(() => {
+        // The candidate is no good. That does NOT mean the original is gone —
+        // the recorded cwd may simply be stale because the agent `cd`'d, in
+        // which case the original is still live and pruning it would destroy
+        // real state. Re-read it; heal only if that fails too.
+        if (!cancelled) setLoadSeq((n) => n + 1);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, pendingRebase, tree.projectPath, fileMachine, session]);
+
+  // The notice is transient, like the upload pill it borrows its geometry from.
+  useEffect(() => {
+    if (!notice) return;
+    const t = window.setTimeout(() => setNotice(""), 2800);
+    return () => window.clearTimeout(t);
+  }, [notice]);
 
   const doSave = useCallback(
     async (force = false) => {
@@ -1681,8 +1822,16 @@ export default function EditorOverlay({
         </div>
       )}
 
+      {/* role="alert" so assistive tech announces a failure that appears without
+          the user having moved focus — and so the E2E pass can assert its
+          ABSENCE after a rebase (proposal 0079 Part E). */}
       {error && (
-        <div className="border-b border-edge/40 bg-red-500/5 px-3 py-2 text-sm text-red-400">{error}</div>
+        <div
+          role="alert"
+          className="border-b border-edge/40 bg-red-500/5 px-3 py-2 text-sm text-red-400"
+        >
+          {error}
+        </div>
       )}
 
       {/* ── Body: optional tree (desktop) + writing surface ───────────────── */}
@@ -1930,15 +2079,21 @@ export default function EditorOverlay({
         </div>
       )}
 
+      {/* Proposal 0079 B3 — the "your file moved" notice. Grey, not the red
+          error banner: nothing failed, the app repaired itself and is saying so.
+          It borrows the upload pill's geometry (and its safe-area handling) but
+          queues BEHIND it: one pill slot, and an in-flight upload owns it. */}
+      {notice && !uploadStatus && (
+        <Pill>
+          <span className="truncate text-slate-300">{notice}</span>
+        </Pill>
+      )}
+
       {/* Drag-and-drop upload progress/result toast. A drop on a tree folder
           uploads straight into it (no sheet); this pill reports progress and
           the outcome, then auto-dismisses. */}
       {uploadStatus && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="pointer-events-none absolute bottom-6 left-1/2 z-[80] flex max-w-[90%] -translate-x-1/2 items-center gap-2.5 rounded-full border border-edge bg-bar/95 px-4 py-2 text-sm shadow-xl backdrop-blur"
-        >
+        <Pill>
           {!uploadStatus.done ? (
             <>
               <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-edge border-t-accent" aria-hidden="true" />
@@ -1957,7 +2112,7 @@ export default function EditorOverlay({
               ✓ Uploaded {uploadStatus.total} file{uploadStatus.total === 1 ? "" : "s"} to {basename(uploadStatus.dir)}
             </span>
           )}
-        </div>
+        </Pill>
       )}
 
       {/* File-tree CRUD menu (right-click / long-press). Renders fixed at the

@@ -64,6 +64,42 @@ fn contained(real: &Path, real_root: &Path) -> bool {
     real == real_root || real.starts_with(real_root)
 }
 
+/// Why a path failed to resolve under a confinement root.
+///
+/// The split exists so the file plane can answer `404` for a path that is inside
+/// the caller's own root but no longer there, instead of a `403` naming
+/// confinement for an ordinary `mv`. It is deliberately **asymmetric**:
+///
+/// > `Missing` is only ever reported for a path whose nearest existing ancestor
+/// > is inside the root. Anything outside the root — lexically, after symlink
+/// > resolution, or by having no contained ancestor — stays a single,
+/// > undifferentiated `Outside`, whether it exists or not.
+///
+/// That clause is load-bearing, not decoration: `canonicalize` fails before
+/// containment is ever checked, so mapping "canonicalize failed" straight to
+/// `Missing` would make `$HOME/escape/x` (where `escape -> /etc`) answer
+/// *missing* when `/etc/x` is absent and *outside* when it is present — a
+/// per-path existence oracle for the whole filesystem, reachable through any
+/// symlink an owner left in a shared folder. `symlink_outward_never_discloses`
+/// in this module's tests is what keeps it closed.
+///
+/// **Deliberate exceptions.** Resolution performed *before* authorization —
+/// `Cmd::ResolveFolder` and the folder-grant `canonical_under` / `root_for`
+/// helpers (proposal 0074) — must answer one undifferentiated refusal, because
+/// the caller may hold no grant and must not learn the shape of a filesystem it
+/// is not entitled to. Those stay `Option`-shaped on purpose; do not "fix" them
+/// to use this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved {
+    /// The path escapes the root — lexically, after symlink resolution, or by
+    /// having no existing ancestor inside it. Existence is NEVER disclosed for
+    /// these: a caller must not learn what does or does not exist outside the
+    /// root they hold.
+    Outside,
+    /// The path is inside the root but is not there (or is unreadable).
+    Missing,
+}
+
 /// Resolve a path that must already EXIST and stay within `root` **even after
 /// symlink resolution**. Lexical clean + lexical containment first (a cheap
 /// reject of obvious traversal / non-absolute input), then canonicalize the
@@ -72,11 +108,49 @@ fn contained(real: &Path, real_root: &Path) -> bool {
 ///
 /// Returns the *lexical* path (for display + the subsequent fs op); the op
 /// re-follows the symlink to the target we just verified is inside the root.
+///
+/// On failure the reason is typed — see [`Resolved`] for the asymmetry rule that
+/// keeps `Missing` from becoming an existence oracle.
+pub fn try_resolve_existing_under(root: &Path, p: &str) -> Result<PathBuf, Resolved> {
+    let lexical = resolve_under(root, p).ok_or(Resolved::Outside)?;
+    // A root that doesn't canonicalize is a $HOME misconfiguration, not a
+    // per-path fact — it must never become a probe.
+    let real_root = std::fs::canonicalize(root).map_err(|_| Resolved::Outside)?;
+    match std::fs::canonicalize(&lexical) {
+        Ok(real) => {
+            if contained(&real, &real_root) {
+                Ok(lexical)
+            } else {
+                Err(Resolved::Outside)
+            }
+        }
+        // The leaf isn't there (or an intermediate component is unreadable, or a
+        // symlink dangles). Only call it Missing once we've proven the nearest
+        // ancestor that DOES exist is inside the root.
+        Err(_) => {
+            let mut anc = lexical.as_path();
+            loop {
+                anc = match anc.parent() {
+                    Some(a) => a,
+                    None => return Err(Resolved::Outside),
+                };
+                if !anc.exists() {
+                    continue;
+                }
+                let real_anc = std::fs::canonicalize(anc).map_err(|_| Resolved::Outside)?;
+                return if contained(&real_anc, &real_root) {
+                    Err(Resolved::Missing)
+                } else {
+                    Err(Resolved::Outside)
+                };
+            }
+        }
+    }
+}
+
+/// [`try_resolve_existing_under`] for callers that don't care *why* it failed.
 pub fn resolve_existing_under(root: &Path, p: &str) -> Option<PathBuf> {
-    let lexical = resolve_under(root, p)?;
-    let real_root = std::fs::canonicalize(root).ok()?;
-    let real = std::fs::canonicalize(&lexical).ok()?;
-    contained(&real, &real_root).then_some(lexical)
+    try_resolve_existing_under(root, p).ok()
 }
 
 /// Resolve a path for CREATION (the leaf — and possibly intermediate dirs — may
@@ -208,6 +282,65 @@ mod tests {
         // in-home dir is allowed.
         assert!(resolve_create_under(&home, &home.join("escape/new.txt").to_string_lossy()).is_none());
         assert!(resolve_create_under(&home, &home.join("real/new.txt").to_string_lossy()).is_some());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A path inside the root that simply isn't there is `Missing` (→ 404);
+    /// everything outside stays `Outside` (→ 403).
+    #[cfg(unix)]
+    #[test]
+    fn typed_resolution_distinguishes_missing_from_outside() {
+        let base = std::env::temp_dir().join(format!("ccr-confine-typed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        std::fs::write(home.join("proj/in.txt"), b"in").unwrap();
+
+        let at = |p: PathBuf| try_resolve_existing_under(&home, &p.to_string_lossy());
+
+        assert!(at(home.join("proj/in.txt")).is_ok());
+        // Gone, but inside the root: the leaf, and a whole missing subtree.
+        assert_eq!(at(home.join("proj/gone.md")), Err(Resolved::Missing));
+        assert_eq!(at(home.join("proj/no/such/dir/x")), Err(Resolved::Missing));
+        assert_eq!(at(home.join("gone-dir")), Err(Resolved::Missing));
+        // Outside the root, existing or not — one answer.
+        assert_eq!(try_resolve_existing_under(&home, "/etc/passwd"), Err(Resolved::Outside));
+        assert_eq!(try_resolve_existing_under(&home, "/etc/nope-not-here"), Err(Resolved::Outside));
+        assert_eq!(try_resolve_existing_under(&home, "relative"), Err(Resolved::Outside));
+        assert_eq!(at(base.join("sibling")), Err(Resolved::Outside));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The oracle test. A symlink under the root pointing OUT of it must answer
+    /// identically whether or not the target exists — otherwise the 404/403 split
+    /// is a per-path existence probe for the entire filesystem. See [`Resolved`].
+    #[cfg(unix)]
+    #[test]
+    fn symlink_outward_never_discloses() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("ccr-confine-oracle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"x").unwrap();
+        symlink(&outside, home.join("escape")).unwrap();
+
+        let existing = try_resolve_existing_under(&home, &home.join("escape/secret.txt").to_string_lossy());
+        let absent = try_resolve_existing_under(&home, &home.join("escape/no-such-file").to_string_lossy());
+        assert_eq!(existing, Err(Resolved::Outside));
+        assert_eq!(absent, Err(Resolved::Outside));
+        assert_eq!(existing, absent, "existence outside the root must not be observable");
+
+        // A dangling symlink INSIDE the root is missing, not outside.
+        symlink(home.join("nowhere"), home.join("dangling")).unwrap();
+        assert_eq!(
+            try_resolve_existing_under(&home, &home.join("dangling").to_string_lossy()),
+            Err(Resolved::Missing)
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

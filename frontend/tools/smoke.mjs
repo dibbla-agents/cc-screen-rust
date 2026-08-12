@@ -3,7 +3,15 @@
 // control keys and the compose sheet, and fails on any console/page error.
 import { chromium } from "playwright";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import {
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -121,7 +129,10 @@ async function desktopEditorPass() {
   dpage.on("response", (r) => {
     try {
       const u = new URL(r.url());
-      if (u.pathname.startsWith("/api/")) dapi.push(`${r.request().method()} ${u.pathname} -> ${r.status()}`);
+      // Keep `u.search`, like the phone recorder: without it the log can't say
+      // WHICH path answered what (proposal 0079 Part E).
+      if (u.pathname.startsWith("/api/"))
+        dapi.push(`${r.request().method()} ${u.pathname}${u.search} -> ${r.status()}`);
     } catch {}
   });
   try {
@@ -176,6 +187,161 @@ async function desktopEditorPass() {
   } finally {
     await dctx.close();
   }
+}
+
+// ── Proposal 0079 ─────────────────────────────────────────────────────────────
+// Rename the folder a session is working in, then reopen the editor: it must
+// land on the same file at its NEW path, with no error banner.
+//
+// This pass owns its whole fixture — a throwaway directory under $HOME, a
+// markdown file inside it, and a session rooted there — because the shared
+// `session` above is driven from env and its cwd is discovered opportunistically
+// (it may be $HOME itself, whose rename would break every other pass). Renaming
+// a mere *subdirectory* of an existing cwd is not a substitute: it doesn't move
+// `projectPath`, so it would exercise Part B's heal and silently never test Part
+// C's rebase — the worst kind of green test.
+//
+// The session is created over the API with the plain **shell** tool (no
+// assistant process is spawned) and killed in `finally`, honouring the harness's
+// standing rule that a pass must not drive the New-session UI.
+let renamePassProjA = "";
+let renamePassProjB = "";
+let renamePassSession = "";
+
+async function folderRenamePass() {
+  const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const dapi = [];
+  const derrs = [];
+  dpage.on("console", (m) => {
+    if (m.type() === "error") derrs.push("console: " + m.text());
+  });
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  dpage.on("response", (r) => {
+    try {
+      const u = new URL(r.url());
+      // NB the `u.search`: without the query this log can't say WHICH path
+      // answered what, which is the entire assertion below.
+      if (u.pathname.startsWith("/api/")) {
+        dapi.push(`${r.request().method()} ${u.pathname}${u.search} -> ${r.status()}`);
+      }
+    } catch {}
+  });
+
+  const projA = mkdtempSync(join(homedir(), "ccwebsmoke-rename-"));
+  renamePassProjA = projA;
+  const projB = `${projA}-renamed`;
+  renamePassProjB = projB;
+  writeFileSync(join(projA, "notes.md"), "# Renamed Heading\n\nStill here after the mv.\n");
+  const shortName = `rn${projA.slice(-6).replace(/[^a-z0-9]/gi, "")}`;
+
+  try {
+    const cr = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool: "shell", name: shortName, dir: projA, extraDirs: [] }),
+    });
+    if (!cr.ok) {
+      fail(`rename pass: could not create a fixture session (${cr.status} ${await cr.text()})`);
+      return;
+    }
+    renamePassSession = (await cr.json()).name;
+
+    const openEditor = async () => {
+      await dpage.locator(".xterm").first().hover();
+      await dpage.getByRole("button", { name: "Open file browser / editor" }).click({ timeout: 8000 });
+    };
+
+    await dpage.goto(base, { waitUntil: "networkidle" });
+    await dpage
+      .getByRole("button", { name: new RegExp(renamePassSession) })
+      .first()
+      .click({ timeout: 15000 });
+    await dpage.waitForSelector('[data-conn="open"]', { timeout: 10000 });
+
+    // Open the fixture from the auto-expanded PROJECT section (not the share
+    // folder — Part C never rebases a path outside the session's cwd), then
+    // close the overlay so the flush persists {activePath, cwd}.
+    await openEditor();
+    await dpage.getByRole("button", { name: "notes.md", exact: true }).click({ timeout: 10000 });
+    await dpage.waitForSelector(".cm-md-h1", { timeout: 10000 });
+    await dpage.keyboard.press("Escape");
+    await dpage.waitForTimeout(400);
+
+    // The mv this whole proposal is about.
+    renameSync(projA, projB);
+    const newPath = join(projB, "notes.md");
+
+    // Reopen. A directory rename leaves the basename unchanged, so a name-based
+    // selector cannot tell "reopened" from "latched" — the distinguishing
+    // signals are content loaded, no alert, and a 200 on the NEW path.
+    const before = dapi.length;
+    await openEditor();
+    await dpage.waitForSelector(".cm-md-h1", { timeout: 15000 });
+    const after = dapi.slice(before);
+    const readNew = after.some(
+      (a) =>
+        a.startsWith("GET /api/file/read") &&
+        a.includes(encodeURIComponent(newPath)) &&
+        a.endsWith("-> 200")
+    );
+    const alerts = await dpage.getByRole("alert").count();
+    const pill = await dpage.getByText(/was renamed to/).count();
+
+    if (derrs.length) fail("rename pass JS errors: " + derrs.join("; "));
+    else if (alerts > 0) fail("rename pass: the editor showed an error banner after the rename");
+    else if (!readNew) {
+      console.error("rename pass API calls:\n  " + after.join("\n  "));
+      fail(`rename pass: no 200 read of the rebased path ${newPath}`);
+    } else if (!pill) fail("rename pass: no notice naming the rename");
+
+    // A second, smaller step: delete the file outright and assert the heal —
+    // the tree landing plus a 404 (not the old 403 accusing an ordinary mv of
+    // leaving $HOME).
+    await dpage.keyboard.press("Escape");
+    await dpage.waitForTimeout(300);
+    rmSync(newPath, { force: true });
+    const beforeDel = dapi.length;
+    await openEditor();
+    await dpage.waitForTimeout(2500); // the hold, the rebase attempt, then the heal
+    const afterDel = dapi.slice(beforeDel);
+    const got404 = afterDel.some((a) => a.startsWith("GET /api/file/read") && a.endsWith("-> 404"));
+    const got403 = afterDel.some((a) => a.startsWith("GET /api/file/read") && a.endsWith("-> 403"));
+    const healed = await dpage.getByText(/isn't there any more/).count();
+    if (got403) fail("rename pass: a missing file inside $HOME still answers 403");
+    else if (!got404) {
+      console.error("rename pass API calls:\n  " + afterDel.join("\n  "));
+      fail("rename pass: a missing file didn't answer 404");
+    } else if (!healed) fail("rename pass: the editor didn't heal onto the tree with a notice");
+  } catch (e) {
+    console.error("rename pass API calls:\n  " + dapi.join("\n  "));
+    if (derrs.length) console.error("rename pass JS errors:\n  " + derrs.join("\n  "));
+    fail("folder rename pass: " + e.message);
+  } finally {
+    await dctx.close();
+    await cleanupRenamePass();
+  }
+}
+
+// Leave the working tree byte-identical, including on an abort between the
+// rename and the reopen. Also called from the outer `finally`, so it is
+// idempotent.
+async function cleanupRenamePass() {
+  if (renamePassSession) {
+    try {
+      await fetch(`${base}/api/session/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: renamePassSession, mode: "kill" }),
+      });
+    } catch {}
+    renamePassSession = "";
+  }
+  for (const d of [renamePassProjA, renamePassProjB]) {
+    if (d) rmSync(d, { recursive: true, force: true });
+  }
+  renamePassProjA = "";
+  renamePassProjB = "";
 }
 
 // Mount the throwaway session in a desktop pane and return the page. Shared by
@@ -1033,7 +1199,9 @@ try {
     if (process.exitCode === 1) throw new Error("recent-section pass failed");
     await gridKeyboardPass();
     if (process.exitCode === 1) throw new Error("grid keyboard pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK)");
+    await folderRenamePass();
+    if (process.exitCode === 1) throw new Error("folder rename pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; folder rename: rebase + 404 heal OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {
@@ -1043,5 +1211,9 @@ try {
   rmSync(newMdPath, { force: true });
   rmSync(pdfPath, { force: true });
   if (uploadedPath) rmSync(uploadedPath, { force: true });
+  // Belt and braces for the 0079 pass: it cleans up in its own `finally`, but an
+  // abort before that runs must still not leave a renamed directory or a live
+  // fixture session behind. Idempotent.
+  await cleanupRenamePass();
   await browser.close();
 }

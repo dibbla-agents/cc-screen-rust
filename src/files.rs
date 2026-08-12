@@ -1,8 +1,9 @@
 // Filesystem endpoints — the $HOME-confined browse / editor / download block,
 // a faithful port of the Go build's browse.go + files.go + editor.go. Every path
-// goes through confine's symlink-safe resolvers (resolve_existing_under for reads/
-// listing/deletes, resolve_create_under for writes) so neither traversal nor a
-// symlink whose target sits outside $HOME can escape the root.
+// goes through confine's symlink-safe resolvers (try_resolve_existing_under for
+// reads/listing/deletes, resolve_create_under for writes) so neither traversal nor
+// a symlink whose target sits outside $HOME can escape the root. Escaping is a
+// 403; a path inside the root that is merely gone is a 404 (proposal 0079).
 
 use std::collections::HashSet;
 use std::io::SeekFrom;
@@ -21,7 +22,7 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
-use crate::confine::{resolve_create_under, resolve_existing_under};
+use crate::confine::{resolve_create_under, try_resolve_existing_under, Resolved};
 use crate::engine::AppState;
 
 const MAX_EDIT_BYTES: u64 = 5 << 20;
@@ -33,6 +34,43 @@ fn e(code: StatusCode, msg: impl Into<String>) -> (StatusCode, String) {
 
 fn home(app: &AppState) -> PathBuf {
     app.inner.home.clone()
+}
+
+/// Resolve an existing path under the confinement root, mapping the typed
+/// failure onto a status (proposal 0079 Part A): a path that escapes the root is
+/// a refusal, a path *inside* it that is simply gone is a `404` — the case a
+/// plain `mv` produces, which used to be answered as a security violation.
+/// `confine::Resolved` documents why that split can never disclose existence
+/// outside the root. Mirror of `fileops::resolve_path`.
+fn resolve_path(home: &Path, p: &str, outside: &str) -> Result<PathBuf, (StatusCode, String)> {
+    try_resolve_existing_under(home, p).map_err(|r| match r {
+        Resolved::Outside => e(StatusCode::FORBIDDEN, outside),
+        Resolved::Missing => e(StatusCode::NOT_FOUND, "not found"),
+    })
+}
+
+/// [`resolve_path`] for endpoints whose target must be a file: $HOME itself is
+/// rejected as a "not a regular file" condition, which is not a confinement
+/// failure and so keeps its `403` rather than sliding into the new `404`.
+fn resolve_file(home: &Path, p: &str) -> Result<PathBuf, (StatusCode, String)> {
+    let path = resolve_path(home, p, "path outside home")?;
+    if path == home {
+        return Err(e(StatusCode::FORBIDDEN, "path outside home"));
+    }
+    Ok(path)
+}
+
+/// The live cwd of a named session, or `404` when the agent cannot read one
+/// (proposal 0079 Part D1: `live_cwd()` answers `""` rather than a path it knows
+/// is wrong). Never falls back to $HOME — that would silently root a session's
+/// file tree somewhere it has never been.
+fn session_cwd(app: &AppState, name: &str) -> Result<String, (StatusCode, String)> {
+    let sess = app.get(name).ok_or_else(|| e(StatusCode::NOT_FOUND, "unknown session"))?;
+    let cwd = sess.live_cwd();
+    if cwd.trim().is_empty() {
+        return Err(e(StatusCode::NOT_FOUND, format!("session cwd unknown: {name}")));
+    }
+    Ok(cwd)
 }
 
 /// The share folder the Files view opens at by default: $CCWEB_SHARE_DIR or
@@ -84,7 +122,7 @@ pub struct PathQuery {
 
 pub async fn dirs(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R {
     let home = home(&app);
-    let dir = resolve_existing_under(&home, &q.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_path(&home, &q.path, "path outside home")?;
     let mut entries = read_dirs(&dir)?;
     entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(Json(json!({
@@ -112,8 +150,7 @@ pub struct DirSearchQuery {
 
 pub async fn dirs_search(State(app): State<AppState>, Query(q): Query<DirSearchQuery>) -> R {
     let home = home(&app);
-    let root =
-        resolve_existing_under(&home, &q.root).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let root = resolve_path(&home, &q.root, "path outside home")?;
     let recent = recent_cwds(&app);
     let hits = crate::dirsearch::search(&home, &root, &q.q, &recent, crate::dirsearch::Kind::Dirs);
     Ok(Json(crate::dirsearch::results_json(&home, &root, &hits)).into_response())
@@ -140,12 +177,9 @@ pub async fn files_search(State(app): State<AppState>, Query(q): Query<FileSearc
     // back to $HOME, then confine it like every other path.
     let mut root = q.root.trim().to_string();
     if root.is_empty() && !q.session.trim().is_empty() {
-        if let Some(sess) = app.get(q.session.trim()) {
-            root = sess.live_cwd();
-        }
+        root = session_cwd(&app, q.session.trim())?;
     }
-    let root =
-        resolve_existing_under(&home, &root).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let root = resolve_path(&home, &root, "path outside home")?;
     let recent = recent_cwds(&app);
     let hits = crate::dirsearch::search(&home, &root, &q.q, &recent, crate::dirsearch::Kind::Files);
     Ok(Json(crate::dirsearch::files_results_json(&home, &root, &hits)).into_response())
@@ -154,7 +188,13 @@ pub async fn files_search(State(app): State<AppState>, Query(q): Query<FileSearc
 /// The cwds of live sessions — fed to the search ranker so a folder you already
 /// have a session in floats to the top.
 fn recent_cwds(app: &AppState) -> HashSet<PathBuf> {
-    app.list().iter().map(|s| PathBuf::from(s.live_cwd())).collect()
+    // A session whose cwd the agent can't read reports "" (0079 D1) — not a path.
+    app.list()
+        .iter()
+        .map(|s| s.live_cwd())
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn read_dirs(dir: &Path) -> Result<Vec<DirEntry>, (StatusCode, String)> {
@@ -181,15 +221,12 @@ pub async fn files(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R
     // Resolution order: ?path → ?session cwd → share dir.
     let mut q_path = q.path.trim().to_string();
     if q_path.is_empty() && !q.session.trim().is_empty() {
-        let sess = app
-            .get(q.session.trim())
-            .ok_or_else(|| e(StatusCode::NOT_FOUND, "unknown session"))?;
-        q_path = sess.live_cwd();
+        q_path = session_cwd(&app, q.session.trim())?;
     }
     if q_path.is_empty() {
         q_path = share.to_string_lossy().into_owned();
     }
-    let dir = resolve_existing_under(&home, &q_path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_path(&home, &q_path, "path outside home")?;
 
     let rd = std::fs::read_dir(&dir).map_err(|err| e(StatusCode::BAD_REQUEST, err.to_string()))?;
     let mut dirs: Vec<DirEntry> = Vec::new();
@@ -242,8 +279,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> R {
     let home = home(&app);
-    let path = resolve_existing_under(&home, &q.path).filter(|p| *p != home)
-        .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let path = resolve_file(&home, &q.path)?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if !meta.is_file() {
         return Err(e(StatusCode::BAD_REQUEST, "not a regular file"));
@@ -341,8 +377,7 @@ fn rfc5987(s: &str) -> String {
 // ── GET /api/file/read ───────────────────────────────────────────────────────
 pub async fn file_read(State(app): State<AppState>, Query(q): Query<PathQuery>) -> R {
     let home = home(&app);
-    let path = resolve_existing_under(&home, &q.path).filter(|p| *p != home)
-        .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let path = resolve_file(&home, &q.path)?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if !meta.is_file() {
         return Err(e(StatusCode::BAD_REQUEST, "not a regular file"));
@@ -428,8 +463,7 @@ pub struct PathReq {
 
 pub async fn file_delete(State(app): State<AppState>, Json(req): Json<PathReq>) -> R {
     let home = home(&app);
-    let path = resolve_existing_under(&home, &req.path).filter(|p| *p != home)
-        .ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let path = resolve_file(&home, &req.path)?;
     let meta = std::fs::metadata(&path).map_err(|_| e(StatusCode::NOT_FOUND, "not found"))?;
     if meta.is_dir() {
         return Err(e(StatusCode::BAD_REQUEST, "path is a directory"));
@@ -447,7 +481,7 @@ pub struct MkdirReq {
 
 pub async fn mkdir(State(app): State<AppState>, Json(req): Json<MkdirReq>) -> R {
     let home = home(&app);
-    let dir = resolve_existing_under(&home, &req.dir).ok_or_else(|| e(StatusCode::FORBIDDEN, "dir outside home"))?;
+    let dir = resolve_path(&home, &req.dir, "dir outside home")?;
     let name = req.name.trim();
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
         return Err(e(StatusCode::BAD_REQUEST, "invalid folder name"));
@@ -472,7 +506,7 @@ pub struct RmdirReq {
 
 pub async fn rmdir(State(app): State<AppState>, Json(req): Json<RmdirReq>) -> R {
     let home = home(&app);
-    let dir = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let dir = resolve_path(&home, &req.path, "path outside home")?;
     if dir == home {
         return Err(e(StatusCode::BAD_REQUEST, "refusing to delete home"));
     }
@@ -506,7 +540,7 @@ pub struct RenameReq {
 
 pub async fn rename(State(app): State<AppState>, Json(req): Json<RenameReq>) -> R {
     let home = home(&app);
-    let src = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
+    let src = resolve_path(&home, &req.path, "path outside home")?;
     if src == home {
         return Err(e(StatusCode::BAD_REQUEST, "refusing to rename home"));
     }
@@ -546,8 +580,8 @@ pub struct MoveReq {
 
 pub async fn move_path(State(app): State<AppState>, Json(req): Json<MoveReq>) -> R {
     let home = home(&app);
-    let src = resolve_existing_under(&home, &req.path).ok_or_else(|| e(StatusCode::FORBIDDEN, "path outside home"))?;
-    let dst_dir = resolve_existing_under(&home, &req.dest).ok_or_else(|| e(StatusCode::FORBIDDEN, "dest outside home"))?;
+    let src = resolve_path(&home, &req.path, "path outside home")?;
+    let dst_dir = resolve_path(&home, &req.dest, "dest outside home")?;
     if src == home {
         return Err(e(StatusCode::BAD_REQUEST, "refusing to move home"));
     }

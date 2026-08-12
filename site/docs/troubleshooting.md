@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 nav: Troubleshooting
-description: Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, and proxy 403s.
+description: Symptom-shaped fixes — activation codes, offline machines, missing assistants, plan limits, invite email that never arrived, an editor stuck on "path outside home", and proxy 403s.
 ---
 
 # Troubleshooting
@@ -262,6 +262,20 @@ window.__ccRenderer   // "webgl" or "dom"
 A tab that starts on WebGL can move to `"dom"` on its own if the browser
 drops the GPU context (iOS does this when a tab is backgrounded). That's the
 fallback working as designed, not a fault.
+
+## "path outside home" when opening the editor
+
+Nothing left your home directory. That message is what an **older machine**
+answers for a file that has simply *moved* — you renamed the folder your session
+is working in, or deleted the file — and it keeps answering it every time you
+open the editor, because the editor remembers the file you had open.
+
+**Fix:** update the agent on that machine (`cc-screen-rust update`, then start a
+fresh session, or use the machine's dashboard row). A current machine says "not found"
+for a path that's gone, and a current web app repairs it for you: it reopens the
+same file at its new location after a folder rename, and drops to the folder with
+a grey notice when the file is really gone. In the meantime, clicking any file in
+the tree clears the banner for that session.
 
 ## The page looks stale after an update
 
