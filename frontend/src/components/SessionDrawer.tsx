@@ -3,6 +3,7 @@ import { type MachineInfo, type MePlan, type PaneRef, type RestorableSession, ty
 import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedEntry, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
 import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
 import { sessionKey } from "../readyEdges";
+import { prefixArmed } from "../prefix";
 import { recentSectionKeys, renderCap, type RecentRef } from "../sessionRecents";
 import NotificationsButton from "./NotificationsButton";
 import { useOpenOrClosing } from "../useOpenOrClosing";
@@ -566,6 +567,11 @@ function SessionDrawer({
     // never even registers the listener, so ↑/↓/⏎ are unambiguous (0026).
     if ((!open && !pane) || mode !== "list" || !keyboardActive) return;
     const handler = (e: KeyboardEvent) => {
+      // A key arriving inside an armed ⌃B prefix belongs to the chord, not to
+      // this cursor — otherwise ⌃B ↑ on a focused empty pane would move the
+      // cursor here AND cycle the pane's session (0081 Part C; see prefix.ts
+      // for why listener order can't be relied on).
+      if (prefixArmed()) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();

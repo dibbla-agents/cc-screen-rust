@@ -371,6 +371,184 @@ async function recentSectionPass() {
   }
 }
 
+// ── Proposal 0081 ─────────────────────────────────────────────────────────────
+// The ⌃B pane keymap, which had no coverage at all — which is how the arrow
+// wrap could be dead in two layouts, the empty pane could swallow the whole
+// prefix, and every pane switch could pop a rename box, all unreported.
+//
+// Every assertion here reads [data-pane-active] (Part E); the whole pass fails
+// on the pre-fix build, first at the focused-input check (Part H), then at the
+// stuck arrow (Part A) and the swallowed prefix (Part C).
+async function gridKeyboardPass() {
+  const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  // The "any JS error fails the suite" listener at the bottom is the PHONE
+  // page's; a desktop pass has to bring its own.
+  dpage.on("console", (m) => {
+    if (m.type() === "error") derrs.push("console: " + m.text());
+  });
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  // Part H's network half: switching panes must never write a display label.
+  let labelPosts = 0;
+  dpage.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/session/label") labelPosts++;
+  });
+
+  // Which pane index currently carries the focus ring, and what has the caret.
+  const activePane = () =>
+    dpage.evaluate(() => document.querySelector("[data-pane-active]")?.getAttribute("data-pane") ?? null);
+  const chord = async (k) => {
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press(k);
+    await dpage.waitForTimeout(120);
+  };
+  // Part H, asserted after EVERY switch: a pane switch moves focus into the
+  // pane and nowhere else. On the pre-fix build the identity bar's rename input
+  // has the caret here — and, being an <input>, it also kills the next chord.
+  // An *empty* pane's switcher filter taking the caret is the one legitimate
+  // case ([0026]), so the check is "not a rename field", not "not an input".
+  const noCaretInField = async (what) => {
+    const bad = await dpage.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el.tagName !== "INPUT") return null;
+      if (el.hasAttribute("data-pane-filter")) return null; // the empty pane's switcher
+      return el.getAttribute("aria-label") || "an <input>";
+    });
+    if (bad) {
+      fail(`${what} put the caret in ${bad} — a pane switch must not open the rename box (0081 H)`);
+      return false;
+    }
+    return true;
+  };
+  // Layouts are picked by accessible name, never by digit: the palette's digits
+  // are ORDER positions, not layout ids (Stacked is layout 5 but digit 2), so a
+  // digit-driven test silently exercises the wrong layout.
+  const pickLayout = async (name) => {
+    await chord("l");
+    await dpage.waitForSelector('[role="dialog"][aria-label="Pick a layout"]', { timeout: 5000 });
+    // No trailing Enter — onClick applies and closes; a stray Enter would fall
+    // through to the terminal.
+    await dpage.getByRole("button", { name, exact: true }).click({ timeout: 5000 });
+    await dpage.waitForSelector('[role="dialog"][aria-label="Pick a layout"]', {
+      state: "detached",
+      timeout: 5000,
+    });
+  };
+  const paneCount = () => dpage.locator("[data-pane]").count();
+
+  try {
+    await mountDesktopSession(dpage);
+
+    // ── Stacked: layout id 5, TWO panes. `(cur+1+lay)%lay` used to compute 2
+    // here, which setActive clamped straight back onto the last pane.
+    await pickLayout("Stacked");
+    if ((await paneCount()) !== 2) {
+      fail(`Stacked should render 2 panes, saw ${await paneCount()}`);
+      return;
+    }
+    await chord("2");
+    if (!(await noCaretInField("⌃B 2"))) return;
+    if ((await activePane()) !== "1") {
+      fail(`⌃B 2 did not focus pane 2 (active=${await activePane()})`);
+      return;
+    }
+    await chord("ArrowRight");
+    if (!(await noCaretInField("⌃B →"))) return;
+    if ((await activePane()) !== "0") {
+      fail(`⌃B → did not wrap from the last pane in Stacked (active=${await activePane()}) — 0081 Part A`);
+      return;
+    }
+
+    // ── The empty pane (pane 2 holds nothing) must not eat the prefix. It is
+    // focused right now via ⌃B 2 below; ⌃B 1 has to get us back out.
+    await chord("2");
+    await dpage.waitForSelector("[data-pane-filter]", { timeout: 5000 });
+    await chord("1");
+    if ((await activePane()) !== "0") {
+      fail(`⌃B 1 from a focused EMPTY pane did nothing — the switcher filter swallowed the prefix (0081 Part C)`);
+      return;
+    }
+    const filterText = await dpage
+      .locator("[data-pane-filter]")
+      .first()
+      .inputValue()
+      .catch(() => "");
+    if (filterText.includes("1")) {
+      fail(`the chord key leaked into the empty pane's filter (${JSON.stringify(filterText)})`);
+      return;
+    }
+    // Part E: an empty pane shows its number, which is the argument to ⌃B <n>.
+    const emptyNumber = await dpage
+      .locator('[data-pane="1"] span.pointer-events-none.font-mono')
+      .first()
+      .textContent()
+      .catch(() => null);
+    if (emptyNumber?.trim() !== "2") {
+      fail(`the empty pane does not render its 1-based number (saw ${JSON.stringify(emptyNumber)}) — 0081 Part E`);
+      return;
+    }
+
+    // ── Right-tall L: layout id 6, THREE panes — the other stuck-arrow case.
+    await pickLayout("Right-tall L");
+    if ((await paneCount()) !== 3) {
+      fail(`Right-tall L should render 3 panes, saw ${await paneCount()}`);
+      return;
+    }
+    await chord("3");
+    if ((await activePane()) !== "2") {
+      fail(`⌃B 3 did not focus pane 3 (active=${await activePane()})`);
+      return;
+    }
+    await chord("ArrowRight");
+    if ((await activePane()) !== "0") {
+      fail(`⌃B → did not wrap from the last pane in Right-tall L (active=${await activePane()}) — 0081 Part A`);
+      return;
+    }
+    if (!(await noCaretInField("⌃B → (layout 6)"))) return;
+
+    // ── ⌃B ; — last-pane. We are on 0, having come from 2.
+    await chord(";");
+    if ((await activePane()) !== "2") {
+      fail(`⌃B ; did not return to the pane we came from (active=${await activePane()}) — 0081 Part D`);
+      return;
+    }
+    // A bare Shift keydown between prefix and chord key must not cancel the
+    // prefix: `;` is Shift+, on a Swedish layout (the isModifierKey guard).
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.down("Shift");
+    await dpage.keyboard.up("Shift");
+    await dpage.keyboard.press(";");
+    await dpage.waitForTimeout(120);
+    if ((await activePane()) !== "0") {
+      fail(`⌃B ; broke when a bare Shift arrived first (active=${await activePane()})`);
+      return;
+    }
+    if (!(await noCaretInField("⌃B ;"))) return;
+
+    // Exactly one pane carries the focus ring, in every layout we touched.
+    const ringCount = await dpage.locator("[data-pane-active]").count();
+    if (ringCount !== 1) {
+      fail(`expected exactly one [data-pane-active], saw ${ringCount}`);
+      return;
+    }
+    // Part H's network half.
+    if (labelPosts > 0) {
+      fail(`pane switching POSTed /api/session/label ${labelPosts}× — an unasked rename (0081 Part H)`);
+      return;
+    }
+    // Leave the grid single-pane so a human running this locally isn't handed a
+    // 3-pane layout. (Hygiene only — every pass has its own storage partition.)
+    await pickLayout("Single");
+    if (derrs.length) fail("grid keyboard pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    if (derrs.length) console.error("grid keyboard JS errors:\n  " + derrs.join("\n  "));
+    fail("grid keyboard pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
 // The other half of Part D: with GL unavailable the terminal must still mount,
 // on xterm's DOM renderer, with search working there too.
 async function domFallbackPass() {
@@ -853,7 +1031,9 @@ try {
     if (process.exitCode === 1) throw new Error("DOM fallback pass failed");
     await recentSectionPass();
     if (process.exitCode === 1) throw new Error("recent-section pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK)");
+    await gridKeyboardPass();
+    if (process.exitCode === 1) throw new Error("grid keyboard pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

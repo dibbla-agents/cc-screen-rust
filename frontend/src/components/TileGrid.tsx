@@ -71,17 +71,19 @@ const MAX_SESSION_LABEL_LEN = 60;
 // <input> seeded with the current name. Enter/blur commits via onCommit; Esc
 // reverts. Committing an empty value clears the label (→ the slug `short`).
 // Identity (`name`/`short`) is never touched — this only sets the display label.
-function InlineName({
+export function InlineName({
   value,
   short,
   nameColor,
   editSeq,
+  paneActive,
   onCommit,
 }: {
   value: string; // the current display name (label || short) — the seed
   short: string; // the slug, for the "empty = use {short}" placeholder hint
   nameColor: string;
-  editSeq: number; // bumped (active pane only) by ⌃B r → enter edit
+  editSeq: number; // bumped by ⌃B r → enter edit (broadcast to every pane)
+  paneActive: boolean; // only the focused pane acts on a bump — see 0081 Part H
   onCommit: (label: string | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -102,14 +104,17 @@ function InlineName({
     }
   };
 
-  // ⌃B r (active pane only): editSeq changes → enter edit mode.
+  // ⌃B r: an actual bump, in the active pane only, enters edit mode.
+  // Consume the seq BEFORE the active test — an inactive pane must record the
+  // bump it ignored, or focusing it later would replay someone else's ⌃B r.
+  // (Same order as TerminalView's searchSignal effect; see 0081 Part H.)
   useEffect(() => {
-    if (editSeq !== lastSeq.current) {
-      lastSeq.current = editSeq;
-      begin();
-    }
+    if (editSeq === lastSeq.current) return;
+    lastSeq.current = editSeq;
+    if (!paneActive) return;
+    begin();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editSeq]);
+  }, [editSeq, paneActive]);
 
   // Autofocus + select-all when the field opens.
   useEffect(() => {
@@ -124,8 +129,14 @@ function InlineName({
 
   if (editing) {
     const commit = () => {
-      onCommit(draft.trim() || null);
+      const next = draft.trim() || null;
       setEditing(false);
+      // `value` is `label || short`, so committing it back changes nothing
+      // visible — but renameSession POSTs unconditionally (App.tsx), which pins
+      // an explicit label onto a session that had none. Blur commits too, so
+      // this fires on any dismissal, not just on Enter. See 0081 Part H.
+      if (next === value) return;
+      onCommit(next);
     };
     return (
       <input
@@ -216,7 +227,9 @@ interface Props {
   // empty clears it (falls back to `short`). The owning machine rides on the ref.
   onRename: (ref: PaneRef, label: string | null) => void;
   // Bumped by the `⌃B r` chord (proposal 0035) to put the *active* pane's
-  // identity-bar name into edit mode with no pointer. Only the active pane reacts.
+  // identity-bar name into edit mode with no pointer. Handed to every pane
+  // unchanged; each pane's InlineName opens only if it is the active one
+  // (0081 Part H) — never gate this prop per pane.
   renameSeq: number;
   // Bumped by the `⌃B /` chord (proposal 0068) to open the *active* pane's
   // terminal find bar. Handed to every pane; each pane opens only if it is the
@@ -302,9 +315,14 @@ function TileGrid({
           onOpenEditor={onOpenEditor}
           onMarkColor={onMarkColor}
           onRename={onRename}
-          // Only the active pane receives the live rename seq; others get a
-          // stable -1 so a ⌃B r bump only edits the focused pane.
-          renameSeq={idx === active ? renameSeq : -1}
+          // The rename seq goes to every pane unchanged; the pane's InlineName
+          // opens only if it is the active one (and only on an actual bump).
+          // Gating this prop per-pane instead (`idx === active ? seq : -1`) made
+          // *changing the active pane* change the prop on both the pane you left
+          // and the pane you landed on, so every ⌃B ←/→ opened a rename box —
+          // and the focused <input> then swallowed the whole ⌃B prefix. See
+          // docs/proposals/0081-pane-focus-navigation.md Part H.
+          renameSeq={renameSeq}
           // The search seq goes to every pane unchanged; TerminalView opens the
           // bar only when it is the active pane (and only on an actual bump).
           searchSeq={searchSeq}
@@ -336,7 +354,8 @@ interface PaneProps {
   onOpenEditor: () => void;
   onMarkColor: (ref: PaneRef, color: string | null) => void;
   onRename: (ref: PaneRef, label: string | null) => void;
-  // Bumped (on the active pane only) by ⌃B r to enter inline name-edit mode.
+  // Bumped by ⌃B r to enter inline name-edit mode. Broadcast to every pane;
+  // InlineName filters on `active` (0081 Part H).
   renameSeq: number;
   // Bumped by ⌃B / to open the active pane's terminal find bar.
   searchSeq: number;
@@ -472,6 +491,13 @@ function PaneBox({
       // on this element — see the long comment there for why.
       className="relative min-h-0 min-w-0 overflow-hidden bg-bar"
       style={{ gridArea: area }}
+      // Addressability (0081 Part E). Nothing in the DOM could answer "which
+      // pane is focused" — the pane box had no ref, id or data-*, and
+      // window.__ccTerm is last-mounted-wins — which is why the pane keymap had
+      // no E2E coverage and shipped three dead chords. Same seam as
+      // data-drawer / data-session-row / data-testid elsewhere; free at runtime.
+      data-pane={index}
+      data-pane-active={active ? "" : undefined}
     >
       {/* The terminal (or picker) area is absolutely positioned and stops
           `bottom-6` short whenever the identity bar is shown, so the bar owns
@@ -514,6 +540,21 @@ function PaneBox({
             onCreated={onCreated}
             onClose={() => {}}
           />
+        )}
+        {/* An empty pane has no identity bar, so it used to show no pane
+            number — and that is the case where the number matters most:
+            [0026]'s flow is "see an empty pane, jump to it with ⌃B <n>, pick a
+            session", and `n` was the one thing not on screen. Bottom-right, to
+            match where a filled pane renders it. z-[15]: above the inline
+            switcher, below the drop-target overlay (z-20). See
+            docs/proposals/0081-pane-focus-navigation.md Part E. */}
+        {!session && (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute bottom-1 right-2 z-[15] font-mono text-[11px] text-slate-600"
+          >
+            {index + 1}
+          </span>
         )}
       </div>
 
@@ -636,6 +677,7 @@ function PaneBox({
                     short={meta.short}
                     nameColor={nameColor}
                     editSeq={renameSeq}
+                    paneActive={active}
                     onCommit={(label) => onRename(session, label)}
                   />
                   {crumb && (

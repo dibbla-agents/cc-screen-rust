@@ -1,0 +1,35 @@
+# Frontend unit tests (vitest).
+#
+# Added by proposal 0081, Open Question 3. Until now nothing under
+# .github/workflows/ ran the frontend's `npm test` — which is how a dead E2E
+# readiness selector and three dead ⌃B chords survived for months. 0081 Part F2
+# adds the first real unit coverage of the grid/keymap, and it would be perverse
+# to add it unrun.
+#
+# Scope is deliberately just `npm test`: it is pure vitest under jsdom, needs no
+# agent and no browser. The Playwright harness (frontend/tools/smoke.mjs) needs a
+# live agent with a real session, so wiring *that* into CI is its own change.
+name: frontend-ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: cd frontend && npm ci
+      # `npm run build` runs `tsc` first, so this also pins that the app still
+      # typechecks — the cheap half of what a broken refactor would break.
+      - name: Typecheck
+        run: cd frontend && npx tsc --noEmit
+      - name: Unit tests
+        run: cd frontend && npm test

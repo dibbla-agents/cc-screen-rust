@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSharedMap, fuzzyScore, machineAccent, sameJson, sharedEntry, sharedOwner, sharedVia, statusDot } from "./util";
+import { buildSharedMap, fuzzyScore, machineAccent, sameJson, sharedEntry, sharedOwner, sharedVia, shouldSkipShortcut, statusDot } from "./util";
 import type { ReceivedShare } from "./api";
 
 // machineAccent backs the per-pane identity bar (proposal 0021). The contract:
@@ -204,5 +204,47 @@ describe("sameJson + statusDot (proposal 0068)", () => {
     }
     // The three states still read differently.
     expect(new Set(["running", "ready", "error"].map((s) => statusDot(s as never))).size).toBe(3);
+  });
+});
+
+// Proposal 0081 Part C — the ⌃B prefix must stay out of a document the user is
+// typing into, but an empty grid pane *is* the session switcher ([0026]) and its
+// filter autofocuses whenever that pane is the active one. Treating it as a text
+// field made the whole prefix vanish the moment you focused an empty pane — you
+// could not even ⌃B → back out. Exactly one input is exempted, alongside xterm's
+// helper textarea; every other text field keeps swallowing the prefix.
+describe("shouldSkipShortcut (0081 Part C)", () => {
+  const on = (el: HTMLElement) => ({ target: el }) as unknown as KeyboardEvent;
+  const el = (tag: string, attrs: Record<string, string> = {}) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") n.className = v;
+      else n.setAttribute(k, v);
+    }
+    return n;
+  };
+
+  it("skips real text fields — compose, search, rename, sidebar filter", () => {
+    expect(shouldSkipShortcut(on(el("input")))).toBe(true);
+    expect(shouldSkipShortcut(on(el("textarea")))).toBe(true);
+    const rich = el("div");
+    Object.defineProperty(rich, "isContentEditable", { value: true });
+    expect(shouldSkipShortcut(on(rich))).toBe(true);
+  });
+
+  it("does not skip xterm's hidden helper textarea (that IS the terminal)", () => {
+    expect(
+      shouldSkipShortcut(on(el("textarea", { class: "xterm-helper-textarea" })))
+    ).toBe(false);
+  });
+
+  it("does not skip the empty pane's switcher filter", () => {
+    expect(shouldSkipShortcut(on(el("input", { "data-pane-filter": "" })))).toBe(false);
+  });
+
+  it("does not skip a non-field target (the terminal, a button, the body)", () => {
+    expect(shouldSkipShortcut(on(el("div")))).toBe(false);
+    expect(shouldSkipShortcut(on(el("button")))).toBe(false);
+    expect(shouldSkipShortcut({ target: null } as unknown as KeyboardEvent)).toBe(false);
   });
 });

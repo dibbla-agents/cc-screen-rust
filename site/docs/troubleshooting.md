@@ -189,6 +189,25 @@ there (it still works for the rest of the page). Use **`Ctrl+B /`** — the
 find bar over the focused pane — or the magnifier button in the header on a
 phone. Enter / Shift+Enter cycle matches, Esc closes.
 
+## A `Ctrl+B` shortcut does nothing
+
+Four things silently switch the prefix off, in rough order of likelihood:
+
+- **The caret is in a text field.** Compose box, a search box, a rename field —
+  while one of those has focus, `Ctrl+B` belongs to it, by design. Click the
+  terminal (or press Esc) and try again.
+- **The window is too narrow, or it's a touch screen.** The chords are
+  desktop-only: they need a mouse-class pointer and a window at least 900 px
+  wide. Narrow the window past that and they quietly stop — there's one pane
+  and nothing to navigate between.
+- **The layout palette is open.** While it's up it owns the keyboard; pick a
+  layout or press Esc first.
+- **You waited too long.** The prefix expires after about 600 ms — press
+  `Ctrl+B` and the second key in one motion. (Held on its own, `Ctrl+B` opens
+  the session list, which is what a long pause looks like.)
+
+The full list of chords is in [the web app guide](../web-app/#keyboard-shortcuts).
+
 ## I copied inside Claude and my clipboard is empty
 
 Which machine's clipboard? That's the whole question.

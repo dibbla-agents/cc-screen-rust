@@ -231,6 +231,23 @@ prints into the normal screen and scrolls with the pane — inside Claude:</p>
 there (it still works for the rest of the page). Use <strong><code>Ctrl+B /</code></strong> — the
 find bar over the focused pane — or the magnifier button in the header on a
 phone. Enter / Shift+Enter cycle matches, Esc closes.</p>
+<h2 id="a-ctrlb-shortcut-does-nothing">A <code>Ctrl+B</code> shortcut does nothing</h2>
+<p>Four things silently switch the prefix off, in rough order of likelihood:</p>
+<ul>
+<li><strong>The caret is in a text field.</strong> Compose box, a search box, a rename field —
+while one of those has focus, <code>Ctrl+B</code> belongs to it, by design. Click the
+terminal (or press Esc) and try again.</li>
+<li><strong>The window is too narrow, or it&#39;s a touch screen.</strong> The chords are
+desktop-only: they need a mouse-class pointer and a window at least 900 px
+wide. Narrow the window past that and they quietly stop — there&#39;s one pane
+and nothing to navigate between.</li>
+<li><strong>The layout palette is open.</strong> While it&#39;s up it owns the keyboard; pick a
+layout or press Esc first.</li>
+<li><strong>You waited too long.</strong> The prefix expires after about 600 ms — press
+<code>Ctrl+B</code> and the second key in one motion. (Held on its own, <code>Ctrl+B</code> opens
+the session list, which is what a long pause looks like.)</li>
+</ul>
+<p>The full list of chords is in <a href="../web-app/#keyboard-shortcuts">the web app guide</a>.</p>
 <h2 id="i-copied-inside-claude-and-my-clipboard-is-empty">I copied inside Claude and my clipboard is empty</h2>
 <p>Which machine&#39;s clipboard? That&#39;s the whole question.</p>
 <p>Every copy Claude Code performs — <code>/copy</code>, copy-on-select, <code>Ctrl+C</code> on a
@@ -291,7 +308,7 @@ Add your domain to <code>CCWEB_ALLOWED_ORIGINS</code> — see
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.5 — docs track the latest release</span>
+  <span>v0.5.6 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

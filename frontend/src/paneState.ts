@@ -19,6 +19,11 @@ export interface PaneState {
   layout: Layout;
   panes: (PaneRef | null)[]; // length == paneCount(layout)
   active: number; // index into panes
+  // The pane focus came from — tmux's `last-pane`, which `⌃B ;` toggles back
+  // to. Additive and back-compatible in both directions: an older blob has no
+  // `prev` and normalizes to 0, an older build ignores the extra key. See
+  // docs/proposals/0081-pane-focus-navigation.md Part D.
+  prev: number;
 }
 
 // normalizePane upgrades one persisted slot to a PaneRef. Tolerates the v1 shape
@@ -39,13 +44,46 @@ export function normalizePane(v: unknown): PaneRef | null {
 // PaneState: layout clamped to 1–6, panes sized/validated via paneCount(), and
 // active clamped into range. Pure (no storage access) so it's unit-testable.
 export function normalizePaneState(raw: unknown): PaneState {
-  const s = (raw ?? {}) as { layout?: unknown; panes?: unknown; active?: unknown };
+  const s = (raw ?? {}) as {
+    layout?: unknown;
+    panes?: unknown;
+    active?: unknown;
+    prev?: unknown;
+  };
   const layout = Math.max(1, Math.min(6, Math.floor(Number(s.layout) || 1))) as Layout;
   const count = paneCount(layout);
   const arr = Array.isArray(s.panes) ? (s.panes as unknown[]) : [];
   const panes = Array.from({ length: count }, (_, i) => normalizePane(arr[i]));
-  const active = Math.max(0, Math.min(count - 1, Math.floor(Number(s.active) || 0)));
-  return { layout, panes, active };
+  const clamp = (v: unknown) =>
+    Math.max(0, Math.min(count - 1, Math.floor(Number(v) || 0)));
+  // `prev` (0081 Part D) clamps exactly like `active`; a blob written before it
+  // existed yields 0, which needs no migration and no key bump.
+  return { layout, panes, active: clamp(s.active), prev: clamp(s.prev) };
+}
+
+// applyLayout is `setLayout`'s reducer, lifted out of App.tsx so the resize
+// migration is pure and unit-testable. It grows/shrinks the panes array to
+// match paneCount(l). Growing fills with nulls. Shrinking: if the active pane's
+// index falls outside the new range, the user's focused session is migrated
+// into the last surviving slot (overwriting whatever was there) before
+// truncation — so switching to single-pane while focused on pane 3 of a quad
+// doesn't silently drop the session the user was looking at. The sessions in
+// the other dropped slots are still alive on the agent; the drawer is the
+// recovery path. `active` AND `prev` are then clamped into the new range —
+// forgetting `prev` would leave ⌃B ; pointing at a truncated pane.
+export function applyLayout(s: PaneState, l: Layout): PaneState {
+  const newCount = paneCount(l);
+  let next = s.panes.slice();
+  if (s.active >= newCount && next[s.active]) {
+    // Promote the focused session into the last surviving slot.
+    next[newCount - 1] = next[s.active]!;
+  }
+  next = Array.from({ length: newCount }, (_, i) => next[i] ?? null);
+  const clamp = (v: number) => Math.max(0, Math.min(newCount - 1, v));
+  // Spread, don't rebuild: a literal `{ layout, panes, active }` silently drops
+  // any field added to PaneState later — which is exactly how `prev` would have
+  // been lost on every layout change.
+  return { ...s, layout: l, panes: next, active: clamp(s.active), prev: clamp(s.prev) };
 }
 
 // loadPaneState restores the persisted layout/panes/active, migrating older
@@ -64,7 +102,12 @@ export function loadPaneState(): PaneState {
     /* fall through to the legacy key */
   }
   const legacy = localStorage.getItem(LAST_KEY);
-  return { layout: 1, panes: [legacy ? { name: legacy, machine: "" } : null], active: 0 };
+  return {
+    layout: 1,
+    panes: [legacy ? { name: legacy, machine: "" } : null],
+    active: 0,
+    prev: 0,
+  };
 }
 
 // cycleSessionInPane returns the next/prev session *name* to mount in `paneIdx`,

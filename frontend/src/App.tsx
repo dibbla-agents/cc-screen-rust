@@ -28,6 +28,7 @@ import {
 import { fetchMachines } from "./api";
 import { getMe, type MeInfo } from "./api";
 import {
+  applyLayout,
   cycleSessionInPane,
   LAST_KEY,
   loadPaneState,
@@ -59,8 +60,9 @@ import { detectReadyEdges, sessionKey } from "./readyEdges";
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
-import { agentStatus, buildSharedMap, displayName, nextSessionColor, sameJson, sessionAccent, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
+import { agentStatus, buildSharedMap, displayName, nextSessionColor, sameJson, sessionAccent, shouldSkipShortcut, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { HIDDEN_SESSIONS_MS, usePoll } from "./poll";
+import { setPrefixArmed } from "./prefix";
 import { listReceivedShares, type ReceivedShare } from "./api";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, RefreshIcon, SearchIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
@@ -137,34 +139,11 @@ function isModifierKey(k: string): boolean {
   );
 }
 
-// shouldSkipShortcut returns true when focus is in a real text input (compose
-// textarea, favourites search, etc.) — but NOT when focus is in a *pane
-// control*, a field that lives inside a pane and that the pane's own chords
-// must keep working over. Two of those:
-//
-//   - xterm.js's hidden helper textarea, which is technically a textarea but is
-//     really just the terminal. See AGENTS.md "xterm.js routes all keystrokes
-//     through a hidden <textarea>" for the full footgun explanation.
-//   - the empty pane's session filter ([0026]), which autofocuses whenever its
-//     pane is active (SessionDrawer's `keyboardActive` effect). Treating it as a
-//     document made the whole Ctrl+B prefix vanish the moment you focused an
-//     empty pane: no ⌃B → back out, no ⌃B l, no ⌃B s. This guard runs before the
-//     isCtrlB check, so the prefix was not merely inert — it was invisible.
-//     See docs/proposals/0081-pane-focus-navigation.md Part C.
-//
-// Everything else — compose, favourites search, rename, the sidebar filter —
-// still swallows the prefix, which is what [0016] wanted.
-function shouldSkipShortcut(e: KeyboardEvent): boolean {
-  const t = e.target as HTMLElement | null;
-  const tag = t?.tagName?.toLowerCase();
-  const isPaneControl =
-    !!t?.classList?.contains("xterm-helper-textarea") ||
-    t?.hasAttribute?.("data-pane-filter") === true;
-  return (
-    (tag === "input" || tag === "textarea" || !!t?.isContentEditable) &&
-    !isPaneControl
-  );
-}
+// shouldSkipShortcut — "is focus in a real text field, so the ⌃B prefix must
+// stay out of the way?" — lives in util.ts, next to the other pure helpers, so
+// its table of cases can be unit-tested without dragging the whole app into a
+// test's import graph. It exempts the [0026] empty-pane filter alongside
+// xterm's helper textarea (0081 Part C); see the comment there.
 
 export default function App() {
   const isDesktop = useIsDesktop();
@@ -630,36 +609,41 @@ export default function App() {
     [updatePanes]
   );
 
+  // setActive focuses a pane and remembers the one it came from, so ⌃B ;
+  // (tmux's last-pane, proposal 0081 Part D) can bounce back. The identity
+  // return matters: onActivate fires on every pointerdown, so without it a
+  // click on the *already* focused pane would overwrite `prev` with itself and
+  // strand the toggle.
   const setActive = useCallback(
     (idx: number) =>
-      updatePanes((s) => ({
-        ...s,
-        active: Math.max(0, Math.min(paneCount(s.layout) - 1, idx)),
-      })),
+      updatePanes((s) => {
+        const next = Math.max(0, Math.min(paneCount(s.layout) - 1, idx));
+        if (next === s.active) return s;
+        return { ...s, active: next, prev: s.active };
+      }),
     [updatePanes]
   );
 
-  // setLayout grows/shrinks the panes array to match paneCount(l). Growing
-  // fills with nulls. Shrinking: if the active pane's index falls outside
-  // the new range, the user's focused session is migrated into the last
-  // surviving slot (overwriting whatever was there) before truncation — so
-  // changing to single-pane while focused on pane 3 of a quad doesn't
-  // silently nuke the session the user was looking at. The sessions in the
-  // other dropped slots are still alive in tmux; the drawer is the recovery
-  // path. Active is then clamped into the new range.
-  const setLayout = useCallback(
-    (l: Layout) =>
+  // toggleLastPane — the ⌃B ; chord (tmux's last-pane, proposal 0081 Part D).
+  // Swaps active/prev *inside the reducer* rather than reading a mirrored ref,
+  // so a fast ping-pong can't act on a value a render hasn't caught up with.
+  // Stable identity, so the keydown effect can depend on it without re-binding
+  // (a re-bind would clear an in-flight prefix timer mid-chord).
+  const toggleLastPane = useCallback(
+    () =>
       updatePanes((s) => {
-        const newCount = paneCount(l);
-        let next = s.panes.slice();
-        if (s.active >= newCount && next[s.active]) {
-          // Promote the focused session into the last surviving slot.
-          next[newCount - 1] = next[s.active]!;
-        }
-        next = Array.from({ length: newCount }, (_, i) => next[i] ?? null);
-        const active = Math.max(0, Math.min(newCount - 1, s.active));
-        return { layout: l, panes: next, active };
+        const next = Math.max(0, Math.min(paneCount(s.layout) - 1, s.prev));
+        if (next === s.active) return s;
+        return { ...s, active: next, prev: s.active };
       }),
+    [updatePanes]
+  );
+
+  // setLayout resizes the grid — the migration lives in `applyLayout`
+  // (paneState.ts) so it is pure and unit-testable; see its comment for the
+  // shrink/promote rule and the clamping of `active`/`prev`.
+  const setLayout = useCallback(
+    (l: Layout) => updatePanes((s) => applyLayout(s, l)),
     [updatePanes]
   );
 
@@ -1129,6 +1113,10 @@ export default function App() {
 
     const clearArm = () => {
       armed = false;
+      // Publish it: the empty pane's switcher ([0026]) registers its own window
+      // capture listener and must not also act on an armed chord key. See
+      // prefix.ts.
+      setPrefixArmed(false);
       if (armTimer != null) {
         window.clearTimeout(armTimer);
         armTimer = null;
@@ -1296,8 +1284,10 @@ export default function App() {
         clearArm();
         clearRepeat(); // a fresh prefix supersedes any in-flight repeat
         armed = true;
+        setPrefixArmed(true);
         armTimer = window.setTimeout(() => {
           armed = false;
+          setPrefixArmed(false);
           armTimer = null;
           openDrawer();
         }, PREFIX_TIMEOUT_MS);
@@ -1425,6 +1415,18 @@ export default function App() {
           setRenameSeq((n) => n + 1);
           return;
         }
+        if (k === ";") {
+          // tmux's last-pane (proposal 0081 Part D): bounce between the two
+          // panes you're actually working in, instead of walking the cycle.
+          // `;` is Shift+, on a Swedish layout, which is safe — isModifierKey
+          // above lets the bare Shift keydown pass without cancelling the
+          // prefix. extendRepeat so ⌃B ; ; ; ping-pongs like ⌃B → → →.
+          stop();
+          clearArm();
+          toggleLastPane();
+          extendRepeat();
+          return;
+        }
         if (k === "Escape") {
           stop();
           clearArm();
@@ -1446,6 +1448,14 @@ export default function App() {
           extendRepeat();
           return;
         }
+        if (k === ";") {
+          // last-pane repeats like an arrow — the window belongs to pane
+          // navigation as a whole, so ⌃B ; ; ; ping-pongs (0081 Part D).
+          stop();
+          toggleLastPane();
+          extendRepeat();
+          return;
+        }
         // Any other key while repeating: cancel and let it through to xterm.
         // This is the escape hatch — start typing into the terminal and the
         // repeat mode steps out of your way immediately.
@@ -1460,7 +1470,7 @@ export default function App() {
       clearArm();
       clearRepeat();
     };
-  }, [isDesktop, closeAllSheets, mountAt, setActive, openPalette, openEditor, focusTreeFilter, markColor, openShareFor]);
+  }, [isDesktop, closeAllSheets, mountAt, setActive, toggleLastPane, openPalette, openEditor, focusTreeFilter, markColor, openShareFor]);
 
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //

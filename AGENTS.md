@@ -385,6 +385,37 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   kill/delete, or the 20-cap, does. **Addendum:** the cursor parks on the top
   `Recent` row, so `⌃B`/`⌃A d` → `⏎` is "back to the last session" on desktop,
   phone, and `ccs` alike. See proposal 0078.
+- **The web `⌃B` keymap, and the three rules it cost us to learn (0081).** The
+  desktop prefix engine lives in `frontend/src/App.tsx` (arm/repeat state
+  machine, capture-phase, `isDesktop`-gated) and its chord ladder is now written
+  down for users in `site/docs/web-app.md#keyboard-shortcuts` — keep the two in
+  sync, and add `⌃B ;` (last-pane) to any inventory you copy. Three rules bind
+  anything you add there:
+  **(1) Count panes, never layout ids.** `Layout` is `1..6` but `paneCount` is
+  `{1,2,3,4,2,3}` — `⌃B ←/→` wrapped modulo the *id* and was a dead key in the
+  stacked and right-tall layouts for as long as they existed. Every index
+  arithmetic goes through `paneCount(layout)`.
+  **(2) An uppercase chord must precede its lowercase twin, or discriminate on
+  `e.shiftKey` inside one case.** The ladder is first-match-wins, so
+  `if (k === "s" || k === "S")` shadowed a later `if (k === "S")` and [0041]'s
+  `⌃B ⇧S` share chord never once fired.
+  **(3) A focus signal is broadcast and filtered by the receiver — never gated
+  by swapping the prop per pane.** `searchSeq` (`TileGrid` → `TerminalView`) is
+  the reference implementation: hand every pane the same counter and test
+  `active` in the effect, *consuming the bump before the active test* so an
+  inactive pane can't replay it later. `renameSeq` did it the other way
+  (`idx === active ? seq : -1`), which made *changing the focused pane* look
+  like a bump — so every `⌃B ←/→` opened the rename box, the focused `<input>`
+  then swallowed the whole prefix, and blur-commit POSTed a display label nobody
+  asked for.
+  Also: `shouldSkipShortcut` (`frontend/src/util.ts`) is the single gate keeping
+  the prefix out of text fields, and it is shared with the mobile handler —
+  widen it only by attribute, as the [0026] empty-pane filter (`data-pane-filter`)
+  and xterm's helper textarea are. Panes carry `data-pane` / `data-pane-active`
+  so the harness can ask which one is focused; `frontend/tools/smoke.mjs`'s
+  `gridKeyboardPass()` is the coverage, and its readiness helper is
+  `waitAttached` (the old `[title="open"]` selector matched nothing for months).
+  See proposal 0081.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

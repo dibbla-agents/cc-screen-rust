@@ -30,7 +30,7 @@ Recent row: on a laptop `⌃B` `⏎` takes you back to the last session, and on 
 phone it's the first row under your thumb.
 
 This list lives in *this* browser — it isn't synced between devices, and
-`ccs` on the same machine keeps its own (see the [FAQ](faq.md)). Clearing
+`ccs` on the same machine keeps its own (see the [FAQ](../faq/)). Clearing
 your browser storage clears it; nothing else is affected.
 
 **New session** starts one: pick the machine, the tool (Claude, Codex,
@@ -60,7 +60,9 @@ booting:
 On a wide screen you can tile up to six sessions side by side, in six layout
 templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
 from *different machines* — one grid, your whole fleet. There's a layout
-palette to switch arrangements, and each pane is a full live terminal.
+palette to switch arrangements (**`⌃B` `l`**), and each pane is a full live
+terminal. The whole grid is drivable from the keyboard — see
+[Keyboard shortcuts](#keyboard-shortcuts) for the pane chords.
 
 ![Three live panes with the layout palette open](../img/web-grid.png "Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.")
 
@@ -122,6 +124,55 @@ swipe scrolls the terminal's own scrollback normally, and scrolls the
 **application's** view when a full-screen app has taken over. On the desktop
 the mouse wheel does the same — the app's own view while it's running, the
 browser's scrollback outside it.
+
+## Keyboard shortcuts
+
+On a laptop, cc-screen drives the whole grid from one prefix key: **`⌃B`**
+(Ctrl+B), then a second key. It's the tmux idea, and it's the only keyboard
+namespace the app claims — `Cmd/Ctrl+F` and the rest of your browser's keys are
+never taken. The prefix is **desktop-only**: it needs a real pointer and a
+window at least 900 px wide, so on a phone (or a narrow window) there's one
+pane and no chords. And it stays out of the way of typing: whenever the caret is
+in a text field — the compose box, a search box, a rename field — `⌃B` goes to
+that field instead.
+
+**The prefix itself**
+
+- **`⌃B`** arms the prefix. Press the second key within 600 ms.
+- **`⌃B` held for ~½ a second**, with no second key, opens the session list.
+- **`⌃B` `Esc`** cancels an armed prefix.
+
+**Moving between panes**
+
+- **`⌃B` `←` / `→`** move the focus between panes, wrapping around. After one,
+  you get about 800 ms in which bare `←` / `→` keep stepping — so you can walk
+  the grid without re-pressing the prefix.
+- **`⌃B` `1`–`9`** jump straight to a pane. The number is the small digit in the
+  corner of each pane, shown whether or not that pane holds a session.
+- **`⌃B` `;`** goes back to the pane you came from, and pressing it again
+  returns — for bouncing between the two sessions you're actually working in.
+- **`⌃B` `l`** (or **`⌃B` `Space`**) opens the layout palette.
+- **`⌃B` `x`** clears the focused pane — the session keeps running.
+
+**The session in a pane**
+
+- **`⌃B` `↑` / `↓`** change *which session* the focused pane shows. This is the
+  one to keep straight: left/right moves between panes, up/down changes what's
+  inside one. (On an *empty* pane the bare arrows belong to its session
+  switcher, so there you press the prefix each time.)
+- **`⌃B` `s`** opens the session list.
+- **`⌃B` `r`** renames the focused session (same as double-clicking its name).
+- **`⌃B` `c`** re-rolls the focused session's colour mark; **`⌃B` `⇧C`** clears
+  it.
+- **`⌃B` `⇧S`** shares the focused session with a teammate — team accounts on
+  ccscreen.dev only; elsewhere it does nothing.
+
+**Files and search**
+
+- **`⌃B` `/`** finds text in the focused terminal (see above).
+- **`⌃B` `e`** opens the file browser / editor for the focused session.
+- **`⌃B` `f`** opens it and jumps straight to find-a-file.
+- **`⌃B` `t`** opens it and jumps to the tree filter.
 
 ## Files: browse, edit, cowork
 

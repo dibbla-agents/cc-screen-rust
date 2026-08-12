@@ -110,7 +110,7 @@ screen), and when the drawer opens the cursor is already parked on the top
 Recent row: on a laptop <code>⌃B</code> <code>⏎</code> takes you back to the last session, and on a
 phone it&#39;s the first row under your thumb.</p>
 <p>This list lives in <em>this</em> browser — it isn&#39;t synced between devices, and
-<code>ccs</code> on the same machine keeps its own (see the <a href="faq.md">FAQ</a>). Clearing
+<code>ccs</code> on the same machine keeps its own (see the <a href="../faq/">FAQ</a>). Clearing
 your browser storage clears it; nothing else is affected.</p>
 <p><strong>New session</strong> starts one: pick the machine, the tool (Claude, Codex,
 Gemini, Kimi, or a plain shell), and the working directory (with a
@@ -134,7 +134,9 @@ booting:</p>
 <p>On a wide screen you can tile up to six sessions side by side, in six layout
 templates (columns, rows, main-plus-stack, 2×2, and more). Panes can come
 from <em>different machines</em> — one grid, your whole fleet. There&#39;s a layout
-palette to switch arrangements, and each pane is a full live terminal.</p>
+palette to switch arrangements (<strong><code>⌃B</code> <code>l</code></strong>), and each pane is a full live
+terminal. The whole grid is drivable from the keyboard — see
+<a href="#keyboard-shortcuts">Keyboard shortcuts</a> for the pane chords.</p>
 <p><figure><img src="../img/web-grid.png" alt="Three live panes with the layout palette open" loading="lazy" /><figcaption>Three sessions tiled in the main-plus-stack layout — two Claude agents and a shell — with the layout palette open.</figcaption></figure></p>
 <h3 id="searching-terminal-output">Searching terminal output</h3>
 <p><code>Ctrl+B /</code> opens a find bar over the focused pane: type to search that
@@ -186,6 +188,53 @@ swipe scrolls the terminal&#39;s own scrollback normally, and scrolls the
 <strong>application&#39;s</strong> view when a full-screen app has taken over. On the desktop
 the mouse wheel does the same — the app&#39;s own view while it&#39;s running, the
 browser&#39;s scrollback outside it.</p>
+<h2 id="keyboard-shortcuts">Keyboard shortcuts</h2>
+<p>On a laptop, cc-screen drives the whole grid from one prefix key: <strong><code>⌃B</code></strong>
+(Ctrl+B), then a second key. It&#39;s the tmux idea, and it&#39;s the only keyboard
+namespace the app claims — <code>Cmd/Ctrl+F</code> and the rest of your browser&#39;s keys are
+never taken. The prefix is <strong>desktop-only</strong>: it needs a real pointer and a
+window at least 900 px wide, so on a phone (or a narrow window) there&#39;s one
+pane and no chords. And it stays out of the way of typing: whenever the caret is
+in a text field — the compose box, a search box, a rename field — <code>⌃B</code> goes to
+that field instead.</p>
+<p><strong>The prefix itself</strong></p>
+<ul>
+<li><strong><code>⌃B</code></strong> arms the prefix. Press the second key within 600 ms.</li>
+<li><strong><code>⌃B</code> held for ~½ a second</strong>, with no second key, opens the session list.</li>
+<li><strong><code>⌃B</code> <code>Esc</code></strong> cancels an armed prefix.</li>
+</ul>
+<p><strong>Moving between panes</strong></p>
+<ul>
+<li><strong><code>⌃B</code> <code>←</code> / <code>→</code></strong> move the focus between panes, wrapping around. After one,
+you get about 800 ms in which bare <code>←</code> / <code>→</code> keep stepping — so you can walk
+the grid without re-pressing the prefix.</li>
+<li><strong><code>⌃B</code> <code>1</code>–<code>9</code></strong> jump straight to a pane. The number is the small digit in the
+corner of each pane, shown whether or not that pane holds a session.</li>
+<li><strong><code>⌃B</code> <code>;</code></strong> goes back to the pane you came from, and pressing it again
+returns — for bouncing between the two sessions you&#39;re actually working in.</li>
+<li><strong><code>⌃B</code> <code>l</code></strong> (or <strong><code>⌃B</code> <code>Space</code></strong>) opens the layout palette.</li>
+<li><strong><code>⌃B</code> <code>x</code></strong> clears the focused pane — the session keeps running.</li>
+</ul>
+<p><strong>The session in a pane</strong></p>
+<ul>
+<li><strong><code>⌃B</code> <code>↑</code> / <code>↓</code></strong> change <em>which session</em> the focused pane shows. This is the
+one to keep straight: left/right moves between panes, up/down changes what&#39;s
+inside one. (On an <em>empty</em> pane the bare arrows belong to its session
+switcher, so there you press the prefix each time.)</li>
+<li><strong><code>⌃B</code> <code>s</code></strong> opens the session list.</li>
+<li><strong><code>⌃B</code> <code>r</code></strong> renames the focused session (same as double-clicking its name).</li>
+<li><strong><code>⌃B</code> <code>c</code></strong> re-rolls the focused session&#39;s colour mark; <strong><code>⌃B</code> <code>⇧C</code></strong> clears
+it.</li>
+<li><strong><code>⌃B</code> <code>⇧S</code></strong> shares the focused session with a teammate — team accounts on
+ccscreen.dev only; elsewhere it does nothing.</li>
+</ul>
+<p><strong>Files and search</strong></p>
+<ul>
+<li><strong><code>⌃B</code> <code>/</code></strong> finds text in the focused terminal (see above).</li>
+<li><strong><code>⌃B</code> <code>e</code></strong> opens the file browser / editor for the focused session.</li>
+<li><strong><code>⌃B</code> <code>f</code></strong> opens it and jumps straight to find-a-file.</li>
+<li><strong><code>⌃B</code> <code>t</code></strong> opens it and jumps to the tree filter.</li>
+</ul>
 <h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
 <p>Every machine gets a built-in file browser and editor, confined to that
 machine&#39;s home directory. The tree is live (it follows filesystem changes as
@@ -302,7 +351,7 @@ you hit and how to request more — see the <a href="../faq/">FAQ</a> on plans.<
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.5 — docs track the latest release</span>
+  <span>v0.5.6 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>
