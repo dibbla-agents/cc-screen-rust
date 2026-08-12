@@ -128,7 +128,8 @@ file contents you&#39;re currently looking at. See
 <h2 id="what-happens-when-the-hub-restarts">What happens when the hub restarts?</h2>
 <p>Nothing, from your sessions&#39; point of view. Your machines own their sessions;
 the hub is a relay. Agents reconnect automatically and the session list comes
-back. Same answer for your phone losing signal or your browser closing —
+back. Your <strong>Recent</strong> list is local to the client, so it survives a hub
+restart untouched. Same answer for your phone losing signal or your browser closing —
 sessions run server-side on <em>your</em> box, not in the browser tab.</p>
 <h2 id="and-when-the-machine-itself-reboots">And when the machine itself reboots?</h2>
 <p>The agent starts on boot (it&#39;s a background service) and resumes its recorded
@@ -214,6 +215,33 @@ The same applies inside the grid&#39;s action menu (<code>Ctrl-A d</code>): <cod
 into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
 <a href="../tui/">the ccs terminal client</a> for the full map.</p>
+<h2 id="what-is-the-recent-list-at-the-top-of-the-session-list">What is the &quot;Recent&quot; list at the top of the session list?</h2>
+<p>The sessions you were last <em>working in</em>, most recent first — the answer to
+&quot;where was I two sessions ago?&quot;. It&#39;s deliberately <strong>not</strong> sorted by which
+agent needs you: the whole point is that the top rows stay put, so switching
+between the two or three sessions you&#39;re actively driving is muscle memory
+rather than reading. Attention still surfaces everywhere it did before: the
+ready toasts, the status view, and the freshest-first order inside each
+machine group.</p>
+<p>A few things people ask about it:</p>
+<ul>
+<li><strong>The session you&#39;re in isn&#39;t in it.</strong> It&#39;s already on screen; the list is
+what you&#39;d switch <em>to</em>. With a single pane that makes the first row the
+session you were in immediately before — open the switcher, press <code>Enter</code>,
+and you&#39;re back.</li>
+<li><strong>It&#39;s empty for a new user</strong>, and stays empty until you&#39;ve been in a
+session you&#39;re not currently in. Nothing to fix.</li>
+<li><strong>It doesn&#39;t sync between devices.</strong> Your phone, your laptop&#39;s browser, and
+<code>ccs</code> each keep their own — &quot;where was I&quot; is a per-device question. The web
+app stores it in that browser (clearing site data clears it); <code>ccs</code> stores
+it in <code>~/.config/cc-screen-tui/state.toml</code>, keyed per hub (delete the file
+to clear it).</li>
+<li><strong><code>ccs</code> and the web app on the same machine show different lists</strong> for the
+same reason: two client installs, two histories.</li>
+<li><strong>A session on an offline machine doesn&#39;t fall out of it.</strong> It&#39;s skipped
+while it&#39;s missing and comes back where it was. Only killing or exiting a
+session removes it, and the list holds 20 (showing 10).</li>
+</ul>
 <h2 id="why-does-scrolling-behave-differently-when-an-app-like-claude-or-vim-is-running">Why does scrolling behave differently when an app like Claude or vim is running?</h2>
 <p>Because the app has taken over the screen. Full-screen apps — Claude Code&#39;s
 fullscreen renderer, <code>vim</code>, <code>less</code>, <code>htop</code> — draw on the terminal&#39;s alternate

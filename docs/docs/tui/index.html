@@ -149,7 +149,9 @@ uses to talk to the hub (<code>CCWEB_API_TOKEN</code> on the server / <code>--to
 <ul>
 <li>Device sign-ins land in <code>~/.config/cc-screen-tui/credentials.toml</code> —
 owner-only (<code>0600</code>), keyed per hub, never printed. The server URL lives in
-<code>config.toml</code> next to it.</li>
+<code>config.toml</code> next to it, and machine-written state — today the <strong>Recent</strong>
+session list — in <code>state.toml</code>, which you can delete at any time to clear
+that history.</li>
 <li>Precedence when several sources exist: <code>--token</code> &gt; <code>CCS_API_TOKEN</code> &gt;
 <code>CCWEB_API_TOKEN</code> &gt; <code>credentials.toml</code> &gt; <code>api_token</code> in <code>config.toml</code>.</li>
 <li>Headless/CI use: set <code>CCS_API_TOKEN</code> (or pass <code>--token</code>) and skip
@@ -158,7 +160,10 @@ owner-only (<code>0600</code>), keyed per hub, never printed. The server URL liv
 <h2 id="using-it">Using it</h2>
 <p><code>ccs</code> opens in the <strong>switcher</strong>: every machine&#39;s sessions in one list, each
 with its colour, tool, and latest one-line summary, plus create / kill /
-rename / restore actions. Pick sessions into the <strong>grid</strong> — the same six
+rename / restore actions. A <strong>Recent</strong> block leads the list — up to ten of the
+sessions you were last <em>working in</em>, most recent first — with the cursor
+already on the first of them, so <code>Enter</code> takes you straight back to the
+session you just left. Pick sessions into the <strong>grid</strong> — the same six
 layouts as the web app, and panes from different machines can sit side by
 side, each titled <code>machine/name</code>. Each pane is a full terminal emulator with
 multi-thousand-line scrollback.</p>
@@ -173,22 +178,35 @@ name, its folder, its AI summary, its tool, and its machine — ranked
 name &gt; path &gt; summary — so finding a session in a big fleet is &quot;type 3
 letters, Enter&quot;. <code>Esc</code> clears the query first; a second <code>Esc</code> quits
 (<code>Ctrl-U</code> clears in one stroke).</p>
-<p>On a hub with several machines the resting list groups sessions under
-per-machine hostname headers (offline machines are marked); while you&#39;re
-typing the list flattens to ranked order and each row shows its machine
-inline. The selected session&#39;s full 2–3 sentence AI summary appears above the
-status bar.</p>
+<p>At rest the list starts with the <strong>Recent</strong> block, then — on a hub with
+several machines — the remaining sessions under per-machine hostname headers
+(offline machines are marked). Recent rows carry their machine inline, since
+they sit outside the grouping, and a session that&#39;s already open in a pane
+isn&#39;t listed there (it&#39;s on screen already). The order inside Recent changes
+only when you focus a session, never when an agent goes ready. While you&#39;re
+typing, the split doesn&#39;t run at all: the list flattens to ranked order,
+exactly as before, and each row shows its machine inline. The selected
+session&#39;s full 2–3 sentence AI summary appears above the status bar.</p>
+<p>The Recent list is stored per client install, in
+<code>~/.config/cc-screen-tui/state.toml</code>, keyed per hub — so two hubs keep two
+histories, and <code>ccs</code> and the web app on the same machine keep their own. It
+remembers 20 sessions and shows 10; a session that&#39;s merely missing from the
+current list (an offline machine, say) is skipped, not forgotten, and only an
+explicit kill/exit removes it.</p>
 <p>The grid&#39;s <strong>action menu</strong> (<code>Ctrl-A d</code>) works the same way: start typing and
 the menu filters and re-ranks live — sessions rank exactly like the switcher,
 and the action rows match on aliases too (type &quot;split&quot; for the layout picker,
 &quot;detach&quot; to clear the box, &quot;exit&quot; to quit), with a session name hit always
 winning over an action. The same rules apply: arrows move, <code>Enter</code> selects,
-<code>Esc</code> clears the query first and closes second, and multi-machine hubs show
-the same hostname headers at rest and machine chips while filtering. Putting
+<code>Esc</code> clears the query first and closes second, multi-machine hubs show the
+same hostname headers at rest and machine chips while filtering, and the same
+<strong>Recent</strong> block leads the sessions — with the cursor parked on its first row,
+so <code>Ctrl-A d</code> <code>Enter</code> swaps the box back to the session you were in before. Putting
 a session into a box is &quot;<code>Ctrl-A d</code>, type 3 letters, Enter&quot;.</p>
 <p>Because typing searches, the switcher&#39;s commands live on Ctrl-chords:</p>
 <ul>
-<li><code>↑</code>/<code>↓</code> move · <code>Enter</code> attach the selected (top) match</li>
+<li><code>↑</code>/<code>↓</code> move — through the Recent rows first, never landing on a header ·
+<code>Enter</code> attach the selected (top) match</li>
 <li><code>Ctrl-N</code> new session · <code>Ctrl-X</code> kill · <code>Ctrl-E</code> graceful exit</li>
 <li><code>Ctrl-R</code> rename the selected session</li>
 <li><code>Ctrl-O</code> open the <strong>restorable-session picker</strong> (bring sessions back after
