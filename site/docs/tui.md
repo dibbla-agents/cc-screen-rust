@@ -93,7 +93,9 @@ uses to talk to the hub (`CCWEB_API_TOKEN` on the server / `--token` on
 
 - Device sign-ins land in `~/.config/cc-screen-tui/credentials.toml` —
   owner-only (`0600`), keyed per hub, never printed. The server URL lives in
-  `config.toml` next to it.
+  `config.toml` next to it, and machine-written state — today the **Recent**
+  session list — in `state.toml`, which you can delete at any time to clear
+  that history.
 - Precedence when several sources exist: `--token` > `CCS_API_TOKEN` >
   `CCWEB_API_TOKEN` > `credentials.toml` > `api_token` in `config.toml`.
 - Headless/CI use: set `CCS_API_TOKEN` (or pass `--token`) and skip
@@ -103,7 +105,10 @@ uses to talk to the hub (`CCWEB_API_TOKEN` on the server / `--token` on
 
 `ccs` opens in the **switcher**: every machine's sessions in one list, each
 with its colour, tool, and latest one-line summary, plus create / kill /
-rename / restore actions. Pick sessions into the **grid** — the same six
+rename / restore actions. A **Recent** block leads the list — up to ten of the
+sessions you were last *working in*, most recent first — with the cursor
+already on the first of them, so `Enter` takes you straight back to the
+session you just left. Pick sessions into the **grid** — the same six
 layouts as the web app, and panes from different machines can sit side by
 side, each titled `machine/name`. Each pane is a full terminal emulator with
 multi-thousand-line scrollback.
@@ -125,24 +130,38 @@ name > path > summary — so finding a session in a big fleet is "type 3
 letters, Enter". `Esc` clears the query first; a second `Esc` quits
 (`Ctrl-U` clears in one stroke).
 
-On a hub with several machines the resting list groups sessions under
-per-machine hostname headers (offline machines are marked); while you're
-typing the list flattens to ranked order and each row shows its machine
-inline. The selected session's full 2–3 sentence AI summary appears above the
-status bar.
+At rest the list starts with the **Recent** block, then — on a hub with
+several machines — the remaining sessions under per-machine hostname headers
+(offline machines are marked). Recent rows carry their machine inline, since
+they sit outside the grouping, and a session that's already open in a pane
+isn't listed there (it's on screen already). The order inside Recent changes
+only when you focus a session, never when an agent goes ready. While you're
+typing, the split doesn't run at all: the list flattens to ranked order,
+exactly as before, and each row shows its machine inline. The selected
+session's full 2–3 sentence AI summary appears above the status bar.
+
+The Recent list is stored per client install, in
+`~/.config/cc-screen-tui/state.toml`, keyed per hub — so two hubs keep two
+histories, and `ccs` and the web app on the same machine keep their own. It
+remembers 20 sessions and shows 10; a session that's merely missing from the
+current list (an offline machine, say) is skipped, not forgotten, and only an
+explicit kill/exit removes it.
 
 The grid's **action menu** (`Ctrl-A d`) works the same way: start typing and
 the menu filters and re-ranks live — sessions rank exactly like the switcher,
 and the action rows match on aliases too (type "split" for the layout picker,
 "detach" to clear the box, "exit" to quit), with a session name hit always
 winning over an action. The same rules apply: arrows move, `Enter` selects,
-`Esc` clears the query first and closes second, and multi-machine hubs show
-the same hostname headers at rest and machine chips while filtering. Putting
+`Esc` clears the query first and closes second, multi-machine hubs show the
+same hostname headers at rest and machine chips while filtering, and the same
+**Recent** block leads the sessions — with the cursor parked on its first row,
+so `Ctrl-A d` `Enter` swaps the box back to the session you were in before. Putting
 a session into a box is "`Ctrl-A d`, type 3 letters, Enter".
 
 Because typing searches, the switcher's commands live on Ctrl-chords:
 
-- `↑`/`↓` move · `Enter` attach the selected (top) match
+- `↑`/`↓` move — through the Recent rows first, never landing on a header ·
+  `Enter` attach the selected (top) match
 - `Ctrl-N` new session · `Ctrl-X` kill · `Ctrl-E` graceful exit
 - `Ctrl-R` rename the selected session
 - `Ctrl-O` open the **restorable-session picker** (bring sessions back after

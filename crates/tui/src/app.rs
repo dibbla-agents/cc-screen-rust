@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{ws, DirEntry, Rest};
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::input;
 use crate::layout::{self, Layout};
 use crate::pane::{ConnState, Pane, WsOut};
@@ -246,18 +246,51 @@ fn menu_selected_row(rows: &[MenuRow], selected: usize) -> Option<usize> {
     None
 }
 
-/// Initial menu cursor: the box's current session if it's in the display order,
-/// else the first session, else New session. `order` is the resting session
-/// display order (`grouped_session_order`) — headers don't count, so session
-/// number `i` in that order sits at selectable index `2 + i`.
-fn menu_initial(sessions: &[SessionInfo], order: &[usize], current: Option<&str>) -> usize {
-    current
-        .and_then(|name| {
-            order.iter().position(|&i| sessions.get(i).is_some_and(|s| s.name == name))
-        })
-        .map(|i| 2 + i)
-        .or((!order.is_empty()).then_some(2))
-        .unwrap_or(1)
+/// Initial menu cursor: the top `Recent` row when the section is present, else
+/// the box's current session, else the first session, else New session.
+///
+/// Preferring the section is the 0078 addendum, and it is what makes switching
+/// cost two keystrokes: the box's own session is already on screen, so parking
+/// on it means `⏎` re-attaches what you are looking at. The top of the section
+/// is the session you were in *before* this one — so open the menu, press `⏎`,
+/// and you are back. (The full-screen switcher gets this for free: its cursor
+/// resets to 0, and the section leads `visible_sessions()`.)
+///
+/// It counts *selectable* rows in the built list rather than assuming "two
+/// actions, then sessions" (the pre-0078 `2 + i`): the `Recent` section puts a
+/// non-selectable header between them. Identity is `(machine, name)` — on a hub
+/// with two same-named sessions the old name-only match parked on whichever
+/// came first, which this proposal's identity thesis makes worth fixing here.
+fn menu_initial(sessions: &[SessionInfo], rows: &[MenuRow], current: Option<(&str, &str)>) -> usize {
+    let mut nth = 0usize;
+    let mut first_session: Option<usize> = None;
+    let mut in_section = false;
+    for row in rows {
+        match row {
+            MenuRow::Header { label, .. } => {
+                // The section's rows are the run after its header (the next
+                // header ends it) — the first of them is the addendum's target.
+                in_section = label == RECENT_LABEL;
+                continue; // not selectable, doesn't count
+            }
+            MenuRow::Session(i) => {
+                if in_section {
+                    return nth; // the top Recent row wins outright
+                }
+                if first_session.is_none() {
+                    first_session = Some(nth);
+                }
+                if let (Some((m, n)), Some(s)) = (current, sessions.get(*i)) {
+                    if s.machine == m && s.name == n {
+                        return nth;
+                    }
+                }
+            }
+            MenuRow::Action(_) => {}
+        }
+        nth += 1;
+    }
+    first_session.unwrap_or(1) // no sessions at all → New session
 }
 
 /// Which field of the new-session form is focused. `Machine` is only in the cycle
@@ -768,7 +801,31 @@ pub struct App {
     /// why") with its expiry — 0069 Part D's refused-`^A [` hint. Rides the
     /// existing 1 s ticker; the ready-toast outranks it when both are up.
     hint: Option<(String, Instant)>,
+
+    // ── most-recently-focused sessions (0078) ───────────────────────────────
+    /// The `Recent` section's order, most recent first: the in-memory copy of
+    /// this host's slice of `state.toml`. Authoritative for rendering; every
+    /// write goes back through `config::update_recents` (a read-modify-write, so
+    /// two `ccs` processes against one hub interleave rather than clobber).
+    recents: Vec<config::RecentSession>,
+    /// Which `state.toml` entry the recents live under — the hub's host key, so
+    /// a `ccs` pointed at two hubs keeps two histories. Overridable per test
+    /// (`set_state_scope`), since the e2e binary shares one `XDG_CONFIG_HOME`
+    /// across every test in the process.
+    state_scope: String,
+    /// The dwell gate (0078 A3): which `(machine, name)` the focused box has
+    /// been showing, since when, and whether it has already been promoted.
+    /// Passing through boxes in under a second promotes nothing.
+    focus_dwell: Option<(String, String, Instant, bool)>,
 }
+
+/// How long a box must hold focus before its session is promoted (0078 A3).
+const RECENT_DWELL: Duration = Duration::from_secs(1);
+/// How many `Recent` rows the switcher and the action menu render (0078 A4).
+const RECENT_RENDER: usize = 10;
+/// The section header's label — never conditional on surface or mode: a header
+/// whose text changes is a header you cannot learn (0078 B5).
+pub const RECENT_LABEL: &str = "Recent";
 
 /// Which real-terminal side effects `App::run_with` starts. Production passes the
 /// default (both on); e2e tests pass both off and drive the loop synthetically
@@ -791,6 +848,10 @@ impl App {
     pub fn new(rest: Rest, cfg: Config) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let prefix = input::parse_prefix(&cfg.prefix);
+        // This host's remembered sessions (0078). Keyed per hub host, so a `ccs`
+        // pointed at two hubs keeps two histories.
+        let state_scope = config::host_key(rest.urls().base());
+        let recents = config::recents_for_key(&state_scope);
         Self {
             rest,
             clip_sink: None,
@@ -825,6 +886,9 @@ impl App {
             toast_until: None,
             is_focused: true,
             hint: None,
+            recents,
+            state_scope,
+            focus_dwell: None,
         }
     }
 
@@ -843,6 +907,16 @@ impl App {
     /// default menu boot rather than erroring.
     pub fn set_start_attach(&mut self, query: String) {
         self.start_attach_query = Some(query);
+    }
+
+    /// Scope this client's persisted recents to `key` instead of the hub's host
+    /// key. The e2e binary sets `XDG_CONFIG_HOME` **once per process**, so every
+    /// test in it shares one `state.toml`; without a per-test scope one test's
+    /// attach would reorder another test's resting list and the index-pinning
+    /// assertions would go flaky (proposal 0078, Part D's isolation hazard).
+    pub fn set_state_scope(&mut self, key: &str) {
+        self.state_scope = key.to_string();
+        self.recents = config::recents_for_key(&self.state_scope);
     }
 
     pub async fn run<B: Backend>(self, term: &mut Terminal<B>) -> Result<()> {
@@ -1008,7 +1082,13 @@ impl App {
 
     async fn handle(&mut self, msg: AppMsg) {
         match msg {
-            AppMsg::Tick => self.refresh().await,
+            AppMsg::Tick => {
+                // The 0078 dwell gate rides the existing 1 s ticker — no timer
+                // of its own, and nothing to flush on shutdown (each promote is
+                // already a read-modify-write against state.toml).
+                self.tick_focus_dwell();
+                self.refresh().await
+            }
             AppMsg::Term(ev) => self.handle_term(ev),
             AppMsg::Pane { id, msg } => self.handle_pane(id, msg),
             AppMsg::Created(res) => self.handle_created(res),
@@ -1450,6 +1530,15 @@ impl App {
                     });
                     self.status =
                         format!("{} {session}", if graceful { "exiting" } else { "killing" });
+                    // The user has stated this session is gone, so drop it from
+                    // the Recent list (0078 A5) — the one prune edge.
+                    let machine = self
+                        .sessions
+                        .iter()
+                        .find(|s| s.name == session)
+                        .map(|s| s.machine.clone())
+                        .unwrap_or_default();
+                    self.forget_recent(&machine, &session);
                     self.pending_refresh = true;
                 }
             }
@@ -1891,9 +1980,17 @@ impl App {
     // ── unified action menu (Ctrl-A d / empty box) ───────────────────────────
     fn open_menu(&mut self, target: usize) {
         let target = target.min(self.panes.len().saturating_sub(1));
-        let current = self.panes.get(target).and_then(|p| p.as_ref()).map(|p| p.session.clone());
-        let selected =
-            menu_initial(&self.sessions, &self.grouped_session_order(), current.as_deref());
+        let current = self
+            .panes
+            .get(target)
+            .and_then(|p| p.as_ref())
+            .map(|p| (p.machine.clone(), p.session.clone()));
+        let rows = self.menu_rows(false, "");
+        let selected = menu_initial(
+            &self.sessions,
+            &rows,
+            current.as_ref().map(|(m, s)| (m.as_str(), s.as_str())),
+        );
         self.grid_overlay = GridOverlay::Menu { target, selected, query: String::new() };
         self.prefix_armed = false;
         self.scroll_mode = false; // leaving the live pane view exits scroll mode
@@ -2224,7 +2321,7 @@ impl App {
         let token = self.rest.token().map(str::to_owned);
         let task = tokio::spawn(ws::run(url, token, id, cols, rows, out_rx, self.tx.clone()));
 
-        self.remember(&session);
+        self.remember(&machine, &session);
         self.panes[idx] = Some(Pane::new(id, session, machine, cols, rows, out_tx, task));
         self.refresh_pane_accents();
         self.active = idx;
@@ -2281,12 +2378,18 @@ impl App {
     }
 
     fn kill_focused(&mut self) {
-        if let Some(p) = self.panes.get(self.active).and_then(|x| x.as_ref()) {
+        let killed = self.panes.get(self.active).and_then(|x| x.as_ref()).map(|p| {
             let rest = self.rest.clone();
             let target = p.session.clone();
+            let machine = p.machine.clone();
+            let spawned = target.clone();
             tokio::spawn(async move {
-                let _ = rest.delete(&target, "kill").await;
+                let _ = rest.delete(&spawned, "kill").await;
             });
+            (machine, target)
+        });
+        if let Some((machine, target)) = killed {
+            self.forget_recent(&machine, &target); // explicit kill → forget (0078 A5)
         }
         self.detach_focused();
     }
@@ -2347,12 +2450,62 @@ impl App {
             .unwrap_or((80, 24))
     }
 
-    /// Record a freshly-attached session as the most recent (best-effort save).
-    fn remember(&mut self, session: &str) {
-        self.cfg.recents.retain(|s| s != session);
-        self.cfg.recents.insert(0, session.to_string());
-        self.cfg.recents.truncate(20);
-        let _ = self.cfg.save();
+    /// Record a freshly-attached session as the most recent (proposal 0078).
+    ///
+    /// Keyed on `(machine, name)` — the pre-0078 version stored a bare name, so
+    /// `api` on two machines was one entry — and written to `state.toml`, not
+    /// to the user-editable `config.toml` this used to rewrite on every attach.
+    fn remember(&mut self, machine: &str, session: &str) {
+        // A mount is a deliberate act (Enter on a row / `ccs <name>`), and
+        // `fill_box` always focuses the box it filled, so it promotes at once;
+        // the dwell gate below covers the cheap edge, moving focus BETWEEN
+        // boxes.
+        self.promote_recent(machine, session);
+        self.focus_dwell = Some((machine.to_string(), session.to_string(), Instant::now(), true));
+    }
+
+    fn promote_recent(&mut self, machine: &str, session: &str) {
+        if self.recents.first().is_some_and(|r| r.is(machine, session)) {
+            return; // head-idempotent: no write, no disk touch
+        }
+        self.recents = config::update_recents(&self.state_scope, |l| {
+            config::promote_recent(l, machine, session)
+        });
+    }
+
+    /// Drop a session the user explicitly ended. The ONLY prune edge besides the
+    /// 20-cap: a session merely absent from a poll is skipped at render and kept
+    /// in storage, since absence is indistinguishable from an offline machine
+    /// (0078 A5).
+    fn forget_recent(&mut self, machine: &str, session: &str) {
+        self.recents = config::update_recents(&self.state_scope, |l| {
+            config::forget_recent(l, machine, session)
+        });
+    }
+
+    /// The dwell gate (0078 A3), driven by the existing 1 s ticker rather than a
+    /// timer of its own: the focused box's session is promoted once it has held
+    /// focus for `RECENT_DWELL`. Tabbing through boxes writes nothing.
+    fn tick_focus_dwell(&mut self) {
+        let cur = self
+            .panes
+            .get(self.active)
+            .and_then(|p| p.as_ref())
+            .map(|p| (p.machine.clone(), p.session.clone()));
+        match (cur, self.focus_dwell.take()) {
+            (None, _) => {} // empty box — nothing focused, nothing pending
+            (Some((m, s)), Some((pm, ps, since, done)))
+                if pm == m && ps == s =>
+            {
+                if !done && since.elapsed() >= RECENT_DWELL {
+                    self.promote_recent(&m, &s);
+                    self.focus_dwell = Some((m, s, since, true));
+                } else {
+                    self.focus_dwell = Some((m, s, since, done));
+                }
+            }
+            (Some((m, s)), _) => self.focus_dwell = Some((m, s, Instant::now(), false)),
+        }
     }
 
     /// Build the render view for a new-session form (shared by both overlays).
@@ -2440,25 +2593,33 @@ impl App {
                     GridOverlay::Palette(hi) => ui::overlay::layout_palette(f, *hi),
                     GridOverlay::Menu { target, selected, query } => {
                         let rows = self.menu_rows(self.box_has_session(*target), query);
-                        // Machine chips only while filtering in multi-machine hub
-                        // mode (headers cover the resting state) — precomputed
-                        // here so the overlay stays App-free. Parallel to
-                        // `sessions`; an empty string suppresses the chip.
-                        let chips: Vec<String> =
-                            if !query.trim().is_empty() && self.multi_machine() {
-                                self.sessions
-                                    .iter()
-                                    .map(|s| {
-                                        if s.machine.is_empty() {
-                                            String::new()
-                                        } else {
-                                            self.machine_label(&s.machine)
-                                        }
-                                    })
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
+                        // Machine chips in multi-machine hub mode, for the rows
+                        // with no group header to inherit from: every row while
+                        // filtering, and the `Recent` section's rows at rest
+                        // (0078 C6). Precomputed here so the overlay stays
+                        // App-free. Parallel to `sessions`; an empty string
+                        // suppresses the chip.
+                        let filtering = !query.trim().is_empty();
+                        let section =
+                            if filtering { Vec::new() } else { self.recent_split().0 };
+                        let chips: Vec<String> = if self.multi_machine()
+                            && (filtering || !section.is_empty())
+                        {
+                            self.sessions
+                                .iter()
+                                .enumerate()
+                                .map(|(i, s)| {
+                                    if s.machine.is_empty() || !(filtering || section.contains(&i))
+                                    {
+                                        String::new()
+                                    } else {
+                                        self.machine_label(&s.machine)
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         ui::overlay::grid_menu(
                             f,
                             &ui::overlay::MenuView {
@@ -2571,13 +2732,61 @@ impl App {
         out
     }
 
+    /// The `Recent` split (proposal 0078): the session indices lifted into the
+    /// section, and the grouped remainder. The pipeline is ordered and total:
+    /// take the stored list (≤20, MRU) → drop entries absent from the current
+    /// poll → drop entries mounted in any box → take the first 10.
+    ///
+    /// Suppressed (empty section, untouched order) when nothing is eligible, or
+    /// when the section would hold *every* session: "the top of the list" and
+    /// "the list" would then be the same rows, so triage order would be lost
+    /// for nothing (A7). A typed query never reaches here — callers keep using
+    /// `grouped_session_order()` directly, so ranking and its equal-score tie
+    /// order stay bit-for-bit [0028]'s (A8).
+    fn recent_split(&self) -> (Vec<usize>, Vec<usize>) {
+        let grouped = self.grouped_session_order();
+        let mounted: Vec<(&str, &str)> = self
+            .panes
+            .iter()
+            .flatten()
+            .map(|p| (p.machine.as_str(), p.session.as_str()))
+            .collect();
+        let mut section = Vec::new();
+        for r in &self.recents {
+            if section.len() >= RECENT_RENDER {
+                break;
+            }
+            // Absent from this poll → skipped here, retained in storage.
+            let Some(i) = self.sessions.iter().position(|s| r.is(&s.machine, &s.name)) else {
+                continue;
+            };
+            // Already on screen → the top of the list is what you'd switch TO.
+            if mounted.iter().any(|(m, n)| r.is(m, n)) {
+                continue;
+            }
+            if !section.contains(&i) {
+                section.push(i);
+            }
+        }
+        let rest: Vec<usize> = grouped.iter().copied().filter(|i| !section.contains(i)).collect();
+        if section.is_empty() || rest.is_empty() {
+            return (Vec::new(), grouped);
+        }
+        (section, rest)
+    }
+
     /// Session indices in display order: ranked (name > path > meta, the web's
-    /// 0028 tiers) while filtering; resting order (name-sorted, grouped by
-    /// machine when `multi_machine`) otherwise. `selected` indexes THIS list.
+    /// 0028 tiers) while filtering; at rest the `Recent` section (0078) followed
+    /// by the resting order (name-sorted, grouped by machine when
+    /// `multi_machine`) minus the section's members. `selected` indexes THIS
+    /// list, and `switcher_rows`/`menu_rows` emit the same split, so the cursor
+    /// and the rows can't disagree.
     pub fn visible_sessions(&self) -> Vec<usize> {
         let q = self.query.trim();
         if q.is_empty() {
-            self.grouped_session_order()
+            let (mut section, rest) = self.recent_split();
+            section.extend(rest);
+            section
         } else {
             let mut scored: Vec<(i64, usize)> = self
                 .sessions
@@ -2598,13 +2807,30 @@ impl App {
     /// session list otherwise. Headers are non-selectable — the cursor lives in
     /// `visible_sessions()`, whose order matches this list's `Session` rows.
     pub fn switcher_rows(&self) -> Vec<SwitcherRow> {
-        let vis = self.visible_sessions();
-        if self.filtering() || !self.multi_machine() {
-            return vis.into_iter().map(SwitcherRow::Session).collect();
+        if self.filtering() {
+            // The split doesn't run while filtering (0078 A8) — a flat ranked
+            // list, exactly as before.
+            return self.visible_sessions().into_iter().map(SwitcherRow::Session).collect();
         }
-        let mut rows = Vec::with_capacity(vis.len() + self.machines.len());
+        let (section, rest) = self.recent_split();
+        let mut rows = Vec::with_capacity(section.len() + rest.len() + self.machines.len() + 1);
+        if !section.is_empty() {
+            // The section header is the machine-header variant with a fixed
+            // label: same shape, same non-selectable semantics, no second render
+            // arm to keep in sync. It is emitted on EVERY branch — including a
+            // direct/single-machine connection, where there are no machine
+            // headers below it (0078 C3).
+            rows.push(SwitcherRow::Header { label: RECENT_LABEL.into(), online: true });
+            rows.extend(section.into_iter().map(SwitcherRow::Session));
+        }
+        if !self.multi_machine() {
+            rows.extend(rest.into_iter().map(SwitcherRow::Session));
+            return rows;
+        }
+        // The run-boundary detector must not see section rows: they mix machines
+        // and precede the groups, so `cur` starts fresh here (0078 C3).
         let mut cur: Option<&str> = None;
-        for i in vis {
+        for i in rest {
             let m = self.sessions[i].machine.as_str();
             if cur != Some(m) {
                 rows.push(SwitcherRow::Header {
@@ -2616,6 +2842,17 @@ impl App {
             rows.push(SwitcherRow::Session(i));
         }
         rows
+    }
+
+    /// Which visible rows sit in the `Recent` section — a leading run of
+    /// `visible_sessions()`, so a count is enough. Drives the per-row machine
+    /// chip on both surfaces (0078 C6): a row outside the grouping has no header
+    /// to inherit its machine from.
+    pub fn recent_count(&self) -> usize {
+        if self.filtering() {
+            return 0;
+        }
+        self.recent_split().0.len()
     }
 
     /// The selected session, resolved through the visible-row indirection —
@@ -2646,9 +2883,17 @@ impl App {
             let mut rows = Vec::with_capacity(self.sessions.len() + self.machines.len() + 5);
             rows.push(MenuRow::Action(MenuItem::ChangeLayout));
             rows.push(MenuRow::Action(MenuItem::NewSession));
+            // The `Recent` section, above the machine groups and on every branch
+            // — including the single-machine one, which renders no headers at
+            // all below it (0078 C3).
+            let (section, rest) = self.recent_split();
+            if !section.is_empty() {
+                rows.push(MenuRow::Header { label: RECENT_LABEL.into(), online: true });
+                rows.extend(section.into_iter().map(MenuRow::Session));
+            }
             let headers = self.multi_machine();
             let mut cur: Option<&str> = None;
-            for i in self.grouped_session_order() {
+            for i in rest {
                 let m = self.sessions[i].machine.as_str();
                 if headers && cur != Some(m) {
                     rows.push(MenuRow::Header {
@@ -2759,6 +3004,14 @@ impl App {
     /// Set the switcher search query directly (render tests drive state, not keys).
     pub fn test_set_query(&mut self, q: &str) {
         self.query = q.into();
+    }
+
+    /// Seed the `Recent` order (0078) without touching disk — the ordering
+    /// functions are pure over this list, so unit tests drive it directly.
+    /// Entries are `(machine, name)`.
+    pub fn test_set_recents(&mut self, recents: &[(&str, &str)]) {
+        self.recents =
+            recents.iter().map(|(m, n)| config::RecentSession::new(m, n)).collect();
     }
 
     /// Set the switcher cursor directly (an index into `visible_sessions()`).
@@ -2971,13 +3224,42 @@ mod tests {
     #[test]
     fn menu_initial_prefers_current_then_first_then_new() {
         let list = vec![sess("a"), sess("b"), sess("c")];
-        let order = [0usize, 1, 2];
-        assert_eq!(menu_initial(&list, &order, Some("b")), 3); // 2 + index 1
-        assert_eq!(menu_initial(&list, &order, Some("missing")), 2); // falls back to first session
-        assert_eq!(menu_initial(&list, &order, None), 2); // first session
-        assert_eq!(menu_initial(&[], &[], None), 1); // New session when there are none
+        // The two pinned actions, then the sessions — `menu_rows`' resting shape.
+        let rows = |order: &[usize]| -> Vec<MenuRow> {
+            let mut r = vec![
+                MenuRow::Action(MenuItem::ChangeLayout),
+                MenuRow::Action(MenuItem::NewSession),
+            ];
+            r.extend(order.iter().map(|&i| MenuRow::Session(i)));
+            r
+        };
+        let all = rows(&[0, 1, 2]);
+        assert_eq!(menu_initial(&list, &all, Some(("", "b"))), 3); // 2 actions + index 1
+        assert_eq!(menu_initial(&list, &all, Some(("", "missing"))), 2); // first session
+        assert_eq!(menu_initial(&list, &all, None), 2);
+        assert_eq!(menu_initial(&[], &rows(&[]), None), 1); // New session when there are none
         // A grouped (reordered) display order maps through: "b" shown first.
-        assert_eq!(menu_initial(&list, &[1, 0, 2], Some("b")), 2);
+        assert_eq!(menu_initial(&list, &rows(&[1, 0, 2]), Some(("", "b"))), 2);
+        // 0078 C4: a non-selectable header between the actions and the sessions
+        // doesn't shift the cursor — the count is of SELECTABLE rows.
+        let mut sectioned = vec![
+            MenuRow::Action(MenuItem::ChangeLayout),
+            MenuRow::Action(MenuItem::NewSession),
+            MenuRow::Header { label: RECENT_LABEL.into(), online: true },
+            MenuRow::Session(1),
+            MenuRow::Header { label: "pine".into(), online: true },
+        ];
+        sectioned.extend([MenuRow::Session(0), MenuRow::Session(2)]);
+        // …and the 0078 addendum parks on the section's first row whatever the
+        // box's own session is, so `⏎` goes BACK instead of re-attaching.
+        assert_eq!(menu_initial(&list, &sectioned, Some(("", "b"))), 2);
+        assert_eq!(menu_initial(&list, &sectioned, Some(("", "c"))), 2);
+        assert_eq!(menu_initial(&list, &sectioned, None), 2);
+        // …and identity is (machine, name): a same-named session on another
+        // machine is a different session, which the old name-only match missed.
+        let hub = vec![sess_on("api", "pine"), sess_on("api", "studio")];
+        let hub_rows = rows(&[0, 1]);
+        assert_eq!(menu_initial(&hub, &hub_rows, Some(("studio", "api"))), 3);
     }
 
     #[test]
@@ -3289,6 +3571,84 @@ mod tests {
         assert_eq!(a.selected_session().unwrap().name, "apollo");
         a.move_sel(1);
         assert_eq!(a.selected_session().unwrap().name, "cherry");
+    }
+
+    #[test]
+    /// Proposal 0078 — the `Recent` section is lifted above the machine groups,
+    /// in stored (MRU) order, and vanishes entirely while filtering.
+    #[test]
+    fn recent_section_precedes_groups_and_vanishes_while_filtering() {
+        let mut a = App::test_fixture_hub(
+            vec![sess_on("apollo", "boxB"), sess_on("banana", "boxA"), sess_on("cherry", "boxB")],
+            vec![machine("boxA", "hostA", true), machine("boxB", "hostB", true)],
+            "",
+        );
+        // Focused most recently: cherry, then banana. Resting order was [1,0,2].
+        a.test_set_recents(&[("boxB", "cherry"), ("boxA", "banana")]);
+        assert_eq!(a.visible_sessions(), vec![2, 1, 0], "section first, then the remainder");
+        let rows = a.switcher_rows();
+        assert!(
+            matches!(&rows[0], SwitcherRow::Header { label, .. } if label == RECENT_LABEL),
+            "the Recent header leads the resting switcher"
+        );
+        assert!(matches!(rows[1], SwitcherRow::Session(2)));
+        assert!(matches!(rows[2], SwitcherRow::Session(1)));
+        // The run-boundary detector never saw the section's machines, so the
+        // first real group header is still emitted (0078 B3/C3).
+        assert!(matches!(&rows[3], SwitcherRow::Header { label, .. } if label == "hostB"));
+        assert!(matches!(rows[4], SwitcherRow::Session(0)));
+        assert_eq!(rows.len(), 5, "boxA's group is empty — no header, no empty group");
+        assert_eq!(a.recent_count(), 2);
+        // The header is not selectable: the cursor still indexes sessions only.
+        assert_eq!(a.selected_session().unwrap().name, "cherry");
+        // Filtering: the split doesn't run at all (A8) — today's flat ranked list.
+        a.test_set_query("an");
+        assert_eq!(a.recent_count(), 0);
+        assert!(a.switcher_rows().iter().all(|r| matches!(r, SwitcherRow::Session(_))));
+    }
+
+    /// A5/A6/A7: absent entries are skipped (not forgotten), mounted sessions are
+    /// excluded, and a section that would hold every session is suppressed.
+    #[test]
+    fn recent_section_skips_absent_and_suppresses_the_degenerate_case() {
+        let mut a = App::test_fixture_hub(
+            vec![sess_on("apollo", "boxB"), sess_on("banana", "boxA")],
+            vec![machine("boxA", "hostA", true), machine("boxB", "hostB", true)],
+            "",
+        );
+        // A session that isn't in this poll is skipped at render…
+        a.test_set_recents(&[("boxB", "ghost"), ("boxB", "apollo")]);
+        assert_eq!(a.visible_sessions(), vec![0, 1]);
+        assert_eq!(a.recent_count(), 1);
+        // …and a machine-less same-named entry is a DIFFERENT session (A1).
+        a.test_set_recents(&[("", "apollo")]);
+        assert_eq!(a.recent_count(), 0);
+        // The section would hold every session → suppressed, resting order kept.
+        a.test_set_recents(&[("boxB", "apollo"), ("boxA", "banana")]);
+        assert_eq!(a.recent_count(), 0);
+        assert_eq!(a.visible_sessions(), vec![1, 0]);
+    }
+
+    /// C3: the section is emitted on the branches that have no machine headers
+    /// at all — a direct agent and a single-machine hub.
+    #[test]
+    fn recent_section_renders_in_single_machine_mode() {
+        let mut a = App::test_fixture(vec![sess("alpha"), sess("beta")], "");
+        a.test_set_recents(&[("", "beta")]);
+        let rows = a.switcher_rows();
+        assert!(matches!(&rows[0], SwitcherRow::Header { label, .. } if label == RECENT_LABEL));
+        assert!(matches!(rows[1], SwitcherRow::Session(1)));
+        assert!(matches!(rows[2], SwitcherRow::Session(0)));
+        assert_eq!(rows.len(), 3, "no machine headers below it");
+        // The menu agrees: header + section row above the grouped remainder.
+        let menu = a.menu_rows(false, "");
+        assert!(matches!(&menu[2], MenuRow::Header { label, .. } if label == RECENT_LABEL));
+        assert!(matches!(menu[3], MenuRow::Session(1)));
+        assert!(matches!(menu[4], MenuRow::Session(0)));
+        // …and the header is excluded from the selectable count [0062]:245-247:
+        // 2 pinned actions + 2 sessions + ClearBox + Quit.
+        assert_eq!(menu.len(), 7);
+        assert_eq!(menu_selectable_len(&menu), 6);
     }
 
     #[test]

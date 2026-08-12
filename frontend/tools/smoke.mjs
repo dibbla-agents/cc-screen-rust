@@ -291,6 +291,84 @@ async function idleRendererPass() {
   }
 }
 
+// ── Proposal 0078 ─────────────────────────────────────────────────────────────
+// The `Recent` section: work in one session, switch to another, and the drawer
+// must lead with the one you just left — and never with the one you are in.
+// Needs two sessions on the box; with fewer, the section is suppressed by
+// design (A7) and the pass logs a skip rather than failing.
+async function recentSectionPass() {
+  const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  try {
+    await dpage.goto(base, { waitUntil: "networkidle" });
+    const rows = dpage.locator("[data-session-row]");
+    await rows.first().waitFor({ timeout: 15000 });
+    const names = await rows.evaluateAll((els) =>
+      els.map((e) => e.querySelector("span.font-semibold")?.textContent?.trim() ?? "")
+    );
+    const uniq = [...new Set(names.filter(Boolean))];
+    if (uniq.length < 2) {
+      console.log(`SKIP recent-section pass: needs 2 sessions, saw ${uniq.length}`);
+      return;
+    }
+    const [first, second] = uniq;
+
+    // Work in `first` for longer than the 1s dwell gate, then switch to `second`.
+    await dpage.getByRole("button", { name: new RegExp(first) }).first().click({ timeout: 15000 });
+    await dpage.waitForSelector('[title="open"]', { timeout: 10000 });
+    await dpage.waitForTimeout(1600);
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("s");
+    await dpage.waitForSelector('[data-drawer="open"] [data-session-row]', { timeout: 5000 });
+    await dpage.getByRole("button", { name: new RegExp(second) }).first().click({ timeout: 10000 });
+    await dpage.waitForTimeout(1600);
+
+    // Reopen: the section leads with `first`, and excludes the mounted `second`.
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("s");
+    await dpage.waitForSelector('[data-drawer="open"] [data-recent-section]', { timeout: 5000 });
+    const section = await dpage
+      .locator('[data-drawer="open"] [data-session-row][data-recent-section]')
+      .evaluateAll((els) =>
+        els.map((e) => e.querySelector("span.font-semibold")?.textContent?.trim() ?? "")
+      );
+    // The 0078 addendum: the cursor is parked on that first row, so ⏎ alone
+    // goes back to the session you were just in — two keystrokes total. Proof
+    // is the round trip: reopening the drawer now leads with `second`, because
+    // `first` has become the mounted one. (The drawer is still open here.)
+    await dpage.keyboard.press("Enter");
+    await dpage.waitForTimeout(1800);
+    await dpage.keyboard.press("Control+b");
+    await dpage.keyboard.press("s");
+    await dpage.waitForSelector('[data-drawer="open"] [data-recent-section]', { timeout: 5000 });
+    const back = await dpage
+      .locator('[data-drawer="open"] [data-session-row][data-recent-section]')
+      .evaluateAll((els) =>
+        els.map((e) => e.querySelector("span.font-semibold")?.textContent?.trim() ?? "")
+      );
+    await dpage.keyboard.press("Escape");
+    if (back[0] !== second) {
+      fail(`⏎ on the parked cursor didn't switch back (section now leads with ${JSON.stringify(back[0])})`);
+      return;
+    }
+    if (section[0] !== first) {
+      fail(`Recent leads with ${JSON.stringify(section[0])}, expected ${JSON.stringify(first)}`);
+      return;
+    }
+    if (section.includes(second)) {
+      fail(`the mounted session ${JSON.stringify(second)} must not be in Recent`);
+      return;
+    }
+    if (derrs.length) fail("recent-section pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    fail("recent-section pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
 // The other half of Part D: with GL unavailable the terminal must still mount,
 // on xterm's DOM renderer, with search working there too.
 async function domFallbackPass() {
@@ -771,7 +849,9 @@ try {
     if (process.exitCode === 1) throw new Error("idle/renderer pass failed");
     await domFallbackPass();
     if (process.exitCode === 1) throw new Error("DOM fallback pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK)");
+    await recentSectionPass();
+    if (process.exitCode === 1) throw new Error("recent-section pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

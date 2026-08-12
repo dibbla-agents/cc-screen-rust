@@ -19,6 +19,20 @@ and who's waiting for you. Tap a session to attach; the terminal is the real
 PTY — what you see is exactly what's running on the box, and it keeps running
 when you close the tab.
 
+**Recent** sits at the top of the list: up to ten of the sessions you were
+last *working in*, most recent first, lifted out of their machine groups. It
+answers "where was I two sessions ago?", so switching back and forth between
+the two or three you're actively driving needs no reading — the order only
+changes when *you* focus a session, never when an agent goes ready or starts
+talking. The session you're currently in isn't listed (it's already on
+screen), and when the drawer opens the cursor is already parked on the top
+Recent row: on a laptop `⌃B` `⏎` takes you back to the last session, and on a
+phone it's the first row under your thumb.
+
+This list lives in *this* browser — it isn't synced between devices, and
+`ccs` on the same machine keeps its own (see the [FAQ](faq.md)). Clearing
+your browser storage clears it; nothing else is affected.
+
 **New session** starts one: pick the machine, the tool (Claude, Codex,
 Gemini, Kimi, or a plain shell), and the working directory (with a
 directory search, so deep project paths are a few keystrokes). Two details

@@ -34,6 +34,7 @@ import {
   PANES_KEY,
   type PaneState,
 } from "./paneState";
+import { SessionRecentsStore, type RecentRef } from "./sessionRecents";
 import TerminalView, { type ConnState } from "./components/TerminalView";
 import SessionDrawer, { type PaneSwitcherProps } from "./components/SessionDrawer";
 import ControlBar from "./components/ControlBar";
@@ -209,6 +210,30 @@ export default function App() {
     [panes]
   );
 
+  // Most-recently-focused sessions (proposal 0078) — the `Recent` section at the
+  // top of the switcher. The store owns the dwell gate, the trailing-debounced
+  // persist and the read-modify-write against localStorage; App owns only the
+  // two write edges (focus, background mount) and the render copy.
+  const [recentsStore] = useState(() => new SessionRecentsStore());
+  const [recents, setRecents] = useState<RecentRef[]>(() => recentsStore.list());
+  useEffect(() => {
+    const unsub = recentsStore.subscribe(() => setRecents(recentsStore.list()));
+    // A second tab on this origin shares the store; adopt its writes rather than
+    // rendering a divergent section (0078 A11).
+    const onStorage = () => recentsStore.reload();
+    // Flush before the tab goes away — the in-memory list is authoritative and
+    // the debounce window may still be open.
+    const onHide = () => recentsStore.flush();
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      unsub();
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("pagehide", onHide);
+      recentsStore.dispose();
+    };
+  }, [recentsStore]);
+
   // Mirror layout/active/sessions/panes into refs so the keyboard handler can
   // read fresh values without re-binding (which would reset its in-flight
   // prefix timer mid-chord). State drives rendering; refs drive the handler.
@@ -275,7 +300,40 @@ export default function App() {
   useEffect(() => { panesRef.current = panes; }, [panes]);
   useEffect(() => { meRef.current = me; }, [me]);
 
+  // The two write edges of the Recent section (proposal 0078 A2). "Viewed" means
+  // *focused*: in a 2×2 grid four sessions are visible, and only the focused one
+  // is being worked in. Recording focus (not just mounts) is what makes the
+  // order right after the panes change — collapsing a 2×2 unmounts three
+  // sessions at once, and they must fall into last-focused order.
+  const focusKey = currentSession ? sessionKey(currentSession) : "";
+  useEffect(() => {
+    const p = panesRef.current[activeRef.current] ?? null;
+    // Dwell-gated inside the store: passing through panes (⌃B ↑/↓) writes
+    // nothing, so the cycle can't rewrite the list it walks.
+    recentsStore.focus(p ? { name: p.name, machine: p.machine } : null);
+  }, [focusKey, recentsStore]);
+
+  // A mount that lands in a *background* pane (a deep link, a notification tap,
+  // a pick into another tile) is a real view event — recorded at once, but never
+  // promoted above the focused pane's session.
+  const prevPanes = useRef<(PaneRef | null)[]>(panes);
+  useEffect(() => {
+    const before = prevPanes.current;
+    prevPanes.current = panes;
+    panes.forEach((p, i) => {
+      if (!p || i === active) return;
+      const was = before[i];
+      if (was && was.name === p.name && was.machine === p.machine) return;
+      recentsStore.record({ name: p.name, machine: p.machine });
+    });
+  }, [panes, active, recentsStore]);
+
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Persist pending promotions when the selector opens (proposal 0078 A3): the
+  // list is about to be read, and another tab reading it should see it.
+  useEffect(() => {
+    if (drawerOpen) recentsStore.flush();
+  }, [drawerOpen, recentsStore]);
   // Bumped by the `⌃B r` chord (proposal 0035) to put the active pane's
   // identity-bar name into edit mode — even with no pointer. Same focus-seq
   // trick as the editor's `focusSearchSeq`.
@@ -1793,6 +1851,10 @@ export default function App() {
   const removeSession = useCallback(
     async (name: string, mode: "exit" | "kill", machine = "") => {
       setDeleting((d) => new Set(d).add(name));
+      // The one prune edge for the Recent list besides the 20-cap (0078 A5): the
+      // user has *stated* this session is gone, so forget it. Mere absence from
+      // a poll never does — that is indistinguishable from an offline machine.
+      recentsStore.forget({ name, machine });
       try {
         await deleteSession(name, mode, machine);
         const deadline = Date.now() + 25000; // give a soft /exit time to wind down
@@ -1832,7 +1894,7 @@ export default function App() {
         refresh();
       }
     },
-    [refresh, updatePanes]
+    [refresh, updatePanes, recentsStore]
   );
 
   // Favourites live server-side (durable, shared across devices). Load once, then
@@ -2041,6 +2103,12 @@ export default function App() {
       multiMachine,
       loading,
       error,
+      // The Recent section (proposal 0078): the MRU list plus the set of
+      // sessions already on screen, which the drawer subtracts. Both are stable
+      // references (the store notifies only on a real change; mountedKeys is
+      // memoized on `panes`), so SessionDrawer's memo keeps holding.
+      recents,
+      mountedKeys,
       onRefresh: refresh,
       onStatus: () => setStatusOpen(true),
       createInitialMachine: currentSession?.machine || firstOnlineMachine,
@@ -2078,6 +2146,8 @@ export default function App() {
       multiMachine,
       loading,
       error,
+      recents,
+      mountedKeys,
       refresh,
       currentSession?.machine,
       firstOnlineMachine,

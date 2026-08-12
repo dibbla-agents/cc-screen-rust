@@ -208,8 +208,11 @@ a panic leaves the user's shell wrecked. Install before entering the UI.
   serve`) work out of the box via `webpki-roots`; `--insecure` accepts invalid
   certs for ad-hoc self-signed setups.
 - Config `~/.config/cc-screen-tui/config.toml`: `server`, `prefix` (e.g.
-  `"C-a"`), `recents = [...]`, optional `[servers]` map (no UI in v1; the file is
-  the source).
+  `"C-a"`), optional `[servers]` map (no UI in v1; the file is the source).
+  **Machine-written state lives in a sibling `state.toml`** (proposal 0078),
+  never in the user-editable config: today the `[hosts."<hub>"].recents` list
+  behind the switcher's `Recent` section, written tmp+rename on a
+  read-modify-write.
 - REST/WS failures surface as a transient bar message, never a crash; the
   switcher shows "server unreachable — retrying" and keeps polling.
 
@@ -237,7 +240,9 @@ suites all pass; every milestone also has a live PTY smoke test. Run it with
   Exhaustive encoder unit tests + live typing/detach smoke.
 - **M4 — Lifecycle + polish.** ✅ New-session form (tool/name/dir), kill/exit
   confirm, restore-all; WS reconnect with backoff; auto-detach when the attached
-  session ends; recents persisted to config. Live create/kill/auto-detach smoke.
+  session ends; recents persisted (moved out of `config.toml` into `state.toml`
+  and *surfaced* as the `Recent` section by proposal 0078). Live
+  create/kill/auto-detach smoke.
 
 ### Deferred (out of v1)
 - **`--insecure` for `wss`**: honored on the HTTP side (reqwest); the WebSocket

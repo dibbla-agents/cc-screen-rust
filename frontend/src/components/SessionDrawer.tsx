@@ -2,6 +2,8 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import { type MachineInfo, type MePlan, type PaneRef, type RestorableSession, type Session } from "../api";
 import { ago, agentStatus, dirCrumb, displayName, fuzzyScore, MAX_SESSION_LABEL_LEN, sessionAccent, sharedEntry, stateAnchor, statusDot, statusTitle, toolColor, type SharedMap } from "../util";
 import { PlusIcon, RefreshIcon, ShareIcon, StatusListIcon, TrashIcon, XIcon } from "../icons";
+import { sessionKey } from "../readyEdges";
+import { recentSectionKeys, renderCap, type RecentRef } from "../sessionRecents";
 import NotificationsButton from "./NotificationsButton";
 import { useOpenOrClosing } from "../useOpenOrClosing";
 import SummaryTip, { dismissSummaryTips } from "./SummaryTip";
@@ -45,6 +47,13 @@ interface Props {
   // True when >1 machine is connected: group the list by machine. False keeps
   // the flat, single-machine layout unchanged.
   multiMachine: boolean;
+  // The most-recently-focused sessions in this client install (proposal 0078),
+  // MRU first, and the set of `${machine}/${name}` keys currently mounted in a
+  // pane. Together they drive the `Recent` section above the machine groups:
+  // stored order is rendered verbatim (never attention-ordered), minus anything
+  // already on screen. Absent → no section, i.e. exactly today's drawer.
+  recents?: RecentRef[];
+  mountedKeys?: Set<string>;
   current: PaneRef | null;
   loading: boolean;
   error: string | null;
@@ -118,6 +127,8 @@ export type PaneSwitcherProps = Pick<
   | "connByRef"
   | "machines"
   | "multiMachine"
+  | "recents"
+  | "mountedKeys"
   | "loading"
   | "error"
   | "onRefresh"
@@ -144,11 +155,15 @@ export type PaneSwitcherProps = Pick<
 // A navigable item the keyboard cursor can land on (proposal 0011, generalized
 // by 0016 to include "New layout"). Empty filter → today's order; a non-empty
 // filter fuzzy-ranks all of these in one flat list.
+// The `Recent` section (proposal 0078) adds one non-selectable header item and
+// marks its member rows with `inSection` — the flag the header run-detector,
+// the machine chip and the smoke suite's `data-recent-section` all read.
 type NavItem =
   | { kind: "new" }
   | { kind: "layout" }
   | { kind: "restore" }
-  | { kind: "session"; session: Session };
+  | { kind: "sectionHeader"; label: string }
+  | { kind: "session"; session: Session; inSection?: boolean };
 
 // Aliases that let the actions surface from a fuzzy query (e.g. "split" → New
 // layout). The label is matched too.
@@ -185,6 +200,8 @@ function SessionDrawer({
   connByRef,
   machines,
   multiMachine,
+  recents,
+  mountedKeys,
   current,
   loading,
   error,
@@ -298,6 +315,29 @@ function SessionDrawer({
     });
   }, [sessions]);
 
+  // ── The `Recent` section (proposal 0078) ──────────────────────────────────
+  //
+  // Membership is SNAPSHOTTED when the selector opens (A12): poll ticks keep
+  // updating each row's badges, status dot and time, but never add, remove or
+  // reorder a section row under the cursor. So `recents`/`sessions` are read
+  // from the opening render's closure and deliberately left out of the deps —
+  // the only re-snapshot edge is the mounted set changing, which is a user
+  // action (and, in the permanently-open pane variant, the one thing that can
+  // change what you'd switch *to*).
+  const snapshotSection = () => {
+    if (!open && !pane) return [];
+    const vh = typeof window === "undefined" ? 1000 : window.innerHeight;
+    return recentSectionKeys(recents ?? [], sessions, mountedKeys ?? new Set(), renderCap(pane, vh));
+  };
+  // Seeded on the first render (so a drawer that mounts already open — the pane
+  // variant, and the server-rendered test harness — has its section at once)
+  // and re-snapshotted only on the edges above.
+  const [sectionKeys, setSectionKeys] = useState<string[]>(snapshotSection);
+  useEffect(() => {
+    setSectionKeys(snapshotSection());
+    // eslint-disable-next-line -- A12: frozen while open, by design.
+  }, [open, pane, mountedKeys]);
+
   // Desktop sidebar width, sized to content so the whole folder breadcrumb —
   // crucially the leaf (0025) — is visible without truncation. We grow from the
   // 320px floor only as far as the widest label needs, capped at 480px (and at
@@ -314,26 +354,53 @@ function SessionDrawer({
     return Math.min(480, Math.max(320, Math.round(150 + maxLen * 7)));
   }, [sessions]);
 
-  // The base (unfiltered) item list — actions first, then session rows. The
-  // cursor indexes the *visible* list (`view`), which equals this when the
-  // filter is empty.
+  const q = query.trim();
+  const filtering = q.length > 0;
+
+  // Lift the snapshotted recents out of the grouped order. A typed query
+  // short-circuits the split *entirely* (0078 A8) — not merely the header — so
+  // the ranked list is bit-for-bit [0028]'s, including its equal-score tie
+  // order, which rides on the stable sort over this very list.
+  const { section, rest } = useMemo(() => {
+    if (filtering || sectionKeys.length === 0) return { section: [] as Session[], rest: ordered };
+    const keys = new Set(sectionKeys);
+    const byKey = new Map(sessions.map((s) => [sessionKey(s), s]));
+    const picked = sectionKeys.map((k) => byKey.get(k)).filter((s): s is Session => !!s);
+    const remainder = ordered.filter((s) => !keys.has(sessionKey(s)));
+    // A7: one row is enough (single-pane, it's the session you were just in),
+    // but a section holding *every* session gains nothing — "the top of the
+    // list" and "the list" would be the same rows — while losing triage order
+    // and adding a header. Suppress it and render today's list.
+    if (picked.length === 0 || remainder.length === 0) return { section: [], rest: ordered };
+    return { section: picked, rest: remainder };
+  }, [filtering, sectionKeys, sessions, ordered]);
+
+  // The base (unfiltered) item list — actions, then the `Recent` section, then
+  // the machine-grouped remainder. The cursor indexes the *visible* list
+  // (`view`), which equals this when the filter is empty.
   const baseItems = useMemo<NavItem[]>(
     () => [
       { kind: "new" },
       ...(showLayout ? [{ kind: "layout" as const }] : []),
       ...(restorable.length > 0 ? [{ kind: "restore" as const }] : []),
-      ...ordered.map((session) => ({ kind: "session" as const, session })),
+      ...(section.length > 0
+        ? [
+            { kind: "sectionHeader" as const, label: "Recent" },
+            ...section.map((s) => ({ kind: "session" as const, session: s, inSection: true })),
+          ]
+        : []),
+      ...rest.map((session) => ({ kind: "session" as const, session })),
     ],
-    [ordered, restorable.length, showLayout]
+    [section, rest, restorable.length, showLayout]
   );
-
-  const q = query.trim();
-  const filtering = q.length > 0;
 
   // Fuzzy score for one item against the query (best over its label/aliases or
   // the session's searchable fields). null = no match (dropped while filtering).
   const scoreItem = useCallback(
     (it: NavItem): number | null => {
+      // Never scored, never ranked — and the split doesn't run while filtering,
+      // so it can't be in the list to begin with (0078 B1/A8).
+      if (it.kind === "sectionHeader") return null;
       if (it.kind === "session") {
         const s = it.session;
         // The cwd *leaf* (basename) is scored as its own PATH-tier field so a
@@ -421,12 +488,27 @@ function SessionDrawer({
       setCursor(view.length > 0 ? 0 : -1);
       return;
     }
-    const sessionBase = baseItems.length - ordered.length;
-    const cur = ordered.findIndex(
-      (s) => s.name === current?.name && (s.machine ?? "") === current?.machine
+    // 0078 addendum: when there's a `Recent` section, park on its FIRST row —
+    // the session you were in before this one. The mounted session is already
+    // on screen, so parking on it made `⏎` re-attach what you're looking at;
+    // parking on the section makes "back to the last session" ⌃B → ⏎ (and one
+    // tap on a phone, where the drawer is the only way to switch).
+    const top = baseItems.findIndex((it) => it.kind === "session" && it.inSection);
+    if (top >= 0) {
+      setCursor(top);
+      return;
+    }
+    // A direct lookup, not index arithmetic (0078 B2): `baseItems.length -
+    // ordered.length` was correct only while every non-session item preceded
+    // every session item, which the `Recent` section ends.
+    const cur = baseItems.findIndex(
+      (it) =>
+        it.kind === "session" &&
+        it.session.name === current?.name &&
+        (it.session.machine ?? "") === current?.machine
     );
-    setCursor(cur >= 0 ? sessionBase + cur : 0);
-  }, [open, pane, mode, keyboardActive, filtering, view.length, baseItems.length, ordered, current]);
+    setCursor(cur >= 0 ? cur : baseItems.findIndex((it) => it.kind !== "sectionHeader"));
+  }, [open, pane, mode, keyboardActive, filtering, view.length, baseItems, current]);
 
   // Keep the cursor item in view when it moves off-screen (long lists).
   useEffect(() => {
@@ -465,6 +547,7 @@ function SessionDrawer({
   const activate = useCallback(
     (it: NavItem | undefined) => {
       if (!it) return;
+      if (it.kind === "sectionHeader") return; // inert, like a machine header
       if (it.kind === "session") onPick(it.session);
       else if (it.kind === "new") enterCreate();
       else if (it.kind === "layout") onLayout();
@@ -490,16 +573,33 @@ function SessionDrawer({
         else onClose();
         return;
       }
+      // ↑/↓ step over the `Recent` header the same way [0062] pins for the TUI's
+      // machine headers: it is a label, never a landing spot.
+      const skip = (from: number, dir: 1 | -1): number => {
+        let i = from;
+        while (i >= 0 && i < view.length) {
+          if (view[i].kind !== "sectionHeader") return i;
+          i += dir;
+        }
+        return -1;
+      };
       if (e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
-        setCursor((i) => (i < 0 ? 0 : Math.min(view.length - 1, i + 1)));
+        setCursor((i) => {
+          const next = skip(i < 0 ? 0 : Math.min(view.length - 1, i + 1), 1);
+          return next >= 0 ? next : i;
+        });
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        setCursor((i) => (i <= 0 ? 0 : i - 1));
+        setCursor((i) => {
+          const start = i <= 0 ? 0 : i - 1;
+          const up = skip(start, -1);
+          return up >= 0 ? up : skip(start, 1);
+        });
         return;
       }
       if (e.key === "Enter") {
@@ -617,6 +717,23 @@ function SessionDrawer({
     );
   };
 
+  // The `Recent` section header (proposal 0078 B5). Same dim uppercase
+  // treatment as a machine header, deliberately NOT sticky: it sits at the top
+  // of the scroll region by construction, and a second sticky element competing
+  // with the machine headers is a stacking bug waiting to happen. The label is
+  // never conditional — a header whose text changes is one you cannot learn.
+  const renderRecentHeader = () => (
+    <div
+      className="flex items-center gap-1.5 px-2 pb-1 pt-2"
+      data-recent-section=""
+      title="The sessions you were last working in, on this device"
+    >
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        Recent
+      </span>
+    </div>
+  );
+
   // Empty (session-less) machines, listed at the end so an idle box stays
   // visible. Grouping only, and not while filtering.
   const emptyMachines =
@@ -690,7 +807,7 @@ function SessionDrawer({
     );
   };
 
-  const sessionRow = (s: Session, i: number, showHeader: boolean) => {
+  const sessionRow = (s: Session, i: number, showHeader: boolean, inSection = false) => {
     const active = s.name === current?.name && (s.machine ?? "") === current?.machine;
     const focused = i === cursor;
     const isDeleting = deleting.has(s.name);
@@ -713,6 +830,9 @@ function SessionDrawer({
           }}
           className={`group flex items-center rounded-md transition-colors ${rowState}`}
           data-session-row=""
+          // Marks a row lifted into the `Recent` section (proposal 0078) — the
+          // smoke suite's assertion vocabulary is data attributes.
+          {...(inSection ? { "data-recent-section": "" } : {})}
           // Per-session mark (proposal 0029): a thin left colour spine via an
           // inset box-shadow (no layout shift), so a marked session is scannable
           // in the list. Unmarked rows render exactly as before.
@@ -830,8 +950,11 @@ function SessionDrawer({
                   />
                 )}
                 {/* When filtering across machines, show the machine inline since
-                    the group headers are suppressed. */}
-                {filtering && multiMachine && s.machine && (
+                    the group headers are suppressed — and likewise for a row
+                    lifted into the `Recent` section (proposal 0078 B4), which
+                    sits outside the grouping and so has no header to inherit
+                    its machine from. */}
+                {(filtering || inSection) && multiMachine && s.machine && (
                   <span className="shrink-0 rounded bg-edge/60 px-1 py-px text-[9px] text-slate-400">
                     {machines.find((m) => m.machine === s.machine)?.hostname || s.machine}
                   </span>
@@ -1018,10 +1141,15 @@ function SessionDrawer({
             kept a status dot per running session live off-screen
             (proposal 0068 Part B). */}
         {body && view.map((it, i) => {
+          if (it.kind === "sectionHeader") {
+            return <Fragment key="recent-header">{renderRecentHeader()}</Fragment>;
+          }
           if (it.kind !== "session") {
             // A divider between the action block and the session rows in the
-            // resting (unfiltered) list, mirroring today's layout.
-            const nextIsSession = view[i + 1]?.kind === "session";
+            // resting (unfiltered) list, mirroring today's layout. The `Recent`
+            // header counts as the start of the rows.
+            const next = view[i + 1]?.kind;
+            const nextIsSession = next === "session" || next === "sectionHeader";
             return (
               <Fragment key={`action-${it.kind}`}>
                 {actionRow(it, i)}
@@ -1032,9 +1160,13 @@ function SessionDrawer({
             );
           }
           const machine = it.session.machine ?? "";
-          const showHeader = !filtering && multiMachine && machine !== lastMachine;
-          lastMachine = machine;
-          return sessionRow(it.session, i, showHeader);
+          // The run-boundary detector must not see section rows (0078 B3): they
+          // mix machines and precede the groups, so letting one assign
+          // `lastMachine` would silently swallow the first real group header.
+          const showHeader =
+            !filtering && multiMachine && !it.inSection && machine !== lastMachine;
+          if (!it.inSection) lastMachine = machine;
+          return sessionRow(it.session, i, showHeader, !!it.inSection);
         })}
 
         {/* Build-aware empty state (proposal 0056 A3): a SaaS user drives the

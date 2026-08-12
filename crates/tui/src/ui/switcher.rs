@@ -110,15 +110,25 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
     // highlight symbol ("▸ ") the List reserves. Used to bound the trailing
     // headline/preview so a row never wraps (it clips) — holds at 40 cols.
     let row_width = area.width.saturating_sub(2) as usize;
-    // While filtering across machines the group headers are suppressed (a flat
-    // ranked list reads better), so each row carries an inline machine chip.
-    let chip = app.filtering() && app.multi_machine();
+    // The inline machine chip is per ROW, not per list (proposal 0078 C6). Two
+    // cases need it, both for the same reason — the row has no group header to
+    // inherit its machine from: the flat ranked list while filtering, and the
+    // `Recent` section, which sits above the grouping and mixes machines. The
+    // section is the leading run of session rows, so a counter is enough.
+    let multi = app.multi_machine();
+    let filtering = app.filtering();
+    let recent = app.recent_count();
+    let mut nth_session = 0usize;
     let rows = app.switcher_rows();
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
             SwitcherRow::Header { label, online } => header_item(label, *online, row_width),
-            SwitcherRow::Session(i) => session_item(app, *i, chip, row_width),
+            SwitcherRow::Session(i) => {
+                let in_section = nth_session < recent;
+                nth_session += 1;
+                session_item(app, *i, multi && (filtering || in_section), row_width)
+            }
         })
         .collect();
 

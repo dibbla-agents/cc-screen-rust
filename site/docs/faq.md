@@ -55,7 +55,8 @@ file contents you're currently looking at. See
 
 Nothing, from your sessions' point of view. Your machines own their sessions;
 the hub is a relay. Agents reconnect automatically and the session list comes
-back. Same answer for your phone losing signal or your browser closing —
+back. Your **Recent** list is local to the client, so it survives a hub
+restart untouched. Same answer for your phone losing signal or your browser closing —
 sessions run server-side on *your* box, not in the browser tab.
 
 ## And when the machine itself reboots?
@@ -165,6 +166,35 @@ The same applies inside the grid's action menu (`Ctrl-A d`): `j`/`k` now type
 into the search there too, and the arrow keys still navigate.
 The header line in the switcher always shows the current keys; see
 [the ccs terminal client](../tui/) for the full map.
+
+## What is the "Recent" list at the top of the session list?
+
+The sessions you were last *working in*, most recent first — the answer to
+"where was I two sessions ago?". It's deliberately **not** sorted by which
+agent needs you: the whole point is that the top rows stay put, so switching
+between the two or three sessions you're actively driving is muscle memory
+rather than reading. Attention still surfaces everywhere it did before: the
+ready toasts, the status view, and the freshest-first order inside each
+machine group.
+
+A few things people ask about it:
+
+- **The session you're in isn't in it.** It's already on screen; the list is
+  what you'd switch *to*. With a single pane that makes the first row the
+  session you were in immediately before — open the switcher, press `Enter`,
+  and you're back.
+- **It's empty for a new user**, and stays empty until you've been in a
+  session you're not currently in. Nothing to fix.
+- **It doesn't sync between devices.** Your phone, your laptop's browser, and
+  `ccs` each keep their own — "where was I" is a per-device question. The web
+  app stores it in that browser (clearing site data clears it); `ccs` stores
+  it in `~/.config/cc-screen-tui/state.toml`, keyed per hub (delete the file
+  to clear it).
+- **`ccs` and the web app on the same machine show different lists** for the
+  same reason: two client installs, two histories.
+- **A session on an offline machine doesn't fall out of it.** It's skipped
+  while it's missing and comes back where it was. Only killing or exiting a
+  session removes it, and the list holds 20 (showing 10).
 
 ## Why does scrolling behave differently when an app like Claude or vim is running?
 

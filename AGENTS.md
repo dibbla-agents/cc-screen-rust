@@ -86,7 +86,9 @@ deserializes the mirror; drift breaks both clients and the React PWA.
 
 `ccs` is a ratatui/crossterm app with one unified `mpsc<AppMsg>` event loop
 (`app.rs`). Two modes: a **switcher** (session list + create/kill/restore
-overlays) and a **grid**. Each attached box is a `Pane` (`pane.rs`) — an
+overlays) and a **grid**. Both list surfaces lead with the **`Recent` section**
+([0078]) — the most-recently-focused sessions, persisted per hub host in
+`~/.config/cc-screen-tui/state.toml` (never `config.toml`). Each attached box is a `Pane` (`pane.rs`) — an
 `alacritty_terminal` emulator (chosen over `vt100` for real multi-thousand-line
 scrollback) fed by the session WebSocket and rendered straight into the ratatui
 buffer by a custom widget. The grid (`layout.rs`, `ui/grid.rs`) has the web app's
@@ -355,6 +357,34 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   `TerminalView`/`TileGrid`/`SessionDrawer`/`StatusView` don't re-render on a
   no-op tick — **keep the props those four receive stable** (`useCallback` /
   `useMemo`), or the memo silently stops working. See proposal 0068.
+- **The selector answers "where was I" first, "what needs me" second (0078).**
+  Both clients lead their resting session list with a **`Recent` section**: the
+  most-recently-*focused* sessions, in stored order, lifted out of the machine
+  groups. It is deliberately **not** attention-ordered — a section that
+  re-sorts when an agent finishes is one you cannot build muscle memory on — so
+  the only thing that moves a row is the user focusing a session, and never
+  while the selector is open (membership is snapshotted at open). Below it the
+  groups keep exactly today's order: web triage (ready-first / freshest state
+  anchor), TUI name sort. **A typed query short-circuits the split entirely**,
+  so [0028]'s ranking *and* its equal-score tie order (a stable sort over the
+  resting list) stay bit-for-bit what they were. Identity is `(machine, name)`
+  — `frontend/src/sessionRecents.ts` reuses `sessionKey`, `ccs` stores
+  `{machine, name}` pairs — so a rename ([0035]) never reorders or duplicates
+  an entry. Storage is **per client install**: `ccweb.sessionRecents.v1` in
+  localStorage, and `~/.config/cc-screen-tui/state.toml` keyed per hub host,
+  which is where `Config::recents` moved (it was dead, unkeyed, and rewrote the
+  user-editable `config.toml` on every attach — the clobber [0060] Part A
+  fixed). Three traps, all silent when broken: the **header run-detectors** in
+  both clients (`SessionDrawer.tsx`'s `lastMachine`, `switcher_rows`/`menu_rows`
+  in `app.rs`) must never see a section row, or the first machine header
+  vanishes; **cursor/region arithmetic** that assumed "actions, then sessions"
+  is now a lookup (`menu_initial` counts *selectable* rows, the drawer searches
+  `baseItems`); and the e2e binary shares one `XDG_CONFIG_HOME`, so each booted
+  app takes its own `set_state_scope()` or one test's attach reorders another's
+  list. Absence from a poll never forgets an entry — only an explicit
+  kill/delete, or the 20-cap, does. **Addendum:** the cursor parks on the top
+  `Recent` row, so `⌃B`/`⌃A d` → `⏎` is "back to the last session" on desktop,
+  phone, and `ccs` alike. See proposal 0078.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

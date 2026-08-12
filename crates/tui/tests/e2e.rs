@@ -24,10 +24,17 @@ use ratatui::style::Color;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-/// Redirect the TUI's config writes (recents persistence, `Config::save`) to a
+/// Redirect the TUI's config writes (`state.toml` recents, `Config::save`) to a
 /// throwaway dir so running the suite never clobbers a developer's real
 /// `~/.config/cc-screen-tui/config.toml`. `directories` reads `XDG_CONFIG_HOME`
 /// on Linux (where CI runs); idempotent via `Once`.
+///
+/// NB this is **per process**, not per test — every test in this binary shares
+/// one `state.toml`. Since proposal 0078 the persisted recents feed the resting
+/// order, so a shared store would let one test's attach reorder another test's
+/// switcher and make the index-pinning assertions flaky. `state_scope()` gives
+/// each booted app its own key inside that shared file (an env var can't be set
+/// per test: these run in parallel threads).
 fn isolate_config() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -35,6 +42,12 @@ fn isolate_config() {
         let _ = std::fs::create_dir_all(&dir);
         std::env::set_var("XDG_CONFIG_HOME", &dir);
     });
+}
+
+/// A fresh, unique recents scope for one booted app (see `isolate_config`).
+fn state_scope() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("e2e-{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// A booted app + its channel receiver + a `TestBackend` terminal, ready to drive.
@@ -54,6 +67,7 @@ impl Harness {
         isolate_config();
         let rest = Rest::new(&format!("http://{hub}"), false, token).expect("rest");
         let mut app = App::new(rest, Config::default());
+        app.set_state_scope(&state_scope()); // one recents history per test
         let rx = app.take_rx();
         app.init().await;
         let mut term = Terminal::new(TestBackend::new(cols, rows)).unwrap();
@@ -1244,6 +1258,13 @@ async fn switcher_machine_headers_and_chips() {
     into_switcher(&mut h).await;
     assert!(h.tick_until(|t| t.contains("alpha") && t.contains("bravo")).await, "in switcher");
 
+    // Boot attaches (and so remembers) a session, which proposal 0078 would lift
+    // into a `Recent` section above the groups. This scenario is about the
+    // grouping itself, so re-scope to an empty recents history and assert the
+    // pure-grouping shape; the section has its own scenario below.
+    h.app.set_state_scope("no-recents/headers-and-chips");
+    h.app.draw(&mut h.term).unwrap();
+
     // Resting: per-machine header rows (the fake registers hostname == id) —
     // a header line holds the hostname alone, not a session row — and no chips.
     let t = h.text();
@@ -1731,4 +1752,57 @@ async fn activate_degrades_on_single_tenant_and_old_hubs() {
     assert!(matches!(err, ActivateError::HubTooOld), "got {err:?}");
     assert_eq!(err.exit_code(), 2);
     assert!(err.message().contains("update"), "points at updating the hub");
+}
+
+/// Proposal 0078 — the `Recent` section: after working in two sessions, the
+/// resting switcher leads with them, most-recently-focused first, under a
+/// `Recent` header — and the session you are *currently in* is not in it (it is
+/// already on screen; the top of the list is what you would switch TO).
+#[tokio::test]
+async fn switcher_recent_section_lists_the_sessions_you_were_last_in() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let _agent = spawn_scriptable_agent(
+        &hub,
+        "boxA",
+        None,
+        vec![sess("alpha"), sess("bravo"), sess("cherry")],
+    )
+    .await;
+    await_hub(&hub, None, |l| l.len() == 3).await;
+
+    // Boot attaches alpha (and so remembers it).
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    h.key(KeyCode::Esc).await;
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:alpha")).await, "attached to alpha");
+
+    // Switch to bravo: now bravo is on screen and alpha is the one you'd go back to.
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('s')).await;
+    assert!(h.pump_until(|t| t.contains("type to search")).await, "switcher up");
+    h.type_str("bravo").await;
+    h.key(KeyCode::Enter).await;
+    assert!(h.pump_until(|t| t.contains("SNAP:boxA:bravo")).await, "attached to bravo");
+
+    // Reopen the switcher: `Recent` leads, holding alpha only — bravo is mounted.
+    h.ctrl('a').await;
+    h.key(KeyCode::Char('s')).await;
+    assert!(h.tick_until(|t| t.contains("Recent")).await, "Recent header; got:\n{}", h.text());
+    let t = h.text();
+    let lines: Vec<&str> = t.lines().collect();
+    let recent = lines.iter().position(|l| l.contains("Recent")).expect("Recent row");
+    assert!(
+        lines[recent + 1].contains("alpha"),
+        "the session you were just in leads the section:\n{t}"
+    );
+    assert!(
+        !lines.iter().take(recent + 2).any(|l| l.contains("bravo")),
+        "a mounted session is not in the section:\n{t}"
+    );
+    // Nothing disappears: bravo and cherry are still in the list below.
+    assert!(t.contains("bravo") && t.contains("cherry"), "no session is lost:\n{t}");
+
+    // Typing suppresses the split entirely (0078 A8) — no header, today's ranking.
+    h.type_str("cherry").await;
+    let t = h.text();
+    assert!(!t.contains("Recent"), "no section while filtering:\n{t}");
 }

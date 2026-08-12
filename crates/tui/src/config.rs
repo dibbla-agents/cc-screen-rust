@@ -51,8 +51,6 @@ pub struct Config {
     pub corrupt: bool,
     /// Prefix key for in-attach commands (tmux-style), e.g. "C-a". Used in M3.
     pub prefix: String,
-    /// Recently-attached session names, most-recent first. Maintained in M4.
-    pub recents: Vec<String>,
     /// API token for a password-protected server. Sent as `Authorization:
     /// Bearer <token>` on REST + the WS handshake; lets the headless client skip
     /// the web password. Overridable by `--token` or `CCS_API_TOKEN`.
@@ -71,7 +69,6 @@ impl Default for Config {
             server: "http://127.0.0.1:8839".into(),
             corrupt: false,
             prefix: "C-a".into(),
-            recents: Vec::new(),
             api_token: None,
             notify: NotifyMode::default(),
         }
@@ -242,9 +239,208 @@ fn write_credentials(creds: &Credentials) -> Result<()> {
     Ok(())
 }
 
+// ── Client state store (proposal 0078) ────────────────────────────────────────
+//
+// Machine-written state — today just the most-recently-focused sessions behind
+// the switcher's `Recent` section — lives in a sibling `state.toml`, NOT in
+// `config.toml`. Three reasons, all of them bugs the old `Config::recents`
+// had: it is the client's hottest write and `config.toml` is user-editable
+// (the clobber [0060] Part A fixed); `Config::save()` writes in place with no
+// tmp+rename; and it is read on a path that must never warn, unlike the
+// user-facing config.
+//
+// Keyed per hub host via `host_key()`, so a `ccs` pointed at two hubs keeps two
+// histories:
+//
+//   [hosts."app.ccscreen.dev"]
+//   recents = [{ machine = "pine", name = "cc-api" }]
+
+/// How many entries are remembered. 20 stored / 10 rendered is deliberate: a
+/// session that dies and is later restored comes back at its stored position
+/// rather than having been evicted by ten it was never competing with.
+pub const MAX_RECENTS: usize = 20;
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct State {
+    #[serde(default)]
+    pub hosts: std::collections::BTreeMap<String, HostState>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct HostState {
+    /// Most-recently-focused sessions, most recent first.
+    #[serde(default)]
+    pub recents: Vec<RecentSession>,
+}
+
+/// A remembered session. The identity across a hub is `(machine, name)` — never
+/// the display label ([0035]: the slug is the routing key) — and `machine` is
+/// "" for a direct single-agent connection, which is a valid key, not a missing
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentSession {
+    #[serde(default)]
+    pub machine: String,
+    pub name: String,
+}
+
+impl RecentSession {
+    pub fn new(machine: &str, name: &str) -> Self {
+        Self { machine: machine.to_string(), name: name.to_string() }
+    }
+    pub fn is(&self, machine: &str, name: &str) -> bool {
+        self.machine == machine && self.name == name
+    }
+}
+
+pub fn state_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "cc-screen-tui")
+        .map(|d| d.config_dir().join("state.toml"))
+}
+
+/// Load the state file, forgiving everything: a machine-written file must never
+/// warn, never produce a `.bad` sidecar, and never stop the client from
+/// starting (contrast `Config::load`, which is user-facing).
+pub fn load_state() -> State {
+    let Some(path) = state_path() else { return State::default() };
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// The remembered sessions under `key` (a `host_key()`), most recent first.
+pub fn recents_for_key(key: &str) -> Vec<RecentSession> {
+    load_state().hosts.get(key).map(|h| h.recents.clone()).unwrap_or_default()
+}
+
+/// The remembered sessions for `server`, most recent first.
+pub fn recents_for(server: &str) -> Vec<RecentSession> {
+    recents_for_key(&host_key(server))
+}
+
+/// Move `(machine, name)` to the head of `list` (pure). Already at the head →
+/// returns false and leaves the list untouched, so callers can skip the write.
+pub fn promote_recent(list: &mut Vec<RecentSession>, machine: &str, name: &str) -> bool {
+    if list.first().is_some_and(|r| r.is(machine, name)) {
+        return false;
+    }
+    list.retain(|r| !r.is(machine, name));
+    list.insert(0, RecentSession::new(machine, name));
+    list.truncate(MAX_RECENTS);
+    true
+}
+
+/// Drop an entry (pure). Only an explicit user-initiated kill/delete calls this:
+/// a session merely absent from a poll is skipped at render and *retained*,
+/// since absence is indistinguishable from an offline machine (0078 A5).
+pub fn forget_recent(list: &mut Vec<RecentSession>, machine: &str, name: &str) -> bool {
+    let before = list.len();
+    list.retain(|r| !r.is(machine, name));
+    before != list.len()
+}
+
+/// Read-modify-write one host's recents: re-read the file, apply `mut_fn`, and
+/// write the result back — never dump in-memory state over the file. Two `ccs`
+/// processes against one hub are an ordinary setup and both share this store;
+/// under RMW they interleave into one coherent history. Best-effort: an
+/// unwritable state dir leaves the client working and silent.
+pub fn update_recents<F>(key: &str, mut_fn: F) -> Vec<RecentSession>
+where
+    F: FnOnce(&mut Vec<RecentSession>) -> bool,
+{
+    let mut state = load_state();
+    let host = state.hosts.entry(key.to_string()).or_default();
+    if mut_fn(&mut host.recents) {
+        let out = host.recents.clone();
+        let _ = write_state(&state);
+        out
+    } else {
+        host.recents.clone()
+    }
+}
+
+/// Write the state file with the tmp + rename posture `write_credentials`
+/// established, so a concurrent reader never observes a truncated file. The
+/// temp name carries this process's pid, so two writers can't share a partial
+/// file before the rename; last-rename-wins on a true race is accepted for a
+/// navigation hint. NB the atomic path is `#[cfg(unix)]` — Windows keeps
+/// last-writer-wins, as it does for credentials.
+fn write_state(state: &State) -> Result<()> {
+    let path = state_path().context("no config directory available")?;
+    let parent = path.parent().context("no config directory available")?;
+    std::fs::create_dir_all(parent)?;
+    let body = toml::to_string_pretty(state)?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let tmp = path.with_extension(format!("toml.tmp{}", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.flush()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recents_promote_dedupe_cap_and_forget() {
+        let mut l: Vec<RecentSession> = Vec::new();
+        assert!(promote_recent(&mut l, "pine", "api"));
+        assert!(promote_recent(&mut l, "studio", "api")); // same name, other machine
+        assert_eq!(l.len(), 2);
+        assert!(l[0].is("studio", "api"));
+        // Re-promoting the head is a no-op at every layer (no write).
+        assert!(!promote_recent(&mut l, "studio", "api"));
+        // Promoting a tail entry moves it, without duplicating.
+        assert!(promote_recent(&mut l, "pine", "api"));
+        assert_eq!(l.len(), 2);
+        assert!(l[0].is("pine", "api"));
+        // Cap.
+        for i in 0..30 {
+            promote_recent(&mut l, "pine", &format!("s{i}"));
+        }
+        assert_eq!(l.len(), MAX_RECENTS);
+        assert!(l[0].is("pine", "s29"));
+        // Forget only removes what's there.
+        assert!(forget_recent(&mut l, "pine", "s29"));
+        assert!(!forget_recent(&mut l, "pine", "s29"));
+    }
+
+    #[test]
+    fn state_parses_per_host_and_tolerates_a_missing_machine() {
+        let s: State = toml::from_str(
+            r#"[hosts."app.ccscreen.dev"]
+recents = [{ machine = "pine", name = "cc-api" }, { name = "solo" }]
+[hosts."hub:8840"]
+recents = []"#,
+        )
+        .unwrap();
+        let h = s.hosts.get("app.ccscreen.dev").unwrap();
+        assert_eq!(h.recents.len(), 2);
+        assert!(h.recents[0].is("pine", "cc-api"));
+        assert!(h.recents[1].is("", "solo")); // direct-agent key
+        assert!(s.hosts.get("hub:8840").unwrap().recents.is_empty());
+        // Round-trips.
+        let back: State = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.hosts.len(), 2);
+    }
+
+    #[test]
+    fn garbage_state_degrades_to_empty() {
+        assert!(toml::from_str::<State>("hosts = [not toml").is_err());
+        // …and the loader's `unwrap_or_default` is what turns that into "no
+        // Recent section" rather than a warning (see load_state).
+        assert!(State::default().hosts.is_empty());
+    }
 
     #[test]
     fn api_token_parses_and_is_optional() {

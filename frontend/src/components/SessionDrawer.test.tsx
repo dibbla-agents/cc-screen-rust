@@ -255,3 +255,166 @@ describe("SessionDrawer — build-aware empty state (proposal 0056)", () => {
     expect(html).not.toContain("pick a machine,");
   });
 });
+
+// Proposal 0078 — the `Recent` section: the sessions you were last working in,
+// lifted above the machine groups in strict MRU order. The load-bearing claim
+// is *positional stability* — these rows must not move when an agent changes
+// state — so the criterion-2 test below renders twice with the attention inputs
+// flipped and asserts the order is byte-identical.
+describe("SessionDrawer — the Recent section (proposal 0078)", () => {
+  const three = [
+    session({ name: "alpha", machine: "pine", cwd: "/home/erik/a" }),
+    session({ name: "beta", machine: "pine", cwd: "/home/erik/b" }),
+    session({ name: "gamma", machine: "studio", cwd: "/home/erik/g" }),
+  ];
+  const props = {
+    ...baseProps,
+    sessions: three,
+    machines: [
+      { machine: "pine", hostname: "pine", online: true },
+      { machine: "studio", hostname: "studio", online: true },
+    ],
+    multiMachine: true,
+    recents: [
+      { machine: "studio", name: "gamma" },
+      { machine: "pine", name: "alpha" },
+    ],
+    mountedKeys: new Set<string>(),
+  };
+  const order = (html: string, ...names: string[]) => names.map((n) => html.indexOf(n));
+  const sectionRows = (html: string) =>
+    [...html.matchAll(/data-session-row=""\s*data-recent-section=""[\s\S]*?<\/span>/g)].length;
+
+  it("puts the section, in MRU order, above the first machine header", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...props} sidebar open current={null} keyboardActive />
+    );
+    expect(html).toContain("Recent");
+    const [recent, gamma, alpha, firstHeader] = order(
+      html,
+      "Recent",
+      "gamma",
+      "alpha",
+      'tracking-wider text-slate-500">pine</span>' // the machine group header
+    );
+    expect(recent).toBeLessThan(gamma);
+    expect(gamma).toBeLessThan(alpha); // MRU order, not triage order
+    expect(alpha).toBeLessThan(firstHeader); // the whole section precedes the groups
+  });
+
+  it("does not reorder when an agent goes ready or busy (criterion 2)", () => {
+    const flip = (waiting: boolean) => ({
+      ...props,
+      sessions: [
+        { ...three[0], waiting, busy_until: waiting ? 9_000 : 0, activity: 9_000 },
+        three[1],
+        { ...three[2], waiting: !waiting, activity: 1 },
+      ],
+    });
+    const a = renderToStaticMarkup(
+      <SessionDrawer {...flip(true)} sidebar open current={null} keyboardActive />
+    );
+    const b = renderToStaticMarkup(
+      <SessionDrawer {...flip(false)} sidebar open current={null} keyboardActive />
+    );
+    // The section is MRU: gamma before alpha in both renders, whatever the
+    // agents are doing. This test is what fails if anyone ever "improves" the
+    // section by attention-ordering it.
+    for (const html of [a, b]) {
+      const [g, al] = order(html, "gamma", "alpha");
+      expect(g).toBeLessThan(al);
+    }
+  });
+
+  it("renders each session exactly once — section members leave their group", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...props} sidebar open current={null} keyboardActive />
+    );
+    expect([...html.matchAll(/>gamma</g)]).toHaveLength(1);
+    expect([...html.matchAll(/>alpha</g)]).toHaveLength(1);
+    // studio's only session is in the section, so studio renders no group header
+    // and no empty group; pine still renders its header for beta.
+    const groupHeader = (host: string) =>
+      html.includes(`tracking-wider text-slate-500">${host}</span>`);
+    expect(groupHeader("pine")).toBe(true);
+    expect(groupHeader("studio")).toBe(false); // "studio" survives only as a row chip
+  });
+
+  it("excludes a session mounted in a pane, which keeps its row (and dot) below", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer
+        {...props}
+        sessions={[three[0], three[1], { ...three[2], attached: true }]}
+        mountedKeys={new Set(["studio/gamma"])}
+        pane
+        open
+        current={null}
+        keyboardActive
+      />
+    );
+    expect(sectionRows(html)).toBe(1); // alpha only
+    const [recent, alpha, gamma] = order(html, "Recent", "alpha", "gamma");
+    expect(recent).toBeLessThan(alpha);
+    expect(alpha).toBeLessThan(gamma); // gamma is below, in its machine group
+    expect(html).toContain("already shown in another pane");
+  });
+
+  it("carries a machine chip on section rows, which have no header to inherit", () => {
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...props} sidebar open current={null} keyboardActive />
+    );
+    const chip = /<span class="shrink-0 rounded bg-edge\/60 px-1 py-px text-\[9px\] text-slate-400">(\w+)<\/span>/g;
+    expect([...html.matchAll(chip)].map((m) => m[1])).toEqual(["studio", "pine"]);
+  });
+
+  it("suppresses the section when it would hold every session (A7)", () => {
+    const all = {
+      ...props,
+      recents: three.map((s) => ({ machine: s.machine!, name: s.name })),
+    };
+    const html = renderToStaticMarkup(
+      <SessionDrawer {...all} sidebar open current={null} keyboardActive />
+    );
+    expect(html).not.toContain(">Recent<");
+    const [pineHdr, alpha] = order(html, 'tracking-wider text-slate-500">pine</span>', "alpha");
+    expect(pineHdr).toBeLessThan(alpha); // today's grouped list, unchanged
+  });
+
+  it("renders no section with zero eligible recents, and none while filtering", () => {
+    const none = renderToStaticMarkup(
+      <SessionDrawer {...props} recents={[]} sidebar open current={null} keyboardActive />
+    );
+    expect(none).not.toContain(">Recent<");
+    expect(none).not.toContain("data-recent-section");
+    // A query short-circuits the split entirely (A8) — no lifting, no header.
+    const ghosts = renderToStaticMarkup(
+      <SessionDrawer
+        {...props}
+        recents={[{ machine: "pine", name: "does-not-exist" }]}
+        sidebar
+        open
+        current={null}
+        keyboardActive
+      />
+    );
+    expect(ghosts).not.toContain(">Recent<");
+  });
+
+  it("caps the pane-embedded section at 5 rows (B8)", () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      session({ name: `s${i}`, machine: "pine", cwd: `/home/erik/s${i}` })
+    );
+    const html = renderToStaticMarkup(
+      <SessionDrawer
+        {...props}
+        sessions={[...many, session({ name: "tail", machine: "pine" })]}
+        recents={many.map((s) => ({ machine: "pine", name: s.name }))}
+        pane
+        open
+        current={null}
+        keyboardActive
+      />
+    );
+    expect(sectionRows(html)).toBe(5);
+  });
+});
