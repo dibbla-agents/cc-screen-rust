@@ -173,7 +173,37 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   `tools.conf` override that keeps `{name}` substitution:
   `cc_tool cc claude "claude --rc 'claude-{name}'"`. Restore rebuilds from the
   current template, so the change applies uniformly with no migration. See
-  proposal 0015.
+  proposal 0015. **Amended by 0082** (below): the default is no longer merely
+  "no flag", and the opt-in is now a first-class per-session switch — the
+  template-rewrite opt-in still works and bypasses the whole mechanism.
+- **The assistant's own remote control is deterministic, per session (0082).**
+  "Off by absence of a flag" wasn't off: Claude Code turns remote control
+  (claude.ai/code + the mobile app) on from the user setting
+  `remoteControlAtStartup`, from `/remote-control`, from **resume** — which is
+  exactly what cc-screen's `--continue` and [0049]'s restart-and-resume run —
+  and potentially from an upstream rollout. So **every launch of a
+  remote-control-capable assistant now carries an explicit stance**, in
+  `build_launch` beside the yolo gate: off (the default) appends
+  `--settings <config_dir>/claude-remote-off.json` (content
+  `{"disableRemoteControl": true}`, written at boot **and re-verified in
+  `create`** so it can never dangle), on appends `--rc claude-{name}` — the
+  first **flag-side `{name}` substitution** (templates were the only
+  substituted thing before). Load-bearing details: the flag is a **file path,
+  not inline JSON**, because a path rides the platform-split `shell_quote`
+  under both `sh -c` and `cmd.exe /C` (0051's bug class); the **inline guard**
+  blanks both flags when a template already spells `--rc`/`--remote-control`/
+  `disableRemoteControl` out (but **not**
+  `--remote-control-session-name-prefix`, which is naming-only — a false
+  positive there silently leaves sessions capable); `remote_off_flag`/
+  `remote_on_flag` are per-tool metadata, so codex/gemini/kimi/shell launch
+  **byte-identically** to before, and `cc_tool_remote_off|on <tool> ""` is the
+  stance-free escape hatch. The wire/manifest name is
+  `assistantRemoteControl` — **never** reuse `remoteControl`, retired by 0014
+  and pinned as never-serialized — it defaults **false** (so an old client
+  creates a safe session with no shim), persists in the manifest, and
+  `SessionInfo` reports the **effective** stance (requested ∧ the tool having
+  an on-flag) so a badge can't claim a registration that didn't happen. See
+  proposal 0082.
 - **Assistant-CLI preflight & runtime guard (0046).** cc-screen *drives* external
   CLIs, so a missing binary is handled explicitly, all fed by one registry: the
   `Assistant` descriptors in `src/tools.rs` (name → label → per-OS install

@@ -945,6 +945,18 @@ function SessionDrawer({
                     safe
                   </span>
                 )}
+                {/* Proposal 0082: the other exception worth flagging — this
+                    session opted into the assistant's own remote control, so it
+                    is also reachable from claude.ai/code and the Claude mobile
+                    app. Only the *effective* on state is badged. */}
+                {s.assistant_remote_control === true && (
+                  <span
+                    className="shrink-0 rounded bg-accent/20 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-accent"
+                    title="Registered with claude.ai/code and the Claude mobile app (remote control on)"
+                  >
+                    claude app
+                  </span>
+                )}
                 {/* Proposal 0026: in a grid pane, flag a session already shown in
                     another pane (the picker's old amber dot) — a real signal when
                     you're filling an empty pane. Pane-only, so the sidebar row is

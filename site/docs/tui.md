@@ -158,6 +158,25 @@ same hostname headers at rest and machine chips while filtering, and the same
 so `Ctrl-A d` `Enter` swaps the box back to the session you were in before. Putting
 a session into a box is "`Ctrl-A d`, type 3 letters, Enter".
 
+### Creating a session
+
+`Ctrl-N` (or `Ctrl-A d` → **new session** in the grid) opens the create form:
+`Tab` cycles the fields, `←`/`→` change a selector, `Enter` creates, `Esc`
+cancels. Below the tool, machine, name, and directory fields are the launch
+switches — `space` or `←`/`→` flips the focused one:
+
+- **perms** — `[YOLO]` (the default) launches the CLI with its
+  approval-bypass flag; `[ask]` launches it with normal approval prompts, and
+  the session wears a `safe` badge in the switcher.
+- **claude** — `[off]` (the default) launches Claude Code with its own remote
+  control disabled: the session lives in cc-screen and nowhere else. `[app]`
+  registers it with claude.ai/code and the Claude mobile app as
+  `claude-<name>`, and the session wears an `app` badge. The row appears only
+  for tools that have such a feature (today: Claude Code).
+
+Both choices are remembered for the session: a restart, a restore, or an
+assistant update relaunches it exactly the way you created it.
+
 Because typing searches, the switcher's commands live on Ctrl-chords:
 
 - `↑`/`↓` move — through the Recent rows first, never landing on a header ·

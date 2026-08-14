@@ -71,6 +71,10 @@ cc_tool gc  gemini "gemini -y"
 cc_tool tt  shell  "${SHELL:-/bin/bash} -l"
 # cc_tool_resume     cc "--continue"
 # cc_tool_extra_dirs cc "--add-dir"
+# cc_tool_yolo       cc "--dangerously-skip-permissions"   # the per-session YOLO switch's flag
+# cc_tool_remote_off cc "--settings /path/off.json"        # 0082: the "Claude app" switch, off state
+# cc_tool_remote_on  cc "--rc claude-{name}"               # …and its on state ("" = neither: your
+#                                                          #  own Claude settings govern)
 ```
 
 `kimi` isn't installed by default (its distribution varies) — add it to the

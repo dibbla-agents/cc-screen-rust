@@ -318,6 +318,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: strat,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 
@@ -371,8 +373,8 @@ mod tests {
             cc_screen_auth::OriginPolicy::default(),
         );
         let dir = tmp.to_string_lossy().to_string();
-        let c = app.create(&codex, "t", &dir, vec![], false, true).unwrap();
-        let p = app.create(&probe, "t", &dir, vec![], false, true).unwrap();
+        let c = app.create(&codex, "t", &dir, vec![], false, true, false).unwrap();
+        let p = app.create(&probe, "t", &dir, vec![], false, true, false).unwrap();
         // Let the fake assistants reach raw mode before any paste bytes land.
         tokio::time::sleep(Duration::from_millis(400)).await;
 

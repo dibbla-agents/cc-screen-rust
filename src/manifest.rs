@@ -39,6 +39,15 @@ pub struct Entry {
     /// ignored, and the session restores editable.)
     #[serde(default = "default_true")]
     pub skip_permissions: bool,
+    /// Whether this session asked for the **assistant's own** remote control
+    /// (Claude Code's `--rc`, proposal 0082) — persisted so restore and the
+    /// [0049] update-restart relaunch under the same choice. Missing (every
+    /// pre-0082 entry) = false: the safe direction, so an existing session comes
+    /// back with a deterministic "off" stance. Serialized as
+    /// `assistantRemoteControl` — deliberately *not* the `remoteControl` name
+    /// retired by 0014.
+    #[serde(default)]
+    pub assistant_remote_control: bool,
     /// Operator-chosen mark colour (proposal 0029), persisted so the mark
     /// survives restart/redeploy. Empty = unmarked; old files default to empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -150,6 +159,7 @@ mod tests {
             extra_dirs: vec![],
             created_at: 1,
             skip_permissions: true,
+            assistant_remote_control: false,
             color: String::new(),
             label: String::new(),
         }
@@ -219,5 +229,29 @@ mod tests {
         let v = serde_json::to_string(&e[0]).unwrap();
         assert!(v.contains(r#""skipPermissions":true"#), "{v}");
         assert!(!v.contains("remoteControl"), "retired field must not serialize: {v}");
+    }
+
+    #[test]
+    fn assistant_remote_control_persists_and_defaults_off() {
+        // 0082: a pre-0082 entry (no field) restores with the assistant's own
+        // remote control OFF — the safe direction.
+        let json = r#"[{"session":"claude-a","cmd":"cc","prefix":"claude","short":"a","dir":"/tmp","createdAt":1,"skipPermissions":true}]"#;
+        let e: Vec<Entry> = serde_json::from_str(json).unwrap();
+        assert!(!e[0].assistant_remote_control);
+        // An opted-in entry round-trips under its own camelCase name, which the
+        // retired 0014 `remoteControl` pin above must never confuse it with.
+        let mut on = entry("claude-b");
+        on.assistant_remote_control = true;
+        let v = serde_json::to_string(&on).unwrap();
+        assert!(v.contains(r#""assistantRemoteControl":true"#), "{v}");
+        assert!(!v.contains(r#""remoteControl""#), "{v}");
+        let back: Entry = serde_json::from_str(&v).unwrap();
+        assert!(back.assistant_remote_control);
+        // A stray retired field never sets the new one.
+        let legacy: Vec<Entry> = serde_json::from_str(
+            r#"[{"session":"claude-c","prefix":"claude","short":"c","dir":"/tmp","createdAt":3,"remoteControl":true}]"#,
+        )
+        .unwrap();
+        assert!(!legacy[0].assistant_remote_control);
     }
 }

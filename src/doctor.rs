@@ -79,7 +79,7 @@ fn print_report(rows: &[Row]) {
 /// table, never fail the install over it — same posture as the clipboard shim.
 pub fn install_report() {
     let cfg = crate::config::load();
-    let tools = tools::load_tools(cfg.tools_path);
+    let tools = tools::load_tools(cfg.tools_path.clone(), &cfg.config_dir);
     let rows = probe_rows(&tools, &cfg.env_path);
     println!();
     print_report(&rows);
@@ -99,7 +99,7 @@ pub fn run(args: &[String]) -> i32 {
     let only = only_list(args);
 
     let cfg = crate::config::load();
-    let tools = tools::load_tools(cfg.tools_path);
+    let tools = tools::load_tools(cfg.tools_path.clone(), &cfg.config_dir);
     let mut rows = probe_rows(&tools, &cfg.env_path);
     print_report(&rows);
 
@@ -291,6 +291,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 

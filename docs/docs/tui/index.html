@@ -203,6 +203,23 @@ same hostname headers at rest and machine chips while filtering, and the same
 <strong>Recent</strong> block leads the sessions — with the cursor parked on its first row,
 so <code>Ctrl-A d</code> <code>Enter</code> swaps the box back to the session you were in before. Putting
 a session into a box is &quot;<code>Ctrl-A d</code>, type 3 letters, Enter&quot;.</p>
+<h3 id="creating-a-session">Creating a session</h3>
+<p><code>Ctrl-N</code> (or <code>Ctrl-A d</code> → <strong>new session</strong> in the grid) opens the create form:
+<code>Tab</code> cycles the fields, <code>←</code>/<code>→</code> change a selector, <code>Enter</code> creates, <code>Esc</code>
+cancels. Below the tool, machine, name, and directory fields are the launch
+switches — <code>space</code> or <code>←</code>/<code>→</code> flips the focused one:</p>
+<ul>
+<li><strong>perms</strong> — <code>[YOLO]</code> (the default) launches the CLI with its
+approval-bypass flag; <code>[ask]</code> launches it with normal approval prompts, and
+the session wears a <code>safe</code> badge in the switcher.</li>
+<li><strong>claude</strong> — <code>[off]</code> (the default) launches Claude Code with its own remote
+control disabled: the session lives in cc-screen and nowhere else. <code>[app]</code>
+registers it with claude.ai/code and the Claude mobile app as
+<code>claude-&lt;name&gt;</code>, and the session wears an <code>app</code> badge. The row appears only
+for tools that have such a feature (today: Claude Code).</li>
+</ul>
+<p>Both choices are remembered for the session: a restart, a restore, or an
+assistant update relaunches it exactly the way you created it.</p>
 <p>Because typing searches, the switcher&#39;s commands live on Ctrl-chords:</p>
 <ul>
 <li><code>↑</code>/<code>↓</code> move — through the Recent rows first, never landing on a header ·

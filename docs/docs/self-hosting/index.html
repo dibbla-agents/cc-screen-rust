@@ -439,6 +439,32 @@ foreign file already sitting in <code>~/.local/bin</code> under one of those nam
 moved aside to <code>&lt;name&gt;.pre-ccshim</code> once, not clobbered.</li>
 </ul>
 <p>Reinstalling is idempotent. The shim is POSIX-only — Windows agents skip it.</p>
+<h2 id="custom-tool-templates-toolsconf">Custom tool templates (<code>tools.conf</code>)</h2>
+<p>An agent&#39;s launch templates live in <code>tools.conf</code> in its config dir
+(<code>~/.config/cc-screen-rust/tools.conf</code>; <code>$CCWEB_TOOLS</code> overrides the path).
+The file is <strong>all-or-nothing</strong>: a non-empty one replaces the built-in tool
+list entirely, and cc-screen then re-attaches the built-in metadata (resume
+flag, extra-dirs flag, YOLO flag, launch stance) to any tool that kept a
+known command or prefix.</p>
+<pre><code class="language-conf">cc_tool cc claude &quot;claude&quot;          # &lt;cmd&gt; &lt;prefix&gt; &lt;launch template&gt;
+cc_tool_resume cc &quot;--continue&quot;      # how a session resumes
+cc_tool_yolo cc &quot;--dangerously-skip-permissions&quot;
+</code></pre>
+<p>Two directives control the assistant&#39;s own remote control (the <strong>Claude app</strong>
+switch):</p>
+<pre><code class="language-conf">cc_tool_remote_off claude &quot;--settings /path/to/off.json&quot;   # the &quot;off&quot; stance
+cc_tool_remote_on  claude &quot;--rc claude-{name}&quot;             # the &quot;on&quot; stance
+</code></pre>
+<p>Both default to the built-ins shown above — the off stance points at a small
+settings file the agent writes and maintains itself. Set either to the empty
+string to make that stance <strong>do nothing</strong>, so the assistant&#39;s own settings
+govern instead:</p>
+<pre><code class="language-conf">cc_tool_remote_off claude &quot;&quot;    # my Claude settings decide; cc-screen won&#39;t
+</code></pre>
+<p>A template that already spells <code>--rc</code>/<code>--remote-control</code> out by hand is left
+completely alone — cc-screen never strips, doubles, or contradicts a flag you
+wrote. <code>{name}</code> expands to the session&#39;s short name in both templates and
+these flags.</p>
 <h2 id="updating">Updating</h2>
 <p>Each binary re-runs its hosted installer and (for the services) restarts onto
 the new build:</p>

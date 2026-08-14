@@ -101,6 +101,16 @@ pub struct SessionInfo {
     /// omitted-when-absent, so older clients and feature-off agents are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Whether the **assistant's own** remote control (Claude Code's
+    /// `--remote-control`/`--rc` registration with claude.ai/code and the Claude
+    /// mobile app) was enabled for this session's launch (proposal 0082). This is
+    /// the *effective* stance the agent launched with — the requested bit AND the
+    /// tool actually having an enable flag — so a client badges reality, not the
+    /// request. `None` = unknown (pre-0082 agent); omitted on the wire when
+    /// unknown. Deliberately **not** the retired hub-side `remoteControl` (0014):
+    /// different name, different meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_remote_control: Option<bool>,
 }
 
 /// The curated per-session mark palette tokens (proposal 0029). The *rendered*
@@ -151,6 +161,13 @@ pub struct ToolInfo {
     /// omitted when false, so older clients and the hub relay are unaffected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unavailable: bool,
+    /// True when this tool has an *assistant* remote-control feature cc-screen can
+    /// turn on at launch (proposal 0082) — today only Claude Code. A create
+    /// surface offers the per-session switch only for such tools: a switch that
+    /// changes nothing must never be shown. Additive: omitted when false, so
+    /// older clients and pre-0082 agents behave exactly as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_control_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,6 +231,15 @@ pub struct CreateReq {
     /// older client (which omits it) reproduces today's behavior. See 0005.
     #[serde(default = "default_true")]
     pub skip_permissions: bool,
+    /// Launch the assistant with **its own** remote control enabled (Claude
+    /// Code's `--rc <name>`, which registers the session with claude.ai/code and
+    /// the Claude mobile app). Defaults to **false** (proposal 0082): sessions
+    /// cc-screen launches carry a deterministic "off" stance unless the creator
+    /// asks for it, so an older client that omits the field reproduces the new
+    /// safe default and needs no shim. Distinct in name and meaning from the
+    /// hub-side `remoteControl` retired by 0014.
+    #[serde(default)]
+    pub assistant_remote_control: bool,
 }
 
 fn default_true() -> bool {
@@ -231,6 +257,8 @@ impl Default for CreateReq {
             dir: String::new(),
             extra_dirs: Vec::new(),
             skip_permissions: true,
+            // 0082: the assistant's own remote control is off unless asked for.
+            assistant_remote_control: false,
         }
     }
 }
@@ -543,7 +571,13 @@ mod tests {
     fn tool_info_json_parity() {
         // No extra-dir support → no extraDirs key; available → no unavailable key
         // (the 0046 field is omitted when false, so older clients see the same wire).
-        let t = ToolInfo { cmd: "cc".into(), prefix: "claude".into(), extra_dirs: None, unavailable: false };
+        let t = ToolInfo {
+            cmd: "cc".into(),
+            prefix: "claude".into(),
+            extra_dirs: None,
+            unavailable: false,
+            remote_control_available: false,
+        };
         assert_eq!(serde_json::to_string(&t).unwrap(), r#"{"cmd":"cc","prefix":"claude"}"#);
         // Supports extra dirs, unlimited → empty object.
         let t = ToolInfo {
@@ -551,6 +585,7 @@ mod tests {
             prefix: "gemini".into(),
             extra_dirs: Some(ExtraDirs { max: None }),
             unavailable: false,
+            remote_control_available: false,
         };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
@@ -562,6 +597,7 @@ mod tests {
             prefix: "codex".into(),
             extra_dirs: Some(ExtraDirs { max: Some(8) }),
             unavailable: false,
+            remote_control_available: false,
         };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
@@ -569,7 +605,13 @@ mod tests {
         );
         // Missing CLI (0046) → unavailable:true on the wire; and a payload
         // *without* the key still parses (older agent → newer client).
-        let t = ToolInfo { cmd: "cx".into(), prefix: "codex".into(), extra_dirs: None, unavailable: true };
+        let t = ToolInfo {
+            cmd: "cx".into(),
+            prefix: "codex".into(),
+            extra_dirs: None,
+            unavailable: true,
+            remote_control_available: false,
+        };
         assert_eq!(
             serde_json::to_string(&t).unwrap(),
             r#"{"cmd":"cx","prefix":"codex","unavailable":true}"#
@@ -644,6 +686,7 @@ mod tests {
             detail: None,
             color: None,
             label: None,
+            assistant_remote_control: None,
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(!v.contains("cwd"), "empty cwd should be omitted: {v}");
@@ -654,6 +697,10 @@ mod tests {
         assert!(!v.contains("skip_permissions"), "unknown policy should be omitted: {v}");
         assert!(!v.contains("color"), "absent color should be omitted: {v}");
         assert!(!v.contains("label"), "absent label should be omitted: {v}");
+        assert!(
+            !v.contains("assistant_remote_control"),
+            "unknown assistant remote-control stance should be omitted: {v}"
+        );
         assert!(v.contains(r#""waiting":false"#), "waiting should always serialize: {v}");
     }
 
@@ -678,6 +725,7 @@ mod tests {
             detail: Some("It refactored auth and is paused.".into()),
             color: Some("teal".into()),
             label: Some("Auth refactor".into()),
+            assistant_remote_control: Some(false),
         };
         let v = serde_json::to_string(&s).unwrap();
         assert!(v.contains(r#""machine":"laptop""#), "machine should serialize when set: {v}");
@@ -701,6 +749,7 @@ mod tests {
         assert_eq!(old.detail, None);
         assert_eq!(old.color, None, "old payload → no mark colour");
         assert_eq!(old.label, None, "old payload → no display label");
+        assert_eq!(old.assistant_remote_control, None, "old payload → unknown stance (0082)");
 
         // An OLD client parsing a NEW payload (with `machine`) ignores nothing it
         // needs — the rest still parses (forward-compat); round-trip the value.
@@ -768,10 +817,93 @@ mod tests {
             dir: "/tmp".into(),
             extra_dirs: vec![],
             skip_permissions: false,
+            assistant_remote_control: false,
         })
         .unwrap();
         assert!(s.contains(r#""skipPermissions":false"#), "{s}");
         assert!(!s.contains("remoteControl"), "retired field must not serialize: {s}");
+    }
+
+    #[test]
+    fn assistant_remote_control_defaults_off_and_never_collides_with_the_retired_field() {
+        // 0082: an OLD client (no field) creates a session with the assistant's
+        // own remote control OFF — the safe direction, so no compat shim.
+        let r: CreateReq =
+            serde_json::from_str(r#"{"tool":"cc","name":"x","dir":"/tmp"}"#).unwrap();
+        assert!(!r.assistant_remote_control, "missing → deterministically off");
+        assert!(!CreateReq::default().assistant_remote_control, "hand-written Default agrees");
+        // Opting in round-trips as camelCase…
+        let on: CreateReq = serde_json::from_str(
+            r#"{"tool":"cc","name":"x","dir":"/tmp","assistantRemoteControl":true}"#,
+        )
+        .unwrap();
+        assert!(on.assistant_remote_control);
+        let s = serde_json::to_string(&on).unwrap();
+        assert!(s.contains(r#""assistantRemoteControl":true"#), "{s}");
+        // …and the retired 0014 `remoteControl` is a *different* key: a stray one
+        // is still ignored and never sets (or is set by) the new switch.
+        let legacy: CreateReq = serde_json::from_str(
+            r#"{"tool":"cc","name":"x","dir":"/tmp","remoteControl":true}"#,
+        )
+        .unwrap();
+        assert!(!legacy.assistant_remote_control, "the retired field must not leak in");
+        assert!(!s.contains(r#""remoteControl""#), "retired field must not serialize: {s}");
+
+        // Same separation on the session list: the new stance serializes under its
+        // own name, and parsing a payload carrying the retired one leaves it None.
+        let mut info = SessionInfo {
+            name: "claude-x".into(),
+            tool: "claude".into(),
+            short: "x".into(),
+            attached: false,
+            activity: 0,
+            last_input_at: 0,
+            busy_since: 0,
+            busy_until: 0,
+            preview: String::new(),
+            waiting: true,
+            skip_permissions: Some(true),
+            cwd: String::new(),
+            machine: String::new(),
+            headline: None,
+            detail: None,
+            color: None,
+            label: None,
+            assistant_remote_control: Some(true),
+        };
+        let v = serde_json::to_string(&info).unwrap();
+        assert!(v.contains(r#""assistant_remote_control":true"#), "{v}");
+        let back: SessionInfo = serde_json::from_str(&v).unwrap();
+        assert_eq!(back.assistant_remote_control, Some(true));
+        info.assistant_remote_control = Some(false);
+        let off = serde_json::to_string(&info).unwrap();
+        assert!(off.contains(r#""assistant_remote_control":false"#), "{off}");
+        let stray: SessionInfo = serde_json::from_str(
+            r#"{"name":"claude-x","tool":"claude","short":"x","attached":false,"activity":0,"preview":"","waiting":true,"remote_control":true}"#,
+        )
+        .unwrap();
+        assert_eq!(stray.assistant_remote_control, None, "retired field must not leak in");
+    }
+
+    #[test]
+    fn tool_info_advertises_remote_control_capability() {
+        // 0082: additive + omitted when false, so a pre-0082 agent's payload
+        // parses as "no switch to offer" and an old client ignores the key.
+        let plain = ToolInfo {
+            cmd: "tt".into(),
+            prefix: "shell".into(),
+            extra_dirs: None,
+            unavailable: false,
+            remote_control_available: false,
+        };
+        let v = serde_json::to_string(&plain).unwrap();
+        assert!(!v.contains("remoteControlAvailable"), "omitted when false: {v}");
+        let capable = ToolInfo { remote_control_available: true, ..plain.clone() };
+        let v = serde_json::to_string(&capable).unwrap();
+        assert!(v.contains(r#""remoteControlAvailable":true"#), "{v}");
+        let old: ToolInfo =
+            serde_json::from_str(r#"{"cmd":"cc","prefix":"claude"}"#).unwrap();
+        assert!(!old.remote_control_available);
     }
 
     #[test]

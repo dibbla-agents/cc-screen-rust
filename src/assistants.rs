@@ -527,6 +527,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 

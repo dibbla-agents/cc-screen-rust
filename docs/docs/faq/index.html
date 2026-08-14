@@ -200,6 +200,17 @@ the machine&#39;s X11/Wayland clipboard, which headless boxes don&#39;t have. Up
 the agent on that machine and pasted images reach Codex as a staged local
 file instead — no display server, no Xvfb. Details in
 <a href="../troubleshooting/#codex-says-clipboard-unavailable-an-x11-error-on-image-paste">Troubleshooting</a>.</p>
+<h2 id="why-does-claude-say-remote-control-is-disabled-by-your-organization39s-policy">Why does Claude say Remote Control is &quot;disabled by your organization&#39;s policy&quot;?</h2>
+<p>That&#39;s cc-screen, not your employer. Sessions cc-screen launches run Claude
+Code with its own remote control (claude.ai/code and the Claude mobile app)
+switched off, so a session you started here is reachable through cc-screen
+and nowhere else — one remote-access layer per session. Claude Code phrases
+every block that way; we don&#39;t control the wording.</p>
+<p>Want it on for a session? Create the session with the <strong>Claude app</strong> switch
+on (the <code>claude</code> row in <code>ccs</code>) and it launches registered as
+<code>claude-&lt;name&gt;</code>, badged in the session list. The choice sticks across
+restarts, restores, and assistant updates. Existing sessions keep their
+stance until you recreate them.</p>
 <h2 id="what-are-the-codes-like-wdjb-mjht">What are the codes like <code>WDJB-MJHT</code>?</h2>
 <p>One-time machine-activation codes. The installer prints one; you approve it
 at <a href="https://app.ccscreen.dev/activate">app.ccscreen.dev/activate</a> while

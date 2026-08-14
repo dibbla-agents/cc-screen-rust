@@ -27,6 +27,13 @@ export interface Session {
   // Whether the session launched in YOLO mode (approval prompts skipped).
   // Informational — drives a "YOLO" badge. `undefined` = unknown (pre-0005).
   skip_permissions?: boolean;
+  // Whether the session launched with the ASSISTANT's own remote control on —
+  // Claude Code's registration with claude.ai/code and the Claude mobile app
+  // (proposal 0082). The agent reports the *effective* stance, so this is what
+  // the launch line actually did, not what was requested. `undefined` = unknown
+  // (pre-0082 agent). Nothing to do with cc-screen's hub, whose own view-only
+  // switch was retired by 0014.
+  assistant_remote_control?: boolean;
   // LLM-summarized status (proposal 0022). `headline` (≤6 words) replaces the
   // bare preview in dense surfaces; `detail` (2-3 sentences) is the tooltip /
   // status-view / push body. Absent until computed or when the feature is off —
@@ -1008,6 +1015,11 @@ export interface Tool {
   // This tool's CLI isn't installed on the machine (proposal 0046) — the picker
   // greys it out. Omitted (= falsy) by older agents and for available tools.
   unavailable?: boolean;
+  // This tool has an assistant remote control cc-screen can switch on at launch
+  // (proposal 0082) — today only Claude Code. The create sheet offers the switch
+  // only here: a switch that changes nothing must never be shown. Omitted
+  // (= falsy) by older agents and for tools without the feature.
+  remoteControlAvailable?: boolean;
 }
 
 export interface DirEntry {
@@ -1334,12 +1346,16 @@ export async function createSession(
   // Per-session launch policy (0005). Defaults to the agent's serde default so
   // omitting it reproduces today's behavior: YOLO on. (0014 retired the
   // hub-control switch — every session is editable through the hub.)
-  skipPermissions = true
+  skipPermissions = true,
+  // The assistant's OWN remote control (proposal 0082): register this session
+  // with claude.ai/code and the Claude mobile app. Defaults to the agent's serde
+  // default — off — so a session is never silently registered.
+  assistantRemoteControl = false
 ): Promise<PaneRef> {
   const r = await fetch(withMachine("/api/session", machine), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tool, name, dir, extraDirs, skipPermissions }),
+    body: JSON.stringify({ tool, name, dir, extraDirs, skipPermissions, assistantRemoteControl }),
   });
   if (!r.ok) {
     const msg = (await r.text()).trim();

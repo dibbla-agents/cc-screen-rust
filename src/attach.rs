@@ -159,6 +159,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 
@@ -192,7 +194,7 @@ mod tests {
     async fn attach_emits_snapshot_before_output_with_ris() {
         let tool = shell_tool("printf BRIDGE_MARK; sleep 5");
         let (state, tmp) = app_with(&tool, "snapshot");
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         let (out_tx, mut out_rx) = mpsc::channel::<AttachOut>(64);
@@ -234,7 +236,7 @@ mod tests {
         // second snapshot — the 80-wide one would re-wrap (ghost) in its grid.
         let tool = shell_tool("printf hi; sleep 5");
         let (state, tmp) = app_with(&tool, "refit");
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         let (out_tx, mut out_rx) = mpsc::channel::<AttachOut>(64);
@@ -266,7 +268,7 @@ mod tests {
     async fn two_clients_pin_pty_to_min_then_grow_back_through_loop() {
         let tool = shell_tool("sleep 5; echo two");
         let (state, tmp) = app_with(&tool, "minsize");
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
         assert_eq!(sess.current_size(), INIT);
 
@@ -316,7 +318,7 @@ mod tests {
         // Attach to a LIVE session, then kill it — the loop must surface Closed.
         let tool = shell_tool("printf READY; sleep 5");
         let (state, tmp) = app_with(&tool, "closed");
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         let (out_tx, mut out_rx) = mpsc::channel::<AttachOut>(64);

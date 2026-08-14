@@ -202,6 +202,17 @@ fn session_item(app: &App, idx: usize, chip: bool, row_width: usize) -> ListItem
         ));
         prefix_cols += 5;
     }
+    // …and the other exception: a session that opted into the assistant's own
+    // remote control (0082). Only the *effective* on state is badged — the agent
+    // reports what it actually launched with, so a stance-free relaunch never
+    // claims to be registered.
+    if s.assistant_remote_control == Some(true) {
+        spans.push(Span::styled(
+            "app ",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+        prefix_cols += 4;
+    }
     // The inline machine chip (filtering, multi-machine): the group headers are
     // suppressed, so the row itself says where the session lives.
     if chip && !s.machine.is_empty() {
@@ -292,6 +303,7 @@ mod tests {
             detail: None,
             color: None,
             label: None,
+            assistant_remote_control: None,
         }
     }
 

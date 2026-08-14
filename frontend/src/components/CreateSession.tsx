@@ -108,6 +108,10 @@ export default function CreateSession({
   const [name, setName] = useState("");
   const nameEdited = useRef(false);
   const [skipPermissions, setSkipPermissions] = useState(true);
+  // The ASSISTANT's own remote control (proposal 0082) — off by default, and
+  // only offered for a tool that has one. Registering a session with
+  // claude.ai/code + the Claude mobile app is a deliberate per-session choice.
+  const [assistantRemoteControl, setAssistantRemoteControl] = useState(false);
   const [extraDirs, setExtraDirs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -124,6 +128,8 @@ export default function CreateSession({
 
   const selectedTool = tools.find((t) => t.cmd === tool || t.prefix === tool);
   const extraSupport = selectedTool?.extraDirs;
+  // Does the picked tool have an assistant remote control to switch on (0082)?
+  const rcSupport = !!selectedTool?.remoteControlAvailable;
   const extraLimit = extraSupport?.max || 0;
   const extraOverLimit = extraLimit > 0 && extraDirs.length > extraLimit;
 
@@ -287,7 +293,10 @@ export default function CreateSession({
           dir,
           extraSupport ? extraDirs : [],
           selectedMachine,
-          skipPermissions
+          skipPermissions,
+          // A tool without the capability never shows the switch; send the
+          // stance anyway — the agent recomputes the effective one.
+          rcSupport ? assistantRemoteControl : false
         );
         onCreated(ref);
       } catch (e) {
@@ -298,7 +307,19 @@ export default function CreateSession({
         setBusy(false);
       }
     },
-    [tool, extraOverLimit, selectedTool, extraLimit, extraSupport, extraDirs, selectedMachine, skipPermissions, onCreated]
+    [
+      tool,
+      extraOverLimit,
+      selectedTool,
+      extraLimit,
+      extraSupport,
+      extraDirs,
+      selectedMachine,
+      skipPermissions,
+      rcSupport,
+      assistantRemoteControl,
+      onCreated,
+    ]
   );
 
   // Activate the highlighted row: a folder creates a session there; the mkdir row
@@ -607,6 +628,34 @@ export default function CreateSession({
             </span>
             <span className="font-semibold">YOLO</span>
           </button>
+          {/* Proposal 0082: the assistant's OWN remote control. Off by default —
+              cc-screen is already this session's remote-access layer — and shown
+              only for a tool that has one. */}
+          {rcSupport && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={assistantRemoteControl}
+              data-rc-switch
+              data-rc-on={assistantRemoteControl ? "1" : "0"}
+              onClick={() => setAssistantRemoteControl((v) => !v)}
+              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-slate-300 hover:bg-edge/50"
+              title={
+                assistantRemoteControl
+                  ? "Remote control — this session registers with claude.ai/code and the Claude mobile app"
+                  : "Remote control off — this session stays inside cc-screen (claude.ai/code and the Claude mobile app can’t see it)"
+              }
+            >
+              <span
+                className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${assistantRemoteControl ? "bg-accent" : "bg-edge"}`}
+              >
+                <span
+                  className={`absolute top-0.5 h-3 w-3 rounded-full bg-slate-100 transition-all ${assistantRemoteControl ? "left-[0.875rem]" : "left-0.5"}`}
+                />
+              </span>
+              <span className="font-semibold">Claude app</span>
+            </button>
+          )}
           {extraSupport && (
             <span className="ml-auto text-[11px] text-slate-500">
               {extraDirs.length > 0 ? `${extraDirs.length} extra folder${extraDirs.length > 1 ? "s" : ""}` : ""}

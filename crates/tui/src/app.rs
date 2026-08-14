@@ -305,22 +305,29 @@ pub enum FormField {
     /// Per-session launch policy toggle (0005). Takes Space / ←→ to flip. (The
     /// hub-control toggle that lived beside it was retired by 0014.)
     SkipPermissions,
+    /// The **assistant's own** remote-control switch (proposal 0082): register
+    /// this session with claude.ai/code and the Claude mobile app. Off by
+    /// default, and only in the cycle for a tool that has something to turn on.
+    AssistantRemoteControl,
 }
 
 /// The fields in Tab order. `Machine` is skipped unless the server is a hub; the
-/// skip-permissions toggle is always present.
-fn form_fields(has_machine: bool) -> &'static [FormField] {
+/// skip-permissions toggle is always present; the assistant-remote-control
+/// toggle appears only for a tool that advertises the capability (0082) — a
+/// switch that changes nothing must never be offered.
+fn form_fields(has_machine: bool, rc_capable: bool) -> &'static [FormField] {
     use FormField::*;
-    if has_machine {
-        &[Tool, Machine, Name, Dir, SkipPermissions]
-    } else {
-        &[Tool, Name, Dir, SkipPermissions]
+    match (has_machine, rc_capable) {
+        (true, true) => &[Tool, Machine, Name, Dir, SkipPermissions, AssistantRemoteControl],
+        (true, false) => &[Tool, Machine, Name, Dir, SkipPermissions],
+        (false, true) => &[Tool, Name, Dir, SkipPermissions, AssistantRemoteControl],
+        (false, false) => &[Tool, Name, Dir, SkipPermissions],
     }
 }
 
 /// Step `field` by `delta` (±1) through the active fields, wrapping.
-fn step_field(field: FormField, has_machine: bool, delta: isize) -> FormField {
-    let fields = form_fields(has_machine);
+fn step_field(field: FormField, has_machine: bool, rc_capable: bool, delta: isize) -> FormField {
+    let fields = form_fields(has_machine, rc_capable);
     let i = fields.iter().position(|&f| f == field).unwrap_or(0);
     let n = fields.len() as isize;
     fields[((i as isize + delta).rem_euclid(n)) as usize]
@@ -368,7 +375,30 @@ fn rename_key(form: &mut RenameForm, k: KeyEvent) -> RenameAction {
 }
 
 /// Apply one key to a `NewForm` — shared by the switcher form and the grid form.
-fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: KeyEvent) -> NewFormAction {
+/// `tool_rc[i]` is whether tool *i* offers the assistant-remote-control switch
+/// (0082); its length is the tool count. Passing the whole vector (rather than a
+/// count plus one bool) is what keeps the field cycle honest when ←/→ changes
+/// the tool: the capability is re-read for the tool now selected.
+fn newform_key(form: &mut NewForm, tool_rc: &[bool], machines_len: usize, k: KeyEvent) -> NewFormAction {
+    let action = newform_key_inner(form, tool_rc, machines_len, k);
+    // Changing the tool can retire the focused field (claude → codex); park the
+    // focus somewhere real rather than on an invisible row.
+    if form.field == FormField::AssistantRemoteControl
+        && !tool_rc.get(form.tool_idx).copied().unwrap_or(false)
+    {
+        form.field = FormField::SkipPermissions;
+    }
+    action
+}
+
+fn newform_key_inner(
+    form: &mut NewForm,
+    tool_rc: &[bool],
+    machines_len: usize,
+    k: KeyEvent,
+) -> NewFormAction {
+    let tools_len = tool_rc.len();
+    let rc_capable = tool_rc.get(form.tool_idx).copied().unwrap_or(false);
     let has_machine = machines_len > 0;
     match (k.code, k.modifiers) {
         (KeyCode::Esc, _) => return NewFormAction::Cancel,
@@ -381,8 +411,8 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
         (KeyCode::Tab, _) if form.field == FormField::Dir && form.dir_sel.is_some() => {
             return accept_candidate(form);
         }
-        (KeyCode::Tab, _) => form.field = step_field(form.field, has_machine, 1),
-        (KeyCode::BackTab, _) => form.field = step_field(form.field, has_machine, -1),
+        (KeyCode::Tab, _) => form.field = step_field(form.field, has_machine, rc_capable, 1),
+        (KeyCode::BackTab, _) => form.field = step_field(form.field, has_machine, rc_capable, -1),
         (KeyCode::Left, _) => match form.field {
             FormField::Tool if tools_len > 0 => {
                 form.tool_idx = (form.tool_idx + tools_len - 1) % tools_len;
@@ -392,6 +422,9 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
                 return invalidate_dirs(form);
             }
             FormField::SkipPermissions => form.skip_permissions = !form.skip_permissions,
+            FormField::AssistantRemoteControl => {
+                form.assistant_remote_control = !form.assistant_remote_control
+            }
             _ => {}
         },
         (KeyCode::Right, _) => match form.field {
@@ -403,6 +436,9 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
                 return invalidate_dirs(form);
             }
             FormField::SkipPermissions => form.skip_permissions = !form.skip_permissions,
+            FormField::AssistantRemoteControl => {
+                form.assistant_remote_control = !form.assistant_remote_control
+            }
             // → also accepts a highlighted dir candidate (a quick "drill in").
             FormField::Dir if form.dir_sel.is_some() => return accept_candidate(form),
             _ => {}
@@ -411,6 +447,9 @@ fn newform_key(form: &mut NewForm, tools_len: usize, machines_len: usize, k: Key
         // literal char in the Char arm below).
         (KeyCode::Char(' '), _) if form.field == FormField::SkipPermissions => {
             form.skip_permissions = !form.skip_permissions;
+        }
+        (KeyCode::Char(' '), _) if form.field == FormField::AssistantRemoteControl => {
+            form.assistant_remote_control = !form.assistant_remote_control;
         }
         (KeyCode::Down, _) if form.field == FormField::Dir => move_cand(form, 1),
         (KeyCode::Up, _) if form.field == FormField::Dir => move_cand(form, -1),
@@ -701,6 +740,10 @@ struct NewForm {
     /// Per-session launch policy (0005). Defaults to the agent's serde default:
     /// YOLO on. (The hub-control toggle beside it was retired by 0014.)
     skip_permissions: bool,
+    /// The assistant's own remote control (0082). Defaults — like the agent's
+    /// serde default — to **off**: registering a session with claude.ai/code and
+    /// the Claude mobile app is a deliberate choice, never inherited.
+    assistant_remote_control: bool,
 }
 
 impl NewForm {
@@ -719,6 +762,7 @@ impl NewForm {
             dir_cands: Vec::new(),
             dir_sel: None,
             skip_permissions: true,
+            assistant_remote_control: false,
         }
     }
 }
@@ -1548,12 +1592,12 @@ impl App {
     }
 
     fn key_newform(&mut self, k: KeyEvent) {
-        let tools_len = self.tools.len();
+        let tool_rc = self.tool_rc_caps();
         let machines_len = self.machines.len();
         let Overlay::NewSession(form) = &mut self.overlay else {
             return;
         };
-        match newform_key(form, tools_len, machines_len, k) {
+        match newform_key(form, &tool_rc, machines_len, k) {
             NewFormAction::None => {}
             NewFormAction::Cancel => self.overlay = Overlay::None,
             NewFormAction::Submit => self.submit_newform(),
@@ -1659,6 +1703,9 @@ impl App {
             dir: form.dir.clone(),
             extra_dirs: Vec::new(),
             skip_permissions: form.skip_permissions,
+            // Only a capable tool can honor it; the form hides the switch
+            // otherwise, and the agent recomputes the effective stance anyway.
+            assistant_remote_control: form.assistant_remote_control,
         };
         let rest = self.rest.clone();
         let tx = self.tx.clone();
@@ -2137,11 +2184,11 @@ impl App {
     }
 
     fn key_grid_newform(&mut self, k: KeyEvent) {
-        let tools_len = self.tools.len();
+        let tool_rc = self.tool_rc_caps();
         let machines_len = self.machines.len();
         let (target, action) = match &mut self.grid_overlay {
             GridOverlay::NewForm { target, form } => {
-                (*target, newform_key(form, tools_len, machines_len, k))
+                (*target, newform_key(form, &tool_rc, machines_len, k))
             }
             _ => return,
         };
@@ -2536,7 +2583,20 @@ impl App {
             cand_sel: form.dir_sel,
             error: form.error.as_deref(),
             skip_permissions: form.skip_permissions,
+            // 0082: the row exists only for a tool that has something to turn on.
+            assistant_remote_control: form.assistant_remote_control,
+            remote_control_available: self
+                .tools
+                .get(form.tool_idx)
+                .map(|t| t.remote_control_available)
+                .unwrap_or(false),
         }
+    }
+
+    /// Per-tool "offers the assistant-remote-control switch" flags, in tool
+    /// order (proposal 0082) — the form's view of `/api/tools`.
+    fn tool_rc_caps(&self) -> Vec<bool> {
+        self.tools.iter().map(|t| t.remote_control_available).collect()
     }
 
     // ── render ───────────────────────────────────────────────────────────────
@@ -3044,6 +3104,7 @@ mod tests {
             detail: None,
             color: None,
             label: None,
+            assistant_remote_control: None,
         }
     }
 
@@ -3351,17 +3412,17 @@ mod tests {
     #[test]
     fn newform_key_edits_submits_and_cancels() {
         let mut f = form(); // starts on the name field
-        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Char('x'))), NewFormAction::None));
+        assert!(matches!(newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Char('x'))), NewFormAction::None));
         assert_eq!(f.name, "x");
         // Tab: name → dir (no machine field with machines_len == 0).
-        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Dir);
         // Typing a separator changes the parent dir → triggers a fetch.
-        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Char('/'))), NewFormAction::FetchDirs(_)));
+        assert!(matches!(newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Char('/'))), NewFormAction::FetchDirs(_)));
         assert_eq!(f.dir, "/");
         // Submit / cancel from the dir field (no candidate highlighted).
-        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Enter)), NewFormAction::Submit));
-        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Esc)), NewFormAction::Cancel));
+        assert!(matches!(newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Enter)), NewFormAction::Submit));
+        assert!(matches!(newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Esc)), NewFormAction::Cancel));
     }
 
     #[test]
@@ -3369,18 +3430,18 @@ mod tests {
         let mut f = form();
         f.field = FormField::Tool;
         // No machines: Tool → Name → Dir → SkipPermissions → Tool.
-        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Name);
-        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Dir);
-        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::SkipPermissions);
-        newform_key(&mut f, 3, 0, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Tool);
         // With machines: Tool → Machine → Name.
-        newform_key(&mut f, 3, 2, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 2, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Machine);
-        newform_key(&mut f, 3, 2, key(KeyCode::Tab));
+        newform_key(&mut f, &[false, false, false], 2, key(KeyCode::Tab));
         assert_eq!(f.field, FormField::Name);
     }
 
@@ -3391,14 +3452,55 @@ mod tests {
         assert!(f.skip_permissions);
         // Space flips the focused toggle; ←/→ do too.
         f.field = FormField::SkipPermissions;
-        newform_key(&mut f, 3, 0, key(KeyCode::Char(' ')));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Char(' ')));
         assert!(!f.skip_permissions, "space toggles skip off");
-        newform_key(&mut f, 3, 0, key(KeyCode::Right));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Right));
         assert!(f.skip_permissions, "→ toggles skip back on");
-        newform_key(&mut f, 3, 0, key(KeyCode::Left));
+        newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Left));
         assert!(!f.skip_permissions, "← toggles skip off");
         // Enter still submits from a toggle field.
-        assert!(matches!(newform_key(&mut f, 3, 0, key(KeyCode::Enter)), NewFormAction::Submit));
+        assert!(matches!(newform_key(&mut f, &[false, false, false], 0, key(KeyCode::Enter)), NewFormAction::Submit));
+    }
+
+    #[test]
+    fn newform_remote_control_switch_is_capability_gated() {
+        // 0082: tool 0 is capable (claude), tool 1 isn't (codex).
+        let caps = [true, false];
+        let mut f = form();
+        assert!(!f.assistant_remote_control, "the assistant's own remote control is off by default");
+        // It's the last field in the cycle for a capable tool…
+        f.field = FormField::SkipPermissions;
+        newform_key(&mut f, &caps, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::AssistantRemoteControl);
+        // …and takes space / ←→ like the permissions switch.
+        newform_key(&mut f, &caps, 0, key(KeyCode::Char(' ')));
+        assert!(f.assistant_remote_control, "space toggles it on");
+        newform_key(&mut f, &caps, 0, key(KeyCode::Left));
+        assert!(!f.assistant_remote_control, "← toggles it off");
+        newform_key(&mut f, &caps, 0, key(KeyCode::Right));
+        assert!(f.assistant_remote_control, "→ toggles it back on");
+        // Tab wraps back to the top of the form, not into a phantom field.
+        newform_key(&mut f, &caps, 0, key(KeyCode::Tab));
+        assert_eq!(f.field, FormField::Tool);
+
+        // For a tool with nothing to turn on, the field isn't in the cycle…
+        let mut g = form();
+        g.tool_idx = 1;
+        g.field = FormField::SkipPermissions;
+        newform_key(&mut g, &caps, 0, key(KeyCode::Tab));
+        assert_eq!(g.field, FormField::Tool, "no phantom row for an incapable tool");
+        // …and switching TO an incapable tool parks the focus somewhere real
+        // rather than on an invisible row.
+        let mut h = form();
+        h.field = FormField::AssistantRemoteControl;
+        newform_key(&mut h, &caps, 0, key(KeyCode::Tab)); // wraps to Tool
+        h.field = FormField::AssistantRemoteControl;
+        h.tool_idx = 0;
+        newform_key(&mut h, &caps, 0, key(KeyCode::Char(' ')));
+        assert_eq!(h.field, FormField::AssistantRemoteControl, "capable → stays");
+        h.tool_idx = 1;
+        newform_key(&mut h, &caps, 0, key(KeyCode::Char(' ')));
+        assert_eq!(h.field, FormField::SkipPermissions, "incapable → focus falls back");
     }
 
     #[test]
@@ -3406,15 +3508,15 @@ mod tests {
         let mut f = form();
         // Tool field: ←/→ cycles the tool.
         f.field = FormField::Tool;
-        newform_key(&mut f, 3, 2, key(KeyCode::Right));
+        newform_key(&mut f, &[false, false, false], 2, key(KeyCode::Right));
         assert_eq!(f.tool_idx, 1);
         assert_eq!(f.machine_idx, 0); // machine untouched
-        newform_key(&mut f, 3, 2, key(KeyCode::Left));
+        newform_key(&mut f, &[false, false, false], 2, key(KeyCode::Left));
         assert_eq!(f.tool_idx, 0);
         // Machine field: ←/→ cycles the machine and re-fetches dirs + tools for it.
         f.field = FormField::Machine;
         assert!(matches!(
-            newform_key(&mut f, 3, 2, key(KeyCode::Right)),
+            newform_key(&mut f, &[false, false, false], 2, key(KeyCode::Right)),
             NewFormAction::MachineChanged(_)
         ));
         assert_eq!(f.machine_idx, 1);
@@ -3432,9 +3534,9 @@ mod tests {
         assert_eq!(f.dir_cands.len(), 3);
         assert_eq!(f.dir_sel, None); // Enter would submit here
         // ↓ enters the list; Enter then accepts instead of submitting.
-        newform_key(&mut f, 1, 0, key(KeyCode::Down));
+        newform_key(&mut f, &[false], 0, key(KeyCode::Down));
         assert_eq!(f.dir_sel, Some(0));
-        let acted = newform_key(&mut f, 1, 0, key(KeyCode::Enter));
+        let acted = newform_key(&mut f, &[false], 0, key(KeyCode::Enter));
         assert!(matches!(acted, NewFormAction::FetchDirs(_)));
         assert_eq!(f.dir, "/home/u/dev/"); // completed + trailing slash to drill in
         assert_eq!(f.dir_sel, None);

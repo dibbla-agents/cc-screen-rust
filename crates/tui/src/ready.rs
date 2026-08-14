@@ -124,6 +124,7 @@ mod tests {
             detail: None,
             color: None,
             label: None,
+            assistant_remote_control: None,
         }
     }
 

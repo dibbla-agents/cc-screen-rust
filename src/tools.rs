@@ -5,7 +5,7 @@
 // and its resume form (for the restore path), with built-in defaults for the
 // four known CLIs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cc_screen_protocol::{ExtraDirs, ToolInfo};
 
@@ -54,6 +54,22 @@ pub struct Tool {
     /// other built-in metadata uses, so a `tools.conf` Codex override inherits
     /// it; a genuinely unknown custom tool keeps the compatible probe.
     pub image_paste: ImagePasteStrategy,
+    /// The flag appended when the session's assistant-remote-control switch is
+    /// **off** — the default (proposal 0082). For Claude Code this is
+    /// `--settings <disable-file>`, which is the only reliable off-switch: it
+    /// beats the user's own `remoteControlAtStartup`, the in-session
+    /// `/remote-control`, resume re-registration and any upstream auto-on
+    /// cohort, for this invocation only. `None` = **stance-free**: nothing is
+    /// appended and the user's own settings govern (the tool has no such
+    /// feature, an operator cleared it with `cc_tool_remote_off <tool> ""`, or
+    /// the template already carries the feature by hand — the inline guard).
+    pub remote_off_flag: Option<String>,
+    /// The flag appended when the switch is **on**: for Claude Code
+    /// `--rc claude-{name}`, [0015]'s documented opt-in under a cc-screen-derived
+    /// name (`{name}` is substituted in `build_launch`, like the template's).
+    /// `None` = there is nothing to turn on, so no create surface offers the
+    /// switch and an opted-in session relaunches stance-free.
+    pub remote_on_flag: Option<String>,
 }
 
 impl Tool {
@@ -70,6 +86,8 @@ impl Tool {
             install_hint: None,
             update_cmd: None,
             image_paste: ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 }
@@ -87,6 +105,10 @@ pub fn tool_info(t: &Tool, unavailable: bool) -> ToolInfo {
             .is_some()
             .then(|| ExtraDirs { max: (t.extra_max > 0).then_some(t.extra_max) }),
         unavailable,
+        // 0082: only a tool we can actually *enable* remote control for gets the
+        // per-session switch offered — a switch that changes nothing is worse
+        // than no switch.
+        remote_control_available: t.remote_on_flag.is_some(),
     }
 }
 
@@ -635,16 +657,73 @@ fn split_head(line: &str, n: usize) -> (Vec<String>, String) {
     (toks, rest.to_string())
 }
 
-pub fn load_tools(path: Option<PathBuf>) -> Vec<Tool> {
+/// Load the tool registry. `config_dir` is the agent's own config directory —
+/// where the remote-control disable settings file lives (proposal 0082), whose
+/// absolute path is baked into `remote_off_flag` here so `build_launch` stays a
+/// pure function over the tool.
+pub fn load_tools(path: Option<PathBuf>, config_dir: &Path) -> Vec<Tool> {
     if let Some(p) = path {
         if let Ok(text) = std::fs::read_to_string(&p) {
             let parsed = parse(&text);
             if !parsed.is_empty() {
-                return with_defaults(parsed);
+                return with_defaults(parsed, config_dir);
             }
         }
     }
-    with_defaults(defaults())
+    with_defaults(defaults(), config_dir)
+}
+
+// ── The assistant remote-control disable file (proposal 0082) ────────────────
+// Claude Code has no `--no-remote-control` flag and no disable env var; the only
+// per-invocation off-switch is `--settings <file|json>`, whose `flagSettings`
+// source outranks the user's own settings for `disableRemoteControl`. We pass a
+// FILE rather than inline JSON: inline JSON would need different quoting under
+// `/bin/sh -c` and `cmd.exe /C` — exactly the class of Windows breakage 0051
+// cleaned up — while a path rides the platform-split `shell_quote` unchanged.
+
+/// The disable file's name inside the agent's config dir.
+pub const REMOTE_OFF_FILE: &str = "claude-remote-off.json";
+/// Its entire content. Exactly one key: the semantic kill switch upstream
+/// documents for claude.ai/code registration, the `claude remote-control`
+/// daemon, `--remote-control`/`--rc`, auto-start, and the in-session toggle.
+pub const REMOTE_OFF_JSON: &str = r#"{"disableRemoteControl": true}"#;
+
+pub fn remote_off_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(REMOTE_OFF_FILE)
+}
+
+/// Write-or-verify the disable file. Called at boot **and on every launch path**,
+/// so a wiped config dir can never leave a session launching with `--settings` at
+/// a dangling path. Returns whether the file is now present with the right
+/// content (best-effort: the caller logs, it never blocks a create).
+pub fn ensure_remote_off_file(config_dir: &Path) -> bool {
+    let path = remote_off_path(config_dir);
+    if matches!(std::fs::read_to_string(&path), Ok(s) if s.trim() == REMOTE_OFF_JSON) {
+        return true;
+    }
+    let _ = std::fs::create_dir_all(config_dir);
+    std::fs::write(&path, REMOTE_OFF_JSON).is_ok()
+}
+
+/// Does this launch template already carry the remote-control feature by hand?
+/// Then cc-screen appends no stance at all: we never strip, double, or
+/// contradict an operator-written flag (the same discipline `yolo_flag` uses).
+///
+/// `--remote-control-session-name-prefix` deliberately does **not** trip this —
+/// it is naming-only, and a false positive here would silently leave that
+/// operator's sessions remote-control-capable.
+fn inlines_remote_control(tmpl: &str) -> bool {
+    // The disable key only ever appears *inside* a `--settings` argument, so
+    // token equality can never see it — substring is the right test.
+    if tmpl.contains("disableRemoteControl") {
+        return true;
+    }
+    tmpl.split_whitespace().any(|tok| {
+        tok == "--rc"
+            || tok == "--remote-control"
+            || tok.starts_with("--rc=")
+            || tok.starts_with("--remote-control=")
+    })
 }
 
 fn defaults() -> Vec<Tool> {
@@ -696,6 +775,8 @@ fn parse(text: &str) -> Vec<Tool> {
     let mut yolos: Vec<(String, String)> = Vec::new();
     let mut installs: Vec<(String, String)> = Vec::new();
     let mut updates: Vec<(String, String)> = Vec::new();
+    let mut rc_offs: Vec<(String, String)> = Vec::new();
+    let mut rc_ons: Vec<(String, String)> = Vec::new();
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -737,6 +818,26 @@ fn parse(text: &str) -> Vec<Tool> {
             let (toks, rest) = split_head(line, 2);
             if toks.len() >= 2 && !rest.is_empty() {
                 updates.push((toks[1].clone(), unquote(&rest)));
+            }
+            continue;
+        }
+        // cc_tool_remote_off / cc_tool_remote_on <cmd|prefix> "<flag>" — override
+        // (or clear) this tool's assistant-remote-control stance flags (0082).
+        // An explicitly empty flag ("") is the *stance-free* escape hatch: nothing
+        // is appended and the user's own assistant settings govern. Declared here
+        // as `Some("")`, normalised to `None` at the end of `with_defaults` — the
+        // two-step is what lets "declared empty" beat the built-in default.
+        if line.starts_with("cc_tool_remote_off") {
+            let (toks, rest) = split_head(line, 2);
+            if toks.len() >= 2 && !rest.is_empty() {
+                rc_offs.push((toks[1].clone(), unquote(&rest)));
+            }
+            continue;
+        }
+        if line.starts_with("cc_tool_remote_on") {
+            let (toks, rest) = split_head(line, 2);
+            if toks.len() >= 2 && !rest.is_empty() {
+                rc_ons.push((toks[1].clone(), unquote(&rest)));
             }
             continue;
         }
@@ -799,12 +900,27 @@ fn parse(text: &str) -> Vec<Tool> {
             }
         }
     }
+    for (key, flag) in rc_offs {
+        for t in out.iter_mut() {
+            if t.cmd == key || t.prefix == key {
+                t.remote_off_flag = Some(flag.clone());
+            }
+        }
+    }
+    for (key, flag) in rc_ons {
+        for t in out.iter_mut() {
+            if t.cmd == key || t.prefix == key {
+                t.remote_on_flag = Some(flag.clone());
+            }
+        }
+    }
     out
 }
 
 /// Fill in the built-in extra-dir + resume support for any tool that didn't
-/// declare its own (the four known CLIs).
-fn with_defaults(mut tools: Vec<Tool>) -> Vec<Tool> {
+/// declare its own (the four known CLIs). `config_dir` is only used to resolve
+/// the 0082 remote-control disable file's absolute path.
+fn with_defaults(mut tools: Vec<Tool>, config_dir: &Path) -> Vec<Tool> {
     for t in tools.iter_mut() {
         if t.extra_flag.is_none() {
             match (t.prefix.as_str(), t.cmd.as_str()) {
@@ -859,6 +975,32 @@ fn with_defaults(mut tools: Vec<Tool>) -> Vec<Tool> {
         // keeps the backward-compatible clipboard probe.
         if matches!((t.prefix.as_str(), t.cmd.as_str()), ("codex", _) | (_, "coc")) {
             t.image_paste = ImagePasteStrategy::BracketedImagePath;
+        }
+        // The assistant's own remote control (0082). Claude Code is the only CLI
+        // with a launch-time enable today: Codex's `remote-control` daemon is
+        // user-invoked and its feature flag reports `removed`; gemini and kimi
+        // have no analogous feature. The identity match is the usual `(prefix,
+        // cmd)` one, so a tools.conf override of claude inherits the stance —
+        // unless it already carries the feature by hand (the inline guard).
+        if matches!((t.prefix.as_str(), t.cmd.as_str()), ("claude", _) | (_, "cc"))
+            && !inlines_remote_control(&t.tmpl)
+        {
+            if t.remote_off_flag.is_none() {
+                t.remote_off_flag =
+                    Some(format!("--settings {}", shell_quote(&remote_off_path(config_dir).to_string_lossy())));
+            }
+            if t.remote_on_flag.is_none() {
+                t.remote_on_flag = Some("--rc claude-{name}".into());
+            }
+        }
+        // An explicitly declared empty flag (`cc_tool_remote_off claude ""`) is
+        // the operator saying "append nothing here" — normalise it to None now
+        // that the default-fill above has had its chance to see it as declared.
+        if t.remote_off_flag.as_deref() == Some("") {
+            t.remote_off_flag = None;
+        }
+        if t.remote_on_flag.as_deref() == Some("") {
+            t.remote_on_flag = None;
         }
     }
     tools
@@ -916,24 +1058,44 @@ fn resume_command(t: &Tool, name: &str, extra_dirs: &[String]) -> Option<String>
 /// default) and the tool has a flag, it's appended to *both* the fresh and
 /// resume forms (so resuming stays YOLO too); when false the flag is omitted and
 /// the CLI launches with its normal approval prompts.
+///
+/// `remote_control` (0082) gates the assistant's *own* remote control the same
+/// way, except that **both** states carry a flag: off (the default) appends
+/// `remote_off_flag` — the `--settings` disable file — and on appends
+/// `remote_on_flag` (`--rc claude-{name}`, with `{name}` substituted like the
+/// template's). Either may be `None`, in which case that launch is *stance-free*
+/// and the user's own assistant settings govern. Both land on both branches of
+/// the `(resume) || (fresh)` fallback, so resuming can't re-register a session
+/// that was created with the switch off.
+#[allow(clippy::too_many_arguments)]
 pub fn build_launch(
     t: &Tool,
     name: &str,
     extra_dirs: &[String],
     resume: bool,
     skip_permissions: bool,
+    remote_control: bool,
 ) -> String {
     let yolo = if skip_permissions { t.yolo_flag.as_deref() } else { None };
-    let with_yolo = |mut cmd: String| {
+    // 0082: every launch of a remote-control-capable assistant carries an
+    // explicit stance — disable by default, enable by choice.
+    let rc = if remote_control { t.remote_on_flag.as_deref() } else { t.remote_off_flag.as_deref() };
+    let with_flags = |mut cmd: String| {
         if let Some(flag) = yolo {
             cmd.push(' ');
             cmd.push_str(flag);
         }
+        if let Some(flag) = rc {
+            cmd.push(' ');
+            // Flag-side `{name}` substitution (the template's own is done in
+            // `launch_command`/`resume_command`) — `--rc claude-{name}`.
+            cmd.push_str(&flag.replace("{name}", name));
+        }
         cmd
     };
-    let launch = with_yolo(launch_command(t, name, extra_dirs));
+    let launch = with_flags(launch_command(t, name, extra_dirs));
     if resume {
-        if let Some(rc) = resume_command(t, name, extra_dirs).map(with_yolo) {
+        if let Some(rc) = resume_command(t, name, extra_dirs).map(with_flags) {
             if rc != launch {
                 return format!("({rc}) || ({launch})");
             }
@@ -962,9 +1124,21 @@ pub fn sanitize_name(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A fixed config dir for the registry under test. The 0082 disable-file
+    /// path is baked into `remote_off_flag` at load time, so the tests compute
+    /// their expectations from the same helper rather than hard-coding a path.
+    fn test_cfg() -> PathBuf {
+        PathBuf::from("/cfg")
+    }
+
+    /// The exact argument a default (switch-off) claude launch must carry.
+    fn remote_off_arg() -> String {
+        format!("--settings {}", shell_quote(&remote_off_path(&test_cfg()).to_string_lossy()))
+    }
+
     #[test]
     fn builtin_defaults() {
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         let claude = t.iter().find(|x| x.prefix == "claude").unwrap();
         assert_eq!(claude.resume_suffix.as_deref(), Some("--continue"));
         assert_eq!(claude.extra_flag.as_deref(), Some("--add-dir"));
@@ -978,7 +1152,7 @@ mod tests {
     #[test]
     fn yolo_flag_split_out_of_templates() {
         // The dangerous flag lives in yolo_flag, never inline in the template.
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         let want = [
             ("claude", "--dangerously-skip-permissions"),
             ("kimi", "-y"),
@@ -1001,7 +1175,7 @@ mod tests {
     #[test]
     fn image_paste_strategy_mapping() {
         // Built-ins: Codex is the only bracketed-path tool (0066).
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         for tool in &t {
             let want = if tool.prefix == "codex" {
                 ImagePasteStrategy::BracketedImagePath
@@ -1012,30 +1186,30 @@ mod tests {
         }
         // A tools.conf override that keeps Codex's prefix or command inherits
         // its strategy through the same identity logic as the other defaults.
-        let by_prefix = with_defaults(parse("cc_tool xx codex 'my-codex-wrapper'"));
+        let by_prefix = with_defaults(parse("cc_tool xx codex 'my-codex-wrapper'"), &test_cfg());
         assert_eq!(by_prefix[0].image_paste, ImagePasteStrategy::BracketedImagePath);
-        let by_cmd = with_defaults(parse("cc_tool coc oai 'codex --profile fast'"));
+        let by_cmd = with_defaults(parse("cc_tool coc oai 'codex --profile fast'"), &test_cfg());
         assert_eq!(by_cmd[0].image_paste, ImagePasteStrategy::BracketedImagePath);
         // A genuinely unknown custom tool keeps the compatible probe.
-        let custom = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let custom = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         assert_eq!(custom[0].image_paste, ImagePasteStrategy::ClipboardProbe);
     }
 
     #[test]
     fn build_launch_gates_yolo_flag() {
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         let claude = t.iter().find(|x| x.prefix == "claude").unwrap();
         // skip on (today's default): the flag is present.
-        let yolo = build_launch(claude, "proj", &[], false, true);
+        let yolo = build_launch(claude, "proj", &[], false, true, false);
         assert!(yolo.contains("--dangerously-skip-permissions"), "{yolo}");
         // skip off: launches with normal approval prompts — no flag.
-        let safe = build_launch(claude, "proj", &[], false, false);
+        let safe = build_launch(claude, "proj", &[], false, false, false);
         assert!(!safe.contains("--dangerously-skip-permissions"), "{safe}");
         // Resume keeps the YOLO flag on both the resume and fallback forms.
-        let resumed = build_launch(claude, "proj", &[], true, true);
+        let resumed = build_launch(claude, "proj", &[], true, true, false);
         assert_eq!(resumed.matches("--dangerously-skip-permissions").count(), 2, "{resumed}");
         // …and drops it from both when skip is off.
-        let resumed_safe = build_launch(claude, "proj", &[], true, false);
+        let resumed_safe = build_launch(claude, "proj", &[], true, false, false);
         assert!(!resumed_safe.contains("--dangerously-skip-permissions"), "{resumed_safe}");
     }
 
@@ -1044,21 +1218,22 @@ mod tests {
         // Explicit cc_tool_yolo wins.
         let cfg = "cc_tool xx myc 'myc run'\ncc_tool_yolo myc --go-fast";
         let t = parse(cfg);
-        let t = with_defaults(t);
+        let t = with_defaults(t, &test_cfg());
         let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
         assert_eq!(tool.yolo_flag.as_deref(), Some("--go-fast"));
-        let line = build_launch(tool, "p", &[], false, true);
+        let line = build_launch(tool, "p", &[], false, true, false);
         assert!(line.ends_with("--go-fast"), "{line}");
         // A pre-0005 template that inlines the known flag keeps yolo_flag = None,
         // so skip=false can't strip it (stays YOLO) and skip=true won't double it.
-        let inlined = with_defaults(parse(
-            "cc_tool cc claude \"claude --dangerously-skip-permissions\"",
-        ));
+        let inlined = with_defaults(
+            parse("cc_tool cc claude \"claude --dangerously-skip-permissions\""),
+            &test_cfg(),
+        );
         let c = inlined.iter().find(|x| x.prefix == "claude").unwrap();
         assert!(c.yolo_flag.is_none(), "inlined flag must not adopt a default yolo_flag");
-        let on = build_launch(c, "p", &[], false, true);
+        let on = build_launch(c, "p", &[], false, true, false);
         assert_eq!(on.matches("--dangerously-skip-permissions").count(), 1, "{on}");
-        let off = build_launch(c, "p", &[], false, false);
+        let off = build_launch(c, "p", &[], false, false, false);
         assert!(off.contains("--dangerously-skip-permissions"), "can't strip inlined: {off}");
     }
 
@@ -1066,7 +1241,7 @@ mod tests {
     fn probe_binary_is_the_template_head() {
         // The binary a session needs is the first bare token of the launch
         // template — for every built-in and for a renamed tools.conf override.
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         for (prefix, bin) in [("claude", "claude"), ("kimi", "kimi"), ("gemini", "gemini"), ("codex", "codex")] {
             let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
             assert_eq!(probe_binary(tool), Some(bin), "{prefix}");
@@ -1075,7 +1250,7 @@ mod tests {
         let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
         assert_eq!(probe_binary(sh), None);
         // A tools.conf override that renames the binary probes the new name.
-        let custom = with_defaults(parse("cc_tool cc claude \"my-claude-wrapper --fast\""));
+        let custom = with_defaults(parse("cc_tool cc claude \"my-claude-wrapper --fast\""), &test_cfg());
         let c = custom.iter().find(|x| x.prefix == "claude").unwrap();
         assert_eq!(probe_binary(c), Some("my-claude-wrapper"));
     }
@@ -1240,17 +1415,17 @@ mod tests {
         // A custom tool can declare its own install one-liner (0046), matched by
         // cmd or prefix like the other cc_tool_* metadata lines.
         let cfg = "cc_tool xx myc 'myc run'\ncc_tool_install myc \"cargo install myc\"";
-        let t = with_defaults(parse(cfg));
+        let t = with_defaults(parse(cfg), &test_cfg());
         let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
         assert_eq!(tool.install_hint.as_deref(), Some("cargo install myc"));
         // The declared hint wins over the built-in registry…
         assert_eq!(install_hint(tool).as_deref(), Some("cargo install myc"));
         // …the built-ins fall back to the assistant registry…
-        let builtins = load_tools(None);
+        let builtins = load_tools(None, &test_cfg());
         let claude = builtins.iter().find(|x| x.prefix == "claude").unwrap();
         assert!(install_hint(claude).is_some(), "built-in claude must carry an install hint");
         // …and a custom tool with no declaration has none (guard still reports).
-        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         let b = bare.iter().find(|x| x.prefix == "other").unwrap();
         assert_eq!(install_hint(b), None);
     }
@@ -1260,18 +1435,19 @@ mod tests {
         // A declared update command is the first (and for a custom tool, only)
         // candidate — the escape hatch for a pin/wrapper/distro package (0049).
         let cfg = "cc_tool xx myc 'myc run'\ncc_tool_update myc \"cargo install myc --locked\"";
-        let t = with_defaults(parse(cfg));
+        let t = with_defaults(parse(cfg), &test_cfg());
         let tool = t.iter().find(|x| x.prefix == "myc").unwrap();
         assert_eq!(tool.update_cmd.as_deref(), Some("cargo install myc --locked"));
         assert_eq!(update_commands(tool), vec!["cargo install myc --locked".to_string()]);
         // A custom tool with no declaration and no descriptor has no known path —
         // reported as "skipped", never an error.
-        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         assert!(update_commands(bare.iter().find(|x| x.prefix == "other").unwrap()).is_empty());
         // An override on a built-in still wins, with the registry's commands after.
-        let over = with_defaults(parse(
-            "cc_tool cc claude 'claude'\ncc_tool_update claude \"claude update --pin 2.1.220\"",
-        ));
+        let over = with_defaults(
+            parse("cc_tool cc claude 'claude'\ncc_tool_update claude \"claude update --pin 2.1.220\""),
+            &test_cfg(),
+        );
         let c = over.iter().find(|x| x.prefix == "claude").unwrap();
         assert_eq!(update_commands(c)[0], "claude update --pin 2.1.220");
         assert!(update_commands(c).len() > 1, "the registry commands remain as fallbacks");
@@ -1279,7 +1455,7 @@ mod tests {
 
     #[test]
     fn update_commands_order_self_update_then_package_manager() {
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         // claude/codex have their own `update` subcommand — tried first, because
         // the CLI knows how it was installed.
         for prefix in ["claude", "codex"] {
@@ -1306,7 +1482,7 @@ mod tests {
         // The registry and the tool defaults must not drift: each assistant
         // descriptor describes exactly one built-in tool, with install commands
         // for both supported platforms.
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         for a in ASSISTANTS {
             let tool = t
                 .iter()
@@ -1336,7 +1512,7 @@ mod tests {
 
     #[test]
     fn prerequisites_are_declared_and_a_cc_tool_install_suppresses_them() {
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         let need = |prefix: &str| {
             prereqs_for(t.iter().find(|x| x.prefix == prefix).unwrap())
                 .into_iter()
@@ -1356,9 +1532,10 @@ mod tests {
         // A machine that declares its own install line short-circuits the
         // prerequisite logic entirely: the self-hoster said what they wanted, and
         // rewriting someone's config would be worse than trusting it.
-        let custom = with_defaults(parse(
-            "cc_tool coc codex 'codex'\ncc_tool_install codex \"my-mirror add codex\"",
-        ));
+        let custom = with_defaults(
+            parse("cc_tool coc codex 'codex'\ncc_tool_install codex \"my-mirror add codex\""),
+            &test_cfg(),
+        );
         let c = custom.iter().find(|x| x.prefix == "codex").unwrap();
         assert_eq!(install_command(c).as_deref(), Some("my-mirror add codex"));
         assert!(prereqs_for(c).is_empty(), "an explicit install line owns its own deps");
@@ -1377,14 +1554,14 @@ mod tests {
         // The distinction 0050 B2 depends on: `install_hint` can return a
         // "see <docs>" DISPLAY string, which must never reach a shell. A custom
         // tool with no descriptor and no declaration has neither.
-        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"));
+        let bare = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         let b = bare.iter().find(|x| x.prefix == "other").unwrap();
         assert_eq!(install_command(b), None);
         assert_eq!(install_hint(b), None);
         // A built-in always has a runnable command on every supported platform
         // now, so the two agree — the "see docs" branch is the fallback for a
         // future assistant that lacks a per-OS line.
-        let t = load_tools(None);
+        let t = load_tools(None, &test_cfg());
         for prefix in ["claude", "codex", "gemini", "kimi"] {
             let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
             let cmd = install_command(tool).expect(prefix);
@@ -1404,16 +1581,22 @@ mod tests {
     #[test]
     fn launch_and_resume_fallback() {
         // The built-in claude template is a plain `claude` (0015) — no `--rc`.
-        let t = with_defaults(defaults()).into_iter().find(|t| t.prefix == "claude").unwrap();
+        let t = with_defaults(defaults(), &test_cfg())
+            .into_iter()
+            .find(|t| t.prefix == "claude")
+            .unwrap();
         // skip_permissions=false here keeps these assertions focused on the
         // launch/resume shape (yolo gating is covered by build_launch_gates_yolo_flag).
-        let fresh = build_launch(&t, "proj", &[], false, false);
-        assert_eq!(fresh, "claude");
-        let resumed = build_launch(&t, "proj", &[], true, false);
+        // The fresh form is no longer a bare `claude`: since 0082 every launch
+        // carries an explicit remote-control stance, and the default one is the
+        // `--settings` disable file. `--rc` is still absent — that's the point.
+        let fresh = build_launch(&t, "proj", &[], false, false, false);
+        assert_eq!(fresh, format!("claude {}", remote_off_arg()));
+        let resumed = build_launch(&t, "proj", &[], true, false, false);
         assert!(resumed.contains("--continue"));
         assert!(resumed.contains("||")); // (resume) || (fresh) fallback
         assert!(!resumed.contains("--rc"), "default no longer registers with the desktop app: {resumed}");
-        let with_extra = build_launch(&t, "proj", &["/home/u/lib".to_string()], false, false);
+        let with_extra = build_launch(&t, "proj", &["/home/u/lib".to_string()], false, false, false);
         assert!(with_extra.contains("--add-dir") && with_extra.contains("/home/u/lib"));
     }
 
@@ -1422,14 +1605,172 @@ mod tests {
         // Opting back into desktop registration via a tools.conf override
         // (`cc_tool cc claude "claude --rc 'claude-{name}'"`) still substitutes
         // {name} → the session name, so the `{name}` launch logic stays covered.
-        let t = with_defaults(parse("cc_tool cc claude \"claude --rc 'claude-{name}'\""))
+        let t = with_defaults(parse("cc_tool cc claude \"claude --rc 'claude-{name}'\""), &test_cfg())
             .into_iter()
             .find(|t| t.prefix == "claude")
             .unwrap();
-        let fresh = build_launch(&t, "proj", &[], false, false);
+        let fresh = build_launch(&t, "proj", &[], false, false, false);
         assert_eq!(fresh, "claude --rc 'claude-proj'");
         // Resume still appends --continue ahead of the registered launch.
-        let resumed = build_launch(&t, "proj", &[], true, false);
+        let resumed = build_launch(&t, "proj", &[], true, false, false);
         assert!(resumed.contains("--continue") && resumed.contains("--rc"), "{resumed}");
+    }
+
+    // ── The assistant's own remote control (proposal 0082) ───────────────────
+
+    #[test]
+    fn build_launch_gates_the_remote_control_stance() {
+        let t = load_tools(None, &test_cfg());
+        let claude = t.iter().find(|x| x.prefix == "claude").unwrap();
+        // Off (the default): the disable settings file, quoted for the launch
+        // shell — single quotes on Unix, double quotes under `cmd.exe /C`.
+        let off = build_launch(claude, "proj", &[], false, false, false);
+        assert_eq!(off, format!("claude {}", remote_off_arg()));
+        #[cfg(not(windows))]
+        assert!(off.contains("'/cfg/claude-remote-off.json'"), "{off}");
+        #[cfg(windows)]
+        assert!(off.contains("\"") && off.contains("claude-remote-off.json"), "{off}");
+        assert!(!off.contains("--rc"), "{off}");
+        // On: registration under the cc-screen-derived name, with the flag-side
+        // {name} substituted (new in 0082 — only templates were substituted).
+        let on = build_launch(claude, "proj", &[], false, false, true);
+        assert_eq!(on, "claude --rc claude-proj");
+        assert!(!on.contains("--settings"), "an opted-in launch carries no disable file: {on}");
+        // Both stances ride BOTH branches of the (resume) || (fresh) fallback, so
+        // resume can't re-register a session created with the switch off.
+        let resumed_off = build_launch(claude, "proj", &[], true, false, false);
+        assert_eq!(resumed_off.matches("--settings").count(), 2, "{resumed_off}");
+        assert!(!resumed_off.contains("--rc"), "{resumed_off}");
+        let resumed_on = build_launch(claude, "proj", &[], true, false, true);
+        assert_eq!(resumed_on.matches("--rc claude-proj").count(), 2, "{resumed_on}");
+        // The stance lands after the YOLO flag, and the two compose.
+        let both = build_launch(claude, "proj", &[], false, true, false);
+        assert_eq!(both, format!("claude --dangerously-skip-permissions {}", remote_off_arg()));
+    }
+
+    #[test]
+    fn only_claude_carries_a_remote_control_stance() {
+        // Codex's remote-control daemon is user-invoked and its feature flag
+        // reports `removed`; gemini/kimi have no analogous feature; the bare
+        // shell isn't an assistant. Their launch lines must be byte-identical to
+        // pre-0082 — the acceptance criterion this test IS.
+        let t = load_tools(None, &test_cfg());
+        for (prefix, want) in [
+            ("kimi", "kimi"),
+            ("gemini", "gemini --skip-trust"),
+            ("codex", "codex"),
+        ] {
+            let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
+            assert!(tool.remote_off_flag.is_none() && tool.remote_on_flag.is_none(), "{prefix}");
+            assert_eq!(build_launch(tool, "proj", &[], false, false, false), want);
+            // …and asking for "on" on a tool that has nothing to turn on is a
+            // stance-free launch, never a stray flag.
+            assert_eq!(build_launch(tool, "proj", &[], false, false, true), want);
+            assert!(!tool_info(tool, false).remote_control_available, "{prefix}");
+        }
+        let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
+        assert!(sh.remote_off_flag.is_none() && sh.remote_on_flag.is_none());
+        // Claude is the one capable tool, so it's the one that offers the switch.
+        let claude = t.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(tool_info(claude, false).remote_control_available);
+    }
+
+    #[test]
+    fn remote_control_inline_guard_and_its_false_positive() {
+        // A template that already carries the feature by hand is left entirely
+        // alone: we neither strip, double, nor contradict it.
+        for tmpl in [
+            "cc_tool cc claude \"claude --rc 'claude-{name}'\"",
+            "cc_tool cc claude \"claude --remote-control\"",
+            "cc_tool cc claude \"claude --rc=mine\"",
+            "cc_tool cc claude \"claude --remote-control=mine\"",
+        ] {
+            let t = with_defaults(parse(tmpl), &test_cfg());
+            let c = t.iter().find(|x| x.prefix == "claude").unwrap();
+            assert!(c.remote_off_flag.is_none(), "guard must fire: {tmpl}");
+            assert!(c.remote_on_flag.is_none(), "guard must fire: {tmpl}");
+            let line = build_launch(c, "p", &[], false, false, false);
+            assert!(!line.contains("--settings /cfg"), "no stance appended: {line}");
+        }
+        // A template inlining the DISABLE key (inside a --settings argument) also
+        // trips it — substring, because token equality could never see it.
+        let disabled = with_defaults(
+            parse("cc_tool cc claude \"claude --settings '{\\\"disableRemoteControl\\\": true}'\""),
+            &test_cfg(),
+        );
+        let d = disabled.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(d.remote_off_flag.is_none() && d.remote_on_flag.is_none());
+        // …but `--remote-control-session-name-prefix` is naming-only and must NOT
+        // trip it: a false positive there silently leaves those sessions
+        // remote-control-capable.
+        let named = with_defaults(
+            parse("cc_tool cc claude \"claude --remote-control-session-name-prefix box\""),
+            &test_cfg(),
+        );
+        let n = named.iter().find(|x| x.prefix == "claude").unwrap();
+        assert_eq!(n.remote_off_flag.as_deref(), Some(remote_off_arg().as_str()));
+        assert_eq!(n.remote_on_flag.as_deref(), Some("--rc claude-{name}"));
+    }
+
+    #[test]
+    fn cc_tool_remote_directives_override_and_clear() {
+        // An override wins over the built-in stance…
+        let t = with_defaults(
+            parse("cc_tool cc claude 'claude'\ncc_tool_remote_off claude \"--settings /etc/off.json\"\ncc_tool_remote_on claude \"--rc box-{name}\""),
+            &test_cfg(),
+        );
+        let c = t.iter().find(|x| x.prefix == "claude").unwrap();
+        assert_eq!(build_launch(c, "p", &[], false, false, false), "claude --settings /etc/off.json");
+        assert_eq!(build_launch(c, "p", &[], false, false, true), "claude --rc box-p");
+        // …and an explicitly empty flag is the stance-free escape hatch: nothing
+        // appended, the user's own assistant settings govern.
+        let cleared = with_defaults(
+            parse("cc_tool cc claude 'claude'\ncc_tool_remote_off claude \"\""),
+            &test_cfg(),
+        );
+        let c = cleared.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(c.remote_off_flag.is_none());
+        assert_eq!(build_launch(c, "p", &[], false, false, false), "claude");
+        // Clearing one field leaves the other alone (they're independent), so a
+        // session opted in on a cleared-on tool relaunches stance-free — and the
+        // capability flag stops advertising a switch that would do nothing.
+        assert!(c.remote_on_flag.is_some() && tool_info(c, false).remote_control_available);
+        let no_on = with_defaults(
+            parse("cc_tool cc claude 'claude'\ncc_tool_remote_on claude \"\""),
+            &test_cfg(),
+        );
+        let c = no_on.iter().find(|x| x.prefix == "claude").unwrap();
+        assert!(c.remote_on_flag.is_none());
+        assert!(!tool_info(c, false).remote_control_available);
+        assert_eq!(build_launch(c, "p", &[], false, false, true), "claude");
+        // The directives reach a *custom* tool too — the day another CLI grows a
+        // launch-time enable, it's a tools.conf line, not a code change.
+        let custom = with_defaults(
+            parse("cc_tool xx myc 'myc run'\ncc_tool_remote_on myc \"--register {name}\""),
+            &test_cfg(),
+        );
+        let m = custom.iter().find(|x| x.prefix == "myc").unwrap();
+        assert_eq!(build_launch(m, "p", &[], false, false, true), "myc run --register p");
+    }
+
+    #[test]
+    fn remote_off_file_is_written_and_repaired() {
+        let dir = std::env::temp_dir().join(format!("ccr-rc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Created (with its parent) on first call…
+        assert!(ensure_remote_off_file(&dir));
+        let path = remote_off_path(&dir);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), REMOTE_OFF_JSON);
+        // …idempotent…
+        assert!(ensure_remote_off_file(&dir));
+        // …and repaired if something wiped or clobbered it, so no launch ever
+        // passes `--settings` at a dangling (or wrong) path.
+        std::fs::remove_file(&path).unwrap();
+        assert!(ensure_remote_off_file(&dir));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), REMOTE_OFF_JSON);
+        std::fs::write(&path, "{}").unwrap();
+        assert!(ensure_remote_off_file(&dir));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), REMOTE_OFF_JSON);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

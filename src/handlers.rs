@@ -139,6 +139,10 @@ pub fn session_info(s: &Arc<Session>) -> SessionInfo {
         // Operator-chosen display label (proposal 0035). Same live-mirror read and
         // every-client propagation as the colour above.
         label: s.label(),
+        // The assistant's own remote-control stance this session launched under
+        // (proposal 0082) — the effective one, so a session created "on" but
+        // launched stance-free is never badged as registered.
+        assistant_remote_control: Some(s.assistant_remote_control),
     }
 }
 
@@ -190,7 +194,15 @@ pub fn create_core(app: &AppState, req: &CreateReq) -> Result<String, (StatusCod
     if name.is_empty() {
         name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     }
-    app.create(&tool, &name, &dir.to_string_lossy(), extra, false, req.skip_permissions)
+    app.create(
+        &tool,
+        &name,
+        &dir.to_string_lossy(),
+        extra,
+        false,
+        req.skip_permissions,
+        req.assistant_remote_control,
+    )
         .map_err(|e| {
             let msg = e.to_string();
             let code = if msg.contains("already exists") {
@@ -737,6 +749,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 

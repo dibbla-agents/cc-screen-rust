@@ -266,6 +266,43 @@ Two guarantees worth knowing about:
 
 Reinstalling is idempotent. The shim is POSIX-only — Windows agents skip it.
 
+## Custom tool templates (`tools.conf`)
+
+An agent's launch templates live in `tools.conf` in its config dir
+(`~/.config/cc-screen-rust/tools.conf`; `$CCWEB_TOOLS` overrides the path).
+The file is **all-or-nothing**: a non-empty one replaces the built-in tool
+list entirely, and cc-screen then re-attaches the built-in metadata (resume
+flag, extra-dirs flag, YOLO flag, launch stance) to any tool that kept a
+known command or prefix.
+
+```conf
+cc_tool cc claude "claude"          # <cmd> <prefix> <launch template>
+cc_tool_resume cc "--continue"      # how a session resumes
+cc_tool_yolo cc "--dangerously-skip-permissions"
+```
+
+Two directives control the assistant's own remote control (the **Claude app**
+switch):
+
+```conf
+cc_tool_remote_off claude "--settings /path/to/off.json"   # the "off" stance
+cc_tool_remote_on  claude "--rc claude-{name}"             # the "on" stance
+```
+
+Both default to the built-ins shown above — the off stance points at a small
+settings file the agent writes and maintains itself. Set either to the empty
+string to make that stance **do nothing**, so the assistant's own settings
+govern instead:
+
+```conf
+cc_tool_remote_off claude ""    # my Claude settings decide; cc-screen won't
+```
+
+A template that already spells `--rc`/`--remote-control` out by hand is left
+completely alone — cc-screen never strips, doubles, or contradicts a flag you
+wrote. `{name}` expands to the session's short name in both templates and
+these flags.
+
 ## Updating
 
 Each binary re-runs its hosted installer and (for the services) restarts onto

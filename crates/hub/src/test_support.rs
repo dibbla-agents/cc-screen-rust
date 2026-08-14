@@ -232,6 +232,7 @@ pub fn sess(name: &str) -> SessionInfo {
         detail: None,
         color: None,
         label: None,
+        assistant_remote_control: None,
     }
 }
 
@@ -470,6 +471,7 @@ pub async fn spawn_scriptable_agent(
                 prefix: "claude".into(),
                 extra_dirs: None,
                 unavailable: false,
+                remote_control_available: true,
             }],
             caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_ASSISTANT_INSTALL.to_string()],
         },
@@ -541,6 +543,9 @@ fn handle_cmd(cmd: &Cmd, sessions: &Arc<Mutex<Vec<SessionInfo>>>) -> CmdResult {
             s.tool = req.tool.clone();
             s.cwd = req.dir.clone();
             s.skip_permissions = Some(req.skip_permissions);
+            // 0082: the fake agent mirrors the requested stance, as a real one
+            // reports its effective one — so a relay test can see it round-trip.
+            s.assistant_remote_control = Some(req.assistant_remote_control);
             sessions.lock().unwrap().push(s);
             CmdResult::Created(name)
         }

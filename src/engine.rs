@@ -176,6 +176,12 @@ pub struct Session {
     pub created: u64,
     /// Whether this session launched YOLO — reported to clients as a badge.
     pub skip_permissions: bool,
+    /// Whether this session launched with the **assistant's own** remote control
+    /// enabled (proposal 0082) — the *effective* stance, i.e. the requested bit
+    /// AND the tool actually having an enable flag, so the badge reports what the
+    /// launch line really did. Reported to clients; never client input after
+    /// create.
+    pub assistant_remote_control: bool,
     /// How a pasted clipboard image is delivered to this PTY (proposal 0066).
     /// Copied immutably from the resolved tool at spawn/restore; never client
     /// input. See `tools::ImagePasteStrategy` and `clip.rs`.
@@ -214,6 +220,7 @@ impl Session {
         extra_dirs: Vec<String>,
         resume: bool,
         skip_permissions: bool,
+        assistant_remote_control: bool,
         env_path: &str,
         clip_url: &str,
     ) -> anyhow::Result<(Arc<Session>, Box<dyn portable_pty::Child + Send + Sync>)> {
@@ -226,7 +233,12 @@ impl Session {
             pixel_height: 0,
         })?;
 
-        let launch = tools::build_launch(tool, short, &extra_dirs, resume, skip_permissions);
+        // 0082: the switch can only be honored where there's something to turn
+        // on; everywhere else the launch is stance-free and this reads false, so
+        // a client badges reality rather than the request.
+        let rc_effective = assistant_remote_control && tool.remote_on_flag.is_some();
+        let launch =
+            tools::build_launch(tool, short, &extra_dirs, resume, skip_permissions, rc_effective);
         // The wrapping interpreter is platform-specific (`/bin/sh -c` on Unix,
         // `cmd.exe /C` on Windows); `native_pty_system()` already gave us a ConPTY
         // on Windows, so only the command wrapper differs. See tools::launch_shell.
@@ -295,6 +307,7 @@ impl Session {
             extra_dirs,
             created: now,
             skip_permissions,
+            assistant_remote_control: rc_effective,
             image_paste: tool.image_paste,
             color: Mutex::new(None),
             label: Mutex::new(None),
@@ -855,6 +868,7 @@ impl AppState {
         extra_dirs: Vec<String>,
         resume: bool,
         skip_permissions: bool,
+        assistant_remote_control: bool,
     ) -> anyhow::Result<String> {
         let short = tools::sanitize_name(name);
         if short.is_empty() {
@@ -867,6 +881,16 @@ impl AppState {
                 anyhow::bail!("session already exists: {full}");
             }
         }
+        // 0082: re-verify the remote-control disable file on every launch path,
+        // not just at boot — a wiped config dir must never leave a session
+        // launching with `--settings` at a dangling path.
+        if !tools::ensure_remote_off_file(&self.inner.config_dir) {
+            tracing::warn!(
+                "could not write {} — a claude session may launch without its \
+                 remote-control disable settings",
+                tools::remote_off_path(&self.inner.config_dir).display()
+            );
+        }
         let (sess, mut child) = Session::spawn(
             tool,
             &short,
@@ -874,6 +898,7 @@ impl AppState {
             extra_dirs.clone(),
             resume,
             skip_permissions,
+            assistant_remote_control,
             &self.inner.env_path,
             &self.inner.clip_url,
         )?;
@@ -892,6 +917,10 @@ impl AppState {
                 extra_dirs,
                 created_at: now_secs() as i64,
                 skip_permissions,
+                // Persist what was *asked for*, not the effective stance: a tool
+                // that regains its enable flag (a tools.conf edit undone) should
+                // relaunch the session the way its creator chose (0082).
+                assistant_remote_control,
                 // A fresh session starts unmarked; a restored one re-applies its
                 // saved colour below (this record overwrote any prior entry).
                 color: String::new(),
@@ -990,6 +1019,7 @@ impl AppState {
                 e.extra_dirs.clone(),
                 true,
                 e.skip_permissions,
+                e.assistant_remote_control,
             ) {
                 Ok(name) => {
                     // `create` re-recorded the manifest entry with an empty colour
@@ -1077,24 +1107,27 @@ impl AppState {
             let entry = manifest::entries(&self.inner.config_dir)
                 .into_iter()
                 .find(|e| e.session == name);
-            let (short, dir, extra_dirs, skip_permissions, color, label) = match &entry {
-                Some(e) => (
-                    e.short.clone(),
-                    e.dir.clone(),
-                    e.extra_dirs.clone(),
-                    e.skip_permissions,
-                    e.color.clone(),
-                    e.label.clone(),
-                ),
-                None => (
-                    sess.short.clone(),
-                    sess.launch_dir.clone(),
-                    sess.extra_dirs.clone(),
-                    sess.skip_permissions,
-                    sess.color().unwrap_or_default(),
-                    sess.label().unwrap_or_default(),
-                ),
-            };
+            let (short, dir, extra_dirs, skip_permissions, remote_control, color, label) =
+                match &entry {
+                    Some(e) => (
+                        e.short.clone(),
+                        e.dir.clone(),
+                        e.extra_dirs.clone(),
+                        e.skip_permissions,
+                        e.assistant_remote_control,
+                        e.color.clone(),
+                        e.label.clone(),
+                    ),
+                    None => (
+                        sess.short.clone(),
+                        sess.launch_dir.clone(),
+                        sess.extra_dirs.clone(),
+                        sess.skip_permissions,
+                        sess.assistant_remote_control,
+                        sess.color().unwrap_or_default(),
+                        sess.label().unwrap_or_default(),
+                    ),
+                };
             let Some(tool) = self
                 .find_tool(&tool_prefix)
                 .or_else(|| entry.as_ref().and_then(|e| self.find_tool(&e.cmd)))
@@ -1127,7 +1160,8 @@ impl AppState {
             row.state = "starting".into();
             row.message = None;
             progress(&row);
-            match self.create(&tool, &short, &dir, extra_dirs, true, skip_permissions) {
+            match self.create(&tool, &short, &dir, extra_dirs, true, skip_permissions, remote_control)
+            {
                 Ok(new_name) => {
                     // `create` re-records the entry blank — re-apply the saved
                     // mark + label exactly as `restore_all` does.
@@ -1234,6 +1268,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 
@@ -1265,8 +1301,8 @@ mod tests {
             cc_screen_auth::OriginPolicy::default(),
         );
         let dir = tmp.to_string_lossy().to_string();
-        let a = state.create(&alpha, "work", &dir, vec![], false, true).unwrap();
-        let b = state.create(&beta, "work", &dir, vec![], false, true).unwrap();
+        let a = state.create(&alpha, "work", &dir, vec![], false, true, false).unwrap();
+        let b = state.create(&beta, "work", &dir, vec![], false, true, false).unwrap();
         // A marked + labelled session, so the re-apply is actually observable.
         state.get(&a).unwrap().set_color(Some("teal".into()));
         manifest::set_color(&tmp, &a, Some("teal".into()));
@@ -1394,7 +1430,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // Before any submit (and despite any startup repaint), it reads ready.
@@ -1435,7 +1471,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         assert_eq!(name, "shell-t");
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1482,7 +1518,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1545,7 +1581,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         // Read the full snapshot (not the one-line preview) so all three lines show.
@@ -1586,7 +1622,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // First attach (the live client) BEFORE the burst. Leave rx1 UNDRAINED —
@@ -1647,7 +1683,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // Typed input is captured + reconstructed.
@@ -1696,7 +1732,7 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "t", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let sess = state.get(&name).unwrap();
 
         // No client has reported a size yet → PTY stays at its init size.
@@ -1769,7 +1805,7 @@ mod tests {
         );
 
         // Control: an unmarked clean exit still forgets (today's behavior).
-        let plain = state.create(&tool, "plain", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let plain = state.create(&tool, "plain", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         state.get(&plain).unwrap().graceful_exit();
         assert!(wait_until(|| state.get(&plain).is_none()), "the child should exit on /exit");
         assert!(
@@ -1778,7 +1814,7 @@ mod tests {
         );
 
         // Marked as restarting: the same clean exit must NOT forget it.
-        let kept = state.create(&tool, "kept", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let kept = state.create(&tool, "kept", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         state.inner.restarting.lock().unwrap().insert(kept.clone());
         state.get(&kept).unwrap().graceful_exit();
         assert!(wait_until(|| state.get(&kept).is_none()));
@@ -1817,8 +1853,8 @@ mod tests {
             crate::auth::Auth::load(&tmp, None, None),
             cc_screen_auth::OriginPolicy::default(),
         );
-        let name = state.create(&tool, "proj", &tmp.to_string_lossy(), vec![], false, false).unwrap();
-        let untouched = state.create(&other, "infra", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let name = state.create(&tool, "proj", &tmp.to_string_lossy(), vec![], false, false, false).unwrap();
+        let untouched = state.create(&other, "infra", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
         let before_pid = state.get(&name).unwrap().pid;
         crate::handlers::set_color_core(&state, &name, Some("teal".into())).unwrap();
         crate::handlers::set_label_core(&state, &name, Some("My project".into())).unwrap();
@@ -1870,6 +1906,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         };
         // env_path = the empty tmp dir → `ghost-cli` can't resolve.
         let state = AppState::new(
@@ -1893,6 +1931,7 @@ mod tests {
                 extra_dirs: vec![],
                 created_at: 0,
                 skip_permissions: true,
+                assistant_remote_control: false,
                 color: String::new(),
                 label: String::new(),
             },

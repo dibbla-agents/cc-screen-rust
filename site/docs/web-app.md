@@ -44,6 +44,12 @@ worth knowing:
   approval-bypass flag — the agent won't stop to ask before running tools.
   Turn it off for a session you want to supervise; sessions with it off wear
   a "safe" badge.
+- **Claude app** (off by default) turns on Claude Code's *own* remote
+  control, registering the session with claude.ai/code and the Claude mobile
+  app under the name `claude-<session>`. Leave it off and the session stays
+  inside cc-screen — one remote-access layer per session, which is the point.
+  Sessions with it on wear a "claude app" badge. The switch only appears for
+  tools that have such a feature (today: Claude Code).
 - Sessions survive you. Closing the browser, losing signal, even the machine
   rebooting — the agent resumes its sessions and your panes re-attach.
 

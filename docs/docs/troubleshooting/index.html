@@ -182,6 +182,24 @@ CLIs first (a failed update leaves the machine untouched), then gracefully
 restarts the sessions that use them, and your panes re-attach under the same
 names. On the box: <code>cc-screen-rust doctor --update</code> (updates the CLIs only,
 restarts nothing).</p>
+<h2 id="remote-control-is-disabled-by-your-organization39s-policy">&quot;Remote Control is disabled by your organization&#39;s policy&quot;</h2>
+<p>Seen inside a cc-screen session after <code>/remote-control</code>, or when Claude Code
+didn&#39;t auto-start remote control the way it does in your own terminal. It&#39;s
+cc-screen&#39;s default, not an org policy: sessions we launch disable Claude
+Code&#39;s own remote control (claude.ai/code + the Claude mobile app) for that
+process, so it can&#39;t be switched on by a leftover setting, a slash command,
+or a resumed conversation. The message is Claude Code&#39;s own wording for any
+block on that setting.</p>
+<p>The fix is to <strong>recreate the session with the &quot;Claude app&quot; switch on</strong> (the
+<code>claude</code> row in the <code>ccs</code> create form). It launches registered as
+<code>claude-&lt;name&gt;</code>. Your own terminals outside cc-screen are untouched — we
+never write your global Claude settings. Self-hosters who want their own
+settings to govern instead can clear the stance per tool; see
+<a href="../self-hosting/#custom-tool-templates-toolsconf">Self-hosting → Custom tool templates</a>.</p>
+<p>If a claude session instead fails to start right after an update with an
+error about an unknown <code>--settings</code> flag, that Claude Code build is too old:
+update the CLI (machine dashboard row → <strong>Update</strong>, or
+<code>cc-screen-rust doctor --update</code>).</p>
 <h2 id="codex-says-clipboard-unavailable-an-x11-error-on-image-paste">Codex says &quot;clipboard unavailable&quot; / an X11 error on image paste</h2>
 <p>Older cc-screen agents delivered every pasted image the same way, and Codex
 tried to read it from the machine&#39;s X11/Wayland clipboard — which a headless

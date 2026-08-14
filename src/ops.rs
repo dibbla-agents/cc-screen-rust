@@ -168,6 +168,8 @@ mod tests {
             install_hint: None,
             update_cmd: None,
             image_paste: crate::tools::ImagePasteStrategy::ClipboardProbe,
+            remote_off_flag: None,
+            remote_on_flag: None,
         }
     }
 
@@ -195,7 +197,7 @@ mod tests {
         let app = app(&tmp);
         let tool = shell_tool();
 
-        let s = app.create(&tool, "s", &tmp.to_string_lossy(), vec![], false, true).unwrap();
+        let s = app.create(&tool, "s", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
 
         // Key + clear-history run; no 403 anywhere.
         assert!(matches!(

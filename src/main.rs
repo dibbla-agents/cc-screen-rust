@@ -197,7 +197,17 @@ async fn main() {
         .init();
 
     let cfg = config::load();
-    let tools = tools::load_tools(cfg.tools_path.clone());
+    // The assistant remote-control disable file (proposal 0082) must exist before
+    // any session launches with `--settings` pointing at it; `create` re-verifies
+    // it per launch, this is the once-per-boot write.
+    if !tools::ensure_remote_off_file(&cfg.config_dir) {
+        tracing::warn!(
+            "could not write {} — claude sessions may launch without their \
+             remote-control disable settings",
+            tools::remote_off_path(&cfg.config_dir).display()
+        );
+    }
+    let tools = tools::load_tools(cfg.tools_path.clone(), &cfg.config_dir);
     let prefixes: Vec<String> = tools.iter().map(|t| t.prefix.clone()).collect();
     tracing::info!(
         "cc-screen-rust: tools={:?} config={}",

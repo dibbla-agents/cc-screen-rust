@@ -966,6 +966,21 @@ try {
   await page.waitForTimeout(600);
   const deleted = (await page.locator(`[data-folder="${fname}"]`).count()) === 0;
 
+  // Proposal 0082: the assistant-remote-control switch is capability-gated and
+  // defaults OFF. Claude has a remote control to turn on; the bare shell tool
+  // doesn't, and a switch that changes nothing must never be offered.
+  const toolChip = (prefix) => page.locator("button", { hasText: new RegExp(`^${prefix}$`, "i") });
+  await toolChip("claude").first().click();
+  await page.waitForTimeout(150);
+  const rcChip = page.locator("[data-rc-switch]");
+  const rcOffered = (await rcChip.count()) === 1;
+  const rcDefaultsOff = rcOffered && (await rcChip.getAttribute("data-rc-on")) === "0";
+  await toolChip("shell").first().click();
+  await page.waitForTimeout(150);
+  const rcHiddenForShell = (await page.locator("[data-rc-switch]").count()) === 0;
+  await toolChip("claude").first().click();
+  await page.waitForTimeout(150);
+
   // Descend into a folder (dir navigation).
   const folder = page.locator("[data-folder]").first();
   if (await folder.count()) await folder.click();
@@ -1009,6 +1024,9 @@ try {
   else if (!api.some((a) => a.startsWith("POST /api/upload?"))) fail("phone Upload button never POSTed /api/upload");
   else if (!uploadOk) fail("phone upload didn't land in the session cwd");
   else if (toolCalls < 1) fail("new-session panel didn't load tools");
+  else if (!rcOffered) fail("claude's assistant-remote-control switch is missing from the create sheet (0082 B)");
+  else if (!rcDefaultsOff) fail("the assistant-remote-control switch didn't default to off (0082 B)");
+  else if (!rcHiddenForShell) fail("the assistant-remote-control switch was offered for the shell tool (0082 B)");
   else if (dirCalls < 2) fail(`expected dir browse + descend, got ${dirCalls} /api/dirs`);
   else if (!created || !mkdirOk) fail("folder create didn't work");
   else if (!deleted || !rmdirOk) fail("folder delete didn't work");

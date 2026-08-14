@@ -125,6 +125,28 @@ restarts the sessions that use them, and your panes re-attach under the same
 names. On the box: `cc-screen-rust doctor --update` (updates the CLIs only,
 restarts nothing).
 
+## "Remote Control is disabled by your organization's policy"
+
+Seen inside a cc-screen session after `/remote-control`, or when Claude Code
+didn't auto-start remote control the way it does in your own terminal. It's
+cc-screen's default, not an org policy: sessions we launch disable Claude
+Code's own remote control (claude.ai/code + the Claude mobile app) for that
+process, so it can't be switched on by a leftover setting, a slash command,
+or a resumed conversation. The message is Claude Code's own wording for any
+block on that setting.
+
+The fix is to **recreate the session with the "Claude app" switch on** (the
+`claude` row in the `ccs` create form). It launches registered as
+`claude-<name>`. Your own terminals outside cc-screen are untouched — we
+never write your global Claude settings. Self-hosters who want their own
+settings to govern instead can clear the stance per tool; see
+[Self-hosting → Custom tool templates](../self-hosting/#custom-tool-templates-toolsconf).
+
+If a claude session instead fails to start right after an update with an
+error about an unknown `--settings` flag, that Claude Code build is too old:
+update the CLI (machine dashboard row → **Update**, or
+`cc-screen-rust doctor --update`).
+
 ## Codex says "clipboard unavailable" / an X11 error on image paste
 
 Older cc-screen agents delivered every pasted image the same way, and Codex

@@ -36,6 +36,16 @@ a session can do anything your user account can do on that machine.
 - Each session has a **Skip permissions** switch at creation (default on).
   Turn it off for a supervised session; it launches without the bypass flag
   and wears a "safe" badge.
+- **The assistant's own remote control is off unless you ask for it.**
+  Claude Code can register a terminal session with claude.ai/code and the
+  Claude mobile app ("remote control"), and that can switch itself on from a
+  user setting, a slash command, or a resumed conversation. Sessions
+  cc-screen launches carry an explicit *off* stance instead, so a session is
+  never quietly reachable from a second, account-bound control plane you
+  didn't set up. Inside such a session Claude Code reports remote control as
+  disabled by policy — that's this switch, not your employer. Turn it on per
+  session with the **Claude app** switch on the create sheet; the choice is
+  remembered across restarts and restores.
 - For real containment, run the machine host **in a container**: the
   container plus its mounted home volume become the sandbox, and a runaway
   agent is confined there. See

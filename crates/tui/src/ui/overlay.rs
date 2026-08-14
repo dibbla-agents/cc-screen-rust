@@ -155,6 +155,11 @@ pub struct NewSessionView<'a> {
     /// Per-session launch policy toggle (0005). Default: YOLO on. (0014 retired
     /// the hub-control toggle that sat beside it.)
     pub skip_permissions: bool,
+    /// The assistant's own remote-control switch (0082). Default: off.
+    pub assistant_remote_control: bool,
+    /// Whether the selected tool has a remote control to turn on at all — the
+    /// row is hidden otherwise, so no switch is offered that changes nothing.
+    pub remote_control_available: bool,
 }
 
 /// How many dir candidates to show at once.
@@ -273,11 +278,27 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         "skip permission prompts",
     ));
 
+    // The assistant's own remote control (0082) — off by default, and shown only
+    // where flipping it does something. "On" is the outward-facing state, so it
+    // carries the colour, exactly like the permissions row above.
+    if v.remote_control_available {
+        lines.push(toggle_line(
+            "claude",
+            v.assistant_remote_control,
+            v.focus == FormField::AssistantRemoteControl,
+            "app",
+            "off",
+            Color::Magenta,
+            "register with the Claude app",
+        ));
+    }
+
     lines.push(Line::from(""));
     if let Some(e) = v.error {
         lines.push(Line::from(Span::styled(format!(" {e}"), Style::default().fg(Color::Red))));
     }
-    let toggle_focused = matches!(v.focus, FormField::SkipPermissions);
+    let toggle_focused =
+        matches!(v.focus, FormField::SkipPermissions | FormField::AssistantRemoteControl);
     let hint = if dir_focused {
         " ↑↓ pick · tab/→ open · enter create · esc cancel"
     } else if toggle_focused {
@@ -663,6 +684,7 @@ mod tests {
             detail: None,
             color: None,
             label: None,
+            assistant_remote_control: None,
         }
     }
 
@@ -930,6 +952,8 @@ mod tests {
             cand_sel: None,
             error: Some("already exists"),
             skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: true,
         };
         let s = render_to(70, 14, |f| new_session(f, &v));
         assert!(s.contains("new session"), "{s}");
@@ -946,6 +970,37 @@ mod tests {
     }
 
     #[test]
+    fn new_session_remote_control_row_is_capability_gated() {
+        // 0082: the row renders — off by default — for a capable tool…
+        let mut v = NewSessionView {
+            tool: "claude",
+            machine: None,
+            machine_online: true,
+            machine_pickable: true,
+            name: "proj",
+            dir: "/home/u",
+            focus: FormField::AssistantRemoteControl,
+            candidates: &[],
+            cand_sel: None,
+            error: None,
+            skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: true,
+        };
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(s.contains("register with the Claude app"), "{s}");
+        assert!(s.contains("[off]"), "default is off: {s}");
+        // …reads "app" when on…
+        v.assistant_remote_control = true;
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(s.contains("[app]"), "{s}");
+        // …and is absent entirely for a tool with nothing to turn on.
+        v.remote_control_available = false;
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(!s.contains("register with the Claude app"), "{s}");
+    }
+
+    #[test]
     fn new_session_shows_machine_row_when_present() {
         let v = NewSessionView {
             tool: "claude",
@@ -959,6 +1014,8 @@ mod tests {
             cand_sel: None,
             error: None,
             skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: true,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -981,6 +1038,8 @@ mod tests {
             cand_sel: None,
             error: None,
             skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: true,
         };
         let s = render_to(70, 16, |f| new_session(f, &v));
         assert!(s.contains("machine"), "{s}");
@@ -1007,6 +1066,8 @@ mod tests {
             cand_sel: Some(1),
             error: None,
             skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: true,
         };
         let s = render_to(70, 18, |f| new_session(f, &v));
         assert!(s.contains("dev"), "{s}");

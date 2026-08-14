@@ -148,6 +148,20 @@ the agent on that machine and pasted images reach Codex as a staged local
 file instead — no display server, no Xvfb. Details in
 [Troubleshooting](../troubleshooting/#codex-says-clipboard-unavailable-an-x11-error-on-image-paste).
 
+## Why does Claude say Remote Control is "disabled by your organization's policy"?
+
+That's cc-screen, not your employer. Sessions cc-screen launches run Claude
+Code with its own remote control (claude.ai/code and the Claude mobile app)
+switched off, so a session you started here is reachable through cc-screen
+and nowhere else — one remote-access layer per session. Claude Code phrases
+every block that way; we don't control the wording.
+
+Want it on for a session? Create the session with the **Claude app** switch
+on (the `claude` row in `ccs`) and it launches registered as
+`claude-<name>`, badged in the session list. The choice sticks across
+restarts, restores, and assistant updates. Existing sessions keep their
+stance until you recreate them.
+
 ## What are the codes like `WDJB-MJHT`?
 
 One-time machine-activation codes. The installer prints one; you approve it
