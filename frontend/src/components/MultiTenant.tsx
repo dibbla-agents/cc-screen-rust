@@ -27,6 +27,7 @@ import {
   removeOrgMember,
   respondOrgInvite,
   revokeOrgInvite,
+  regenerateLink,
   revokeShare,
   rotateAgent,
   setMachineTeamVisible,
@@ -1108,6 +1109,79 @@ function TerminalClientsCard() {
   );
 }
 
+// One read-only link grant in the outbox (proposal 0083 Part C). Revoke rides
+// the shared GrantRow; Regenerate sits in its `extra` slot and reveals the
+// fresh URL inline — which is the whole point of it existing: the token is
+// hashed at rest, so a URL the owner has lost can only be REPLACED, never
+// re-shown.
+function LinkGrantRow({ grant, onChanged }: { grant: ShareInvite; onChanged: () => void }) {
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const label = grant.file || "file";
+  return (
+    <>
+      <GrantRow
+        dot="bg-amber mt-dot-on"
+        title={label}
+        sub={
+          <>
+            → anyone with the link · read-only{grant.machine ? ` · ${grant.machine}` : ""}
+          </>
+        }
+        badge="link"
+        extra={
+          <button
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const r = await regenerateLink(grant.id);
+                setFresh(r.inviteUrl);
+                onChanged();
+              } catch {
+                /* the row stays as it was; the old link is untouched */
+              } finally {
+                setBusy(false);
+              }
+            }}
+            className="shrink-0 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-accent hover:text-accent disabled:opacity-50"
+            title="Replace this link with a new URL — the old one stops working immediately"
+          >
+            {busy ? "…" : "New URL"}
+          </button>
+        }
+        actionLabel="Revoke"
+        confirmText={`Stop sharing ${label}? The link stops working immediately.`}
+        onConfirm={async () => {
+          await revokeShare(grant.id);
+          onChanged();
+        }}
+      />
+      {fresh && (
+        <li className="rounded-xl border border-amber/30 bg-amber/10 p-3 text-xs text-amber">
+          <div>New link — the previous URL no longer works. Copy it now; it isn’t shown again:</div>
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
+              {fresh}
+            </code>
+            <button
+              onClick={() => {
+                void writeClipboard(fresh).catch(() => {});
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="min-h-11 shrink-0 rounded-md border border-amber/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
+          </div>
+        </li>
+      )}
+    </>
+  );
+}
+
 function SharedCard() {
   const [outbox, setOutbox] = useState<ShareInvite[] | null>(null);
   const [received, setReceived] = useState<ReceivedShare[] | null>(null);
@@ -1122,8 +1196,11 @@ function SharedCard() {
 
   // Only the live offers/grants are actionable; terminal rows are dropped.
   // "invited" (proposal 0056 Part C) = an email invite awaiting signup.
+  // "active" (proposal 0083 Part C) is a live read-only link grant — no
+  // acceptance step, so it is live from the moment it is minted.
   const active = (outbox ?? []).filter(
-    (i) => i.status === "pending" || i.status === "accepted" || i.status === "invited"
+    (i) =>
+      i.status === "pending" || i.status === "accepted" || i.status === "invited" || i.status === "active"
   );
   const loading = outbox === null || received === null;
   // Team-materialized rows (proposal 0065 Part B) are EXCLUDED from the grant
@@ -1150,25 +1227,33 @@ function SharedCard() {
         </div>
       ) : (
         <ul className="space-y-2">
-          {active.map((i) => (
-            <GrantRow
-              key={i.id}
-              dot={i.status === "accepted" ? "bg-amber mt-dot-on" : "bg-slate-600"}
-              title={subjectTitle(i.machine, i.session)}
-              sub={
-                <>
-                  → {i.granteeEmail || "—"} · {i.permission === "view" ? "can view" : "can use"}
-                </>
-              }
-              badge={i.status}
-              actionLabel={i.status === "accepted" ? "Revoke" : "Cancel"}
-              confirmText={`Stop sharing ${subjectTitle(i.machine, i.session)} with ${i.granteeEmail || "them"}? They lose access immediately.`}
-              onConfirm={async () => {
-                await revokeShare(i.id);
-                reload();
-              }}
-            />
-          ))}
+          {active.map((i) =>
+            // A read-only link grant (proposal 0083 Part C) reads differently
+            // from an invite: the recipient is "anyone with the URL", the
+            // subject is a file, and the second action is Regenerate — the
+            // only way back to a URL we deliberately cannot show again.
+            i.resourceKind === "link" ? (
+              <LinkGrantRow key={i.id} grant={i} onChanged={reload} />
+            ) : (
+              <GrantRow
+                key={i.id}
+                dot={i.status === "accepted" ? "bg-amber mt-dot-on" : "bg-slate-600"}
+                title={subjectTitle(i.machine, i.session)}
+                sub={
+                  <>
+                    → {i.granteeEmail || "—"} · {i.permission === "view" ? "can view" : "can use"}
+                  </>
+                }
+                badge={i.status}
+                actionLabel={i.status === "accepted" ? "Revoke" : "Cancel"}
+                confirmText={`Stop sharing ${subjectTitle(i.machine, i.session)} with ${i.granteeEmail || "them"}? They lose access immediately.`}
+                onConfirm={async () => {
+                  await revokeShare(i.id);
+                  reload();
+                }}
+              />
+            )
+          )}
         </ul>
       )}
 

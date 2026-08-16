@@ -4,6 +4,7 @@ import {
   clearHistory,
   deleteSession,
   fetchFavorites,
+  fetchFiles,
   fetchRestorable,
   fetchSessions,
   flattenDataTransfer,
@@ -56,10 +57,22 @@ import InboxButton from "./components/InboxButton";
 import UpdateAssistants from "./components/UpdateAssistants";
 import ShareForm, { type ShareSubject } from "./components/ShareForm";
 import { detectReadyEdges, sessionKey } from "./readyEdges";
+import {
+  fileLinkPath,
+  joinHome,
+  parseFileLink,
+  parseLinkToken,
+  relFromHome,
+  type EditorLocation,
+} from "./fileLink";
 // The editor pulls in CodeMirror + react-markdown — a big chunk only needed
 // once the user actually opens a file. Lazy-load it so the terminal app's
 // initial bundle stays light.
 const EditorOverlay = lazy(() => import("./components/EditorOverlay"));
+// The read-only link-grant page (proposal 0083 Part C). Its own chunk: it pulls
+// the markdown reading view + CodeMirror, and an ordinary app load must never
+// pay for a page only anonymous bearers see.
+const LinkView = lazy(() => import("./components/LinkView"));
 import { agentStatus, buildSharedMap, displayName, nextSessionColor, sameJson, sessionAccent, shouldSkipShortcut, statusDot, statusTitle, toolColor, toPng, writeClipboard } from "./util";
 import { HIDDEN_SESSIONS_MS, usePoll } from "./poll";
 import { setPrefixArmed } from "./prefix";
@@ -88,6 +101,16 @@ const LOGIN_ERROR_HINT: Record<string, string> = {
   unverified: "That Google account's email isn't verified.",
   account: "Signed in with Google, but the account couldn't be set up.",
 };
+
+// Proposal 0083 Part A — the file deep link, read ONCE at load (like
+// LOGIN_ERROR above) and consumed by an effect after auth resolves. Read at
+// module scope so the consumption never races a re-render, and deliberately
+// NOT stripped from the URL on success: Part B's urlSync owns the address bar
+// from that point on, and the URL *is* the feature.
+const FILE_LINK = typeof window === "undefined" ? null : parseFileLink(window.location.pathname);
+// Proposal 0083 Part C — `/s/<token>`, the read-only link grant page. Its
+// viewer has no account, so this route renders BEFORE the auth gate.
+const LINK_TOKEN = typeof window === "undefined" ? null : parseLinkToken(window.location.pathname);
 
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
@@ -388,6 +411,12 @@ export default function App() {
   const [editor, setEditor] = useState<{
     open: boolean;
     path: string | null;
+    // Proposal 0083: the browse machine a deep link named, overriding the
+    // pane-derived default. "" = follow the pane (today's behaviour).
+    machine: string;
+    // Proposal 0083: the folder form of a deep link (`/file/<m>/dir/`) — the
+    // tree opens here instead of a file buffer.
+    dir: string | null;
     focusSearchSeq: number;
     // Proposal 0038: `Ctrl+B /` bumps this to focus the in-tree "Filter tree"
     // field (mirror of focusSearchSeq for [0027]'s find-file bar).
@@ -395,11 +424,39 @@ export default function App() {
   }>(() => ({
     open: loadEditorOpen(),
     path: null,
+    machine: "",
+    dir: null,
     focusSearchSeq: 0,
     focusTreeFilterSeq: 0,
   }));
   const editorOpenRef = useRef(false);
   useEffect(() => { editorOpenRef.current = editor.open; }, [editor.open]);
+  // Proposal 0083: a file deep link is being resolved. True from the FIRST
+  // render (not from an effect) so the phone's drawer auto-open below never
+  // gets a frame in which to cover the editor the bookmark asked for. Cleared
+  // whether the resolve succeeds or fails — a stuck flag would leave a phone
+  // with no way back to the switcher.
+  const [fileLinkPending, setFileLinkPending] = useState(!!FILE_LINK);
+  const fileLinkDone = useRef(false);
+  // ⌃B l — copy the open file's link (proposal 0083 Part B). Bumped here,
+  // consumed inside the overlay (which holds the path, the machine and $HOME).
+  const [copyLinkSeq, setCopyLinkSeq] = useState(0);
+  // Where the open editor is pointing, reported up by the overlay — the input
+  // to Part B's address-bar sync and to the ⌃B l copy chord.
+  const [editorLoc, setEditorLoc] = useState<EditorLocation | null>(null);
+  const onEditorLocation = useCallback(
+    (loc: EditorLocation) =>
+      setEditorLoc((prev) =>
+        prev &&
+        prev.path === loc.path &&
+        prev.dir === loc.dir &&
+        prev.machine === loc.machine &&
+        prev.home === loc.home
+          ? prev // identity-stable: a no-op report must not re-run urlSync
+          : loc
+      ),
+    []
+  );
   // Persist the open/closed mode so a reload returns to the file viewer or the
   // terminal grid, whichever was active.
   useEffect(() => {
@@ -695,13 +752,19 @@ export default function App() {
   // so it doesn't peek through). `path` null = desktop tree-pick entry.
   // `focusSearch` (the Ctrl+B f path) bumps focusSearchSeq so the viewer focuses
   // its Find bar — also when already open, so re-pressing re-focuses in place.
+  // `opts.machine` / `opts.dir` are the proposal 0083 deep-link seam: a
+  // `/file/…` URL names the machine whose $HOME the path belongs to, and its
+  // folder form opens the tree instead of a buffer. Both default to "follow the
+  // pane / no folder", so every pre-0083 call site behaves exactly as before.
   const openEditor = useCallback(
-    (path: string | null, focusSearch = false) => {
+    (path: string | null, focusSearch = false, opts?: { machine?: string; dir?: string | null }) => {
       closeAllSheets();
       setEditor((s) => ({
         ...s,
         open: true,
         path,
+        machine: opts?.machine ?? "",
+        dir: opts?.dir ?? null,
         focusSearchSeq: s.focusSearchSeq + (focusSearch ? 1 : 0),
       }));
     },
@@ -711,10 +774,16 @@ export default function App() {
   // bumps focusTreeFilterSeq so it re-focuses even when already open (0038).
   const focusTreeFilter = useCallback(() => {
     closeAllSheets();
-    setEditor((s) => ({ ...s, open: true, path: null, focusTreeFilterSeq: s.focusTreeFilterSeq + 1 }));
+    setEditor((s) => ({
+      ...s,
+      open: true,
+      path: null,
+      dir: null,
+      focusTreeFilterSeq: s.focusTreeFilterSeq + 1,
+    }));
   }, [closeAllSheets]);
   const closeEditor = useCallback(
-    () => setEditor((s) => ({ ...s, open: false, path: null })),
+    () => setEditor((s) => ({ ...s, open: false, path: null, machine: "", dir: null })),
     []
   );
 
@@ -926,6 +995,48 @@ export default function App() {
     };
   }, [authed, openSessionByName]);
 
+  // Cold-open FILE deep link (proposal 0083 Part A): `/file/<machine>/<rel>`
+  // opens that file straight in the editor — the bookmark path, and the whole
+  // point of the proposal on a phone, where the viewer restores nothing.
+  //
+  // Modeled line-for-line on the `?session=` consumer above: it waits for
+  // `authed === true`, so a signed-out hit lands in login and continues here
+  // afterwards (including across the Google OAuth bounce, which returns to the
+  // same path). It differs in one deliberate way — it does NOT strip the URL.
+  // Part B's urlSync owns the address bar from here, and a bookmarkable URL
+  // that erased itself on arrival would defeat the feature.
+  //
+  // The one round-trip is `home`: a link is home-relative (see fileLink.ts), so
+  // the absolute path the API wants is `home + "/" + relPath`, and `home` comes
+  // back on any `/api/files` listing for that machine. A failure leaves the URL
+  // alone so a reload retries, and still opens the editor — on the tree, where
+  // [0079]'s heal-don't-latch rule wants a stale link to land.
+  useEffect(() => {
+    if (authed !== true || !FILE_LINK) return;
+    if (fileLinkDone.current) return;
+    fileLinkDone.current = true;
+    const link = FILE_LINK;
+    let cancelled = false;
+    fetchFiles(undefined, undefined, link.machine)
+      .then((r) => {
+        if (cancelled) return;
+        const abs = joinHome(r.home, link.relPath);
+        if (link.isDir) openEditor(null, false, { machine: link.machine, dir: abs });
+        else openEditor(abs, false, { machine: link.machine });
+      })
+      .catch(() => {
+        // Unknown machine, offline agent, expired cookie mid-flight: open the
+        // editor on that machine's tree and let the overlay say what's wrong.
+        if (!cancelled) openEditor(null, false, { machine: link.machine });
+      })
+      .finally(() => {
+        if (!cancelled) setFileLinkPending(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authed, openEditor]);
+
   // Warm-open notification tap: the service worker focuses this window and asks
   // it to mount the notified session instead of leaving the user on the prior
   // pane.
@@ -1043,6 +1154,15 @@ export default function App() {
     setShareTarget({ title: meta ? displayName(meta) : ref.name, machine: ref.machine, session: ref.name });
   }, []);
 
+  // Mint a read-only link grant for one file (proposal 0083 Part C). The same
+  // ShareForm overlay as every other share — the file subject just puts it in
+  // its `link` mode (no recipient; the URL is the recipient).
+  const openShareLink = useCallback(
+    (s: { title: string; machine: string; path: string; relPath: string }) =>
+      setShareTarget({ title: s.title, machine: s.machine, path: s.path, pathLabel: s.relPath }),
+    []
+  );
+
   // Refresh the restore offer whenever the drawer opens — cheap, and the only
   // surface that shows it. Errors are non-fatal (just hides the offer).
   // With multiple machines, the restore offer is scoped to the focused machine
@@ -1071,9 +1191,52 @@ export default function App() {
   // session in this pane vanished). On desktop the empty pane already shows
   // an inline picker — but on phones (single pane, no inline picker) the
   // drawer is the only way to attach, so keep popping it open there.
+  // Proposal 0083: suppressed while a file deep link is still resolving — the
+  // user's declared destination is a file, not a session, and the drawer would
+  // land on top of it. Once resolved the rule is back exactly as it was.
   useEffect(() => {
+    if (fileLinkPending) return;
     if (!isDesktop && currentSession === null) setDrawerOpen(true);
-  }, [isDesktop, currentSession]);
+  }, [isDesktop, currentSession, fileLinkPending]);
+
+  // ── Proposal 0083 Part B — the address bar tracks the open file ────────────
+  // The cheapest way to create a bookmark is for the URL to already be right
+  // when the user presses ⌘D. `replaceState` only (the app's single history
+  // verb — 0083 explicitly does not introduce push/popstate navigation).
+  //
+  // Single writer, two guards:
+  //   * it only ever writes over `/` or an existing `/file/…` — so a reserved
+  //     page (`/activate`, `/invite/…`, `/billing/…`, `/s/…`) is never
+  //     clobbered, and neither is Part A's inbound link before it resolves;
+  //   * it writes nothing until `home` is known for the current browse machine,
+  //     because a URL is home-relative and an absolute path has no link form.
+  // Query + hash are preserved so a pending `?session=` consumer keeps its
+  // parameter.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const here = window.location.pathname;
+    if (here !== "/" && !here.startsWith("/file/")) return;
+    let want: string | null = null;
+    if (editor.open && editorLoc) {
+      // File → folder → machine root, the same ladder the phone's two-step
+      // close walks (0083 Mobile/touch), so a bookmark made mid-ladder means
+      // what the screen showed.
+      const target = editorLoc.path ?? editorLoc.dir;
+      const rel = target ? relFromHome(editorLoc.home, target) : null;
+      if (target) {
+        // Outside $HOME there is no link form; leave the bar as it is rather
+        // than minting a URL that would 404 on arrival.
+        if (rel !== null) want = fileLinkPath(editorLoc.machine, rel, !editorLoc.path);
+      } else if (editorLoc.home) {
+        want = fileLinkPath(editorLoc.machine, "", true);
+      }
+    } else if (!editor.open) {
+      want = "/";
+    }
+    if (want && want !== here) {
+      window.history.replaceState({}, "", `${want}${window.location.search}${window.location.hash}`);
+    }
+  }, [editor.open, editorLoc]);
 
   // (Re-listing on PWA resume / tab focus is part of the sessions poll above —
   // one deduplicated handler for `focus` + `visibilitychange`, on the quiet
@@ -1262,6 +1425,15 @@ export default function App() {
             stop();
             clearArm();
             openEditor(null, true);
+            return;
+          }
+          if (k === "l" || k === "L") {
+            // Copy link (proposal 0083 Part B): the URL of the file the viewer
+            // has open. `l` is free HERE — over the grid it is the layout
+            // palette, and a file link only exists while the viewer is up.
+            stop();
+            clearArm();
+            setCopyLinkSeq((n) => n + 1);
             return;
           }
           if (k === "/" || k === "t" || k === "T") {
@@ -2256,6 +2428,20 @@ export default function App() {
     />
   );
 
+  // Proposal 0083 Part C — `/s/<token>`, the read-only link grant. It renders
+  // BEFORE the auth gate on purpose: its whole reason to exist is a reader with
+  // no account. Nothing of the app comes with it: every poll above is gated on
+  // `authed === true`, which an anonymous reader never is, and no drawer,
+  // terminal or WebSocket is rendered — just the token, the file, and the
+  // provenance banner.
+  if (LINK_TOKEN) {
+    return (
+      <Suspense fallback={<div className="fixed inset-0 bg-bar" />}>
+        <LinkView token={LINK_TOKEN} />
+      </Suspense>
+    );
+  }
+
   // Auth gate (after all hooks, so the rules of hooks hold): a blank splash
   // while checking, the login screen when locked, otherwise the app.
   if (authed === null) {
@@ -2814,10 +3000,15 @@ export default function App() {
           <EditorOverlay
             open={editor.open}
             initialPath={editor.path}
+            // Proposal 0083: the folder form of a deep link — the tree opens
+            // here (and its ancestors expand) instead of a file buffer.
+            initialDir={editor.dir}
             session={currentSession?.name ?? null}
             machines={machines}
             multiMachine={multiMachine}
-            initialMachine={currentSession?.machine || firstOnlineMachine}
+            // A deep link names the machine whose $HOME the path belongs to and
+            // must win over the pane-derived default; "" falls back to today's.
+            initialMachine={editor.machine || currentSession?.machine || firstOnlineMachine}
             agentMachine={currentSession?.machine ?? ""}
             isDesktop={isDesktop}
             onClose={closeEditor}
@@ -2835,6 +3026,17 @@ export default function App() {
             // Proposal 0077 B: the mirror's xterm, so ⌘C can copy a selection
             // made in the editor's agent column.
             onAgentTerm={setAgentTerm}
+            // Proposal 0083 Part C: mint a read-only file link. Multi-tenant
+            // only — the grant lives in the hub's store, and a single-tenant
+            // hub has none, so the menu item simply isn't offered there.
+            onShareLink={me?.multiTenant ? openShareLink : undefined}
+            // Proposal 0083 Part B: the overlay reports where it is pointing so
+            // App can mirror it into the address bar (one writer, up here).
+            onLocation={onEditorLocation}
+            // Proposal 0083 Part B: ⌃B l bumps this to copy the open file's
+            // link. A broadcast counter consumed by the receiver, per [0081]'s
+            // rule — never a prop swapped per target.
+            copyLinkSeq={copyLinkSeq}
             // Proposal 0027: Ctrl+B f bumps this to focus the in-tree Find bar.
             focusSearchSeq={editor.focusSearchSeq}
             // Proposal 0038: Ctrl+B / bumps this to focus the tree-filter field.

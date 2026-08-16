@@ -230,6 +230,29 @@ Four things silently switch the prefix off, in rough order of likelihood:
 
 The full list of chords is in [the web app guide](../web-app/#keyboard-shortcuts).
 
+## A file link opens the file tree instead of the file
+
+The file isn't where the link says any more — it was renamed, moved, or
+deleted. A link is `(machine, path)`, and cc-screen deliberately never guesses
+at a new location, so it drops you in the tree with a one-line note rather than
+showing an error or retrying forever.
+
+Find the file where it is now, open it, and re-bookmark: the address bar is
+already showing the new URL. If the tree is at the wrong machine, check the
+machine name in the link — renaming a machine invalidates links that named it.
+
+## A shared link says "that machine is offline"
+
+The link is fine; the computer holding the file isn't reachable. Read-only
+links serve the *live* file, so the machine has to be online to answer — there
+is no cached copy. Wake the machine (or start the agent) and reload; the page
+has a retry button.
+
+If it instead says "this link isn't available", the link itself is gone:
+revoked, expired, or the file was renamed or deleted. Those four look identical
+on purpose — see [Security](../security/#read-only-link-grants). Ask whoever
+shared it to mint a new one.
+
 ## I copied inside Claude and my clipboard is empty
 
 Which machine's clipboard? That's the whole question.

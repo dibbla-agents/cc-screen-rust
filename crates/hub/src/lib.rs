@@ -25,6 +25,10 @@ pub mod account;
 /// Share-invite lifecycle endpoints (proposal 0040) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod share;
+/// Read-only link grants (proposal 0083 Part C) — multi-tenant only. Its own
+/// resolver, its own table, hardcoded to the read op; see the module docs.
+#[cfg(feature = "multi-tenant")]
+pub mod link;
 /// Org membership lifecycle endpoints (proposal 0063) — multi-tenant only.
 #[cfg(feature = "multi-tenant")]
 pub mod org;
@@ -175,6 +179,14 @@ pub fn build_router(hub: HubState) -> Router {
         // Email-invite landing read (proposal 0056 C4): unauthenticated (the
         // token is the capability; exempted in require_client_auth), throttled.
         .route("/api/invite/:token", get(share::invite_info))
+        // Read-only link grants (proposal 0083 Part C). The two GETs are
+        // unauthenticated by design — the reader has no account — and are the
+        // ONLY routes that accept a link token. Both are GET-only: there is no
+        // route, in this block or anywhere else, that takes this token for a
+        // write. `regenerate` is cookie-authed and owner-scoped like revoke.
+        .route("/api/link/:token", get(link::meta))
+        .route("/api/link/:token/content", get(link::content))
+        .route("/api/shares/:id/regenerate", post(link::regenerate))
         // Orgs (proposal 0063): membership lifecycle, roles, the per-machine
         // team-visibility opt-out, and the audit log. No :org_id in paths — the
         // caller's org is always resolved from their own membership.

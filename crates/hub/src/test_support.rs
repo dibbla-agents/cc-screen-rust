@@ -590,11 +590,19 @@ fn handle_cmd(cmd: &Cmd, sessions: &Arc<Mutex<Vec<SessionInfo>>>) -> CmdResult {
         // to the agent rather than refusing it at the gate. The real agent reads
         // the disk (under `$HOME` confinement); the double just echoes the op and
         // path back, which is enough to tell a 200 from a 404.
-        Cmd::File { op, args } => CmdResult::Json(serde_json::json!({
-            "op": op,
-            "path": args.get("path").and_then(|p| p.as_str()).unwrap_or_default(),
-            "content": "fake-agent file body",
-        })),
+        Cmd::File { op, args } => {
+            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or_default();
+            // `name` is what a real `read` returns (fileops.rs) and what the
+            // 0083 link mint reads back to label the grant — the double would
+            // otherwise look like "that path isn't a file".
+            let name = path.rsplit('/').next().unwrap_or_default();
+            CmdResult::Json(serde_json::json!({
+                "op": op,
+                "path": path,
+                "name": name,
+                "content": "fake-agent file body",
+            }))
+        }
         _ => CmdResult::Ok,
     }
 }

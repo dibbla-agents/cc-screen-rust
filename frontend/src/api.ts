@@ -384,16 +384,24 @@ export interface ShareInvite {
   id: string;
   inviterEmail?: string;
   granteeEmail?: string;
-  resourceKind: "agent" | "session";
+  // "link" (proposal 0083 Part C) = a read-only link grant on ONE file. It has
+  // no grantee (the URL is the recipient), so it appears ONLY in the outbox —
+  // never in an inbox, a received list, or anything that confers visibility.
+  resourceKind: "agent" | "session" | "link";
   agentId: string;
   machine?: string;
   session?: string | null;
-  // [0039]'s grant level rendered as a friendly verb: "use" (agent) / "view" (session).
-  permission: "use" | "view";
+  // Link grants only: the file's basename and its absolute path on the agent.
+  file?: string;
+  path?: string;
+  // [0039]'s grant level rendered as a friendly verb: "use" (agent) / "view"
+  // (session) / "read" (a link grant, which is read-only by construction).
+  permission: "use" | "view" | "read";
   ownerPeek: boolean;
   // "invited" (proposal 0056 Part C) = an email invite awaiting the address's
-  // signup — outbox-only, revocable like a pending invite.
-  status: "pending" | "accepted" | "declined" | "revoked" | "expired" | "invited";
+  // signup — outbox-only, revocable like a pending invite. "active" (0083) = a
+  // live link grant; there is no pending state, since nobody has to accept it.
+  status: "pending" | "accepted" | "declined" | "revoked" | "expired" | "invited" | "active";
   createdAt: number;
   expiresAt?: number | null;
   // The /invite/<token> link for an email-invite outbox row (0056 Part C).
@@ -429,24 +437,65 @@ export interface ReceivedShare {
 // Throws with the server's message on a bad request (not your resource,
 // self-share) — an ApiError, so a 429 invite-cap answer is identifiable.
 export async function createShare(args: {
-  granteeEmail: string;
+  granteeEmail?: string;
   machine: string;
   session?: string;
   ownerPeek?: boolean;
+  // Proposal 0083 Part C — a `link` share: read-only, one file, no grantee.
+  // Same endpoint and same `{id, status, invite_url}` response as every other
+  // kind ([0074] §C1/§D4: one endpoint, one response shape); the URL just
+  // happens to be `/s/<token>` rather than `/invite/<token>`.
+  kind?: "link";
+  path?: string;
+  expiresAt?: number;
 }): Promise<{ id: string; status: string; inviteUrl?: string }> {
   const r = await fetch("/api/shares", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      grantee_email: args.granteeEmail,
+      grantee_email: args.granteeEmail ?? "",
       machine: args.machine,
       session: args.session,
       owner_peek: args.ownerPeek ?? false,
+      kind: args.kind,
+      path: args.path,
+      expires_at: args.expiresAt,
     }),
   });
   if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `share: ${r.status}`);
   const j = (await r.json()) as { id: string; status: string; invite_url?: string };
   return { id: j.id, status: j.status, inviteUrl: j.invite_url };
+}
+
+// ── Read-only link grants (proposal 0083 Part C) ───────────────────────────
+// The two endpoints behind `/s/<token>`. BOTH are unauthenticated by design —
+// the reader has no account; the token is the whole capability — and both
+// answer one undifferentiated 404 for malformed / unknown / revoked / expired /
+// gone, so a bearer who may hold nothing learns nothing.
+//
+// `getLinkMeta` is answered by the hub alone (no agent round-trip), so the page
+// can title itself even while the owner's machine is waking up; `getLinkContent`
+// is the single agent read, which is where 503-offline and 415-no-preview come
+// from. Nothing here can write: there is no endpoint that accepts this token
+// for anything but these two reads.
+
+export interface LinkMeta {
+  name: string;
+  machine: string;
+  /** How to render it: reading view, highlighted source, or the no-preview page. */
+  mimeClass: "markdown" | "text" | "other";
+}
+
+export async function getLinkMeta(token: string): Promise<LinkMeta> {
+  const r = await fetch(`/api/link/${encodeURIComponent(token)}`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `link: ${r.status}`);
+  return r.json();
+}
+
+export async function getLinkContent(token: string): Promise<string> {
+  const r = await fetch(`/api/link/${encodeURIComponent(token)}/content`);
+  if (!r.ok) throw new ApiError(r.status, (await r.text().catch(() => "")).trim() || `link: ${r.status}`);
+  return r.text();
 }
 
 // The invite-link landing read (proposal 0056 C4): what /invite/<token> shows
@@ -505,6 +554,18 @@ export const declineInvite = (id: string) => postShare(`/api/shares/${encodeURIC
 // revokeShare cancels an invite the caller sent (pre- or post-accept), removing
 // any granted access. Forgiving server-side (double-revoke is success).
 export const revokeShare = (id: string) => postShare(`/api/shares/${encodeURIComponent(id)}/revoke`);
+
+// regenerateLink (proposal 0083 Part C) mints a FRESH token onto the same link
+// grant: the old URL dies at that instant, the grant's id/file/expiry are
+// unchanged. This is what makes hashing the token at rest livable — a URL the
+// owner can no longer be shown, they can always replace. The new URL comes back
+// once, exactly like the mint.
+export async function regenerateLink(id: string): Promise<{ inviteUrl: string }> {
+  const r = await fetch(`/api/shares/${encodeURIComponent(id)}/regenerate`, { method: "POST" });
+  if (!r.ok) throw new ApiError(r.status, (await r.text()).trim() || `regenerate: ${r.status}`);
+  const j = (await r.json()) as { invite_url?: string };
+  return { inviteUrl: new URL(j.invite_url ?? "/", window.location.origin).toString() };
+}
 
 // leaveShare gives back a share I hold (the "Leave" action); `id` is the
 // received grant's id from listReceivedShares().

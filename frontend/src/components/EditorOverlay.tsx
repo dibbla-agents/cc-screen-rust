@@ -1,6 +1,4 @@
 import {
-  Children,
-  isValidElement,
   lazy,
   Suspense,
   useCallback,
@@ -10,12 +8,13 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
-  type ReactElement,
-  type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { writeClipboard, useDebouncedValue } from "../util";
+// The reading view + its markdown component overrides live in their own module
+// (proposal 0083 Part C) so the `/s/<token>` link-grant page can render prose
+// without pulling the whole editor in behind it. The rendering invariant is
+// documented there and is load-bearing — read it before changing anything.
+import ReadingView from "./ReadingView";
+import { useDebouncedValue, writeClipboard } from "../util";
 import {
   readFile,
   writeFile,
@@ -46,6 +45,7 @@ import {
   type TreeCtxInfo,
 } from "./dirTree";
 import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
+import { fileLinkUrl, relFromHome, type EditorLocation } from "../fileLink";
 import MarkdownEditor from "./MarkdownEditor";
 import { toggleTaskAt } from "../editor/livePreview";
 import EditorTree from "./EditorTree";
@@ -70,6 +70,7 @@ import {
   TerminalIcon,
   KeyboardIcon,
   SearchIcon,
+  LinkIcon,
 } from "../icons";
 import type { EditorView } from "@codemirror/view";
 import { openFind, findIsOpen, findHasQuery, clearFindQuery, closeFind } from "../editor/findInFile";
@@ -81,9 +82,13 @@ const SURFACE_BG =
 
 interface Props {
   open: boolean;
-  // File to open when the overlay opens (from a Files-sheet tap). Null on a
-  // desktop Ctrl+B e, where the user picks from the tree.
+  // File to open when the overlay opens (from a Files-sheet tap, or a
+  // `/file/…` deep link — proposal 0083). Null on a desktop Ctrl+B e, where the
+  // user picks from the tree.
   initialPath: string | null;
+  // Folder to open the tree at (proposal 0083 Part A, the trailing-slash form
+  // of a deep link). Null for every other entry point.
+  initialDir?: string | null;
   // Active session — anchors the tree's "project" section at its tmux cwd, and
   // is the agent shown in the right-hand mirror column.
   session: string | null;
@@ -130,6 +135,17 @@ interface Props {
   // The editor's agent mirror hands its xterm.js Terminal up so App's global
   // copy handler can read a selection made in this column (proposal 0077 B).
   onAgentTerm?: (term: Terminal | null) => void;
+  // Proposal 0083 Part B: report where the viewer is pointing (file, folder,
+  // browse machine, that machine's $HOME) so App — the single writer — can
+  // mirror it into the address bar. Called on every change; App dedupes.
+  onLocation?: (loc: EditorLocation) => void;
+  // Proposal 0083 Part B: ⌃B l. A monotonically-bumped counter, broadcast and
+  // consumed here ([0081] rule 3), that copies the open file's link.
+  copyLinkSeq?: number;
+  // Proposal 0083 Part C: mint a read-only link for one file. App owns the
+  // ShareForm overlay (it renders above this one at z-70), so this hands the
+  // subject up rather than duplicating the form. Absent on a single-tenant hub.
+  onShareLink?: (subject: { title: string; machine: string; path: string; relPath: string }) => void;
 }
 
 // "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
@@ -218,6 +234,7 @@ const dirname = (p: string) => {
 export default function EditorOverlay({
   open,
   initialPath,
+  initialDir = null,
   session,
   machines,
   multiMachine,
@@ -233,6 +250,9 @@ export default function EditorOverlay({
   focusSearchSeq = 0,
   focusTreeFilterSeq = 0,
   onAgentTerm,
+  onLocation,
+  copyLinkSeq = 0,
+  onShareLink,
 }: Props) {
   // The machine whose $HOME we're browsing/editing. Adopted from initialMachine
   // on open; switchable via the header dropdown (multi-machine only).
@@ -246,6 +266,17 @@ export default function EditorOverlay({
   // is mounted (reading view, PDF, empty).
   const editorViewRef = useRef<EditorView | null>(null);
   const [activePath, setActivePath] = useState<string | null>(initialPath);
+  // Proposal 0083: the folder the tree is showing *as a link target* — a
+  // folder deep link, or the parent a phone stepped back to when it closed a
+  // file. Reported up so the address bar walks the same ladder the screen does.
+  const [linkDir, setLinkDir] = useState<string | null>(initialDir);
+  // [0079]'s heal-don't-latch notice: a deep-linked path that no longer
+  // resolves drops to the tree with ONE quiet line — never a modal, never a
+  // retry loop. `retry` is set only for the one recoverable case (the machine
+  // is asleep, not the file gone), so a valid bookmark can't look dead.
+  const [notice, setNotice] = useState<{ msg: string; retry: boolean } | null>(null);
+  // One-shot confirmations for the copy actions (link copied / copy failed).
+  const [flash, setFlash] = useState("");
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(""); // last-saved/loaded content (for dirty)
   const [baseMtime, setBaseMtime] = useState(0);
@@ -751,6 +782,13 @@ export default function EditorOverlay({
       setActivePath(initialPath);
       return;
     }
+    // A FOLDER deep link (proposal 0083) is an explicit request too, and it
+    // asked for the tree. Without this, [0019]'s desktop restore would helpfully
+    // reopen the last file and the URL the user just followed would be gone.
+    if (initialDir) {
+      setActivePath(null);
+      return;
+    }
     // Desktop restores the session's last open file; phone lands on the tree as
     // before (the phone-tree effect below surfaces it) — phone behaviour is
     // unchanged per proposal 0019.
@@ -760,6 +798,36 @@ export default function EditorOverlay({
     setActivePath(restored);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, initialPath]);
+
+  // Proposal 0083 Part A — the folder form of a deep link
+  // (`/file/<machine>/dir/`). Expand the target AND every ancestor down from
+  // $HOME: `expand` only opens the node it is given, and an unexpanded ancestor
+  // means the folder is loaded but invisible. Waits for `tree.homePath` — the
+  // bootstrap listing — because without it there is no chain to walk.
+  const treeExpand = tree.expand;
+  useEffect(() => {
+    if (!open || !initialDir) return;
+    setLinkDir(initialDir);
+    const home = tree.homePath;
+    if (!home) return;
+    const rel = relFromHome(home, initialDir);
+    if (rel === null) return;
+    let acc = home;
+    const chain = [home];
+    for (const seg of rel.split("/").filter(Boolean)) {
+      acc = `${acc}/${seg}`;
+      chain.push(acc);
+    }
+    for (const p of chain) void treeExpand(p);
+    if (!isDesktop) setTreePanelOpen(true);
+  }, [open, initialDir, tree.homePath, treeExpand, isDesktop]);
+
+  // Proposal 0083 Part B — report where the viewer is pointing. App is the
+  // single writer of the address bar; this is its only input.
+  useEffect(() => {
+    if (!open) return;
+    onLocation?.({ path: activePath, dir: linkDir, machine: fileMachine, home: tree.homePath });
+  }, [open, activePath, linkDir, fileMachine, tree.homePath, onLocation]);
 
   // Proposal 0019 (+ follow-up) — follow a session switch under the open viewer.
   // When the underlying session (or browse machine) changes while the viewer
@@ -840,6 +908,7 @@ export default function EditorOverlay({
     setStatus("loading");
     setError("");
     setConflict(false);
+    setNotice(null); // opening anything supersedes a previous heal notice
     readFile(activePath, fileMachine)
       .then((r) => {
         if (cancelled) return;
@@ -855,10 +924,29 @@ export default function EditorOverlay({
         if (e instanceof FileNotEditable) {
           setName(basename(activePath));
           setStatus("noteditable");
-        } else {
-          setError(errMsg(e));
-          setStatus("error");
+          return;
         }
+        // Proposal 0083 / [0079] — heal, never latch. A path we were ASKED to
+        // open (a bookmark, a Files-sheet tap) and can't is not an error page:
+        // drop to the tree with one quiet line. A path the user just clicked in
+        // the tree keeps the ordinary error banner — they can see what happened.
+        if (activePath === initialPath) {
+          const msg = errMsg(e);
+          const offline = /offline/i.test(msg);
+          setNotice(
+            offline
+              ? { msg: `${basename(activePath)} is on a machine that isn’t reachable right now.`, retry: true }
+              : {
+                  msg: `${relFromHome(tree.homePath, activePath) ?? basename(activePath)} isn’t here anymore.`,
+                  retry: false,
+                }
+          );
+          setActivePath(null);
+          if (!isDesktop) setTreePanelOpen(true);
+          return;
+        }
+        setError(errMsg(e));
+        setStatus("error");
       });
     return () => {
       cancelled = true;
@@ -965,9 +1053,61 @@ export default function EditorOverlay({
   // unsaved-changes guard as requestClose.
   const closeFileToTree = useCallback(() => {
     if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    // The URL steps down the same ladder the screen does (0083 Mobile/touch):
+    // file → its folder → `/`. A bookmark made mid-ladder still means what the
+    // user was looking at.
+    if (activePath) setLinkDir(dirname(activePath));
     setActivePath(null);
     setTreePanelOpen(true);
-  }, [dirty]);
+  }, [dirty, activePath]);
+
+  // ── Copy link (proposal 0083 Part B) ──────────────────────────────────────
+  // One implementation behind three surfaces: the tree context menu (files AND
+  // folders), the toolbar button, and the ⌃B l chord. The link is
+  // (machine, home-relative path) — [0044]'s no-cross-machine-rewriting rule
+  // means we encode the machine whose tree produced the path and never rewrite
+  // it for anyone else. A path outside $HOME has no URL and says so.
+  const copyLink = useCallback(
+    (path: string | null, isDir: boolean) => {
+      if (!path) {
+        setFlash("Nothing open to link to");
+        return;
+      }
+      const rel = relFromHome(tree.homePath, path);
+      if (rel === null) {
+        setFlash("That file is outside home — no link for it");
+        return;
+      }
+      const url = fileLinkUrl(window.location.origin, fileMachine, rel, isDir);
+      noteUserCopy(); // 0077 A10: our copy, not a session's — don't let OSC 52 swap it
+      writeClipboard(url)
+        .then(() => setFlash("Link copied"))
+        .catch(() => setFlash("Couldn’t copy the link"));
+    },
+    [tree.homePath, fileMachine]
+  );
+
+  // ⌃B l — copy the OPEN file's link (App bumps the counter; the receiver
+  // decides, per [0081] rule 3). Skips the initial 0 so opening the viewer
+  // never copies anything on its own.
+  const copyLinkRef = useRef(copyLink);
+  copyLinkRef.current = copyLink;
+  const activeLinkRef = useRef<{ path: string | null; dir: string | null }>({ path: null, dir: null });
+  activeLinkRef.current = { path: activePath, dir: linkDir };
+  useEffect(() => {
+    if (!open || !copyLinkSeq) return;
+    const { path, dir } = activeLinkRef.current;
+    if (path) copyLinkRef.current(path, false);
+    else copyLinkRef.current(dir, true);
+  }, [open, copyLinkSeq]);
+
+  // The flash is a one-shot confirmation, not a status: clear it on a timer so
+  // an idle viewer is back to drawing nothing (proposal 0068).
+  useEffect(() => {
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(""), 1800);
+    return () => window.clearTimeout(t);
+  }, [flash]);
 
   // The toolbar's leading button: on a phone with a file open it steps back to
   // the file tree; otherwise it closes the overlay.
@@ -1356,6 +1496,22 @@ export default function EditorOverlay({
           </button>
         )}
 
+        {/* Copy this file's URL (proposal 0083 Part B). Beside Download because
+            they are the same gesture aimed at two places: one saves the bytes
+            to the device, the other addresses the file for a browser. Shown
+            whenever something is open, on desktop and phone alike — the phone
+            is the device the bookmark story exists for. */}
+        {activePath && (
+          <button
+            onClick={() => copyLink(activePath, false)}
+            className={ghostBtn}
+            title="Copy link to this file (⌃B l)"
+            aria-label="Copy link to this file"
+          >
+            <LinkIcon className="h-[18px] w-[18px]" />
+          </button>
+        )}
+
         {/* Trailing controls. Desktop lays everything out inline; phone keeps
             only the reading toggle + manual Save in the bar and folds the rest
             (font, auto-save, new, delete) into a "⋯" overflow menu so the bar
@@ -1597,6 +1753,28 @@ export default function EditorOverlay({
                         New file
                       </button>
 
+                      {/* Share a read-only link (proposal 0083 Part C) — the
+                          phone's mint entry point, mirroring the tree's
+                          context-menu item. Multi-tenant only. */}
+                      {activePath && onShareLink && tree.homePath && (
+                        <button
+                          onClick={() => {
+                            setMenuOpen(false);
+                            const rel = relFromHome(tree.homePath, activePath);
+                            if (rel === null) {
+                              setFlash("That file is outside home — it can’t be shared");
+                              return;
+                            }
+                            onShareLink({ title: name, machine: fileMachine, path: activePath, relPath: rel });
+                          }}
+                          className="flex w-full items-center gap-2 border-t border-edge/60 px-3 py-3 text-sm text-slate-200 active:bg-panel"
+                          role="menuitem"
+                        >
+                          <LinkIcon className="h-[17px] w-[17px]" />
+                          Share read-only link…
+                        </button>
+                      )}
+
                       {/* Delete */}
                       {activePath && (
                         <button
@@ -1683,6 +1861,34 @@ export default function EditorOverlay({
 
       {error && (
         <div className="border-b border-edge/40 bg-red-500/5 px-3 py-2 text-sm text-red-400">{error}</div>
+      )}
+
+      {/* Heal-don't-latch notice (proposal 0083 / [0079]): a bookmark whose file
+          moved lands here — one quiet line above the tree, dismissible, never a
+          modal and never a retry loop. The offline case is the only one that
+          offers a retry, because it is the only one that can succeed later. */}
+      {notice && (
+        <div className="flex items-center gap-3 border-b border-edge/40 bg-panel/60 px-3 py-2 text-sm text-slate-400">
+          <span className="min-w-0 flex-1 truncate">{notice.msg}</span>
+          {notice.retry && initialPath && (
+            <button
+              onClick={() => {
+                setNotice(null);
+                setActivePath(initialPath);
+              }}
+              className="shrink-0 rounded-md bg-panel px-2.5 py-1 text-xs text-slate-200 hover:bg-edge"
+            >
+              Retry
+            </button>
+          )}
+          <button
+            onClick={() => setNotice(null)}
+            className="shrink-0 rounded-md px-1.5 py-1 text-xs text-slate-500 hover:text-slate-300"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {/* ── Body: optional tree (desktop) + writing surface ───────────────── */}
@@ -1973,6 +2179,26 @@ export default function EditorOverlay({
             setTreePanelOpen(false); // phone: reveal the file behind the tree
           }}
           onDownload={(p, n) => void onDownload({ name: n, path: p, size: 0, mtime: 0 })}
+          // Proposal 0083 Part B: a URL for this node — files and folders alike
+          // (a folder emits the trailing-slash form). Sibling to [0044]'s
+          // *Copy path*, not a replacement: a link is for browsers, a path is
+          // for terminals and agents, and both stay.
+          onCopyLink={(p, isDir) => copyLink(p, isDir)}
+          // Proposal 0083 Part C: mint a revocable read-only link for ONE file.
+          // Files only, and only on a multi-tenant hub (App passes no handler
+          // otherwise, and the item hides).
+          onShareLink={
+            onShareLink && tree.homePath
+              ? (p, n) => {
+                  const rel = relFromHome(tree.homePath, p);
+                  if (rel === null) {
+                    setFlash("That file is outside home — it can’t be shared");
+                    return;
+                  }
+                  onShareLink({ title: n, machine: fileMachine, path: p, relPath: rel });
+                }
+              : undefined
+          }
           onNewFile={ctxNewFile}
           onNewFolder={ctxNewFolder}
           onRename={ctxRename}
@@ -1988,6 +2214,18 @@ export default function EditorOverlay({
       {/* "Move to…" folder picker — the touch path for relocating a node, and a
           non-drag alternative on desktop. onMoveNode throws on error so the
           dialog can show it inline and stay open. */}
+      {/* One-shot confirmation for the copy actions (proposal 0083). Cleared on
+          a timer, so an idle viewer keeps drawing nothing ([0068]). */}
+      {flash && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed bottom-8 left-1/2 z-[75] -translate-x-1/2 rounded-full bg-slate-100/95 px-4 py-2 text-sm font-medium text-bar shadow-lg"
+        >
+          {flash}
+        </div>
+      )}
+
       {movePicker && (
         <MoveDialog
           src={movePicker.src}
@@ -2158,118 +2396,6 @@ function AgentColumn({
             <span>Focus a terminal pane to mirror its agent here.</span>
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-// CodeBlock overrides react-markdown's <pre> for fenced (```) code blocks,
-// floating a copy button over it. We read the rendered text off the <pre>
-// via a ref (innerText) instead of walking the markdown AST, so it copies
-// exactly what's shown regardless of nested syntax nodes. writeClipboard
-// handles the HTTPS (async clipboard) vs plain-HTTP (execCommand) split, so
-// copying works on the tailnet's http:// deployment too. Inline `code` is
-// untouched — only fenced blocks render through <pre>.
-function CodeBlock({ children }: { children?: ReactNode }) {
-  const ref = useRef<HTMLPreElement>(null);
-  const [copied, setCopied] = useState(false);
-  const onCopy = useCallback(() => {
-    const text = ref.current?.innerText ?? "";
-    if (!text) return;
-    noteUserCopy(); // 0077 A10: don't let a session's OSC 52 swap this out
-    writeClipboard(text)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
-      })
-      .catch(() => {});
-  }, []);
-  return (
-    <div className="cc-codeblock">
-      <button type="button" className="cc-copy-btn" onClick={onCopy} aria-label="Copy code">
-        {copied ? "Copied" : "Copy"}
-      </button>
-      <pre ref={ref}>{children}</pre>
-    </div>
-  );
-}
-
-// TaskCheckbox is the enabled, styled checkbox rendered in reading mode in place
-// of react-markdown's disabled task-list input. It's purely presentational + one
-// callback; the actual source rewrite + save happens in the parent. `preventDefault`
-// on press stops a tap from focus-stealing / scroll-jumping on the phone PWA (the
-// [0009] lesson); the toggle runs on click so keyboard (Enter/Space) works too.
-function TaskCheckbox({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      aria-label={checked ? "Mark task incomplete" : "Mark task complete"}
-      className={"cc-task-checkbox" + (checked ? " is-checked" : "")}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onToggle();
-      }}
-    />
-  );
-}
-
-// makeMarkdownComponents builds the react-markdown component overrides for the
-// reading view: the fenced-code copy button (`pre`) plus a task-list `li` that
-// swaps react-markdown's disabled checkbox for an enabled, clickable one. The
-// `<li>` carries the source position via remark's `node.position` (the input
-// itself has none), so toggling is anchored to the exact line — robust to
-// duplicate text and nesting (Part A). Built per-`onToggleTask` so the handler
-// stays current.
-function makeMarkdownComponents(onToggleTask: (sourceOffset: number) => void) {
-  return {
-    pre: CodeBlock,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    li: (props: any) => {
-      const cls: unknown = props.node?.properties?.className;
-      const isTask = Array.isArray(cls) && cls.includes("task-list-item");
-      const offset: unknown = props.node?.position?.start?.offset;
-      if (isTask && typeof offset === "number") {
-        const kids = Children.toArray(props.children);
-        const idx = kids.findIndex(
-          (k) => isValidElement(k) && (k as ReactElement<{ type?: string }>).props.type === "checkbox"
-        );
-        if (idx >= 0) {
-          const checked = !!(kids[idx] as ReactElement<{ checked?: boolean }>).props.checked;
-          const rest = kids.filter((_, i) => i !== idx);
-          return (
-            <li className={"task-list-item" + (checked ? " cc-task-done" : "")}>
-              <TaskCheckbox checked={checked} onToggle={() => onToggleTask(offset)} />
-              {rest}
-            </li>
-          );
-        }
-      }
-      return <li>{props.children}</li>;
-    },
-  };
-}
-
-// ReadingView renders the markdown fully (Obsidian's "reading mode"). It shares
-// the writing surface's centered measure so toggling Edit<->Read doesn't shift
-// the text column. `onToggleTask` flips a task-list checkbox at a source offset.
-function ReadingView({
-  content,
-  onToggleTask,
-}: {
-  content: string;
-  onToggleTask: (sourceOffset: number) => void;
-}) {
-  const components = useMemo(() => makeMarkdownComponents(onToggleTask), [onToggleTask]);
-  return (
-    <div className="h-full overflow-y-auto px-6 py-10">
-      <div className="cc-prose mx-auto" style={{ maxWidth: "var(--cc-measure, 44rem)" }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-          {content}
-        </ReactMarkdown>
       </div>
     </div>
   );

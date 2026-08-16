@@ -262,6 +262,40 @@ pub trait Store: Send + Sync {
     /// invite to `declined`. Returns true if a grant went away.
     async fn leave_grant(&self, grantee: &str, share_id: &str) -> bool;
 
+    // ── read-only link grants (proposal 0083 Part C) ──────────────────────────
+    // Their own table, deliberately: see `migrations/0014_link_shares.sql`. A
+    // link grant has no grantee, so it can never enter `Visibility`, an inbox,
+    // or an accept path — that inertness is structural here, not a filter.
+
+    /// Mint a link grant. `token_hash` is the SHA-256 of the bearer token (the
+    /// plaintext never reaches the store); `path` is already canonicalized by
+    /// the owning agent. Owner-scoped: errors unless `owner_user_id` owns
+    /// `agent_id`. Returns the new grant id.
+    async fn link_share_create(
+        &self,
+        owner_user_id: &str,
+        agent_id: &str,
+        path: &str,
+        name: &str,
+        token_hash: &str,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<String>;
+
+    /// Resolve a bearer token hash to its grant — the ONLY read path for
+    /// `/api/link/:token`. Returns `None` for unknown **or expired**, so the
+    /// handler cannot accidentally tell those apart.
+    async fn link_share_by_token_hash(&self, token_hash: &str) -> Option<LinkShareRow>;
+
+    /// The owner's live link grants, newest first (the outbox rows).
+    async fn link_share_outbox(&self, owner_user_id: &str) -> Vec<LinkShareRow>;
+
+    /// Revoke one grant. Owner-scoped; true if a row went away.
+    async fn link_share_revoke(&self, owner_user_id: &str, id: &str) -> bool;
+
+    /// Replace a grant's token in place: the old URL dies at this instant, and
+    /// the id, path and expiry are unchanged. Owner-scoped; true if it applied.
+    async fn link_share_regenerate(&self, owner_user_id: &str, id: &str, token_hash: &str) -> bool;
+
     // ── email invites (proposal 0056 Part C) ───────────────────────────────────
     /// Create (or re-offer, upserting on `(email, resource)`) an email invite —
     /// the pre-account row that converts into a `share_invites` row when an
@@ -452,6 +486,28 @@ pub struct ShareInviteRow {
     pub status: String,
     pub created_at: i64,
     pub responded_at: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
+/// One `link_shares` row (proposal 0083 Part C) — a read-only, revocable grant
+/// on ONE file, held by whoever has the URL.
+///
+/// The token is **not** in this struct and never leaves the store: only its
+/// SHA-256 is persisted, and nothing needs the plaintext after the mint call
+/// returns it once. Re-viewing a link later shows this metadata and offers
+/// *Regenerate* — which is the answer to the re-viewability question [0073]
+/// said hashing tokens was blocked on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkShareRow {
+    pub id: String,
+    pub agent_id: String,
+    pub owner_user_id: String,
+    /// Absolute path on the agent, canonicalized agent-side at mint.
+    pub path: String,
+    /// Basename at mint time — a display copy; `path` is the identity.
+    pub name: String,
+    pub created_at: i64,
+    /// NULL/None = until revoked.
     pub expires_at: Option<i64>,
 }
 
@@ -2007,6 +2063,95 @@ impl Store for SqliteStore {
         gone
     }
 
+    // ── read-only link grants (proposal 0083 Part C) ──────────────────────────
+
+    async fn link_share_create(
+        &self,
+        owner_user_id: &str,
+        agent_id: &str,
+        path: &str,
+        name: &str,
+        token_hash: &str,
+        expires_at: Option<i64>,
+    ) -> anyhow::Result<String> {
+        self.assert_owns_agent(owner_user_id, agent_id).await?;
+        anyhow::ensure!(path.starts_with('/'), "path must be absolute");
+        anyhow::ensure!(token_hash.len() == 64, "token_hash must be a sha256 hex digest");
+        let id = cc_screen_auth::generate_token();
+        sqlx::query(
+            "INSERT INTO link_shares (id, agent_id, owner_user_id, token_hash, path, name, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(&id)
+        .bind(agent_id)
+        .bind(owner_user_id)
+        .bind(token_hash)
+        .bind(path)
+        .bind(name)
+        .bind(now_secs() as i64)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("link_share_create: {e}"))?;
+        Ok(id)
+    }
+
+    async fn link_share_by_token_hash(&self, token_hash: &str) -> Option<LinkShareRow> {
+        // Expiry is part of the WHERE clause on purpose: an expired grant is
+        // indistinguishable from an unknown one all the way down to the store,
+        // so no handler can grow a branch that tells them apart.
+        let now = now_secs() as i64;
+        let row = sqlx::query(
+            "SELECT * FROM link_shares
+              WHERE token_hash = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        link_share_row(&row)
+    }
+
+    async fn link_share_outbox(&self, owner_user_id: &str) -> Vec<LinkShareRow> {
+        let now = now_secs() as i64;
+        let rows = sqlx::query(
+            "SELECT * FROM link_shares
+              WHERE owner_user_id = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+              ORDER BY created_at DESC",
+        )
+        .bind(owner_user_id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.iter().filter_map(link_share_row).collect()
+    }
+
+    async fn link_share_revoke(&self, owner_user_id: &str, id: &str) -> bool {
+        sqlx::query("DELETE FROM link_shares WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(id)
+            .bind(owner_user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
+    async fn link_share_regenerate(&self, owner_user_id: &str, id: &str, token_hash: &str) -> bool {
+        if token_hash.len() != 64 {
+            return false;
+        }
+        sqlx::query("UPDATE link_shares SET token_hash = ?1 WHERE id = ?2 AND owner_user_id = ?3")
+            .bind(token_hash)
+            .bind(id)
+            .bind(owner_user_id)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false)
+    }
+
     async fn email_invite_create(
         &self,
         inviter: &str,
@@ -3382,6 +3527,18 @@ fn dummy_verify(pw: &str) {
 }
 
 /// Map an `email_invites` result row to an [`EmailInviteRow`].
+fn link_share_row(r: &sqlx::sqlite::SqliteRow) -> Option<LinkShareRow> {
+    Some(LinkShareRow {
+        id: r.try_get("id").ok()?,
+        agent_id: r.try_get("agent_id").ok()?,
+        owner_user_id: r.try_get("owner_user_id").ok()?,
+        path: r.try_get("path").ok()?,
+        name: r.try_get("name").ok()?,
+        created_at: r.try_get("created_at").ok()?,
+        expires_at: r.try_get::<Option<i64>, _>("expires_at").ok().flatten(),
+    })
+}
+
 fn email_invite_row(r: &sqlx::sqlite::SqliteRow) -> Option<EmailInviteRow> {
     Some(EmailInviteRow {
         id: r.try_get("id").ok()?,
@@ -3648,6 +3805,98 @@ mod tests {
         );
         // A window that starts after the stamps sees nothing.
         assert_eq!(s.invites_emailed_since(now_secs() as i64 + 60).await, 0);
+    }
+
+    // Proposal 0083 Part C — link grants: mint, resolve-by-hash, expiry,
+    // revoke, regenerate, ownership scoping, and the inertness that matters.
+    #[tokio::test]
+    async fn link_shares_mint_resolve_revoke_and_regenerate() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        let hash = |t: &str| cc_screen_auth::sha256_hex(t);
+
+        // Owner-scoped: you cannot publish a file on someone else's machine.
+        assert!(s
+            .link_share_create(&bob, &agent, "/home/a/x.md", "x.md", &hash("tok-bob"), None)
+            .await
+            .is_err());
+        // Shape checks: absolute path, real digest.
+        assert!(s.link_share_create(&alice, &agent, "x.md", "x.md", &hash("t"), None).await.is_err());
+        assert!(s.link_share_create(&alice, &agent, "/home/a/x.md", "x.md", "nothex", None).await.is_err());
+
+        let id = s
+            .link_share_create(&alice, &agent, "/home/a/tasks.md", "tasks.md", &hash("tok-1"), None)
+            .await
+            .unwrap();
+
+        // Resolution is by HASH — the plaintext is never stored, so a lookup by
+        // the token itself finds nothing.
+        let row = s.link_share_by_token_hash(&hash("tok-1")).await.expect("live grant resolves");
+        assert_eq!(row.id, id);
+        assert_eq!(row.path, "/home/a/tasks.md");
+        assert_eq!(row.name, "tasks.md");
+        assert!(s.link_share_by_token_hash("tok-1").await.is_none(), "plaintext is not a key");
+        assert!(s.link_share_by_token_hash(&hash("guessed")).await.is_none());
+
+        // The owner's outbox lists it; nobody else's does.
+        assert_eq!(s.link_share_outbox(&alice).await.len(), 1);
+        assert!(s.link_share_outbox(&bob).await.is_empty());
+
+        // Regenerate: the old URL dies at that instant, the id/path survive.
+        assert!(!s.link_share_regenerate(&bob, &id, &hash("tok-2")).await, "not bob's to rotate");
+        assert!(s.link_share_regenerate(&alice, &id, &hash("tok-2")).await);
+        assert!(s.link_share_by_token_hash(&hash("tok-1")).await.is_none(), "old token is dead");
+        let row = s.link_share_by_token_hash(&hash("tok-2")).await.unwrap();
+        assert_eq!(row.id, id, "same grant, new token");
+        assert_eq!(row.path, "/home/a/tasks.md");
+
+        // Expiry is enforced in the store, so no handler can branch on it.
+        let past = now_secs() as i64 - 60;
+        s.link_share_create(&alice, &agent, "/home/a/old.md", "old.md", &hash("tok-old"), Some(past))
+            .await
+            .unwrap();
+        assert!(s.link_share_by_token_hash(&hash("tok-old")).await.is_none(), "expired ⇒ unknown");
+        assert_eq!(s.link_share_outbox(&alice).await.len(), 1, "expired rows are not listed");
+
+        // Revoke is owner-scoped and terminal.
+        assert!(!s.link_share_revoke(&bob, &id).await);
+        assert!(s.link_share_revoke(&alice, &id).await);
+        assert!(s.link_share_by_token_hash(&hash("tok-2")).await.is_none());
+        assert!(!s.link_share_revoke(&alice, &id).await, "idempotent");
+    }
+
+    // The inertness claim, tested where it can actually be observed: a link
+    // grant confers NOTHING through the sharing pipeline. It cannot appear in a
+    // Visibility (which never reads this table), an inbox, or a received list.
+    #[tokio::test]
+    async fn a_link_grant_is_inert_everywhere_but_its_own_table() {
+        let s = SqliteStore::in_memory().await;
+        let alice = s.create_user("alice@x.com", "password12345").await.unwrap();
+        let bob = s.create_user("bob@x.com", "password23456").await.unwrap();
+        let (_t, agent) = s.upsert_agent(&alice, "laptop").await.unwrap();
+        s.link_share_create(
+            &alice,
+            &agent,
+            "/home/a/tasks.md",
+            "tasks.md",
+            &cc_screen_auth::sha256_hex("tok"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        for who in [&alice, &bob] {
+            assert!(s.visibility_rows(who).await.is_empty(), "never a visibility row");
+            assert!(s.share_inbox(who).await.is_empty(), "never an inbox row");
+            assert!(s.shares_to_me(who).await.is_empty(), "never a received grant");
+            assert!(s.share_outbox(who).await.is_empty(), "not a share invite");
+        }
+        // And unlinking the machine takes its links with it (FK cascade).
+        assert_eq!(s.link_share_outbox(&alice).await.len(), 1);
+        assert!(s.delete_agent(&alice, &agent).await);
+        assert!(s.link_share_outbox(&alice).await.is_empty(), "unlink revokes its link grants");
     }
 
     // The §4.1 keystone's data half: a token resolves to its OWNER's agent and

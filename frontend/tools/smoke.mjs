@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 
 const base = process.env.BASE || "http://127.0.0.1:8840";
 const exe = process.env.CHROME;
@@ -379,6 +379,123 @@ async function recentSectionPass() {
 // Every assertion here reads [data-pane-active] (Part E); the whole pass fails
 // on the pre-fix build, first at the focused-input check (Part H), then at the
 // stuck arrow (Part A) and the swallowed prefix (Part C).
+// ── Proposal 0083 Parts A/B ───────────────────────────────────────────────────
+// The whole reason the proposal exists: a URL you can bookmark opens the file
+// with ZERO clicks, on desktop and on a phone. Also covered here: the folder
+// form, the heal-don't-latch path for a link whose file is gone, and that the
+// address bar mints the link itself (⌘D is the "create bookmark" gesture).
+async function deepLinkPass() {
+  // Links are home-relative by construction (fileLink.ts), so the seeded file
+  // has to be under $HOME for there to be a URL at all.
+  const rel = relative(homedir(), editFile).split(sep).join("/");
+  if (rel.startsWith("..")) {
+    console.log("SKIP deep-link pass: CCWEB_SHARE_DIR is outside $HOME, so the file has no link form");
+    return;
+  }
+  const fileUrl = "/file/-/" + rel.split("/").map(encodeURIComponent).join("/");
+  const dirUrl = "/file/-/" + relative(homedir(), shareDir).split(sep).map(encodeURIComponent).join("/") + "/";
+
+  const dctx = await browser.newContext({
+    viewport: { width: 1280, height: 820 },
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  dpage.on("console", (m) => {
+    // The healing step below deliberately requests a file that isn't there, and
+    // Chrome logs every 4xx as a console error. That one is the assertion, not
+    // a defect — everything else still fails the pass.
+    if (m.type() === "error" && !m.text().includes("Failed to load resource")) {
+      derrs.push("console: " + m.text());
+    }
+  });
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  try {
+    // ── Desktop: one navigation, zero clicks ────────────────────────────────
+    await dpage.goto(base + fileUrl, { waitUntil: "domcontentloaded" });
+    await dpage.waitForSelector(".cm-content", { timeout: 15000 });
+    const body = await dpage.locator(".cm-content").first().innerText();
+    if (!body.includes("Smoke Heading")) {
+      fail(`deep link opened the editor but not the file (got: ${body.slice(0, 80)})`);
+      return;
+    }
+    // The URL is NOT stripped on success — that is the bookmark.
+    let path = await dpage.evaluate(() => location.pathname);
+    if (path !== fileUrl) {
+      fail(`deep link rewrote the URL to ${path}, expected ${fileUrl}`);
+      return;
+    }
+
+    // Editing through a deep-linked buffer is the ordinary editor.
+    await dpage.locator(".cm-content").first().click();
+    await dpage.keyboard.press("End");
+    await dpage.keyboard.type(" EDITED-BY-LINK");
+    await dpage.waitForTimeout(1200); // autosave debounce
+    if (!readFileSync(editFile, "utf8").includes("EDITED-BY-LINK")) {
+      fail("a deep-linked file opened read-only — Part A is the app, authenticated as you");
+      return;
+    }
+
+    // ── Copy link mints exactly the URL we arrived on ───────────────────────
+    await dpage.getByRole("button", { name: "Copy link to this file" }).click({ timeout: 8000 });
+    const copied = await dpage.evaluate(() => navigator.clipboard.readText());
+    if (copied !== base.replace(/\/+$/, "") + fileUrl) {
+      fail(`Copy link produced ${copied}, expected ${base + fileUrl}`);
+      return;
+    }
+
+    // ── The folder form opens the tree, not a buffer ────────────────────────
+    await dpage.goto(base + dirUrl, { waitUntil: "domcontentloaded" });
+    await dpage.getByRole("button", { name: "ccwebsmoke_edit.md", exact: true }).first().waitFor({ timeout: 15000 });
+    if ((await dpage.locator(".cm-content").count()) > 0) {
+      fail("the folder form opened a file buffer");
+      return;
+    }
+
+    // ── Heal, don't latch: a link to a file that isn't there ────────────────
+    await dpage.goto(base + "/file/-/" + rel.replace(/[^/]+$/, "ccwebsmoke_vanished.md"), {
+      waitUntil: "domcontentloaded",
+    });
+    await dpage.getByText(/isn’t here anymore|isn't here anymore/).waitFor({ timeout: 15000 });
+    if ((await dpage.locator(".cm-content").count()) > 0) {
+      fail("a stale deep link opened a buffer instead of healing to the tree");
+      return;
+    }
+
+    // ── Phone: the device this proposal exists for. Zero taps. ──────────────
+    const pctx = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+    });
+    const ppage = await pctx.newPage();
+    try {
+      await ppage.goto(base + fileUrl, { waitUntil: "domcontentloaded" });
+      await ppage.waitForSelector(".cm-content", { timeout: 15000 });
+      const ptext = await ppage.locator(".cm-content").first().innerText();
+      if (!ptext.includes("Smoke Heading")) {
+        fail("phone deep link didn't open the file with zero taps");
+        return;
+      }
+      // The session drawer must not have covered it (0083 Mobile/touch).
+      if (await ppage.getByPlaceholder(/search sessions/i).isVisible().catch(() => false)) {
+        fail("the session drawer opened over a phone deep link");
+        return;
+      }
+    } finally {
+      await pctx.close();
+    }
+
+    if (derrs.length) fail("deep-link JS errors: " + derrs.join("; "));
+  } catch (e) {
+    if (derrs.length) console.error("deep-link JS errors:\n  " + derrs.join("\n  "));
+    fail("deep-link pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
 async function gridKeyboardPass() {
   const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
   const dpage = await dctx.newPage();
@@ -1051,7 +1168,9 @@ try {
     if (process.exitCode === 1) throw new Error("recent-section pass failed");
     await gridKeyboardPass();
     if (process.exitCode === 1) throw new Error("grid keyboard pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK)");
+    await deepLinkPass();
+    if (process.exitCode === 1) throw new Error("deep-link pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; file deep links: desktop + phone zero-tap, folder form, heal, Copy link OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

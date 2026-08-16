@@ -1016,6 +1016,11 @@ pub async fn require_client_auth(State(hub): State<HubState>, mut req: Request, 
         // The org-invite landing (proposal 0063 B2) is public like its 0056
         // sibling: the token is the capability, the page renders before login.
         || path.starts_with("/api/org-invite/")
+        // The read-only link grant (proposal 0083 Part C): the token IS the
+        // capability and its whole purpose is a reader with no account. The
+        // handlers resolve it against their own table — never `Visibility`, and
+        // never `file_route` — and can only read; see `link.rs`.
+        || path.starts_with("/api/link/")
         || matches!(path.as_str(), "/api/device/client/code" | "/api/device/client/token");
     // The Stripe webhook (proposal 0058 B2) authenticates via its Stripe-Signature
     // HMAC (verified in the handler), not a session cookie — and Stripe sends no

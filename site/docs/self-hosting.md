@@ -194,6 +194,13 @@ Gotchas:
 - **Browser 403s after fronting with your own domain?** Add the domain to
   `CCWEB_ALLOWED_ORIGINS` (the hub's cross-origin/DNS-rebinding guard only
   auto-accepts same-origin, raw IPs, `localhost`, and `*.ts.net`).
+- **Your proxy's access log is credential material** if anyone uses read-only
+  file links (multi-tenant only). Those URLs carry their token in the path
+  (`/s/<token>`, `/api/link/<token>`); the hub stores only a hash of it and
+  never logs the full path, but a proxy that logs request paths logs the live
+  token. Keep those logs short-lived and tightly scoped, or filter `/s/*` and
+  `/api/link/*` out of path logging. A leaked one is fixed the same way as any
+  other: revoke, or mint a new URL.
 
 ## Environment reference
 

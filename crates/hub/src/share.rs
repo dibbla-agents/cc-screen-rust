@@ -23,7 +23,12 @@ use crate::state::HubState;
 
 #[derive(Deserialize)]
 pub struct CreateShareReq {
-    /// The recipient, named by account email.
+    /// The recipient, named by account email. Defaulted since 0083: a
+    /// `kind:"link"` share has no recipient at all and must not have to send an
+    /// empty string to satisfy the extractor. Every email-bearing arm still
+    /// runs `validate_email_address`, so an omitted address 400s there exactly
+    /// as an empty one always has.
+    #[serde(default)]
     grantee_email: String,
     /// The machine label to share (resolved under the inviter's own scope).
     #[serde(default)]
@@ -34,6 +39,18 @@ pub struct CreateShareReq {
     /// Owner-peek (agent invites only): keep sight of the grantee's sessions.
     #[serde(default)]
     owner_peek: bool,
+    /// Proposal 0083 Part C — `"link"` selects the read-only link grant: one
+    /// file, no grantee, the URL is the recipient. Absent/empty keeps the
+    /// pre-0083 behaviour byte-for-byte, so an older client is unaffected.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The file a link grant serves (absolute on the agent; canonicalized
+    /// agent-side at mint). Ignored by every other kind.
+    #[serde(default)]
+    path: Option<String>,
+    /// Optional expiry, unix seconds. NULL/absent = until revoked.
+    #[serde(default)]
+    expires_at: Option<i64>,
 }
 
 // ── The invite abuse bounds (proposal 0073 C1) ────────────────────────────────
@@ -210,6 +227,24 @@ pub async fn create(State(hub): State<HubState>, headers: HeaderMap, Json(req): 
                 .to_string(),
         )
             .into_response();
+    }
+    // Proposal 0083 Part C — the link arm, taken BEFORE the grantee-email
+    // validation below. That validation used to sit above every arm ([0073] C3
+    // put it there so a bad address 400s before any row is written and before
+    // the account-existence arms diverge); a link grant has no grantee at all,
+    // so it would have failed on an empty string it is never supposed to carry.
+    // Moving the arm above it is the one real fork this proposal needs, and it
+    // is safe precisely because the two paths share no downstream state: the
+    // email validation still guards BOTH email-bearing arms, unchanged.
+    if req.kind.as_deref() == Some("link") {
+        return crate::link::mint(
+            &hub,
+            &actor,
+            &req.machine,
+            req.path.as_deref().unwrap_or_default(),
+            req.expires_at,
+        )
+        .await;
     }
     // Address validation at the API boundary (proposal 0073 C3): 400 before any
     // row is written, and before the arms diverge — the answer is deterministic
@@ -455,6 +490,10 @@ pub async fn outbox(State(hub): State<HubState>, headers: HeaderMap) -> Response
             "inviteUrl": invite_url(&row.token),
         }));
     }
+    // Read-only link grants (proposal 0083 Part C), labeled by the file's name.
+    // Never the token — only its hash is stored, so there is nothing here to
+    // leak even by accident; managing one means Revoke or Regenerate.
+    out.extend(crate::link::outbox_rows(&hub, &actor).await);
     Json(out).into_response()
 }
 
@@ -542,7 +581,10 @@ pub async fn revoke(State(hub): State<HubState>, headers: HeaderMap, Path(id): P
     }
     match hub.share_revoke(&actor, &id).await {
         ShareOutcome::NotFound => {
-            if hub.email_invite_revoke(&actor, &id).await {
+            // The fall-through chain: a share invite, then an email invite, then
+            // a link grant (proposal 0083 Part C). One Revoke action, every kind
+            // of share — the client doesn't have to know which table it's in.
+            if hub.email_invite_revoke(&actor, &id).await || crate::link::revoke(&hub, &actor, &id).await {
                 (StatusCode::OK, Json(json!({ "status": "revoked" }))).into_response()
             } else {
                 (StatusCode::NOT_FOUND, "no such invite").into_response()

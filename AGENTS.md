@@ -446,6 +446,48 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   `gridKeyboardPass()` is the coverage, and its readiness helper is
   `waitAttached` (the old `[title="open"]` selector matched nothing for months).
   See proposal 0081.
+- **A file has a URL now, and a link grant is not a share (0083).** The app had
+  no URLs at all: every `openEditor` call passed `null` and the address bar
+  stayed `/` forever. `frontend/src/fileLink.ts` is the whole grammar —
+  `/file/<machine>/<home-relative-path>` (trailing `/` = the folder form,
+  `-` = the default machine), home-relative because everything browsable lives
+  under the agent's `$HOME` and a bare path means nothing on another machine
+  ([0044]'s rule; `?session=`'s missing machine is the anti-pattern [0078]
+  named). Three things are load-bearing on the client: the consumer is modeled
+  on the `?session=` one but **does not strip the URL** (Part B's `urlSync`
+  owns the bar from then on, and it is the *only* writer — it refuses to touch
+  anything that isn't `/` or `/file/…`, so `/activate`, `/invite/`, `/billing/`
+  and `/s/` are safe); a folder link must **suppress [0019]'s desktop
+  viewer-state restore** (`initialDir` short-circuits the `initialPath`
+  effect) or the remembered file silently reopens over the folder the user
+  asked for; and a read that fails for a path we were *asked* to open **heals
+  to the tree** with one quiet line ([0079]) instead of the error banner a
+  tree click still gets.
+  Part C is the product's first unauthenticated content endpoint, and its
+  invariants live in `crates/hub/src/link.rs`: **its own resolver** (SHA-256 of
+  the token → one `(agent_id, path)`; it never calls `file_route`, never
+  builds a `Visibility`), the **read op hardcoded** as a literal, **one
+  undifferentiated 404** for malformed/unknown/revoked/expired/gone (the 503
+  is reachable only *after* the grant is proven live — and the per-source
+  throttle answers with that same 404, never a 429, because a differing status
+  is an oracle and `source_key` is advisory), and a **per-token** rate limit
+  that is the bound actually protecting the owner's laptop. Link grants live in
+  their **own table** (`migrations/0014_link_shares.sql`), not as a fourth
+  `shares.kind`: `shares.grantee_user_id` is `NOT NULL` and every reader of
+  that table assumes a grantee, so a separate table makes "invisible to
+  `Visibility`/inbox/received/accept" structural instead of a filter someone
+  can forget. The API surface stays uniform anyway — `POST /api/shares
+  {kind:"link"}` returning `{id, status, invite_url}` ([0074] §C1/§D4; the
+  field stays `invite_url` even though the URL is `/s/<token>`), the outbox,
+  and the same `POST /api/shares/:id/revoke` fall-through chain. The token is
+  **hashed at rest** ([0073] flagged invite tokens are not), which is why the
+  URL is shown once and *Regenerate* exists.
+  `frontend/src/components/ReadingView.tsx` is now shared between the editor
+  and `/s/`, and its header comment is a **security boundary**:
+  react-markdown's defaults (no raw HTML, `javascript:`/`data:` stripped) are
+  what make untrusted prose safe on the product's origin — never add
+  `rehype-raw` or `dangerouslySetInnerHTML` there. A vitest pins both the
+  source and the rendered output. See proposal 0083.
 - **`crates/protocol` is the contract.** Keep JSON field names matching what the
   React PWA expects; the parity is covered by tests in the protocol crate.
 - **Frontend must be built before the server compiles** (embedded at build time).

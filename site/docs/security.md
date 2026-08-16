@@ -162,6 +162,56 @@ well. What that does and doesn't mean:
   relay does to your messages is between you and that provider; the pixel above
   is a property of ours, not of cc-screen.
 
+## Read-only link grants
+
+A **read-only link** (`/s/<token>`) is the one thing in cc-screen that anyone
+can use without an account, so it's worth being exact about it.
+
+**What it reaches.** Exactly one file, and only to read it. The link is
+resolved against its own table to a single `(machine, path)` pair; it never
+touches the sharing model, never produces the "visibility" that machine and
+session shares are built on, and the endpoint behind it is hardcoded to a read.
+There is no endpoint anywhere — write, list, search, attach, upload — that
+accepts a link token. It serves what our editor serves: text, up to 5 MiB.
+
+**What it can't reach.** The folder the file is in. The other files on the
+machine. The sessions, the terminal, the machine list, your account. A link
+holder can't enumerate other links either: the token is 32 random bytes, and
+unknown, revoked, expired and deleted-file all answer with the same
+indistinguishable "not found".
+
+**The three things a holder does learn.** Be aware of them before you share:
+
+1. **The file's contents**, until you revoke — including future edits. It's a
+   live view, not a copy.
+2. **Whether the link is valid**, trivially, by using it.
+3. **Whether your machine is online.** A valid link on a sleeping machine
+   answers "this machine is offline" rather than "not found", so someone
+   holding a live link can poll it to see when your laptop is up. That's a
+   deliberate trade — a working bookmark shouldn't look dead because you
+   closed your lid — but it is a presence signal about you.
+
+**The token at rest and in transit.** We store only a SHA-256 fingerprint of
+it, never the token, which is why we show the URL exactly once and offer
+**New URL** instead of showing it again. But the token rides in the URL path,
+so it lands wherever URLs land: the holder's browser history, and the access
+logs of any reverse proxy in front of the hub. (Self-hosting? Treat those logs
+as credential material — see
+[Self-hosting](../self-hosting/#environment-reference).) Responses carry
+`no-store` and no cache validators, so no browser, proxy or CDN keeps the
+content after you revoke.
+
+**Two edges worth knowing.** Renaming the file breaks the link — a grant is
+never silently re-pointed at something else. But *deleting* the file and
+creating a new one at the same path serves the new file under the old token,
+because the grant is the path. Revoke rather than rely on that.
+
+**Rendering.** The shared page renders your file's markdown, but never as
+HTML: raw HTML in the file shows up as text, and `javascript:` links are
+stripped. A fixed banner says the content belongs to the sharer, not to
+cc-screen. Minting requires a paid account, which is also the abuse handle:
+every link is attributable.
+
 ## Transport: when TLS is required
 
 The agent fully trusts whatever answers at its hub URL — once connected, it

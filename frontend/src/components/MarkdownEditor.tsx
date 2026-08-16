@@ -20,6 +20,10 @@ interface Props {
   // Proposal 0038: hand the live EditorView up to the overlay so it can drive
   // find-in-file imperatively (toolbar 🔎 button + the layered-Esc ladder).
   viewRef?: MutableRefObject<EditorView | null>;
+  // Proposal 0083 Part C: a non-editable buffer — the `/s/<token>` link-grant
+  // page, which highlights code but must never offer a way to change it. Drops
+  // the save keymap too, so there is no path to a write from this surface.
+  readOnly?: boolean;
 }
 
 // The editing surface comes in two flavours. Markdown = a centered editorial
@@ -89,7 +93,15 @@ const codeTheme = EditorView.theme(
 // preview; for other text files it lazy-loads a syntax-highlighting language by
 // extension (language-data's descriptors load on demand). A Mod-s keymap (high
 // precedence so it beats the browser's Save dialog) calls onSave.
-export default function MarkdownEditor({ value, onChange, filename, markdown, onSave, viewRef }: Props) {
+export default function MarkdownEditor({
+  value,
+  onChange,
+  filename,
+  markdown,
+  onSave,
+  viewRef,
+  readOnly = false,
+}: Props) {
   // Keep onSave in a ref so the Mod-s keymap doesn't force the whole extension
   // set (and the live-preview plugin) to rebuild on every keystroke — the
   // parent passes a fresh onSave each render.
@@ -135,19 +147,24 @@ export default function MarkdownEditor({ value, onChange, filename, markdown, on
       // Find-in-file (0038): Mod-f opens the floating widget; works for code and
       // markdown edit alike. Above basicSetup, below the Mod-s save keymap.
       findInFileExtensions(),
-      Prec.highest(
-        keymap.of([
-          {
-            key: "Mod-s",
-            preventDefault: true,
-            run: () => {
-              onSaveRef.current?.();
-              return true;
-            },
-          },
-        ])
-      ),
     ];
+    // No save path at all on a read-only surface (proposal 0083 Part C).
+    if (!readOnly) {
+      exts.push(
+        Prec.highest(
+          keymap.of([
+            {
+              key: "Mod-s",
+              preventDefault: true,
+              run: () => {
+                onSaveRef.current?.();
+                return true;
+              },
+            },
+          ])
+        )
+      );
+    }
     if (markdown) {
       exts.push(markdownExtensions(), livePreview());
     } else if (codeLang) {
@@ -157,12 +174,14 @@ export default function MarkdownEditor({ value, onChange, filename, markdown, on
       exts.push(codeHighlightExtension());
     }
     return exts;
-  }, [markdown, codeLang]);
+  }, [markdown, codeLang, readOnly]);
 
   return (
     <CodeMirror
       value={value}
       onChange={onChange}
+      editable={!readOnly}
+      readOnly={readOnly}
       extensions={extensions}
       theme={markdown ? proseTheme : codeTheme}
       onCreateEditor={(view) => {

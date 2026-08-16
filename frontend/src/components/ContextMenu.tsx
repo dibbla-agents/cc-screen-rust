@@ -9,6 +9,14 @@ export type CtxTarget =
 export interface CtxHandlers {
   onOpenFile: (path: string) => void;
   onDownload: (path: string, name: string) => void;
+  // Proposal 0083 Part B — put this node's `/file/…` URL on the clipboard.
+  // Files and folders both (folders get the trailing-slash form). Called from
+  // the click handler so it runs inside a real user gesture, which is what
+  // `writeClipboard`'s execCommand fallback needs on plain HTTP.
+  onCopyLink?: (path: string, isDir: boolean) => void;
+  // Proposal 0083 Part C — mint a revocable, read-only link grant for a FILE.
+  // Absent on a single-tenant hub (and for folders, which v1 doesn't grant).
+  onShareLink?: (path: string, name: string) => void;
   onNewFile: (dir: string, name: string) => Promise<void>;
   onNewFolder: (dir: string, name: string) => Promise<void>;
   onRename: (path: string, name: string) => Promise<void>;
@@ -45,6 +53,8 @@ export default function ContextMenu({
   onClose,
   onOpenFile,
   onDownload,
+  onCopyLink,
+  onShareLink,
   onNewFile,
   onNewFolder,
   onRename,
@@ -148,6 +158,16 @@ export default function ContextMenu({
                 <button className={itemCls} onClick={() => { onDownload(target.path, target.name); onClose(); }}>
                   Download
                 </button>
+                {onCopyLink && (
+                  <button className={itemCls} onClick={() => { onCopyLink(target.path, false); onClose(); }}>
+                    Copy link
+                  </button>
+                )}
+                {onShareLink && (
+                  <button className={itemCls} onClick={() => { onShareLink(target.path, target.name); onClose(); }}>
+                    Share read-only link…
+                  </button>
+                )}
                 <button className={itemCls} onClick={() => startInput("rename")}>
                   Rename…
                 </button>
@@ -167,6 +187,11 @@ export default function ContextMenu({
                 <button className={itemCls} onClick={() => startInput("newfolder")}>
                   New folder…
                 </button>
+                {onCopyLink && (
+                  <button className={itemCls} onClick={() => { onCopyLink(target.path, true); onClose(); }}>
+                    Copy link
+                  </button>
+                )}
                 {!target.root && (
                   <>
                     <button className={itemCls} onClick={() => startInput("rename")}>

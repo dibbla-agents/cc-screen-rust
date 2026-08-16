@@ -19,6 +19,13 @@ export interface ShareSubject {
   // The owning machine label and (for a session share) the session name.
   machine: string;
   session?: string;
+  // Proposal 0083 Part C — a FILE subject puts the form in `link` mode: no
+  // recipient (the URL is the recipient), read-only, one file. `path` is the
+  // absolute path on the agent (the hub canonicalizes it at mint); `pathLabel`
+  // is the home-relative form we echo back so the user can see what they are
+  // about to publish ([0074] §D2's read-only path echo).
+  path?: string;
+  pathLabel?: string;
 }
 
 export default function ShareForm({
@@ -46,29 +53,85 @@ export default function ShareForm({
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const isSession = !!subject.session;
+  // Proposal 0083 Part C — the link-grant mode. No recipient field, no
+  // owner-peek, no email at all: the URL is the recipient, and what it grants
+  // is read-only by construction (its own endpoints, hardcoded to the read op).
+  const isLink = !!subject.path;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const to = email.trim();
-    if (busy || !to) return;
+    if (busy || (!isLink && !to)) return;
     setBusy(true);
     setError(null);
     try {
-      const r = await createShare({
-        granteeEmail: to,
-        machine: subject.machine,
-        session: subject.session,
-        ownerPeek: isSession ? false : peek,
-      });
+      const r = await createShare(
+        isLink
+          ? { kind: "link", machine: subject.machine, path: subject.path }
+          : {
+              granteeEmail: to,
+              machine: subject.machine,
+              session: subject.session,
+              ownerPeek: isSession ? false : peek,
+            }
+      );
       // A relative link (no CCHUB_PUBLIC_URL) resolves against this origin.
       setInviteUrl(r.inviteUrl ? new URL(r.inviteUrl, window.location.origin).toString() : null);
       setDone(true);
       onShared?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not send the invite.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : isLink
+            ? "Could not create the link."
+            : "Could not send the invite."
+      );
     } finally {
       setBusy(false);
     }
+  }
+
+  // The link grant's success state. The URL is shown ONCE — only its SHA-256 is
+  // stored, so nothing can show it again; re-opening the share later offers
+  // *Regenerate* instead (which kills this URL at that instant).
+  if (done && isLink) {
+    return (
+      <div className="rounded-lg border border-amber/30 bg-amber/10 px-3 py-2.5 text-xs text-amber">
+        <div>
+          Read-only link created for <span className="font-semibold">{subject.title}</span>. Anyone with
+          this URL can read the file until you revoke it — copy it now, it isn’t shown again:
+        </div>
+        {inviteUrl && (
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-md border border-amber/30 bg-bar/60 px-2 py-1.5 font-mono text-[11px] text-slate-200">
+              {inviteUrl}
+            </code>
+            <button
+              type="button"
+              onClick={() => {
+                void writeClipboard(inviteUrl).catch(() => {});
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="min-h-11 shrink-0 rounded-md border border-amber/60 px-2.5 py-1.5 text-[11px] font-semibold text-amber transition hover:bg-amber/10"
+            >
+              {copied ? "Copied!" : "Copy link"}
+            </button>
+          </div>
+        )}
+        <div className="mt-2 text-[11px] text-slate-400">
+          Manage or revoke it under Shares in your account.
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="mt-2 min-h-11 rounded-md px-1.5 py-1 text-[11px] text-slate-400 transition hover:text-slate-200"
+        >
+          Done
+        </button>
+      </div>
+    );
   }
 
   if (done) {
@@ -135,9 +198,25 @@ export default function ShareForm({
           Share <span className="text-slate-200">{subject.title}</span>
         </div>
         <span className="shrink-0 rounded border border-accent/25 bg-accent/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent/80">
-          {isSession ? "view" : "use"}
+          {isLink ? "read-only" : isSession ? "view" : "use"}
         </span>
       </div>
+      {isLink ? (
+        <>
+          {/* Read-only path echo ([0074] §D2): the user sees exactly what they
+              are about to publish, and cannot edit it here — the path came from
+              their own tree and the agent canonicalizes it at mint. */}
+          <code className="block w-full overflow-x-auto whitespace-nowrap rounded-lg border border-edge bg-bar px-3 py-2.5 font-mono text-xs text-slate-300">
+            ~/{subject.pathLabel}
+          </code>
+          <p className="mt-2 text-[11px] text-slate-500">
+            Anyone with the URL can read this one file — no account needed, nothing else on{" "}
+            {subject.machine || "this machine"} reachable, and it can’t be edited through the link.
+            Revoke it any time.
+          </p>
+        </>
+      ) : (
+      <>
       <input
         autoFocus
         type="email"
@@ -168,6 +247,8 @@ export default function ShareForm({
       ) : (
         <p className="mt-2 text-[11px] text-slate-500">Shares only this session — not the rest of the machine.</p>
       )}
+      </>
+      )}
       {error && <div className="mt-2 text-[11px] text-claude">{error}</div>}
       <div className="mt-3 flex justify-end gap-2">
         <button
@@ -179,10 +260,10 @@ export default function ShareForm({
         </button>
         <button
           type="submit"
-          disabled={busy || !email.trim()}
+          disabled={busy || (!isLink && !email.trim())}
           className="min-h-11 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bar transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {busy ? "…" : "Share"}
+          {busy ? "…" : isLink ? "Create link" : "Share"}
         </button>
       </div>
     </form>

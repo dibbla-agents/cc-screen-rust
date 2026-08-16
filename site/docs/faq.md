@@ -82,6 +82,34 @@ shares and start a **team** — everyone on it sees everyone's sessions
 automatically, view-only. See
 [Using the web app → Sharing](../web-app/#sharing).
 
+## Can I share a file with someone who doesn't have an account?
+
+Yes — **Share read-only link…** on any file (right-click / long-press it in the
+file tree, or the editor's ⋯ menu) mints a URL that shows that one file,
+rendered and read-only, to whoever holds it. No account, no sign-in, and
+nothing else on your machine is reachable through it. It can't be edited
+through the link; editing means signing in.
+
+The URL is shown once (we store only a fingerprint of it), you can mint a
+replacement at any time, and you can revoke it from the dashboard's Sharing
+card — access stops immediately. See
+[Using the web app → Share a read-only link](../web-app/#share-a-read-only-link)
+and [Security](../security/#read-only-link-grants).
+
+## Can I bookmark a file?
+
+Yes. The address bar tracks whatever file the editor has open, so ⌘D (or ⭐, or
+"Add to Home Screen") captures it, and the bookmark reopens that file in one
+tap — on the phone too, where nothing was remembered before. You can also grab
+the URL without visiting the file: **Copy link** in the file tree's menu, the
+🔗 button in the editor toolbar, or `⌃B` `l`.
+
+A `/file/…` bookmark is an address, not a permission: it opens as you, with the
+access you already have, and a signed-out visit goes through sign-in first and
+then lands on the file. If the file has since moved, the link drops you in the
+file tree with a note instead of an error. See
+[Using the web app → Link to a file](../web-app/#link-to-a-file).
+
 ## How do teams work?
 
 You join by accepting an email invite, and the invite states the deal before

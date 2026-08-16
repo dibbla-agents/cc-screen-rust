@@ -508,6 +508,26 @@ export function KeyboardIcon({ className }: IconProps) {
   );
 }
 
+// A chain link — "copy a URL for this" (proposal 0083: the editor toolbar's
+// Copy link, beside Download).
+export function LinkIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11.5 4.5" />
+      <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L12.5 19.5" />
+    </svg>
+  );
+}
+
 // Three horizontal dots — the phone editor's overflow ("more actions") menu.
 export function MoreIcon({ className }: IconProps) {
   return (

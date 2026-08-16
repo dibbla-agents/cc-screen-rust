@@ -179,6 +179,8 @@ that field instead.
 - **`⌃B` `e`** opens the file browser / editor for the focused session.
 - **`⌃B` `f`** opens it and jumps straight to find-a-file.
 - **`⌃B` `t`** opens it and jumps to the tree filter.
+- **`⌃B` `l`** copies a link to the file the editor has open (see
+  [Link to a file](#link-to-a-file)).
 
 ## Files: browse, edit, cowork
 
@@ -200,6 +202,37 @@ plan or review docs agents produce.
   session is deleted, so it survives drafts and resumes). No X11 or desktop
   environment is needed on the machine.
 - **Downloads:** pull any file back out, PDFs render in-app.
+
+### Link to a file
+
+Every file has a URL, and the address bar shows it while the file is open —
+so **bookmarking a file is just ⌘D / ⭐**, and the bookmark opens it again in
+one tap, on desktop and on the phone alike:
+
+```
+https://app.ccscreen.dev/file/studio/projects/planning/tasks.md
+```
+
+The URL names the **machine** and the path **relative to that machine's home
+folder** — a path only means something on the machine whose tree produced it,
+so a link is never rewritten for someone else's box. A trailing `/` makes it a
+folder link, which opens the tree there instead of a file.
+
+To get the URL without visiting the file: **Copy link** in the file tree's
+right-click / long-press menu (files *and* folders), the 🔗 button in the
+editor's toolbar, or **`⌃B` `l`** while the editor is open.
+
+Two things worth knowing:
+
+- If you're signed out, the link takes you through sign-in and then opens the
+  file — you don't lose your place.
+- If the file has moved or been deleted, the link doesn't break in your face:
+  it drops you in the file tree with a one-line note. If the machine is simply
+  asleep, it says so and offers a retry.
+
+A `/file/…` link is *not* a permission — it's an address. It opens as **you**,
+with the access you already have. To let someone else read a file, see
+[Share a read-only link](#share-a-read-only-link).
 
 ## Notifications
 
@@ -233,6 +266,35 @@ whose operator hasn't configured a mail relay (those send no mail at all).
 You can see everything shared by you and with you on the dashboard's
 **Sharing** card, and revoke (or leave) any of it there. Access stops
 immediately on revoke.
+
+### Share a read-only link
+
+Sometimes the person you want to show a file to doesn't have an account and
+shouldn't need one. **Share read-only link…** — in the file tree's
+right-click / long-press menu, or the editor's ⋯ menu — mints a URL like:
+
+```
+https://app.ccscreen.dev/s/8Kq2…
+```
+
+Anyone holding that URL sees **that one file**, rendered and read-only. No
+account, no sign-in, and nothing else on your machine is reachable through it:
+not the folder it sits in, not the session, not the terminal. It cannot be
+edited through the link — editing means signing in.
+
+- **The URL is shown once.** Only a fingerprint of it is stored, so nobody
+  (including us) can show it to you again. Lost it? **New URL** on the row
+  mints a replacement and kills the old one at that instant.
+- **Revoke any time** from the **Sharing** card. Access stops immediately,
+  including for anyone who has the page open.
+- It serves text files (markdown renders as a page; code is
+  syntax-highlighted). PDFs, images and other binaries get a "no preview"
+  page rather than downloading.
+- A rename breaks the link on purpose — a grant is never silently re-pointed
+  at a different file.
+
+See [Security](../security/#read-only-link-grants) for exactly what a link
+holder can and cannot learn.
 
 ### Teams
 
