@@ -537,6 +537,92 @@ async function deepLinkPass() {
   }
 }
 
+// ── The phone editor gives every pixel to the text while you type ────────────
+// Playwright has no soft keyboard, so this fakes exactly what iOS does to the
+// page — shrink `visualViewport.height`, and (second case) push `offsetTop`
+// down as iOS does when it scrolls the layout viewport under the keyboard —
+// and asserts there is NO dead band left between the last line and the keys.
+// The band was real: the overlay is `fixed`, so it was pinned to the layout
+// viewport while sized to the visual one, and the status bar sat in what was
+// left. What remains above the keyboard after this is the browser's own form
+// accessory bar, which a web page cannot remove.
+async function phoneEditorKeyboardPass() {
+  const KEYBOARD = 336; // a typical iPhone keyboard + accessory bar, CSS px
+  const rel = relative(homedir(), editFile).split(sep).join("/");
+  if (rel.startsWith("..")) return; // no link form; the deep-link pass says so
+  const fileUrl = "/file/-/" + rel.split("/").map(encodeURIComponent).join("/");
+
+  const pctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  const ppage = await pctx.newPage();
+  const perrs = [];
+  ppage.on("pageerror", (e) => perrs.push("pageerror: " + e.message));
+  try {
+    await ppage.goto(base + fileUrl, { waitUntil: "domcontentloaded" });
+    await ppage.waitForSelector(".cm-content", { timeout: 15000 });
+    await ppage.waitForTimeout(800);
+
+    const measure = () =>
+      ppage.evaluate(() => {
+        const overlay = document.querySelector('.fixed.inset-0.z-\\[60\\]');
+        const ob = overlay.getBoundingClientRect();
+        const sc = document.querySelector(".cm-scroller").getBoundingClientRect();
+        return {
+          vvH: Math.round(visualViewport.height),
+          vvTop: Math.round(visualViewport.offsetTop),
+          overlayTop: Math.round(ob.top),
+          scrollerBottom: Math.round(sc.bottom),
+          footer: [...document.querySelectorAll("div")].some(
+            (d) => d.textContent?.includes("min read") && d.children.length === 3
+          ),
+        };
+      });
+
+    if (!(await measure()).footer) {
+      fail("the editor's status bar is missing while just reading");
+      return;
+    }
+
+    for (const offsetTop of [0, 90]) {
+      await ppage.evaluate(
+        ({ kb, offsetTop }) => {
+          const vv = window.visualViewport;
+          Object.defineProperty(vv, "height", { configurable: true, get: () => window.innerHeight - kb });
+          Object.defineProperty(vv, "offsetTop", { configurable: true, get: () => offsetTop });
+          vv.dispatchEvent(new Event("resize"));
+        },
+        { kb: KEYBOARD, offsetTop }
+      );
+      await ppage.waitForTimeout(250);
+      const m = await measure();
+      const keyboardTop = m.vvTop + m.vvH;
+      if (m.footer) {
+        fail(`the status bar still eats a row while typing (offsetTop=${offsetTop})`);
+        return;
+      }
+      if (m.overlayTop !== m.vvTop) {
+        fail(`the editor starts at ${m.overlayTop}, not the visible top ${m.vvTop}`);
+        return;
+      }
+      if (Math.abs(m.scrollerBottom - keyboardTop) > 1) {
+        fail(
+          `dead band above the keyboard: text ends at ${m.scrollerBottom}, keyboard at ${keyboardTop} (offsetTop=${offsetTop})`
+        );
+        return;
+      }
+    }
+    if (perrs.length) fail("phone keyboard-layout JS errors: " + perrs.join("; "));
+  } catch (e) {
+    fail("phone keyboard-layout pass: " + e.message);
+  } finally {
+    await pctx.close();
+  }
+}
+
 async function gridKeyboardPass() {
   const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
   const dpage = await dctx.newPage();
@@ -1211,7 +1297,9 @@ try {
     if (process.exitCode === 1) throw new Error("grid keyboard pass failed");
     await deepLinkPass();
     if (process.exitCode === 1) throw new Error("deep-link pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; file deep links: desktop + phone zero-tap, folder form, heal, Copy link OK)");
+    await phoneEditorKeyboardPass();
+    if (process.exitCode === 1) throw new Error("phone keyboard-layout pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; file deep links: desktop + phone zero-tap, folder form, heal, Copy link OK; phone editor: no dead band above the keyboard OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

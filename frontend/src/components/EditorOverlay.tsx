@@ -181,6 +181,11 @@ const LIVE_KEY = "ccweb.editorLiveSave";
 const LIVE_DEBOUNCE_MS = 700;
 const loadLiveSave = () => localStorage.getItem(LIVE_KEY) !== "0";
 
+// How much of the viewport has to disappear before we call it "the soft
+// keyboard is up". A URL bar collapsing costs tens of pixels; the smallest
+// phone keyboard costs well over two hundred.
+const KEYBOARD_MIN_PX = 120;
+
 // Desktop file-tree sidebar width (px). Drag the splitter on its right edge to
 // resize; persisted so it survives reopen/reload. Default matches the old fixed
 // Tailwind w-64 (16rem).
@@ -331,9 +336,12 @@ export default function EditorOverlay({
   // collapse into an overflow "⋯" menu (menuOpen).
   const [treePanelOpen, setTreePanelOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  // Soft-keyboard-aware height (iOS): the overlay is fixed/full-screen, so it
-  // must track visualViewport like the rest of the app does.
+  // Soft-keyboard-aware geometry (iOS): the overlay is fixed/full-screen, so it
+  // must track visualViewport like the rest of the app does. See the effect
+  // below for what each of the three values is for.
   const [vh, setVh] = useState<number | null>(null);
+  const [vvTop, setVvTop] = useState(0);
+  const [keyboardUp, setKeyboardUp] = useState(false);
 
   // The file tree backing both the desktop sidebar and the phone slide-over
   // panel. Enabled on both now (it's also what gives the phone a real folder to
@@ -755,12 +763,27 @@ export default function EditorOverlay({
     window.addEventListener("pointerup", onUp);
   }, []);
 
-  // visualViewport tracking.
+  // visualViewport tracking. Three values, not one:
+  //
+  //  * `vh` — how tall the visible area is (the keyboard eats into it);
+  //  * `vvTop` — where that area *starts*. iOS can scroll the layout viewport
+  //    when the keyboard opens, and this overlay is `fixed`, which pins it to
+  //    the LAYOUT viewport. Sizing it to the visual height while leaving it at
+  //    layout-top puts its bottom edge `offsetTop` pixels above the keyboard —
+  //    a dead band between the text and the keys. (App's own handler pins the
+  //    scroll to 0, which usually makes this 0; it is not reliably 0 during and
+  //    right after the keyboard animation, so we apply it rather than assume.)
+  //  * `keyboardUp` — the soft keyboard is showing. The threshold ignores the
+  //    URL bar collapsing (tens of pixels); a keyboard is hundreds.
   useEffect(() => {
     if (!open) return;
     const vv = window.visualViewport;
     if (!vv) return;
-    const apply = () => setVh(vv.height);
+    const apply = () => {
+      setVh(vv.height);
+      setVvTop(Math.round(vv.offsetTop));
+      setKeyboardUp(window.innerHeight - vv.height > KEYBOARD_MIN_PX);
+    };
     apply();
     vv.addEventListener("resize", apply);
     vv.addEventListener("scroll", apply);
@@ -1303,7 +1326,13 @@ export default function EditorOverlay({
   const ghostBtn =
     "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-panel hover:text-slate-100 active:bg-edge";
   const saveLabel = saving ? "Saving…" : dirty ? "Save" : "Saved";
-  const showFooter = status === "ready";
+  // The status bar (path · word count · Saved) earns its row when you're
+  // reading. While you're TYPING on a phone it does not: the screen is already
+  // split between the text and the keyboard, the browser wedges its own
+  // form-accessory bar in between, and every remaining pixel belongs to the
+  // words. Nothing is lost — the toolbar keeps the filename and the amber
+  // unsaved dot, which is the only part of this row you'd act on.
+  const showFooter = status === "ready" && !(!isDesktop && keyboardUp);
 
   // ── Find bar + results (proposal 0027) ───────────────────────────────────
   // Rendered as the header of the tree column in both the desktop sidebar and
@@ -1384,7 +1413,10 @@ export default function EditorOverlay({
       className={`fixed inset-0 z-[60] flex flex-col bg-bar text-slate-200 ${
         resizingTree || resizingAgent ? "cursor-col-resize select-none" : ""
       }`}
-      style={vh ? { height: `${vh}px` } : undefined}
+      // `top` overrides `inset-0`'s 0 so the box sits on the VISUAL viewport,
+      // not the layout one — otherwise a keyboard-induced scroll leaves a dead
+      // band between the last line of text and the keys.
+      style={vh ? { height: `${vh}px`, top: `${vvTop}px` } : undefined}
     >
       {/* ── Toolbar ───────────────────────────────────────────────────────── */}
       {/* relative z-40: the toolbar's `backdrop-blur` makes it a stacking
@@ -1959,7 +1991,16 @@ export default function EditorOverlay({
           <div
             onPointerDownCapture={releaseControl}
             className="min-h-0 flex-1 overflow-hidden"
-            style={{ "--cc-editor-font": `${editorFontSize}px`, background: SURFACE_BG } as CSSProperties}
+            style={
+              {
+                "--cc-editor-font": `${editorFontSize}px`,
+                // Collapse the writing surface's bottom pad while a phone
+                // keyboard is up: with no footer under it, 12vh of blank
+                // between the caret and the keys is pure dead space.
+                ...(!isDesktop && keyboardUp ? { "--cc-editor-pad-b": "1rem" } : null),
+                background: SURFACE_BG,
+              } as CSSProperties
+            }
           >
           {status === "loading" && (
             <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading…</div>

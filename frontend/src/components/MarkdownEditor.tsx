@@ -41,10 +41,14 @@ const proseTheme = EditorView.theme(
       fontSize: "var(--cc-editor-font, 15px)",
       caretColor: "#38bdf8",
       // A centered reading measure with breathing room top & bottom — the page,
-      // not the buffer. 12vh bottom padding keeps the last line off the footer.
+      // not the buffer.
       maxWidth: "var(--cc-measure, 44rem)",
       margin: "0 auto",
-      padding: "2rem 1.5rem 12vh",
+      // The bottom pad keeps the last line off the footer. It shrinks to
+      // nothing while a phone's soft keyboard is up (the overlay sets the
+      // variable): there is no footer then, and 12vh of blank between your
+      // caret and the keys is exactly the dead space you're trying to avoid.
+      padding: "2rem 1.5rem var(--cc-editor-pad-b, 12vh)",
     },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#38bdf8", borderLeftWidth: "2px" },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
@@ -69,7 +73,7 @@ const codeTheme = EditorView.theme(
       fontFamily: "var(--cc-mono-font)",
       fontSize: "var(--cc-editor-font, 14px)",
       caretColor: "#38bdf8",
-      padding: "1rem 1.25rem 12vh",
+      padding: "1rem 1.25rem var(--cc-editor-pad-b, 12vh)",
     },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "#38bdf8" },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
