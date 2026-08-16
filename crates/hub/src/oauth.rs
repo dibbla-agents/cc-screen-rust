@@ -16,6 +16,9 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::state::HubState;
 
@@ -24,6 +27,13 @@ const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 /// Name of the short-lived HttpOnly cookie parking `state.verifier` between
 /// `/start` and `/callback`. Scoped to the OAuth path.
 const OAUTH_COOKIE: &str = "ccs_oauth";
+/// How long a `/start` stays completable — the cookie's `Max-Age` and the
+/// server-side fallback below use the same window.
+const PENDING_TTL: Duration = Duration::from_secs(600);
+/// Ceiling on concurrently pending logins held server-side. Expired entries are
+/// pruned first; a full map only ever drops *someone else's* pending login, who
+/// still has the cookie path.
+const PENDING_MAX: usize = 512;
 
 struct OAuthConfig {
     client_id: String,
@@ -57,6 +67,80 @@ pub fn is_configured() -> bool {
     OAuthConfig::from_env().is_some()
 }
 
+/// One `/start` waiting for its callback, held server-side so a browser that
+/// does not hand the `ccs_oauth` cookie back can still finish the login.
+///
+/// Why this exists: the cookie is `SameSite=Lax` and the callback is a top-level
+/// GET, which is exactly the case Lax permits — and yet an installed PWA window
+/// (Chrome app) has been observed arriving at `/callback` without it. Failing
+/// that login was the whole bug.
+///
+/// What it costs: the cookie binds the `state` to *this browser*, which is what
+/// makes login-CSRF (a victim silently signed into the attacker's account) hard.
+/// The fallback keeps as much of that as it can without the cookie — the entry
+/// is **single-use**, expires with the same 10-minute window, and is bound to the
+/// `source_key` (proxy-reported IP) the `/start` came from — and is consulted
+/// **only** when the cookie is absent. A cookie that *is* present must still
+/// match, so the normal path is unchanged.
+struct Pending {
+    verifier: String,
+    expires: Instant,
+    source: String,
+}
+
+fn pending_map() -> &'static Mutex<HashMap<String, Pending>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_put(state: &str, verifier: &str, source: String) {
+    let now = Instant::now();
+    let mut map = pending_map().lock().unwrap();
+    map.retain(|_, p| p.expires > now);
+    if map.len() >= PENDING_MAX {
+        // Evict the entry closest to expiry rather than an arbitrary one.
+        if let Some(k) = map
+            .iter()
+            .min_by_key(|(_, p)| p.expires)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&k);
+        }
+    }
+    map.insert(
+        state.to_string(),
+        Pending { verifier: verifier.to_string(), expires: now + PENDING_TTL, source },
+    );
+}
+
+/// Consume the pending entry for `state`. Single-use: a replayed callback URL
+/// (the Chrome app restoring the last URL it was on) finds nothing.
+fn pending_take(state: &str, source: &str) -> Option<String> {
+    let mut map = pending_map().lock().unwrap();
+    let p = map.remove(state)?;
+    if p.expires <= Instant::now() || p.source != source {
+        return None;
+    }
+    Some(p.verifier)
+}
+
+/// Every failure of the callback ends here: back to the app with a code in the
+/// query, never a dead-end `400` body. The window a user lands in after Google
+/// is often the *app itself* (an installed PWA), where a bare error string is
+/// unrecoverable without knowing to retype the URL — and where a restored or
+/// reloaded stale callback URL would otherwise render as a broken app.
+/// `App.tsx` reads `login_error`, shows it on the sign-in screen, and strips it.
+fn fail(reason: &str) -> Response {
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, format!("/?login_error={reason}")),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    )
+        .into_response()
+}
+
 /// `GET /api/auth/google/start` — 302 to Google's consent screen with a fresh
 /// `state` (CSRF) and PKCE `code_challenge`, parking the matching `state.verifier`
 /// in a 10-minute HttpOnly cookie.
@@ -85,7 +169,19 @@ pub async fn google_start(State(hub): State<HubState>, headers: HeaderMap) -> Re
     let cookie = format!(
         "{OAUTH_COOKIE}={state}.{verifier}; Max-Age=600; Path=/api/auth/google; HttpOnly; SameSite=Lax{secure}"
     );
-    (StatusCode::FOUND, [(header::LOCATION, url), (header::SET_COOKIE, cookie)]).into_response()
+    // The same pair, server-side, for the browser that loses the cookie (see
+    // `Pending`). `no-store` so this 302 — whose Location carries a single-use
+    // state — can never be replayed out of the HTTP cache.
+    pending_put(&state, &verifier, cc_screen_auth::source_key(&headers));
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, url),
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -111,24 +207,43 @@ pub async fn google_callback(
     };
     if let Some(err) = q.error.as_deref() {
         tracing::warn!("oauth-cb: google denied: {err}");
-        return (StatusCode::UNAUTHORIZED, format!("google denied: {err}")).into_response();
+        return fail("denied");
     }
     let (Some(code), Some(state)) = (q.code.as_deref(), q.state.as_deref()) else {
         tracing::warn!("oauth-cb: missing code/state");
-        return (StatusCode::BAD_REQUEST, "missing code/state").into_response();
+        return fail("request");
     };
-    // Recover the parked state+verifier; the state must match (CSRF defense).
-    let Some((c_state, verifier)) = cookie_value(&headers, OAUTH_COOKIE).and_then(|c| {
+    let source = cc_screen_auth::source_key(&headers);
+    // Recover the parked state+verifier. Preferred source is the cookie, whose
+    // state must match (CSRF defense); only when the browser sent no cookie at
+    // all do we fall back to the single-use server-side entry.
+    let cookie_pair = cookie_value(&headers, OAUTH_COOKIE).and_then(|c| {
         let (s, v) = c.split_once('.')?;
         Some((s.to_string(), v.to_string()))
-    }) else {
-        tracing::warn!("oauth-cb: missing/blank oauth state cookie");
-        return (StatusCode::BAD_REQUEST, "missing oauth state cookie").into_response();
+    });
+    let verifier = match cookie_pair {
+        Some((c_state, v)) => {
+            // A cookie is present: it decides, exactly as before.
+            pending_take(state, &source);
+            if c_state != state {
+                tracing::warn!("oauth-cb: state mismatch cookie={c_state} query={state}");
+                return fail("state");
+            }
+            v
+        }
+        None => match pending_take(state, &source) {
+            Some(v) => {
+                tracing::info!("oauth-cb: no state cookie, completing from server-side pending state");
+                v
+            }
+            None => {
+                // Either a genuinely unknown/expired state, or a callback URL
+                // replayed after its one use (a restored app window).
+                tracing::warn!("oauth-cb: no state cookie and no pending state — expired or replayed");
+                return fail("expired");
+            }
+        },
     };
-    if c_state != state {
-        tracing::warn!("oauth-cb: state mismatch cookie={c_state} query={state}");
-        return (StatusCode::BAD_REQUEST, "oauth state mismatch").into_response();
-    }
 
     // Exchange the code directly with Google over TLS using our client secret.
     let resp = reqwest::Client::new()
@@ -148,18 +263,18 @@ pub async fn google_callback(
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("oauth-cb: token parse failed: {e}");
-                return (StatusCode::BAD_GATEWAY, format!("token parse: {e}")).into_response();
+                return fail("google");
             }
         },
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             tracing::warn!("oauth-cb: token exchange HTTP {status}: {}", body.chars().take(300).collect::<String>());
-            return (StatusCode::UNAUTHORIZED, format!("token exchange failed ({status})")).into_response();
+            return fail("google");
         }
         Err(e) => {
             tracing::warn!("oauth-cb: token exchange transport error: {e}");
-            return (StatusCode::BAD_GATEWAY, format!("token exchange: {e}")).into_response();
+            return fail("google");
         }
     };
 
@@ -168,18 +283,21 @@ pub async fn google_callback(
     // verifying the JWT signature (per Google's OIDC guidance for the token
     // response). We only base64url-decode the payload.
     let Some(claims) = decode_id_token(&token.id_token) else {
-        return (StatusCode::BAD_GATEWAY, "malformed id_token").into_response();
+        tracing::warn!("oauth-cb: malformed id_token");
+        return fail("google");
     };
     if !claims.email_verified.unwrap_or(false) {
-        return (StatusCode::FORBIDDEN, "google email not verified").into_response();
+        tracing::warn!("oauth-cb: google email not verified");
+        return fail("unverified");
     }
     let (Some(sub), Some(email)) = (claims.sub.as_deref(), claims.email.as_deref()) else {
-        return (StatusCode::BAD_GATEWAY, "id_token missing sub/email").into_response();
+        tracing::warn!("oauth-cb: id_token missing sub/email");
+        return fail("google");
     };
 
     let Some(user_id) = hub.upsert_google_user(sub, email).await else {
         tracing::warn!("oauth: could not provision user for {email}");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "could not provision user").into_response();
+        return fail("account");
     };
     // Land any email invites waiting for this address (proposal 0056 C3) — this
     // covers a fresh Google signup AND the first Google login of an address
@@ -193,7 +311,11 @@ pub async fn google_callback(
     // own and is overwritten on the next attempt; not worth risking the login.
     (
         StatusCode::FOUND,
-        [(header::LOCATION, "/".to_string()), (header::SET_COOKIE, session)],
+        [
+            (header::LOCATION, "/".to_string()),
+            (header::SET_COOKIE, session),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
     )
         .into_response()
 }
@@ -260,6 +382,50 @@ mod tests {
         assert_eq!(enc("http://localhost:8840/api/auth/google/callback"),
                    "http%3A%2F%2Flocalhost%3A8840%2Fapi%2Fauth%2Fgoogle%2Fcallback");
         assert_eq!(enc("Aa0-_.~"), "Aa0-_.~");
+    }
+
+    // One test, not three: the store is process-global, and the capacity case
+    // evicts — split across parallel tests they would flake on each other.
+    #[test]
+    fn pending_state_is_single_use_source_bound_expiring_and_bounded() {
+        pending_put("st-a", "ver-a", "1.2.3.4".to_string());
+        // Wrong source: refused — and the entry is spent either way, so a probe
+        // from elsewhere can't be retried from the right address.
+        assert_eq!(pending_take("st-a", "9.9.9.9"), None);
+        assert_eq!(pending_take("st-a", "1.2.3.4"), None);
+
+        pending_put("st-b", "ver-b", "1.2.3.4".to_string());
+        assert_eq!(pending_take("st-b", "1.2.3.4").as_deref(), Some("ver-b"));
+        // Replay of the same callback URL (a restored app window) finds nothing.
+        assert_eq!(pending_take("st-b", "1.2.3.4"), None);
+        // An unknown state was never pending.
+        assert_eq!(pending_take("st-never", "1.2.3.4"), None);
+
+        // Expired entries are never handed back.
+        pending_map().lock().unwrap().insert(
+            "st-old".to_string(),
+            Pending {
+                verifier: "ver".to_string(),
+                expires: Instant::now() - Duration::from_secs(1),
+                source: "1.2.3.4".to_string(),
+            },
+        );
+        assert_eq!(pending_take("st-old", "1.2.3.4"), None);
+
+        // And the map cannot grow without bound (evicts, last so it can't
+        // disturb the assertions above).
+        for i in 0..(PENDING_MAX + 40) {
+            pending_put(&format!("cap-{i}"), "v", "1.2.3.4".to_string());
+        }
+        assert!(pending_map().lock().unwrap().len() <= PENDING_MAX);
+    }
+
+    #[test]
+    fn failure_redirects_into_the_app_with_a_reason() {
+        let r = fail("expired");
+        assert_eq!(r.status(), StatusCode::FOUND);
+        assert_eq!(r.headers().get(header::LOCATION).unwrap(), "/?login_error=expired");
+        assert_eq!(r.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
     }
 
     #[test]

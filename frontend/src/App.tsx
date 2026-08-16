@@ -66,6 +66,29 @@ import { setPrefixArmed } from "./prefix";
 import { listReceivedShares, type ReceivedShare } from "./api";
 import { DownloadIcon, EraserIcon, FileEditIcon, ImageIcon, PencilIcon, RefreshIcon, SearchIcon, ServerIcon, StarIcon, StatusListIcon, UploadIcon } from "./icons";
 
+// A Google sign-in that could not be completed comes back as
+// `/?login_error=<reason>` (crates/hub/src/oauth.rs) rather than a dead-end error
+// page — the window the user lands in is often the installed app itself. Read it
+// once at load and strip it from the URL immediately, so a restored or reloaded
+// window doesn't keep re-asserting a failure that already happened.
+const LOGIN_ERROR: string | null = (() => {
+  if (typeof window === "undefined") return null;
+  const url = new URL(window.location.href);
+  const reason = url.searchParams.get("login_error");
+  if (!reason) return null;
+  url.searchParams.delete("login_error");
+  window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  return reason;
+})();
+const LOGIN_ERROR_HINT: Record<string, string> = {
+  expired: "That sign-in link had already been used or expired — try once more.",
+  state: "The sign-in couldn't be verified — try once more.",
+  denied: "Google sign-in was cancelled.",
+  google: "Google couldn't complete the sign-in — try once more.",
+  unverified: "That Google account's email isn't verified.",
+  account: "Signed in with Google, but the account couldn't be set up.",
+};
+
 const FONT_KEY = "ccweb.fontSize";
 // In-app session-ready toasts (proposal 0017) on/off, persisted. Defaults ON
 // (the proposal ships always-on; the gated, foreground-only edge keeps it
@@ -2281,7 +2304,13 @@ export default function App() {
         <AuthScreen
           google={me.googleEnabled}
           password={me.passwordLogin !== false}
-          hint={onActivate ? "Sign in to approve a device." : undefined}
+          hint={
+            onActivate
+              ? "Sign in to approve a device."
+              : LOGIN_ERROR
+                ? LOGIN_ERROR_HINT[LOGIN_ERROR] ?? "Sign-in didn't complete — try once more."
+                : undefined
+          }
           onAuthed={refetchMe}
         />
       );
