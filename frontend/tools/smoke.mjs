@@ -471,16 +471,57 @@ async function deepLinkPass() {
     });
     const ppage = await pctx.newPage();
     try {
+      // Seed the state a returning user actually has — the editor's open/closed
+      // mode is remembered, and the pane holds a session — because the two
+      // regressions this guards against only appear with it. Then leave the app,
+      // so what follows is the genuine cold-open a bookmark performs.
+      await ppage.goto(base, { waitUntil: "domcontentloaded" });
+      await ppage.getByRole("button", { name: new RegExp(session) }).first().click({ timeout: 15000 });
+      await ppage.waitForSelector('[data-conn="open"]', { timeout: 15000 });
+      await ppage.evaluate(() => localStorage.setItem("ccweb.editorOpen.v1", "1"));
+      await ppage.goto("about:blank");
+
+      // Assert on what is ON SCREEN at the tap point, never on what exists in
+      // the DOM: closed sheets stay mounted ([0068]) and the terminal grid sits
+      // *behind* the opaque editor, so "a .xterm exists" proves nothing about
+      // what the user sees. Sample it all the way through the load.
+      const atCenter = () =>
+        ppage.evaluate(() => {
+          const el = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+          if (!el) return "blank";
+          if (el.closest(".cm-editor")) return "editor";
+          if (el.closest(".xterm")) return "terminal";
+          if ([...document.querySelectorAll("button")].some((b) => b.textContent === "Close files"))
+            return "tree";
+          return "other";
+        });
+      const frames = [];
+      const poll = setInterval(async () => {
+        try { frames.push(await atCenter()); } catch { /* navigating */ }
+      }, 40);
       await ppage.goto(base + fileUrl, { waitUntil: "domcontentloaded" });
       await ppage.waitForSelector(".cm-content", { timeout: 15000 });
+      // The sessions poll landing used to look like a session switch and wipe
+      // the deep-linked file ([0019]'s per-session memory winning over an
+      // explicit request). Wait it out before judging.
+      await ppage.waitForTimeout(3000);
+      clearInterval(poll);
+
       const ptext = await ppage.locator(".cm-content").first().innerText();
       if (!ptext.includes("Smoke Heading")) {
-        fail("phone deep link didn't open the file with zero taps");
+        fail("phone deep link didn't land on the file (frames: " + [...new Set(frames)].join(",") + ")");
         return;
       }
-      // The session drawer must not have covered it (0083 Mobile/touch).
-      if (await ppage.getByPlaceholder(/search sessions/i).isVisible().catch(() => false)) {
-        fail("the session drawer opened over a phone deep link");
+      if (frames.includes("terminal")) {
+        fail("a phone deep link flashed the terminal on the way to the file");
+        return;
+      }
+      if (frames.includes("tree")) {
+        fail("the file tree covered a phone deep link");
+        return;
+      }
+      if ((await atCenter()) !== "editor") {
+        fail("something ended up over the file on a phone deep link");
         return;
       }
     } finally {

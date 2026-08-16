@@ -1191,13 +1191,23 @@ export default function App() {
   // session in this pane vanished). On desktop the empty pane already shows
   // an inline picker — but on phones (single pane, no inline picker) the
   // drawer is the only way to attach, so keep popping it open there.
-  // Proposal 0083: suppressed while a file deep link is still resolving — the
-  // user's declared destination is a file, not a session, and the drawer would
-  // land on top of it. Once resolved the rule is back exactly as it was.
+  // Proposal 0083: two suppressions, and the second is the one that bit.
+  //
+  // `fileLinkPending` covers the window before the editor opens. But the drawer
+  // also opens on `currentSession === null`, and on a cold phone load that is
+  // true for a beat *after* the deep link resolves — the session list hasn't
+  // arrived yet — so the drawer slid over the file the user had just been
+  // taken to, and nothing ever closed it again.
+  //
+  // The general rule fixes both: while the file viewer owns the screen, don't
+  // put the switcher over it. The drawer exists to say "this pane has nothing,
+  // here's how to attach", which is not urgent while you're reading a file.
+  // Closing the viewer re-runs this (it's in the deps) and pops the drawer then
+  // — so the empty-pane case a phone still needs is unchanged.
   useEffect(() => {
-    if (fileLinkPending) return;
+    if (fileLinkPending || editor.open) return;
     if (!isDesktop && currentSession === null) setDrawerOpen(true);
-  }, [isDesktop, currentSession, fileLinkPending]);
+  }, [isDesktop, currentSession, fileLinkPending, editor.open]);
 
   // ── Proposal 0083 Part B — the address bar tracks the open file ────────────
   // The cheapest way to create a bookmark is for the URL to already be right
@@ -2556,6 +2566,17 @@ export default function App() {
     return <LoginScreen onSuccess={() => setAuthed(true)} />;
   }
 
+  // A file deep link is still resolving (proposal 0083 Part A). Show nothing
+  // rather than the terminal grid: you asked for a file, and a beat of someone
+  // else's session flashing past — and, on a phone, the drawer and the session
+  // you were last in — is exactly the noise the link exists to skip. It also
+  // makes the open FASTER: no terminal mounts, no WebSocket dials, nothing
+  // competes with the file read for the main thread. Cleared whether the
+  // resolve succeeds or fails, so this can never be a dead end.
+  if (fileLinkPending) {
+    return <div className="fixed inset-0 bg-bar" />;
+  }
+
   return (
     <div
       className="relative flex flex-col bg-bar text-slate-200"
@@ -2996,7 +3017,11 @@ export default function App() {
         onResult={onUploadResult}
       />
       {editor.open && (
-        <Suspense fallback={null}>
+        // A solid cover, not `null`: the overlay is a lazy chunk, and on a cold
+        // open (a deep link, a phone on mobile data) an empty fallback lets the
+        // terminal grid show through for as long as the chunk takes to arrive.
+        // The overlay is opaque and full-screen, so its placeholder should be too.
+        <Suspense fallback={<div className="fixed inset-0 z-[60] bg-bar" />}>
           <EditorOverlay
             open={editor.open}
             initialPath={editor.path}

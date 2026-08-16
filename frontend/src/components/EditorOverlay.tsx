@@ -44,7 +44,7 @@ import {
   type DirTreeOpts,
   type TreeCtxInfo,
 } from "./dirTree";
-import { readViewerState, writeViewerState, viewerKey } from "./viewerState";
+import { readViewerState, switchRestores, writeViewerState, viewerKey } from "./viewerState";
 import { fileLinkUrl, relFromHome, type EditorLocation } from "../fileLink";
 import MarkdownEditor from "./MarkdownEditor";
 import { toggleTaskAt } from "../editor/livePreview";
@@ -780,6 +780,12 @@ export default function EditorOverlay({
     if (!open) return;
     if (initialPath) {
       setActivePath(initialPath);
+      // …and on a phone, get out of the way of it. The tree panel may already
+      // be up: the overlay's open/closed *mode* is restored from localStorage,
+      // so a deep link can mount this overlay with no path at all for a beat,
+      // which trips the phone-tree effect below. Asking for a specific file
+      // means "show me the file", exactly as a tap on a tree row does.
+      if (!isDesktop) setTreePanelOpen(false);
       return;
     }
     // A FOLDER deep link (proposal 0083) is an explicit request too, and it
@@ -847,10 +853,14 @@ export default function EditorOverlay({
     if (prevSessionKey.current !== sessionKey) {
       writeViewerState(prevSessionKey.current, { activePath: activePathRef.current });
       prevSessionKey.current = sessionKey;
+      // An EXPLICIT request outranks the per-session memory (proposal 0083).
+      // The rule and the reason it is load-bearing here live with the predicate.
+      if (!switchRestores({ initialPath, initialDir, activePath: activePathRef.current })) return;
       const restored = readViewerState(sessionKey)?.activePath ?? null;
       setActivePath(restored);
       if (!restored) setTreePanelOpen(true); // phone: surface the tree
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sessionKey]);
 
   // Persist the open file so it survives a reopen + reload (the switch-out save
@@ -874,9 +884,11 @@ export default function EditorOverlay({
   // Opened with no file (the ⬇ Files entry / Ctrl+B e) on a phone? Land directly
   // on the file browser rather than the empty state — this overlay IS the file
   // view now, so opening it should show the tree.
+  // `initialDir` is excluded because the folder-deep-link effect above already
+  // opens the panel, at the folder it was asked for.
   useEffect(() => {
-    if (open && !initialPath && !isDesktop) setTreePanelOpen(true);
-  }, [open, initialPath, isDesktop]);
+    if (open && !initialPath && !initialDir && !isDesktop) setTreePanelOpen(true);
+  }, [open, initialPath, initialDir, isDesktop]);
 
   // Load the active file.
   useEffect(() => {
