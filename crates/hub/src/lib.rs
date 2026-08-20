@@ -94,6 +94,10 @@ pub fn build_router(hub: HubState) -> Router {
         // Session lifecycle + control, routed to the owning agent (?machine=).
         .route("/api/session", post(handlers::create))
         .route("/api/session/delete", post(handlers::delete))
+        // Restart ONE session and resume it (0087) — gated like the other
+        // session ops (may_see_session, not owner-only), plus the agent's
+        // advertised capability so an old agent 501s instead of 504ing.
+        .route("/api/session/restart", post(handlers::restart_session))
         .route("/api/session/color", post(handlers::set_color))
         .route("/api/session/label", post(handlers::set_label))
         .route("/api/session/root", get(handlers::session_root))

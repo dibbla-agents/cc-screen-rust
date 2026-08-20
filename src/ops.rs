@@ -128,6 +128,14 @@ pub fn run_cmd(app: &AppState, cmd: Cmd) -> CmdResult {
             }
         }
         Cmd::UpdateStatus => json_reply(&app.update_job()),
+        // Restart ONE session and resume it (proposal 0087), same core the REST
+        // handler calls. A refusal (unknown / `shell` / already restarting / an
+        // update job is running) comes back as its own status, not as a `failed`
+        // row — nothing was stopped.
+        Cmd::RestartSession { session } => match crate::handlers::restart_core(app, &session) {
+            Ok(row) => json_reply(&row),
+            Err((code, msg)) => CmdResult::Error { code: code.as_u16(), msg },
+        },
         // What an install would do, before the user confirms (proposal 0050).
         // A probe with no side effects, resolved against THIS machine's registry.
         Cmd::InstallPlan { tools } => json_reply(&crate::provision::plan(

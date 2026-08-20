@@ -18,7 +18,7 @@ use std::time::Duration;
 use cc_screen_auth::Auth;
 use cc_screen_protocol::hub::{
     decode_frame, encode_frame, AgentMsg, ChannelId, Cmd, CmdResult, HubMsg,
-    CAP_ASSISTANT_INSTALL, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
+    CAP_ASSISTANT_INSTALL, CAP_ASSISTANT_UPDATE, CAP_SESSION_RESTART, HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{RestorableSession, SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
@@ -267,7 +267,11 @@ pub async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, 
             hostname: machine_id.into(),
             agent_version: "test".into(),
             tools: vec![],
-            caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_ASSISTANT_INSTALL.to_string()],
+            caps: vec![
+                CAP_ASSISTANT_UPDATE.to_string(),
+                CAP_ASSISTANT_INSTALL.to_string(),
+                CAP_SESSION_RESTART.to_string(),
+            ],
         },
         b"",
     )
@@ -300,6 +304,16 @@ pub async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, 
                             serde_json::to_value(UpdateJob {
                                 phase: "done".into(),
                                 ..Default::default()
+                            })
+                            .unwrap(),
+                        ),
+                        // Proposal 0087: one row back, echoing the named session.
+                        Cmd::RestartSession { session } => CmdResult::Json(
+                            serde_json::to_value(cc_screen_protocol::SessionRestartStatus {
+                                session,
+                                tool: "claude".into(),
+                                state: "resumed".into(),
+                                message: None,
                             })
                             .unwrap(),
                         ),
@@ -473,7 +487,11 @@ pub async fn spawn_scriptable_agent(
                 unavailable: false,
                 remote_control_available: true,
             }],
-            caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_ASSISTANT_INSTALL.to_string()],
+            caps: vec![
+                CAP_ASSISTANT_UPDATE.to_string(),
+                CAP_ASSISTANT_INSTALL.to_string(),
+                CAP_SESSION_RESTART.to_string(),
+            ],
         },
         b"",
     )
@@ -552,6 +570,23 @@ fn handle_cmd(cmd: &Cmd, sessions: &Arc<Mutex<Vec<SessionInfo>>>) -> CmdResult {
         Cmd::Delete(req) => {
             sessions.lock().unwrap().retain(|s| s.name != req.session);
             CmdResult::Ok
+        }
+        // Proposal 0087: one restart row back for a session this agent has; a
+        // 404 refusal otherwise, so a relay test can see both shapes.
+        Cmd::RestartSession { session } => {
+            let known = sessions.lock().unwrap().iter().any(|s| &s.name == session);
+            if !known {
+                return CmdResult::Error { code: 404, msg: "unknown session".into() };
+            }
+            CmdResult::Json(
+                serde_json::to_value(cc_screen_protocol::SessionRestartStatus {
+                    session: session.clone(),
+                    tool: "claude".into(),
+                    state: "resumed".into(),
+                    message: None,
+                })
+                .unwrap(),
+            )
         }
         Cmd::SetLabel { session, label } => {
             let mut guard = sessions.lock().unwrap();

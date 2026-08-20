@@ -63,7 +63,11 @@ sessions run server-side on *your* box, not in the browser tab.
 
 The agent starts on boot (it's a background service) and resumes its recorded
 sessions with each CLI's own resume flag — Claude Code sessions come back
-with their conversation intact via `--continue`.
+with their conversation intact via `--continue`. It's the same mechanism behind the
+per-session **restart** button in the session drawer, which is how you make an
+assistant re-read something it only loads at launch (an MCP server, say)
+without losing the session — see
+[Restart a session](../web-app/#restart-a-session).
 
 ## Can I use cc-screen without the hosted service?
 

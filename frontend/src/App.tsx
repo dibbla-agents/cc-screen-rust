@@ -11,6 +11,7 @@ import {
   getAuthStatus,
   imageSendError,
   pasteText,
+  restartSession,
   restoreSessions,
   saveFavorites,
   sendImage,
@@ -37,8 +38,9 @@ import {
   type PaneState,
 } from "./paneState";
 import { SessionRecentsStore, type RecentRef } from "./sessionRecents";
+import { machineMruOrder, mruDefaultMachine } from "./machineMru";
 import TerminalView, { type ConnState } from "./components/TerminalView";
-import SessionDrawer, { type PaneSwitcherProps } from "./components/SessionDrawer";
+import SessionDrawer, { type CreateSeed, type PaneSwitcherProps } from "./components/SessionDrawer";
 import ControlBar from "./components/ControlBar";
 import ComposeSheet, { type ComposeHandle } from "./components/ComposeSheet";
 import ImageSheet from "./components/ImageSheet";
@@ -213,8 +215,9 @@ export default function App() {
   // A one-shot seed for the drawer's create mode (proposal 0056 A1/A2): set by
   // "Start your first session" (/activate) and a machine row's "New session",
   // consumed by SessionDrawer, which opens straight into create pre-scoped to
-  // that machine.
-  const [createSeed, setCreateSeed] = useState<string | null>(null);
+  // that machine. Object-shaped since proposal 0086 C1, where `⌃B n` sends the
+  // machine-less seed `{}` — "create mode, MRU default machine, empty query".
+  const [createSeed, setCreateSeed] = useState<CreateSeed | null>(null);
   // Sharing (proposal 0041). The active shares granted TO me drive the
   // shared-vs-owned badges; `shareTarget` (when set) opens the ShareForm overlay
   // for one session. Multi-tenant only — empty/idle otherwise.
@@ -272,6 +275,21 @@ export default function App() {
       recentsStore.dispose();
     };
   }, [recentsStore]);
+
+  // Proposal 0086 Part B — the create panel's view of the roster: most recently
+  // used first (from the [0078] store above), online before offline. It exists
+  // in exactly two places, both inside the create panel: this list, which the
+  // machine `<select>` renders verbatim, and `mruMachine`, its default. Every
+  // other consumer of `machines` — the drawer's grouping, the dashboard, the
+  // editor's browse root — still sees the hub's roster order untouched.
+  // Memoized because it is handed to the memoized SessionDrawer/TileGrid: an
+  // array rebuilt every render would defeat their memo on every poll tick
+  // ([0068] Part C).
+  const createMachines = useMemo(
+    () => machineMruOrder(recents, sessions, machines),
+    [recents, sessions, machines]
+  );
+  const mruMachine = mruDefaultMachine(createMachines);
 
   // Mirror layout/active/sessions/panes into refs so the keyboard handler can
   // read fresh values without re-binding (which would reset its in-flight
@@ -747,6 +765,20 @@ export default function App() {
     setUploadOpen(false);
     closePalette();
   }, [closePalette]);
+
+  // `⌃B n` — straight into create mode (proposal 0086 Part C), the web's twin of
+  // the TUI's `Ctrl-N`. It reuses the [0056] seed handshake rather than inventing
+  // a second route in: an empty seed means "create mode, MRU default machine,
+  // empty folder query", and `newForPane` records where the result mounts (the
+  // same handshake "New session" uses), so the chord works from a session pane
+  // and from an empty one alike. Reads activeRef, not `active`, so the identity
+  // stays stable for the keydown effect that owns the prefix timer.
+  const openCreate = useCallback(() => {
+    closeAllSheets();
+    setNewForPane(activeRef.current);
+    setCreateSeed({});
+    setDrawerOpen(true);
+  }, [closeAllSheets]);
 
   // openEditor surfaces the singleton editor overlay (closing any sheet first
   // so it doesn't peek through). `path` null = desktop tree-pick entry.
@@ -1257,18 +1289,30 @@ export default function App() {
   //  Desktop: Ctrl+B is a tmux-style PREFIX. The next key within 600ms is
   //  consumed as a chord; if no chord arrives the drawer opens (same end
   //  state, just slightly delayed when bare). Chords:
-  //    1-4         focus pane N
+  //    1-9         focus pane N (bounded by paneCount(layout), never the id)
   //    ← / →       cycle the active pane (index ±1 with wrap)
   //    ↑ / ↓       cycle the session shown in the active pane through the
   //                global session list (skipping sessions already mounted in
   //                another pane). On an empty pane, ↓ mounts the first
   //                available, ↑ the last — so you can fill a fresh pane
   //                without opening the drawer.
+  //    ;           last pane (tmux's, proposal 0081 Part D)
   //    l / Space   open the layout palette (←/→ pick, ⏎ apply, Esc cancel)
   //    s           open the session drawer (instant — for users who hated
   //                the 600ms wait of bare Ctrl+B)
+  //    ⇧S          share the active pane's session (multi-tenant only)
+  //    n           new session: the create panel, empty, on the machine you
+  //                last used (proposal 0086 Part C)
   //    x           unmount the session in the active pane
+  //    e           open the file editor;  f  open it focused on Find file
+  //    t           open it focused on the tree filter ("/" does this inside
+  //                the editor; over the grid "/" is find-in-terminal)
+  //    c / ⇧C      mark / clear the active session's colour
+  //    r           rename the active session (inline, in the identity bar)
   //    Esc         cancel the prefix
+  //
+  //  This list drifts: keep it, `site/docs/web-app.md`'s shortcuts section and
+  //  AGENTS.md's [0081] entry in sync when you add a chord.
   //
   // After an arrow chord, the next arrow keypress within ARROW_REPEAT_MS
   // is also intercepted *without* needing Ctrl+B again (tmux `bind -r`
@@ -1556,6 +1600,16 @@ export default function App() {
           openDrawer();
           return;
         }
+        if (k === "n" || k === "N") {
+          // New session (proposal 0086 Part C) — the create panel, open and
+          // empty, on the machine you last used. The mnemonic is the TUI's
+          // (`Ctrl-N`). ⇧N is folded in here rather than left to a later
+          // uppercase-only case, which would be unreachable ([0081] Part B).
+          stop();
+          clearArm();
+          openCreate();
+          return;
+        }
         if (k === "x" || k === "X") {
           stop();
           clearArm();
@@ -1675,7 +1729,7 @@ export default function App() {
       clearArm();
       clearRepeat();
     };
-  }, [isDesktop, closeAllSheets, mountAt, setActive, toggleLastPane, openPalette, openEditor, focusTreeFilter, markColor, openShareFor]);
+  }, [isDesktop, closeAllSheets, mountAt, setActive, toggleLastPane, openPalette, openEditor, openCreate, focusTreeFilter, markColor, openShareFor]);
 
   // Suppress xterm.js's own paste-shortcut keydown handler.
   //
@@ -2136,6 +2190,39 @@ export default function App() {
     [refresh, updatePanes, recentsStore]
   );
 
+  // Restart & resume ONE session's assistant (proposal 0087). The canonical
+  // reason is a config the CLI only reads at launch — a newly added MCP server —
+  // and every other way to do it destroys the session.
+  //
+  // Deliberately not a job: the request is synchronous and slow (up to ~15s: 10s
+  // graceful /exit + 5s forced), so the row/pane shows an in-flight spinner
+  // instead of polling. No overlay and no success toast — the pane itself is the
+  // signal, and because the session NAME never changes it re-attaches with no
+  // client work ("the pane blinks, it doesn't disappear"). Only a refusal or a
+  // failed row needs saying out loud.
+  const [restarting, setRestarting] = useState<Set<string>>(new Set());
+  const restartOne = useCallback(
+    async (ref: PaneRef) => {
+      setRestarting((r) => new Set(r).add(ref.name));
+      try {
+        const row = await restartSession(ref.name, ref.machine);
+        if (row.state !== "resumed") {
+          showToast(row.message || `Restart ${row.state}`, false);
+        }
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : "Restart failed", false);
+      } finally {
+        setRestarting((r) => {
+          const n = new Set(r);
+          n.delete(ref.name);
+          return n;
+        });
+        refresh();
+      }
+    },
+    [refresh, showToast]
+  );
+
   // Favourites live server-side (durable, shared across devices). Load once, then
   // keep an optimistic local copy and PUT the whole list on every change,
   // adopting the server's sanitised result.
@@ -2350,7 +2437,13 @@ export default function App() {
       mountedKeys,
       onRefresh: refresh,
       onStatus: () => setStatusOpen(true),
-      createInitialMachine: currentSession?.machine || firstOnlineMachine,
+      // The create panel's machine, most-deliberate first (proposal 0086 B2):
+      // a [0056] seed (handled inside the drawer) beats the pane's own live
+      // session, which beats the machine this client most recently used, which
+      // beats "first online" — today's fallback, still what an empty recents
+      // store yields.
+      createInitialMachine: currentSession?.machine || mruMachine || firstOnlineMachine,
+      createMachines,
       recentDirs: restorable.map((r) => r.dir),
       showLayout: isDesktop,
       onLayout: () => {
@@ -2359,6 +2452,13 @@ export default function App() {
       },
       deleting,
       onDelete: removeSession,
+      // Restart & resume from a drawer row (proposal 0087). The row supplies the
+      // session (carrying its machine); App owns the call, the spinner set and
+      // the failure toast.
+      onRestart: (s: Session) => {
+        void restartOne({ name: s.name, machine: s.machine ?? "" });
+      },
+      restarting,
       // Rename via the switcher (proposal 0035): build the ref from the row's
       // session (carrying its machine) and reuse the optimistic renameSession.
       onRename: (s, label) => renameSession({ name: s.name, machine: s.machine ?? "" }, label),
@@ -2389,12 +2489,16 @@ export default function App() {
       mountedKeys,
       refresh,
       currentSession?.machine,
+      mruMachine,
       firstOnlineMachine,
+      createMachines,
       restorable,
       isDesktop,
       openPalette,
       deleting,
       removeSession,
+      restartOne,
+      restarting,
       renameSession,
       openShareFor,
       sharedMap,
@@ -2492,7 +2596,7 @@ export default function App() {
       window.history.replaceState({}, "", "/");
       setShowDash(false);
       setNewForPane(active);
-      setCreateSeed(m);
+      setCreateSeed({ machine: m });
       setDrawerOpen(true);
     };
     if (!authed) {
@@ -2845,6 +2949,8 @@ export default function App() {
             onOpenEditor={openEditorFromPane}
             onMarkColor={markColor}
             onRename={renameSession}
+            onRestart={restartOne}
+            restarting={restarting}
             renameSeq={renameSeq}
             searchSeq={termSearchSeq}
             onTermFor={setPaneTerm}

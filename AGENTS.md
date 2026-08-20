@@ -445,7 +445,28 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   so the harness can ask which one is focused; `frontend/tools/smoke.mjs`'s
   `gridKeyboardPass()` is the coverage, and its readiness helper is
   `waitAttached` (the old `[title="open"]` selector matched nothing for months).
-  See proposal 0081.
+  The ladder gained **`⌃B n`** — new session, the create panel open and empty
+  on the machine you last used (0086 Part C; the TUI's `Ctrl-N` mnemonic). See
+  proposals 0081 and 0086.
+- **The action's own name is not a folder query (0086).** [0016] carried the
+  switcher's filter text into create mode, which is right for `myproj` and wrong
+  for `new`: the folder box read `new`, the name field read `new`, the only row
+  was `Create folder "new"`, and the same `⏎` that meant "yes, new session"
+  minted a `~/new` directory. `enterCreate` now seeds the **residual** query
+  (`residualQuery`/`actionMatchLen` in `SessionDrawer.tsx`): `new` → empty,
+  `new myproj` → `myproj`, `myproj` → `myproj` untouched. The consumption
+  matcher is deliberately **not** `fuzzyScore` — that is a plain subsequence
+  walk, so it matches `news` against "new session" and would silently eat a real
+  folder name; it is word-aligned instead, and it only ever *strips* tokens, so
+  its worst case is the status quo. `scoreItem` keeps [0028]'s scores byte-for-
+  byte: the one addition is a fallback that scores the *consumed prefix* when the
+  whole query matched no alias — which is what makes the `new myproj` row exist
+  at all (it used to read "No matches"). Part B: the create panel's machine
+  default and `<select>` order are **MRU**, derived client-side in
+  `frontend/src/machineMru.ts` from [0078]'s recents store (which stays the
+  single writer) — the roster's own order, the drawer's grouping, the dashboard
+  and the TUI are untouched, and the order is snapshotted at panel mount so a
+  background poll can't reorder an open dropdown. See proposal 0086.
 - **A file has a URL now, and a link grant is not a share (0083).** The app had
   no URLs at all: every `openEditor` call passed `null` and the address bar
   stayed `/` forever. `frontend/src/fileLink.ts` is the whole grammar —

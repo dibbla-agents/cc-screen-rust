@@ -983,6 +983,11 @@ async fn cross_tenant_full_surface_is_refused() {
         ("/api/rename?machine=alice-box", serde_json::json!({ "from": "/tmp/a", "to": "/tmp/b" })),
         ("/api/move?machine=alice-box", serde_json::json!({ "from": "/tmp/a", "to": "/tmp/b" })),
         ("/api/assistants/update?machine=alice-box", serde_json::json!({ "tools": [] })),
+        // Proposal 0087 — restart is a session op, so it must refuse cross-tenant
+        // exactly like delete/key/paste (both the machine-pinned and the
+        // session-only routing forms).
+        ("/api/session/restart", serde_json::json!({ "session": "claude-a" })),
+        ("/api/session/restart?machine=alice-box", serde_json::json!({ "session": "claude-a" })),
     ];
     for (path, body) in posts {
         let r = post_json(&client, &base, &bob, path, body.clone()).await;
@@ -1044,6 +1049,57 @@ async fn agent_grantee_cannot_administer_assistants() {
     // gate, not a dead route).
     let own = get_resp(&client, &base, &alice, "/api/assistants/update?machine=alice-box").await;
     assert_eq!(own.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+/// 0087 B5, and deliberately the mirror image of the test above it: a
+/// **per-session restart is *use*, not administration**, so it pins to
+/// `may_see_session` — the same gate as delete/key/paste — rather than the
+/// owner-only gate the fleet update ops use. A grantee who can already type
+/// `/exit` into the shared session's PTY, or POST `/api/session/delete`, may
+/// restart it; refusing the strictly-safer op would be gate theatre.
+///
+/// The fake agents in this harness advertise **no caps**, so every authorized
+/// call lands on the capability check and answers `501`. That is the assertion
+/// shape: `501` = the tenant gate passed and the hub tried to relay; `404` = it
+/// refused. No relay is opened either way, so nothing pays `REQUEST_TIMEOUT`.
+#[tokio::test]
+async fn a_session_grantee_may_restart_that_session() {
+    let (base, _store) = start_hub_labeled("alice-box", &["claude-a", "claude-a2"], "bob-box", &["claude-b"]).await;
+    let client = reqwest::Client::new();
+    let alice = login(&client, &base, "alice@x.com", "alicepass1-long").await;
+    let bob = login(&client, &base, "bob@x.com", "bobpass1234-long").await;
+
+    // Alice shares ONE session with Bob; Bob accepts.
+    let created = post_json(&client, &base, &alice, "/api/shares",
+        serde_json::json!({ "grantee_email": "bob@x.com", "machine": "alice-box", "session": "claude-a" })).await;
+    let invite_id = created.json::<serde_json::Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+    assert!(post_json(&client, &base, &bob, &format!("/api/shares/{invite_id}/accept"), serde_json::json!({})).await.status().is_success());
+
+    let nf = reqwest::StatusCode::NOT_FOUND;
+    let ni = reqwest::StatusCode::NOT_IMPLEMENTED;
+    let restart = |who: &str, path: &str, session: &str| {
+        let (c, b, who, path, session) =
+            (client.clone(), base.clone(), who.to_string(), path.to_string(), session.to_string());
+        async move {
+            post_json(&c, &b, &who, &path, serde_json::json!({ "session": session })).await.status()
+        }
+    };
+
+    // The owner passes the gate (and stops at the capability check).
+    assert_eq!(restart(&alice, "/api/session/restart?machine=alice-box", "claude-a").await, ni);
+    // …and so does the SESSION grantee — this is the row that differs from the
+    // owner-only assistant-update matrix.
+    assert_eq!(restart(&bob, "/api/session/restart?machine=alice-box", "claude-a").await, ni);
+    assert_eq!(restart(&bob, "/api/session/restart", "claude-a").await, ni, "routed by session name too");
+
+    // But only for the session he was granted — the sibling on the same box is
+    // as invisible as it is everywhere else.
+    assert_eq!(restart(&bob, "/api/session/restart?machine=alice-box", "claude-a2").await, nf);
+    assert_eq!(restart(&bob, "/api/session/restart", "claude-a2").await, nf);
+
+    // And a stranger gets nothing: the widening is grant-scoped, not global.
+    let carol = signup_ok(&client, &base, "carol@x.com", "carolpass12-long", "9.9.9.9").await;
+    assert_eq!(restart(&carol, "/api/session/restart?machine=alice-box", "claude-a").await, nf);
 }
 
 /// Org routes are membership-scoped (proposal 0063 B1, under the 0042 bar):

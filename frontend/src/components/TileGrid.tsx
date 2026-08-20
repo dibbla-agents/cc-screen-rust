@@ -4,7 +4,7 @@ import TerminalView, { type ConnState } from "./TerminalView";
 import SessionDrawer, { type PaneSwitcherProps } from "./SessionDrawer";
 import { type MachineInfo, type PaneRef, type Session } from "../api";
 import { dirCrumb, displayName, machineAccent, nextSessionColor, sessionAccent, toolColor } from "../util";
-import { FileEditIcon } from "../icons";
+import { FileEditIcon, RefreshIcon, XIcon } from "../icons";
 
 export type Layout = 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -226,6 +226,12 @@ interface Props {
   // Set/clear this pane's session display label (proposal 0035). `label` null or
   // empty clears it (falls back to `short`). The owning machine rides on the ref.
   onRename: (ref: PaneRef, label: string | null) => void;
+  // Restart & resume this pane's assistant (proposal 0087). The identity bar is
+  // the "I'm looking at the session that needs the restart" path, so the drawer
+  // needn't be opened. Absent → no affordance; also hidden for `tool === "shell"`.
+  onRestart?: (ref: PaneRef) => void;
+  // Session names with a restart in flight (spinner in the bar).
+  restarting?: Set<string>;
   // Bumped by the `⌃B r` chord (proposal 0035) to put the *active* pane's
   // identity-bar name into edit mode with no pointer. Handed to every pane
   // unchanged; each pane's InlineName opens only if it is the active one
@@ -275,6 +281,8 @@ function TileGrid({
   onOpenEditor,
   onMarkColor,
   onRename,
+  onRestart,
+  restarting,
   renameSeq,
   searchSeq,
   onTermFor,
@@ -315,6 +323,8 @@ function TileGrid({
           onOpenEditor={onOpenEditor}
           onMarkColor={onMarkColor}
           onRename={onRename}
+          onRestart={onRestart}
+          restarting={restarting}
           // The rename seq goes to every pane unchanged; the pane's InlineName
           // opens only if it is the active one (and only on an actual bump).
           // Gating this prop per-pane instead (`idx === active ? seq : -1`) made
@@ -354,6 +364,8 @@ interface PaneProps {
   onOpenEditor: () => void;
   onMarkColor: (ref: PaneRef, color: string | null) => void;
   onRename: (ref: PaneRef, label: string | null) => void;
+  onRestart?: (ref: PaneRef) => void;
+  restarting?: Set<string>;
   // Bumped by ⌃B r to enter inline name-edit mode. Broadcast to every pane;
   // InlineName filters on `active` (0081 Part H).
   renameSeq: number;
@@ -383,6 +395,8 @@ function PaneBox({
   onOpenEditor,
   onMarkColor,
   onRename,
+  onRestart,
+  restarting,
   renameSeq,
   searchSeq,
   onTerm: onTermAt,
@@ -412,6 +426,12 @@ function PaneBox({
   // The chosen per-session mark (proposal 0029), if any — drives the inset pane
   // border and the identity-bar swatch.
   const markAcc = sessionAccent(meta?.color);
+  // Inline restart confirm for this pane's identity bar (proposal 0087 C2), the
+  // same two-step the drawer row uses. Local to the pane — nothing global to
+  // reset, and switching panes never carries an armed confirm with it.
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const canRestart = !!onRestart && !!session && !!meta && meta.tool !== "shell";
+  const isRestarting = !!session && !!restarting?.has(session.name);
 
   // Per-pane identity (proposal 0021): the machine "spine" + hostname tint.
   // Resolved exactly like the session drawer — hostname falls back to the raw
@@ -713,6 +733,57 @@ function PaneBox({
               </span>
             );
           })()}
+          {/* Restart & resume this session's assistant (proposal 0087). Two
+              steps, inline in the bar: the glyph arms the confirm, the confirm
+              fires. The pane needs no client work afterwards — the session name
+              never changes, so it re-attaches by itself: the pane blinks, it
+              doesn't disappear. */}
+          {isRestarting ? (
+            <span
+              aria-hidden
+              data-pane-restarting=""
+              title="restarting…"
+              className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-edge border-t-accent"
+            />
+          ) : canRestart && confirmRestart ? (
+            <span className="flex min-w-0 shrink items-center gap-1">
+              {/* C3: a soft warning, never a hard block — the user may be
+                  restarting precisely because the agent is wedged. */}
+              {meta && !meta.waiting && (
+                <span className="min-w-0 truncate text-[10px] text-amber" data-pane-restart-busy="">
+                  busy — may lose the last exchange
+                </span>
+              )}
+              <button
+                onClick={() => {
+                  setConfirmRestart(false);
+                  if (session) onRestart?.(session);
+                }}
+                data-pane-restart-confirm=""
+                title={`Exit ${meta?.tool ?? "the assistant"} and resume its conversation in place`}
+                className="shrink-0 rounded bg-accent/85 px-1.5 py-0.5 text-[10px] font-semibold text-bar hover:bg-accent"
+              >
+                Restart
+              </button>
+              <button
+                onClick={() => setConfirmRestart(false)}
+                aria-label="Cancel restart"
+                className="shrink-0 text-slate-500 hover:text-slate-300"
+              >
+                <XIcon className="h-3 w-3" />
+              </button>
+            </span>
+          ) : canRestart ? (
+            <button
+              onClick={() => setConfirmRestart(true)}
+              aria-label="Restart session"
+              data-pane-restart=""
+              title="Restart & resume the assistant"
+              className="shrink-0 text-slate-500 hover:text-accent"
+            >
+              <RefreshIcon className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
           {/* Mark-colour swatch (proposal 0029): click re-rolls the session's
               colour; Shift-click clears it. Hollow ring when unmarked, filled
               swatch when marked. Same action as the ⌃B c chord. */}

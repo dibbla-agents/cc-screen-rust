@@ -71,6 +71,12 @@ interface Props {
   // Create-flow plumbing (proposal 0016): the agent to create on, a recents
   // shortcut, and the mount callback once a session is created.
   createInitialMachine: string;
+  // The roster as the CREATE PANEL should list it: most-recently-used first,
+  // online before offline (proposal 0086 Part B). Computed in App from the
+  // [0078] recents store; absent → the panel falls back to `machines`, i.e.
+  // today's roster order. Nothing else reorders — the drawer's own machine
+  // grouping still reads `machines`.
+  createMachines?: MachineInfo[];
   recentDirs?: string[];
   onCreated: (ref: PaneRef) => void;
   /// Open the assistant install dialog for a tool whose CLI is missing on that
@@ -82,6 +88,14 @@ interface Props {
   onLayout: () => void;
   deleting: Set<string>;
   onDelete: (name: string, mode: "exit" | "kill", machine?: string) => void;
+  // Restart & resume a session's assistant (proposal 0087): the row's two-step
+  // inline confirm calls this; App does the POST, the spinner state and the
+  // failure toast. Absent → no restart affordance (the button is also hidden for
+  // `tool === "shell"`, which has no conversation to resume).
+  onRestart?: (s: Session) => void;
+  // Session names with a restart in flight — the row shows a spinner instead of
+  // its action cluster, mirroring `deleting`.
+  restarting?: Set<string>;
   // Set/clear a session's display label (proposal 0035). Reached from a row's
   // right-click (desktop) / long-press (touch) → Rename… inline input. `label`
   // null/empty clears it (falls back to the slug). Identity is never touched.
@@ -111,11 +125,20 @@ interface Props {
   // Whether Stripe billing is configured (proposal 0058 C2) — flips the create
   // form's 402 card action from a mailto to a checkout button.
   billing?: boolean;
-  // A one-shot machine seed (proposal 0056 A1/A2): when set, the drawer opens
-  // straight into create mode pre-scoped to that machine, then reports it
-  // consumed. Only the main drawer instance receives it.
-  createSeed?: string | null;
+  // A one-shot seed (proposal 0056 A1/A2, widened to an object by 0086 C1):
+  // when set, the drawer opens straight into create mode, pre-scoped to
+  // `machine` if it names one, then reports it consumed. An empty seed (`{}`)
+  // means "create mode, MRU default machine, empty query" — what `⌃B n` sends.
+  // Only the main drawer instance receives it.
+  createSeed?: CreateSeed | null;
   onSeedConsumed?: () => void;
+}
+
+// The create-mode entry seed (proposal 0056 A1/A2 → 0086 C1). Object-shaped so
+// "open create mode" and "open create mode ON this machine" are the same
+// message; `dir` is deliberately NOT here until a consumer exists.
+export interface CreateSeed {
+  machine?: string;
 }
 
 // The slice of switcher props that aren't pane-specific — shared verbatim by the
@@ -135,11 +158,14 @@ export type PaneSwitcherProps = Pick<
   | "onRefresh"
   | "onStatus"
   | "createInitialMachine"
+  | "createMachines"
   | "recentDirs"
   | "showLayout"
   | "onLayout"
   | "deleting"
   | "onDelete"
+  | "onRestart"
+  | "restarting"
   | "onRename"
   | "onShare"
   | "sharedMap"
@@ -173,6 +199,66 @@ const ACTION_TERMS: Record<string, string[]> = {
   layout: ["new layout", "split", "grid", "tile", "panes"],
   restore: ["restore", "resume", "saved sessions"],
 };
+
+// ── Proposal 0086 Part A — the residual query ────────────────────────────────
+//
+// [0016] deliberately carried the switcher's filter text into create mode as
+// the folder filter, and for `myproj ⏎ → New session` that is exactly right.
+// The failure is that the *action's own name* is also a query: typing `new` to
+// rank the button to the top left `new` in the folder search, `new` in the name
+// field, and a lone `Create folder "new"` row — so the same ⏎ that meant "yes,
+// new session" minted a `~/new` directory. See
+// docs/proposals/0086-new-session-fewer-clicks-mru-machine.md.
+//
+// The rule is one-sided by construction: it can only ever strip leading tokens
+// that ARE the action's own name, never a token the user meant as a folder. Its
+// worst case is the status quo (the query is carried, the user backspaces).
+//
+// Deliberate deviation from the proposal's "share one matcher with `scoreItem`"
+// note: `fuzzyScore` is a subsequence matcher, so it happily matches `news`
+// against "new session" (the `s` lands in "session") — which would silently
+// strip a real folder name. `scoreItem`'s ranking is [0028]'s and must not move
+// a single point, so the consumption matcher is its own, stricter thing:
+// WORD-ALIGNED subsequence. Each whitespace token of the query must abbreviate
+// the alias word in the same position — so `nw` (⊂ "new") strips, `news`
+// (⊄ "new") does not, and `new session` strips both tokens because the query's
+// own space lines up with the alias's.
+
+// Is `token` a subsequence of `word`? (case-insensitive, both non-empty)
+function abbreviates(token: string, word: string): boolean {
+  if (!token || !word) return false;
+  let i = 0;
+  for (const ch of word.toLowerCase()) {
+    if (ch === token[i]) i++;
+    if (i === token.length) return true;
+  }
+  return false;
+}
+
+// How many LEADING whitespace tokens of `q` are the "New session" action's own
+// name — i.e. how many the create panel must not see as a folder filter.
+export function actionMatchLen(q: string): number {
+  const tokens = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return 0;
+  let best = 0;
+  for (const alias of ACTION_TERMS.new) {
+    const words = alias.split(/\s+/);
+    let k = 0;
+    while (k < tokens.length && k < words.length && abbreviates(tokens[k], words[k])) k++;
+    if (k > best) best = k;
+  }
+  return best;
+}
+
+// The part of the switcher query the create panel SHOULD see: everything the
+// action's own name didn't account for. `new` → "", `new myproj` → "myproj",
+// `create billing` → "billing", `myproj` → "myproj" (untouched).
+export function residualQuery(q: string): string {
+  const trimmed = q.trim();
+  const n = actionMatchLen(trimmed);
+  if (n === 0) return trimmed;
+  return trimmed.split(/\s+/).slice(n).join(" ");
+}
 
 // Tiered field weighting for session search (proposal 0028). A session's score
 // is `TIER_BASE + fuzzyScore(q, field)` for its best-matching field. The tier
@@ -212,6 +298,7 @@ function SessionDrawer({
   onStatus,
   onNew,
   createInitialMachine,
+  createMachines,
   recentDirs,
   onCreated,
   onInstallTool,
@@ -219,6 +306,8 @@ function SessionDrawer({
   onLayout,
   deleting,
   onDelete,
+  onRestart,
+  restarting,
   onRename,
   onShare,
   sharedMap,
@@ -234,6 +323,10 @@ function SessionDrawer({
   onSeedConsumed,
 }: Props) {
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  // Inline restart confirm (proposal 0087), keyed by `${machine}/${name}` — the
+  // same two-step the delete uses, deliberately: restart is destructive to the
+  // *turn*, never a window.confirm.
+  const [confirmRestart, setConfirmRestart] = useState<string | null>(null);
   // Inline rename (proposal 0035): the session name currently being renamed
   // (its `${machine}/${name}` key), plus the draft text. Mirrors the inline
   // delete-confirm pattern rather than a separate popover.
@@ -255,7 +348,7 @@ function SessionDrawer({
   // Consume the one-shot seed: jump straight into create mode scoped to it.
   useEffect(() => {
     if (!createSeed) return;
-    setSeedMachine(createSeed);
+    setSeedMachine(createSeed.machine || null);
     setCreateQuery("");
     setMode("create");
     onSeedConsumed?.();
@@ -357,6 +450,9 @@ function SessionDrawer({
 
   const q = query.trim();
   const filtering = q.length > 0;
+  // What the create panel will actually be seeded with (proposal 0086 A1): the
+  // query minus the leading tokens that ARE the "New session" action's name.
+  const newResidue = filtering ? residualQuery(q) : "";
 
   // Lift the snapshotted recents out of the grouped order. A typed query
   // short-circuits the split *entirely* (0078 A8) — not merely the header — so
@@ -442,6 +538,24 @@ function SessionDrawer({
       for (const term of ACTION_TERMS[it.kind]!) {
         const sc = fuzzyScore(q, term);
         if (sc !== null) best = best === null ? sc : Math.max(best, sc);
+      }
+      // Proposal 0086 A1 — "the action, then a folder" (`new myproj`). The
+      // WHOLE query matches no alias (the subsequence walk over "new session"
+      // dies on the `m`), so the row the user is aiming at used to vanish and
+      // the list read "No matches" — which is why the residual rule had nothing
+      // to fire on. Score the CONSUMED prefix instead, and only after the
+      // whole-query pass came up empty: strictly additive, so no score [0028]
+      // already produces moves by a single point, and the ranking's stable-sort
+      // tie order is untouched.
+      if (best === null && it.kind === "new") {
+        const n = actionMatchLen(q);
+        if (n > 0) {
+          const prefix = q.split(/\s+/).slice(0, n).join(" ");
+          for (const term of ACTION_TERMS.new) {
+            const sc = fuzzyScore(prefix, term);
+            if (sc !== null) best = best === null ? sc : Math.max(best, sc);
+          }
+        }
       }
       return best;
     },
@@ -536,11 +650,15 @@ function SessionDrawer({
     }
   }, [restoring, onRestore]);
 
-  // Enter the in-sidebar create flow, carrying the current filter as the initial
-  // folder query (Part A → Part B handoff).
+  // Enter the in-sidebar create flow, carrying the *residual* filter as the
+  // initial folder query ([0016]'s Part A → Part B handoff, narrowed by
+  // proposal 0086 Part A): the tokens that summoned the "New session" row are
+  // the action's name, not a folder, so they are consumed rather than forwarded.
+  // `new` → empty panel; `new myproj` → filtered on `myproj`; `myproj` → the
+  // whole query, exactly as before.
   const enterCreate = useCallback(() => {
     onNew(); // App records which pane to mount the new session into
-    setCreateQuery(filtering ? q : "");
+    setCreateQuery(filtering ? residualQuery(q) : "");
     setMode("create");
   }, [onNew, filtering, q]);
 
@@ -666,7 +784,9 @@ function SessionDrawer({
     return (
       <div className={rootClass} style={rootStyle} aria-hidden={sidebar && !open}>
         <CreateSession
-          machines={machines}
+          // MRU-ordered for the panel only (proposal 0086 B3) — the drawer's own
+          // machine grouping above still reads the roster order verbatim.
+          machines={createMachines ?? machines}
           multiMachine={multiMachine}
           initialMachine={seedMachine ?? createInitialMachine}
           initialQuery={createQuery}
@@ -764,7 +884,11 @@ function SessionDrawer({
             <PlusIcon className="h-4 w-4 text-accent" />
           </span>
           <span className="text-[13px] font-medium text-slate-200">
-            {filtering ? `New session “${q}”…` : "New session…"}
+            {/* The row names what it will actually carry into the panel — the
+                residual query (proposal 0086 A1), not the tokens that were the
+                action's own name. Typing `new` reads "New session…", typing
+                `new myproj` still reads "New session “myproj”…". */}
+            {newResidue ? `New session “${newResidue}”…` : "New session…"}
           </span>
         </button>
       );
@@ -817,6 +941,12 @@ function SessionDrawer({
     const active = s.name === current?.name && (s.machine ?? "") === current?.machine;
     const focused = i === cursor;
     const isDeleting = deleting.has(s.name);
+    // Proposal 0087: a restart is offered for assistant sessions only. `shell`
+    // has no resume — restarting it would silently discard the user's shell
+    // state — so the affordance simply isn't there (matching the engine's
+    // structural refusal, rather than rendering a button that 422s).
+    const canRestart = !!onRestart && s.tool !== "shell";
+    const isRestarting = !!restarting?.has(s.name);
     const crumb = dirCrumb(s.cwd);
     const status = agentStatus(
       s.waiting,
@@ -1024,6 +1154,38 @@ function SessionDrawer({
                 className="mx-1.5 inline-block h-4 w-4 animate-spin rounded-full border-2 border-edge border-t-accent"
                 title="ending…"
               />
+            ) : isRestarting ? (
+              <span
+                className="mx-1.5 inline-block h-4 w-4 animate-spin rounded-full border-2 border-edge border-t-accent"
+                title="restarting…"
+                data-restarting=""
+              />
+            ) : confirmRestart === rowKey(s) ? (
+              // Second press fires. Copy discipline (proposal 0087 D5): say what
+              // happens — exit the CLI and resume its conversation — and never
+              // claim anything about MCP, which cc-screen has no model of.
+              <div className="flex items-center gap-1">
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setConfirmRestart(null);
+                    onRestart?.(s);
+                  }}
+                  data-restart-confirm=""
+                  className="min-h-11 rounded-md bg-accent/85 px-2 py-1 text-[11px] font-semibold text-bar hover:bg-accent"
+                  title={`Exit ${s.tool} and resume its conversation in place`}
+                >
+                  Restart
+                </button>
+                <button
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setConfirmRestart(null)}
+                  aria-label="Cancel restart"
+                  className="flex h-6 w-6 items-center justify-center rounded text-slate-500 hover:text-slate-300"
+                >
+                  <XIcon className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ) : confirmDel === s.name ? (
               <div className="flex items-center gap-1">
                 <button
@@ -1066,8 +1228,26 @@ function SessionDrawer({
                     <ShareIcon className="h-4 w-4" />
                   </button>
                 )}
+                {canRestart && (
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setConfirmDel(null);
+                      setConfirmRestart(rowKey(s));
+                    }}
+                    aria-label={`Restart session ${s.short}`}
+                    title="Restart & resume the assistant"
+                    data-restart=""
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-80 transition-colors hover:bg-edge hover:text-accent hover:opacity-100"
+                  >
+                    <RefreshIcon className="h-4 w-4" />
+                  </button>
+                )}
                 <button
-                  onClick={() => setConfirmDel(s.name)}
+                  onClick={() => {
+                    setConfirmRestart(null);
+                    setConfirmDel(s.name);
+                  }}
                   aria-label={`Delete session ${s.short}`}
                   className="flex h-8 w-8 items-center justify-center rounded-md text-slate-600 opacity-80 transition-colors hover:bg-edge hover:text-red-400 hover:opacity-100"
                 >
@@ -1077,6 +1257,17 @@ function SessionDrawer({
             )}
           </div>
         </div>
+        {/* Proposal 0087 C3: a soft warning, never a hard block — the user may
+            be restarting precisely BECAUSE the agent is wedged. Rendered as a
+            line under the row (not a tooltip), so it carries on touch too. */}
+        {confirmRestart === rowKey(s) && !s.waiting && (
+          <div
+            className="px-3 pb-1 pl-9 text-[10px] leading-tight text-amber"
+            data-restart-busy=""
+          >
+            Agent appears busy — restarting now may lose the last exchange.
+          </div>
+        )}
       </Fragment>
     );
   };

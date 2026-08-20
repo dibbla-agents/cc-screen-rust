@@ -199,6 +199,10 @@ async fn connect_and_serve(
             // hub answers 501 rather than letting an older agent silently ignore
             // `install_missing` and report an update-only job as an install.
             cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL.to_string(),
+            // …and restarting ONE named session, resuming its conversation
+            // (0087). Without the token the hub answers 501 rather than routing
+            // a `Cmd` variant an older agent can't deserialize (→ a 504).
+            cc_screen_protocol::hub::CAP_SESSION_RESTART.to_string(),
         ],
     };
     let _ = out_tx.send(WsOut::Bin(encode_frame(&register, b""))).await;

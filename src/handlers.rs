@@ -281,6 +281,43 @@ pub async fn delete_session(State(app): State<AppState>, Json(req): Json<DeleteR
     }
 }
 
+// ── POST /api/session/restart (proposal 0087) ────────────────────────────────
+// Restart ONE session and resume its conversation. The canonical reason is a
+// config the assistant only reads at launch — a newly added MCP server — and
+// every other way to do it today destroys the session: a clean `/exit` makes the
+// reaper forget the manifest entry, and Delete forgets it (and purges the 0066
+// attachments) on purpose. This one is deliberately not a job: one row, no
+// phases, a ~15 s ceiling (10 s graceful + 5 s forced).
+
+/// The single core, called by both the REST handler and the hub-routed
+/// `Cmd::RestartSession` arm in `crate::ops` — the established
+/// one-core-two-callers shape (see `update_start_core`). A refusal is mapped to
+/// its status here so both callers answer identically.
+pub fn restart_core(
+    app: &AppState,
+    session: &str,
+) -> Result<cc_screen_protocol::SessionRestartStatus, (StatusCode, String)> {
+    app.restart_one(session).map_err(|r| {
+        (
+            StatusCode::from_u16(r.code()).unwrap_or(StatusCode::CONFLICT),
+            r.message().to_string(),
+        )
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RestartReq {
+    session: String,
+}
+
+pub async fn restart_session(
+    State(app): State<AppState>,
+    Json(req): Json<RestartReq>,
+) -> ApiResult {
+    let row = restart_core(&app, &req.session).map_err(|(code, msg)| err(code, msg))?;
+    Ok((StatusCode::OK, Json(row)).into_response())
+}
+
 // ── GET /api/session/root ────────────────────────────────────────────────────
 #[derive(Deserialize)]
 pub struct RootQuery {

@@ -322,6 +322,80 @@ async fn assistant_update_routes_to_a_capable_agent() {
     assert_eq!(status.status(), reqwest::StatusCode::OK);
 }
 
+// Proposal 0087: the per-session restart relay. A capable agent gets the op
+// routed and its one-row `SessionRestartStatus` returned verbatim — the same
+// shape as the update relay above, but gated like the other SESSION ops
+// (`may_see_session`), not owner-only.
+#[tokio::test]
+async fn session_restart_routes_to_a_capable_agent() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    spawn_fake_agent(&hub, "boxA", None, "claude-proj").await;
+    for _ in 0..50 {
+        let m: Vec<serde_json::Value> =
+            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+        if !m.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{hub}/api/session/restart?machine=boxA"))
+        .json(&serde_json::json!({ "session": "claude-proj" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let row: cc_screen_protocol::SessionRestartStatus = resp.json().await.unwrap();
+    assert_eq!(row.session, "claude-proj", "the agent's row reaches the client unchanged");
+    assert_eq!(row.state, "resumed");
+}
+
+// An agent that predates 0087 advertises no `session-restart` cap. Routing the
+// op would be a `Cmd` variant it can't deserialize — no reply, and the client
+// waits out a 504. The hub refuses up front with an actionable 501 instead.
+#[tokio::test]
+async fn session_restart_on_an_old_agent_is_501() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut ws = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "oldbox".into(),
+            hostname: "oldbox".into(),
+            agent_version: "0.5.6".into(),
+            tools: vec![],
+            // 0049 + 0050 but not 0087 — the exact staggered-fleet shape.
+            caps: vec![
+                cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string(),
+                cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL.to_string(),
+            ],
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![] }, b"").await;
+    for _ in 0..50 {
+        let m: Vec<serde_json::Value> =
+            reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+        if !m.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{hub}/api/session/restart?machine=oldbox"))
+        .json(&serde_json::json!({ "session": "claude-proj" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("too old"), "the message says what to do: {body}");
+}
+
 // A pre-0049 agent advertises no `caps`. Routing the op would be a `Cmd` it
 // can't deserialize — no reply, and the client waits out a 504. The hub refuses
 // it up front with an actionable 501 instead.

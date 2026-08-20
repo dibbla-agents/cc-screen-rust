@@ -460,6 +460,43 @@ pub async fn clear_history(
     }
 }
 
+// ── Restart one session, routed to the owning agent (proposal 0087) ──────────
+// Deliberately NOT the owner-only gate the assistant-update ops use. [0049] E3
+// reasoned that "updating CLIs and restarting terminals" is administration, and
+// that is right for the *fleet* action: it mutates machine-global binaries. A
+// single session's restart mutates nothing machine-global — one child process
+// exits and relaunches — and it is behaviourally a safer version of two things a
+// session-share grantee can already do (type `/exit` into the PTY; POST
+// /api/session/delete with mode "exit"), except that it PRESERVES the session
+// where those destroy it. Denying it to someone who can destroy would be gate
+// theatre. So it pins to `may_see_session`, exactly like delete/key/paste — which
+// is what `resolve_scoped(.., Some(session))` enforces.
+//
+// The other half of the gate is the capability: an agent that predates 0087
+// can't deserialize `Cmd::RestartSession`, so routing one would hang until the
+// relay timed out into a 504. We answer 501 with something actionable instead.
+pub async fn restart_session(
+    State(hub): State<HubState>,
+    Extension(scope): Extension<Visibility>,
+    Query(q): Query<MachineQ>,
+    Json(b): Json<SessionBody>,
+) -> Response {
+    let agent = match hub.registry.resolve_scoped(&scope, &q.machine, Some(&b.session)) {
+        Some(a) => a,
+        None => return (StatusCode::NOT_FOUND, UNRESOLVED).into_response(),
+    };
+    if !agent.caps.iter().any(|c| c == cc_screen_protocol::hub::CAP_SESSION_RESTART) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "this machine's agent is too old to restart a single session — run `cc-screen-rust update` on it",
+        )
+            .into_response();
+    }
+    // `update_send` is the generic "reply is JSON or an error status" mapper —
+    // the restart's one-row `SessionRestartStatus` rides it unchanged.
+    update_send(agent, Cmd::RestartSession { session: b.session }).await
+}
+
 #[derive(Deserialize)]
 pub struct ColorBody {
     session: String,

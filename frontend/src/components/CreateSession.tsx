@@ -28,8 +28,10 @@ const LAST_TOOL_KEY = "ccs.lastTool";
 
 interface Props {
   // The hub's roster + whether to show the machine selector. Creating runs on
-  // `initialMachine` (the pane the user came from, else the first online agent),
-  // changeable in-flow when there's >1 agent.
+  // `initialMachine` (the pane the user came from, else the machine this client
+  // most recently used — proposal 0086 B2), changeable in-flow when there's >1
+  // agent. The list arrives already MRU-ordered (0086 B3); the panel renders it
+  // verbatim and is the only surface that sees that order.
   machines: MachineInfo[];
   multiMachine: boolean;
   initialMachine: string;
@@ -98,6 +100,21 @@ export default function CreateSession({
   const [tools, setTools] = useState<Tool[]>([]);
   const [tool, setTool] = useState<string>("");
   const [selectedMachine, setSelectedMachine] = useState(initialMachine);
+  // Proposal 0086 B4 — the machine order is snapshotted when the panel mounts
+  // and frozen while it is open: a background poll promoting a machine must not
+  // reorder a `<select>` under an open dropdown. Only the ORDER is frozen —
+  // `machines` still supplies live hostname/online, so an agent that drops off
+  // still greys out in place.
+  const [machineOrder] = useState<string[]>(() => machines.map((m) => m.machine));
+  const orderedMachines = useMemo(() => {
+    const rank = new Map(machineOrder.map((id, i) => [id, i]));
+    // Machines that joined the roster while the panel was open have no rank;
+    // they keep their incoming order at the tail rather than jumping the queue.
+    return machines
+      .map((m, i) => ({ m, k: rank.get(m.machine) ?? machineOrder.length + i }))
+      .sort((a, b) => a.k - b.k)
+      .map((x) => x.m);
+  }, [machines, machineOrder]);
   // The search root (default $HOME); → on a result re-roots here for deep browse.
   const [root, setRoot] = useState<string>("");
   const [query, setQuery] = useState(initialQuery);
@@ -435,6 +452,7 @@ export default function CreateSession({
         <span className="text-[13px] font-semibold tracking-wide text-slate-100">New session</span>
         {multiMachine && (
           <select
+            data-create-machine
             value={selectedMachine}
             onChange={(e) => {
               nameEdited.current = false;
@@ -445,7 +463,7 @@ export default function CreateSession({
             className="ml-auto min-w-0 max-w-[40%] truncate rounded-md bg-panel px-1.5 py-1 text-[11px] text-slate-200"
             title="Machine"
           >
-            {machines.map((m) => (
+            {orderedMachines.map((m) => (
               <option key={m.machine} value={m.machine} disabled={!m.online}>
                 {(m.hostname || m.machine) + (m.online ? "" : " (offline)")}
               </option>
@@ -468,6 +486,7 @@ export default function CreateSession({
         <span className="text-slate-500">🔎</span>
         <input
           ref={searchRef}
+          data-create-search
           value={query}
           onChange={(e) => {
             nameEdited.current = false;
@@ -677,6 +696,7 @@ export default function CreateSession({
         <div className="flex gap-1.5">
           <input
             ref={nameRef}
+            data-create-name
             value={name}
             onChange={(e) => {
               nameEdited.current = true;

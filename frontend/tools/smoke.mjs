@@ -793,6 +793,73 @@ async function gridKeyboardPass() {
   }
 }
 
+// ── Proposal 0085 ─────────────────────────────────────────────────────────────
+// Markdown tables in the live-preview editor: the click lands in the cell you
+// aimed at (Part A), editing one row leaves the rest of the table RENDERED
+// (Part B — the assertion that fails on a pre-0085 build), and the widget's
+// Copy button puts the table's own bytes on the clipboard (Part C).
+async function tablePass() {
+  const rel = relative(homedir(), editFile).split(sep).join("/");
+  if (rel.startsWith("..")) {
+    console.log("SKIP table pass: CCWEB_SHARE_DIR is outside $HOME, so the file has no link form");
+    return;
+  }
+  const fileUrl = "/file/-/" + rel.split("/").map(encodeURIComponent).join("/");
+  const TABLE = "| a | b |\n|---|--:|\n| 1 | 2 |";
+  // Earlier passes edit this fixture; start from a known table.
+  writeFileSync(editFile, "# Smoke Heading\n\nHello **world**.\n\n" + TABLE + "\n");
+
+  const dctx = await browser.newContext({
+    viewport: { width: 1280, height: 820 },
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  try {
+    await dpage.goto(base + fileUrl, { waitUntil: "domcontentloaded" });
+    await dpage.waitForSelector(".cm-md-table", { timeout: 15000 });
+
+    // ── Part C: copy the table as markdown, verbatim, without moving the caret
+    await dpage.locator(".cm-md-table-wrap").first().hover();
+    await dpage.locator(".cm-md-table-copy").first().click({ timeout: 8000 });
+    const copied = await dpage.evaluate(() => navigator.clipboard.readText());
+    if (copied !== TABLE) {
+      fail(`table Copy produced ${JSON.stringify(copied)}, expected ${JSON.stringify(TABLE)}`);
+      return;
+    }
+    if ((await dpage.locator(".cm-md-table").count()) !== 1) {
+      fail("the Copy button moved the caret into the table (0085 C1: mousedown must preventDefault)");
+      return;
+    }
+
+    // ── Parts A + B: click the "2" cell; only that row reveals its source
+    await dpage.locator('td[data-row="0"][data-col="1"]').click({ timeout: 8000 });
+    if ((await dpage.locator(".cm-md-table").count()) === 0) {
+      fail("editing one row collapsed the whole table to pipe soup (0085 Part B)");
+      return;
+    }
+    const shown = await dpage.locator(".cm-content").first().innerText();
+    if (!shown.includes("| 1 | 2 |")) {
+      fail("the clicked row never revealed its source");
+      return;
+    }
+    // The caret is IN the cell that was clicked, so typing lands there.
+    await dpage.keyboard.type("X");
+    await dpage.waitForTimeout(1400); // autosave debounce
+    const onDisk = readFileSync(editFile, "utf8");
+    if (!onDisk.includes("| 1 | X2 |")) {
+      fail(`click-to-cell put the caret in the wrong place (0085 Part A); file is:\n${onDisk}`);
+      return;
+    }
+    if (derrs.length) fail("table pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    fail("table pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
 // The other half of Part D: with GL unavailable the terminal must still mount,
 // on xterm's DOM renderer, with search working there too.
 async function domFallbackPass() {
@@ -824,6 +891,207 @@ async function domFallbackPass() {
   } finally {
     await dctx.close();
     await nogl.close();
+  }
+}
+
+// ── Proposal 0087 ─────────────────────────────────────────────────────────────
+// The per-session Restart button — the FIRST browser-level coverage of any
+// restart UI ([0049]'s fleet action has none). The affordance assertion is the
+// one that fails on the pre-0087 build: the row action cluster had Share and
+// Delete and nothing else.
+//
+// Deliberately does NOT restart anything (same discipline as the create step:
+// we do NOT create). It walks the two-step inline confirm to the armed state and
+// cancels, then asserts no restart request was ever issued — so the pass is safe
+// against whatever real sessions the harness is pointed at.
+async function restartActionPass() {
+  const dctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  const dapi = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  dpage.on("request", (r) => {
+    try {
+      dapi.push(`${r.method()} ${new URL(r.url()).pathname}`);
+    } catch {}
+  });
+  try {
+    await dpage.goto(base, { waitUntil: "networkidle" });
+    await dpage.locator("[data-session-row]").first().waitFor({ timeout: 15000 });
+    // Per row: which tool it runs, and whether it offers a restart. The tool dot
+    // is the first title-carrying dot in the row (the status dot follows it).
+    const rows = await dpage.locator("[data-session-row]").evaluateAll((els) =>
+      els.map((e) => ({
+        tool: e.querySelector("span.rounded-full[title]")?.getAttribute("title") ?? "",
+        restart: !!e.querySelector("[data-restart]"),
+      }))
+    );
+    const assistants = rows.filter((r) => r.tool && r.tool !== "shell");
+    if (!assistants.length) {
+      console.log("SKIP restart-action pass: no assistant session in the list");
+      return;
+    }
+    if (!assistants.every((r) => r.restart)) {
+      fail("a session row is missing the Restart affordance (0087 C1)");
+      return;
+    }
+    // C5: `shell` has no conversation to resume, and the engine refuses it — the
+    // row must not render a button that can only 422.
+    if (rows.some((r) => r.tool === "shell" && r.restart)) {
+      fail("a shell session row offered Restart (0087 C5 — it has no resume)");
+      return;
+    }
+
+    // The two-step confirm: first press ARMS (no window.confirm, nothing fired),
+    // second would fire — so we cancel instead.
+    const arm = dpage.locator("[data-restart]").first();
+    await arm.click({ timeout: 10000 });
+    await dpage.waitForSelector("[data-restart-confirm]", { timeout: 5000 });
+    if (dapi.some((a) => a.includes("/api/session/restart"))) {
+      fail("arming the confirm already fired the restart (0087 C1 is two-step)");
+      return;
+    }
+    await dpage.getByRole("button", { name: "Cancel restart" }).first().click();
+    if ((await dpage.locator("[data-restart-confirm]").count()) !== 0) {
+      fail("Cancel didn't disarm the restart confirm");
+      return;
+    }
+    if (dapi.some((a) => a.includes("/api/session/restart"))) {
+      fail("the cancelled confirm still restarted a session");
+      return;
+    }
+    if (derrs.length) fail("restart-action pass JS errors: " + derrs.join("; "));
+  } catch (e) {
+    fail("restart-action pass: " + e.message);
+  } finally {
+    await dctx.close();
+  }
+}
+
+// ── Proposal 0086 ─────────────────────────────────────────────────────────────
+// "New session" costs six keystrokes and two clicks before the first keystroke
+// that carries information. Three things are pinned here:
+//   A. the query that SUMMONED the action ("new") must not arrive in the create
+//      panel as a folder filter — on today's build the folder box reads "new",
+//      the name field reads "new", and the only row is `Create folder "new"`,
+//      so a reflexive second ⏎ mints a ~/new directory;
+//   A'. a residue after the action term still rides along ([0016]'s power path);
+//   C. `⌃B n` opens create mode directly.
+//
+// Nothing here creates a session or a folder — the panel's ⏎ is destructive by
+// design (it creates), so the footgun is asserted structurally (no mkdir row
+// exists to press) rather than by pressing it.
+async function newSessionPass(ctxOpts, label) {
+  const dctx = await browser.newContext(ctxOpts);
+  const dpage = await dctx.newPage();
+  const derrs = [];
+  const dapi = [];
+  dpage.on("pageerror", (e) => derrs.push("pageerror: " + e.message));
+  dpage.on("request", (r) => {
+    try {
+      dapi.push(`${r.method()} ${new URL(r.url()).pathname}`);
+    } catch {}
+  });
+  const phone = !!ctxOpts.isMobile;
+  try {
+    await dpage.goto(base, { waitUntil: "networkidle" });
+    await dpage.locator("[data-session-row]").first().waitFor({ timeout: 15000 });
+    const openDrawer = async () => {
+      if ((await dpage.locator('[data-drawer="open"] [data-session-row]').count()) > 0) return;
+      await dpage.evaluate(() => document.activeElement?.blur?.());
+      await dpage.keyboard.press("Control+b");
+      if (!phone) await dpage.keyboard.press("s");
+      await dpage.waitForSelector('[data-drawer="open"] [data-session-row]', { timeout: 5000 });
+    };
+    const filter = () => dpage.getByPlaceholder("Search sessions, actions").first();
+    const enterCreate = async (typed) => {
+      await openDrawer();
+      await filter().fill(typed);
+      await dpage.waitForTimeout(150);
+      await dpage.getByRole("button", { name: /^New session/ }).first().click({ timeout: 5000 });
+      await dpage.waitForSelector("[data-create-search]", { timeout: 5000 });
+    };
+    const backToList = async () => {
+      await dpage.getByRole("button", { name: "Back to sessions" }).click();
+      await dpage.waitForSelector("[data-session-row]", { timeout: 5000 });
+      await filter().fill("");
+    };
+
+    // A — the action's own name is consumed, not forwarded.
+    await enterCreate("new");
+    const residue = await dpage.locator("[data-create-search]").first().inputValue();
+    const nameVal = await dpage.locator("[data-create-name]").first().inputValue();
+    const mkdirRow = await dpage.getByText("Create folder", { exact: false }).count();
+    if (residue !== "") {
+      fail(`${label}: the create panel opened filtered on ${JSON.stringify(residue)} (0086 A1)`);
+      return;
+    }
+    if (nameVal !== "") {
+      fail(`${label}: the session name auto-derived to ${JSON.stringify(nameVal)} (0086 A2)`);
+      return;
+    }
+    if (mkdirRow !== 0) {
+      fail(`${label}: a "Create folder" row is one ⏎ away from minting ~/new (0086 A2)`);
+      return;
+    }
+
+    // A' — a real folder query after the action term still rides along.
+    await backToList();
+    await enterCreate("new ccwebsmoke");
+    const carried = await dpage.locator("[data-create-search]").first().inputValue();
+    if (carried !== "ccwebsmoke") {
+      fail(`${label}: the residual query didn't carry (got ${JSON.stringify(carried)}, 0086 A1)`);
+      return;
+    }
+
+    // B — the machine selector, when there is one, leads with an ONLINE machine
+    // (the MRU head; a single-agent harness has nothing to reorder).
+    const sel = dpage.locator("[data-create-machine]").first();
+    if ((await sel.count()) > 0) {
+      const opts = await sel.evaluate((el) =>
+        [...el.options].map((o) => ({ v: o.value, off: o.disabled }))
+      );
+      if (opts.length && opts[0].off) {
+        fail(`${label}: the machine select leads with an offline machine (0086 B1)`);
+        return;
+      }
+      const picked = await sel.inputValue();
+      if (opts.length && opts.every((o) => o.v !== picked)) {
+        fail(`${label}: the preselected machine isn't in the list (0086 B2)`);
+        return;
+      }
+    } else {
+      console.log(`SKIP ${label} MRU select assertion: single-machine deployment`);
+    }
+
+    // C — the dedicated chord. Desktop only: the phone has no chord surface
+    // (⌃B toggles the drawer there) and needs none.
+    if (!phone) {
+      await backToList();
+      await dpage.keyboard.press("Escape"); // clear filter
+      await dpage.keyboard.press("Escape"); // close the drawer
+      await dpage.waitForTimeout(200);
+      await dpage.evaluate(() => document.activeElement?.blur?.());
+      await dpage.keyboard.press("Control+b");
+      await dpage.keyboard.press("n");
+      await dpage.waitForSelector("[data-create-search]", { timeout: 5000 });
+      const chordQuery = await dpage.locator("[data-create-search]").first().inputValue();
+      if (chordQuery !== "") {
+        fail(`⌃B n opened the panel filtered on ${JSON.stringify(chordQuery)} (0086 C1)`);
+        return;
+      }
+    }
+
+    // Nothing in this pass may have created anything.
+    if (dapi.some((a) => a.includes("/api/dirs/mkdir") || a.startsWith("POST /api/session"))) {
+      fail(`${label}: the new-session pass created something — it must only look`);
+      return;
+    }
+    if (derrs.length) fail(`${label} JS errors: ` + derrs.join("; "));
+  } catch (e) {
+    fail(`${label}: ` + e.message);
+  } finally {
+    await dctx.close();
   }
 }
 
@@ -1299,7 +1567,18 @@ try {
     if (process.exitCode === 1) throw new Error("deep-link pass failed");
     await phoneEditorKeyboardPass();
     if (process.exitCode === 1) throw new Error("phone keyboard-layout pass failed");
-    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; file deep links: desktop + phone zero-tap, folder form, heal, Copy link OK; phone editor: no dead band above the keyboard OK)");
+    await tablePass();
+    if (process.exitCode === 1) throw new Error("markdown table pass failed");
+    await restartActionPass();
+    if (process.exitCode === 1) throw new Error("restart-action pass failed");
+    await newSessionPass({ viewport: { width: 1280, height: 820 } }, "new-session pass (desktop)");
+    if (process.exitCode === 1) throw new Error("new-session pass failed");
+    await newSessionPass(
+      { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true },
+      "new-session pass (phone)"
+    );
+    if (process.exitCode === 1) throw new Error("new-session phone pass failed");
+    console.log("SMOKE PASS (touch ladder: scrollback + wheel reports + arrows; OSC 52 clipboard; editor save/new/read OK; webgl+dom renderers, idle quiescent, ⌃B / find OK; Recent section OK; grid keymap: wrap + empty-pane prefix + ⌃B ; + no unasked rename OK; file deep links: desktop + phone zero-tap, folder form, heal, Copy link OK; phone editor: no dead band above the keyboard OK; markdown tables: cell click + row reveal + Copy OK; new session: no residue, residual carry, \u2303B n OK)");
     console.log("API calls:\n  " + api.join("\n  "));
   }
 } catch (e) {

@@ -331,6 +331,9 @@ async fn main() {
         .route("/api/tools", get(handlers::tools))
         .route("/api/session", post(handlers::create_session))
         .route("/api/session/delete", post(handlers::delete_session))
+        // Restart ONE session and resume its conversation (proposal 0087) — the
+        // per-session counterpart to /api/assistants/update's fleet restart.
+        .route("/api/session/restart", post(handlers::restart_session))
         .route("/api/session/color", post(handlers::set_color))
         .route("/api/session/label", post(handlers::set_label))
         .route("/api/session/root", get(handlers::session_root))

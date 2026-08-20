@@ -1448,6 +1448,34 @@ export async function deleteSession(
   }
 }
 
+// restartSession restarts ONE session and resumes its conversation (proposal
+// 0087): the agent types the assistant's /exit (escalating to a kill if it
+// doesn't go), relaunches it under the SAME name with resume on, and re-applies
+// its colour + label — so an attached pane blinks rather than disappearing. The
+// canonical reason is a config the CLI only reads at launch, e.g. a newly added
+// MCP server.
+//
+// Synchronous and slow by design (up to ~15s: 10s graceful + 5s forced), so the
+// caller shows an in-flight state rather than polling a job. Resolves with the
+// one-row status; a refusal (404 unknown, 422 shell, 409 already restarting / an
+// assistant update is running, 501 the agent predates 0087) throws with the
+// server's message. Routed to the owning agent via `?machine=` like the other
+// session ops.
+export async function restartSession(
+  session: string,
+  machine?: string
+): Promise<SessionRestartStatus> {
+  const r = await fetch(withMachine("/api/session/restart", machine), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session }),
+  });
+  if (!r.ok) {
+    throw new ApiError(r.status, (await r.text()).trim() || `restart: ${r.status}`);
+  }
+  return (await r.json()) as SessionRestartStatus;
+}
+
 // setSessionColor marks a session with a curated palette token (proposal 0029),
 // or clears the mark when `color` is null. The agent validates the token,
 // persists it (survives restart), and returns the updated Session. Routed to the

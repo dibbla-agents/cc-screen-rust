@@ -74,6 +74,16 @@ pub const CAP_ASSISTANT_UPDATE: &str = "assistant-update";
 /// `501` from the hub.
 pub const CAP_ASSISTANT_INSTALL: &str = "assistant-install";
 
+/// Capability token: this agent understands [`Cmd::RestartSession`] — restarting
+/// **one** named session and resuming its conversation (proposal 0087).
+///
+/// A token rather than a version sniff, for the reason [`CAP_ASSISTANT_UPDATE`]
+/// spells out: an agent that predates the variant can't deserialize the `Cmd` at
+/// all, so routing one would never be answered and the client would wait out the
+/// relay's timeout into a `504`. With the token the hub refuses up front with an
+/// honest `501`.
+pub const CAP_SESSION_RESTART: &str = "session-restart";
+
 /// WebSocket close code the hub uses to reject an agent uplink whose token is
 /// **unauthorized** — unknown, or revoked because the machine was unlinked from
 /// the dashboard. In the private-use range (4000–4999); echoes HTTP 401. The
@@ -232,6 +242,18 @@ pub enum Cmd {
     },
     /// Read the current-or-last update job (proposal 0049) → [`CmdResult::Json`].
     UpdateStatus,
+    /// Restart **one** named session and resume its conversation (proposal 0087)
+    /// — stop the assistant with `/exit` (escalating to a kill), relaunch it
+    /// under the same name with `resume = true`, and re-apply its colour and
+    /// label. Nothing machine-global changes, which is why this is gated like the
+    /// other session ops (`may_see_session`) rather than owner-only: it is
+    /// strictly safer than the `/exit` and Delete a grantee can already perform.
+    ///
+    /// Synchronous: worst case ~15 s (10 s graceful + 5 s forced). Replies
+    /// [`CmdResult::Json`] with the [`crate::SessionRestartStatus`] row, or
+    /// [`CmdResult::Error`] for a refusal (404 unknown, 422 `shell`, 409 already
+    /// restarting / an update job is running). Gated on [`CAP_SESSION_RESTART`].
+    RestartSession { session: String },
     /// What installing the missing assistants on this machine WOULD do (proposal
     /// 0050): the exact commands, the missing prerequisites and the size hints,
     /// so the dialog can show them before the user confirms. A pure probe.
@@ -419,6 +441,8 @@ mod tests {
             // Proposal 0050: installing what's missing, and asking what that would run.
             HubMsg::Command { req: 9, cmd: Cmd::UpdateAssistants { tools: vec![], restart: "updated".into(), install_missing: true } },
             HubMsg::Command { req: 10, cmd: Cmd::InstallPlan { tools: vec!["kimi".into()] } },
+            // Proposal 0087: restart one named session and resume it.
+            HubMsg::Command { req: 11, cmd: Cmd::RestartSession { session: "claude-x".into() } },
             HubMsg::OpenBulk { id: "nonce-abc123".into(), bulk: BulkSpec { method: "GET".into(), uri: "/api/download?path=/home/u/f".into(), headers: vec![("range".into(), "bytes=0-99".into())] } },
             HubMsg::SummaryResult {
                 session: "claude-x".into(),
@@ -433,6 +457,24 @@ mod tests {
             assert_eq!(back, m, "hub frame round-trips");
             assert!(tail.is_empty());
         }
+    }
+
+    // Proposal 0087 inserted `Cmd::RestartSession` into the middle of the enum.
+    // Serde's externally-tagged representation keys on the variant NAME, so that
+    // cannot move an existing variant — but hub and agent are deployed
+    // independently, so pin the encodings that a rename would silently break.
+    #[test]
+    fn existing_cmd_variants_serialize_unchanged() {
+        assert_eq!(serde_json::to_string(&Cmd::UpdateStatus).unwrap(), "\"UpdateStatus\"");
+        assert_eq!(
+            serde_json::to_string(&Cmd::Key { session: "claude-x".into(), key: "enter".into() })
+                .unwrap(),
+            r#"{"Key":{"session":"claude-x","key":"enter"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Cmd::RestartSession { session: "claude-x".into() }).unwrap(),
+            r#"{"RestartSession":{"session":"claude-x"}}"#
+        );
     }
 
     #[test]

@@ -1,12 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { EditorState, EditorSelection } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import {
+  cellSourceOffset,
   computeDecorations,
   parseTableSource,
+  serializeTable,
+  tableCellTarget,
+  tablePasteInsert,
+  TableWidget,
   toggleTaskAt,
   linkNodeUrl,
   hrefFromUrlText,
+  livePreview,
   type DecoSpec,
 } from "./livePreview";
 
@@ -259,11 +266,272 @@ describe("computeDecorations", () => {
     expect(specs.some((s) => s.type !== "table" && s.from >= tFrom && s.to <= tTo)).toBe(false);
   });
 
-  it("reveals table source (no table widget) when the cursor is inside it", () => {
+  // Amended by proposal 0085 Part B (B6): the caret inside a table used to
+  // collapse the WHOLE block to raw pipe source. It now reveals only the row
+  // being edited — the header run stays a rendered table.
+  it("reveals only the active row's source, keeping the rest of the table rendered", () => {
     const doc = "intro\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\nend\n";
-    const cursor = doc.indexOf("| 1 |") + 2;
-    const specs = computeDecorations(stateFor(doc, cursor));
-    expect(specs.filter((s) => s.type === "table").length).toBe(0);
+    const rowFrom = doc.indexOf("| 1 |");
+    const specs = computeDecorations(stateFor(doc, rowFrom + 2));
+    const tables = specs.filter((s) => s.type === "table");
+    // (a) the active body row is not covered by any table spec …
+    expect(tables.some((s) => s.from <= rowFrom && s.to > rowFrom)).toBe(false);
+    // (b) … but the header run still renders.
+    const headFrom = doc.indexOf("| a |");
+    const head = tables.filter((s) => s.from <= headFrom && s.to > headFrom);
+    expect(head.length).toBe(1);
+    expect(head[0].slice!.header).toBe(true);
+    expect(head[0].slice!.whole).toBe(false);
+  });
+});
+
+// ── Proposal 0085 Part B: row-level reveal ────────────────────────────────────
+describe("computeDecorations — table row reveal", () => {
+  // A 4-body-row table with a paragraph on either side, so line numbers are
+  // never accidentally the same as row indices.
+  const doc =
+    "intro\n\n| a | b |\n|---|--:|\n| r1 | 1 |\n| r2 | 2 |\n| r3 | 3 |\n| r4 | 4 |\n\nend\n";
+  const at = (needle: string) => doc.indexOf(needle);
+  const tablesFor = (cursor: number | [number, number]) => {
+    const state =
+      typeof cursor === "number"
+        ? stateFor(doc, cursor)
+        : EditorState.create({
+            doc,
+            selection: EditorSelection.single(cursor[0], cursor[1]),
+            extensions: [markdownLanguage],
+          });
+    return computeDecorations(state).filter((s) => s.type === "table");
+  };
+  const covers = (specs: DecoSpec[], pos: number) => specs.some((s) => s.from <= pos && s.to > pos);
+
+  it("renders the whole block as one slice when the caret is outside", () => {
+    const t = tablesFor(0);
+    expect(t.length).toBe(1);
+    expect(t[0].from).toBe(at("| a |"));
+    expect(t[0].to).toBe(at("| r4 |") + "| r4 | 4 |".length);
+    expect(t[0].slice).toEqual({
+      header: true,
+      bodyFrom: 0,
+      bodyTo: 4,
+      blockFrom: t[0].from,
+      blockTo: t[0].to,
+      first: true,
+      whole: true,
+    });
+  });
+
+  it("splits into two slices around the body row under the caret", () => {
+    const t = tablesFor(at("| r2 |") + 3);
+    expect(t.length).toBe(2);
+    expect(covers(t, at("| r2 |"))).toBe(false);
+    // header + delimiter + r1
+    expect(t[0].slice!.header).toBe(true);
+    expect(t[0].slice!.bodyFrom).toBe(0);
+    expect(t[0].slice!.bodyTo).toBe(1);
+    expect(t[0].slice!.first).toBe(true);
+    // r3 + r4, no header, alignment still available from the block's data
+    expect(t[1].slice!.header).toBe(false);
+    expect(t[1].slice!.bodyFrom).toBe(2);
+    expect(t[1].slice!.bodyTo).toBe(4);
+    expect(t[1].slice!.first).toBe(false);
+    expect(t[1].table!.align).toEqual([null, "right"]);
+    // Both slices point at the whole block, which is what the Copy button copies.
+    for (const s of t) {
+      expect(s.slice!.blockFrom).toBe(at("| a |"));
+      expect(s.slice!.blockTo).toBe(at("| r4 |") + "| r4 | 4 |".length);
+    }
+  });
+
+  it("reveals the header and its delimiter together (B2)", () => {
+    const t = tablesFor(at("| a |") + 2);
+    expect(covers(t, at("| a |"))).toBe(false);
+    expect(covers(t, at("|---|"))).toBe(false);
+    expect(t.length).toBe(1);
+    expect(t[0].slice!.header).toBe(false);
+    expect(t[0].slice!.bodyFrom).toBe(0);
+    expect(t[0].slice!.bodyTo).toBe(4);
+  });
+
+  it("reveals the header when the caret is on the delimiter line", () => {
+    const t = tablesFor(at("|---|") + 2);
+    expect(covers(t, at("| a |"))).toBe(false);
+    expect(covers(t, at("|---|"))).toBe(false);
+    expect(t.length).toBe(1);
+    expect(t[0].slice!.header).toBe(false);
+  });
+
+  it("reveals every row a multi-line selection touches", () => {
+    const t = tablesFor([at("| r1 |") + 2, at("| r2 |") + 2]);
+    expect(covers(t, at("| r1 |"))).toBe(false);
+    expect(covers(t, at("| r2 |"))).toBe(false);
+    expect(t.length).toBe(2);
+    expect(t[0].slice!.header).toBe(true);
+    expect(t[0].slice!.bodyTo).toBe(0); // header + delimiter only
+    expect(t[1].slice!.bodyFrom).toBe(2);
+    expect(t[1].slice!.bodyTo).toBe(4);
+  });
+
+  it("reveals the header when the selection starts on the line above the table", () => {
+    const t = tablesFor([at("intro"), at("| a |") + 2]);
+    expect(covers(t, at("| a |"))).toBe(false);
+    expect(covers(t, at("|---|"))).toBe(false);
+    expect(t.length).toBe(1);
+    expect(t[0].slice!.header).toBe(false);
+    expect(t[0].slice!.bodyFrom).toBe(0);
+    expect(t[0].slice!.bodyTo).toBe(4);
+  });
+
+  it("leaves the revealed row's own inline decorations in place", () => {
+    const bold = "| a | b |\n|---|---|\n| **x** | 2 |\n";
+    const cursor = bold.indexOf("**x**") + 1;
+    const specs = computeDecorations(stateFor(bold, cursor));
+    expect(specs.some((s) => s.type === "mark" && s.cls === "cm-md-strong")).toBe(true);
+    // …and nothing leaks into the rendered header run.
+    const head = specs.filter((s) => s.type === "table")[0];
+    expect(
+      specs.some((s) => s.type !== "table" && s.from >= head.from && s.to <= head.to)
+    ).toBe(false);
+  });
+});
+
+// ── Proposal 0085 Part A: cell-accurate click mapping ─────────────────────────
+describe("cellSourceOffset", () => {
+  const src = "| a | b |\n|---|--:|\n| 1 | 2 |";
+
+  it("finds the first content character of a header cell", () => {
+    expect(cellSourceOffset(src, -1, 0)).toBe(src.indexOf("a"));
+    expect(cellSourceOffset(src, -1, 1)).toBe(src.indexOf("b"));
+  });
+
+  it("finds the first content character of a body cell", () => {
+    expect(cellSourceOffset(src, 0, 0)).toBe(src.indexOf("1"));
+    expect(cellSourceOffset(src, 0, 1)).toBe(src.indexOf("2"));
+  });
+
+  it("handles rows written without leading/trailing pipes", () => {
+    const bare = "a | b\n--- | ---\n1 | 2";
+    expect(cellSourceOffset(bare, -1, 0)).toBe(0);
+    expect(cellSourceOffset(bare, -1, 1)).toBe(bare.indexOf("b"));
+    expect(cellSourceOffset(bare, 0, 0)).toBe(bare.indexOf("1"));
+    expect(cellSourceOffset(bare, 0, 1)).toBe(bare.indexOf("2"));
+  });
+
+  it("does not treat an escaped pipe as a cell boundary", () => {
+    const esc = "| a | b |\n|---|---|\n| x \\| y | 2 |";
+    expect(cellSourceOffset(esc, 0, 0)).toBe(esc.indexOf("x"));
+    expect(cellSourceOffset(esc, 0, 1)).toBe(esc.lastIndexOf("2"));
+    expect(cellSourceOffset(esc, 0, 2)).toBeNull();
+  });
+
+  it("returns null for a cell or row that doesn't exist", () => {
+    expect(cellSourceOffset(src, -1, 2)).toBeNull();
+    expect(cellSourceOffset(src, 5, 0)).toBeNull();
+    expect(cellSourceOffset(src, 0, -1)).toBeNull();
+  });
+
+  it("parks the caret at the end of an empty cell", () => {
+    const empty = "|  | b |\n|---|---|\n| 1 | 2 |";
+    expect(cellSourceOffset(empty, -1, 0)).toBe(empty.indexOf("|", 1));
+  });
+});
+
+// ── Proposal 0085 Part A2: the stale-widget eq() fix ──────────────────────────
+describe("TableWidget.eq", () => {
+  const src = "| a | b |\n|---|---|\n| 1 | 2 |";
+  const slice = {
+    header: true,
+    bodyFrom: 0,
+    bodyTo: 1,
+    blockFrom: 0,
+    blockTo: src.length,
+    first: true,
+    whole: true,
+  };
+  const data = parseTableSource(src)!;
+
+  it("treats identical table text at different offsets as different widgets", () => {
+    const a = new TableWidget(data, slice, src, 0);
+    const b = new TableWidget(data, { ...slice, blockFrom: 40 }, src, 40);
+    expect(a.eq(b)).toBe(false);
+    expect(a.eq(new TableWidget(data, slice, src, 0))).toBe(true);
+  });
+
+  it("distinguishes two runs of the same block", () => {
+    const head = new TableWidget(data, slice, src, 0);
+    const body = new TableWidget(
+      data,
+      { ...slice, header: false, bodyFrom: 0, bodyTo: 1, first: false, whole: false },
+      src,
+      0
+    );
+    expect(head.eq(body)).toBe(false);
+  });
+});
+
+// ── Proposal 0085 Part B4: serializeTable ─────────────────────────────────────
+describe("serializeTable", () => {
+  it("pads columns and emits the alignment row", () => {
+    const t = parseTableSource("| a | bbbb |\n|:-|--:|\n| 1 | 2 |")!;
+    expect(serializeTable(t)).toBe("| a   | bbbb |\n| :-- | ---: |\n| 1   | 2    |");
+  });
+
+  it("round-trips through parseTableSource", () => {
+    for (const src of [
+      "| a | b |\n|---|--:|\n| 1 | 2 |",
+      "| one | two | three |\n|:-:|---|:--|\n| x | y | z |\n| | | |",
+      "| h |\n|---|\n| only |",
+      "| a | b |\n|---|---|\n| x \\| y | 2 |",
+    ]) {
+      const d = parseTableSource(src)!;
+      expect(parseTableSource(serializeTable(d))).toEqual(d);
+    }
+  });
+
+  it("pads a ragged body row instead of throwing", () => {
+    const d = { header: ["a", "b", "c"], align: [null, null, null], body: [["1"]] } as const;
+    const out = serializeTable(d as unknown as Parameters<typeof serializeTable>[0]);
+    const back = parseTableSource(out)!;
+    expect(back.header).toEqual(["a", "b", "c"]);
+    expect(back.body).toEqual([["1", "", ""]]);
+  });
+
+  it("escapes a bare pipe but leaves an already-escaped one alone", () => {
+    const out = serializeTable({ header: ["a|b", "c\\|d"], align: [null, null], body: [] });
+    expect(out.split("\n")[0]).toBe("| a\\|b | c\\|d |");
+  });
+});
+
+// ── Proposal 0085 Part B5: Tab / Shift-Tab walk the cells ────────────────────
+describe("tableCellTarget", () => {
+  const doc = "intro\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n\nend\n";
+  const step = (cursor: number, forward: boolean) =>
+    tableCellTarget(stateFor(doc, cursor), cursor, forward);
+
+  it("returns null outside a table, so the binding falls through", () => {
+    expect(step(1, true)).toBeNull();
+    expect(step(doc.indexOf("end") + 1, true)).toBeNull();
+  });
+
+  it("returns null on the alignment delimiter line", () => {
+    expect(step(doc.indexOf("|---|") + 2, true)).toBeNull();
+  });
+
+  it("moves to the next cell on the same row", () => {
+    expect(step(doc.indexOf("| a |") + 2, true)).toBe(doc.indexOf("b"));
+  });
+
+  it("wraps off the last header cell into the first body cell", () => {
+    expect(step(doc.indexOf("b"), true)).toBe(doc.indexOf("| 1 |") + 2);
+  });
+
+  it("Shift-Tab from the first body cell lands on the last header cell", () => {
+    expect(step(doc.indexOf("| 1 |") + 2, false)).toBe(doc.indexOf("b"));
+  });
+
+  it("is a consumed no-op at both ends of the table", () => {
+    expect(step(doc.indexOf("| 1 | 2 |") + 6, true)).toBe("edge");
+    expect(step(doc.indexOf("| a |") + 2, false)).toBe("edge");
   });
 });
 
@@ -465,5 +733,171 @@ describe("toggleTaskAt", () => {
     const src = "- [ ] a\n";
     expect(toggleTaskAt(src, -1).changed).toBe(false);
     expect(toggleTaskAt(src, 999).changed).toBe(false);
+  });
+});
+
+// ── Proposal 0085 Part D3: the pasted table lands as its own block ────────────
+describe("tablePasteInsert", () => {
+  const md = "| a | b |\n| - | - |";
+  const ins = (doc: string, at: number) => tablePasteInsert(stateFor(doc, at), at, at, md);
+
+  it("adds no padding on an empty document", () => {
+    expect(ins("", 0)).toBe(md);
+  });
+
+  it("breaks out of a paragraph it is pasted into", () => {
+    const doc = "hello";
+    expect(ins(doc, doc.length)).toBe("\n\n" + md);
+  });
+
+  it("adds one newline when the line above is prose", () => {
+    const doc = "hello\n";
+    expect(ins(doc, doc.length)).toBe("\n" + md);
+  });
+
+  it("adds nothing when already surrounded by blank lines", () => {
+    const doc = "hello\n\n\n\nend\n";
+    expect(ins(doc, doc.indexOf("\n\n") + 2)).toBe(md);
+  });
+
+  it("pushes following prose onto its own block", () => {
+    const doc = "\nend\n";
+    expect(ins(doc, 1)).toBe(md + "\n\n");
+  });
+});
+
+// ── Proposal 0085 A/B/C, end to end in a real EditorView ─────────────────────
+// The pure helpers above are the contract; this block proves CodeMirror accepts
+// what they produce — block decorations from the state field, several slices per
+// table, and the two widget gestures (click-a-cell, copy-the-table).
+describe("the rendered table widget", () => {
+  const doc = "intro\n\n| a | b |\n|---|--:|\n| r1 | 1 |\n| r2 | 2 |\n\nend\n";
+  // jsdom does no layout, so CodeMirror's measure pass (a requestAnimationFrame
+  // after any doc change) trips over the missing Range rect APIs. Stub them to
+  // zero rects — nothing here asserts geometry, only structure and behaviour.
+  beforeAll(() => {
+    const proto = window.Range.prototype as unknown as Record<string, unknown>;
+    const empty = { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+    if (typeof proto.getClientRects !== "function") {
+      proto.getClientRects = () => Object.assign([], { item: () => null });
+      proto.getBoundingClientRect = () => ({ ...empty, toJSON: () => empty });
+    }
+  });
+  const mount = () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: EditorSelection.cursor(0),
+        extensions: [markdownLanguage, livePreview()],
+      }),
+      parent,
+    });
+    return { view, parent };
+  };
+  const click = (el: Element) =>
+    el.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+
+  it("renders the whole table off the cursor, tagging every cell", () => {
+    const { view, parent } = mount();
+    expect(parent.querySelectorAll(".cm-md-table").length).toBe(1);
+    expect(parent.querySelectorAll(".cm-md-table-copy").length).toBe(1);
+    expect(parent.querySelector("th[data-row='-1'][data-col='1']")?.textContent).toBe("b");
+    expect(parent.querySelector("td[data-row='1'][data-col='0']")?.textContent).toBe("r2");
+    view.destroy();
+  });
+
+  it("splits into slices while a row is edited, and heals when the caret leaves", () => {
+    const { view, parent } = mount();
+    view.dispatch({ selection: { anchor: doc.indexOf("| r1 |") + 3 } });
+    expect(parent.querySelectorAll(".cm-md-table").length).toBe(2);
+    expect(parent.querySelectorAll(".cm-md-table-copy").length).toBe(1); // first run only
+    expect(view.dom.textContent).toContain("| r1 | 1 |"); // the edited row is source
+
+    // Header active → the header + delimiter reveal, the body renders alone.
+    view.dispatch({ selection: { anchor: doc.indexOf("| a |") + 2 } });
+    expect(parent.querySelectorAll(".cm-md-table").length).toBe(1);
+    expect(parent.querySelectorAll("thead").length).toBe(0);
+
+    view.dispatch({ selection: { anchor: 0 } });
+    expect(parent.querySelectorAll(".cm-md-table").length).toBe(1);
+    expect(parent.querySelectorAll("thead").length).toBe(1);
+    view.destroy();
+  });
+
+  it("puts the caret in the cell that was clicked, not at the table start", () => {
+    const { view, parent } = mount();
+    click(parent.querySelector("td[data-row='1'][data-col='1']")!);
+    expect(view.state.selection.main.head).toBe(doc.indexOf("| r2 | 2 |") + 7);
+    view.dispatch({ selection: { anchor: 0 } });
+    click(parent.querySelector("th[data-row='-1'][data-col='0']")!);
+    expect(view.state.selection.main.head).toBe(doc.indexOf("| a |") + 2);
+    view.destroy();
+  });
+
+  // Part A2: identical table text at a new offset must be a NEW widget. With
+  // the old `eq` (src only) CodeMirror reused the DOM and its closure over the
+  // stale `from`, so every per-cell offset was computed against the wrong base.
+  it("still lands in the right cell after text is inserted above the table", () => {
+    const { view, parent } = mount();
+    view.dispatch({ changes: { from: 0, insert: "preamble\n\n" }, selection: { anchor: 0 } });
+    const shifted = view.state.doc.toString();
+    click(parent.querySelector("td[data-row='1'][data-col='1']")!);
+    expect(view.state.selection.main.head).toBe(shifted.indexOf("| r2 | 2 |") + 7);
+    view.destroy();
+  });
+
+  // Part D: a spreadsheet paste becomes a GFM table in ONE transaction, so a
+  // single undo restores the document as if it never happened.
+  it("converts a TSV paste into an aligned table, and leaves other pastes alone", () => {
+    const { view } = mount();
+    const paste = (flavours: Record<string, string>) => {
+      const ev = new window.Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "clipboardData", {
+        value: { getData: (t: string) => flavours[t] ?? "" },
+      });
+      view.contentDOM.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    expect(paste({ "text/plain": "x\ty\n1\t2" })).toBe(true);
+    expect(view.state.doc.toString()).toContain("| x   | y   |\n| --- | --- |\n| 1   | 2   |");
+    // A non-table paste never reaches the converter: the text lands verbatim.
+    paste({ "text/plain": "just some prose" });
+    expect(view.state.doc.toString()).toContain("just some prose");
+    expect(view.state.doc.toString()).not.toContain("| just some prose |");
+    view.destroy();
+  });
+
+  it("copies the table's own bytes, verbatim, without moving the caret", async () => {
+    const written: string[] = [];
+    const nav = navigator as unknown as { clipboard?: unknown };
+    const prev = nav.clipboard;
+    const prevSecure = window.isSecureContext;
+    Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (t: string) => {
+          written.push(t);
+          return Promise.resolve();
+        },
+      },
+    });
+    try {
+      const { view, parent } = mount();
+      const btn = parent.querySelector(".cm-md-table-copy")!;
+      const notCancelled = click(btn);
+      await Promise.resolve();
+      expect(written).toEqual(["| a | b |\n|---|--:|\n| r1 | 1 |\n| r2 | 2 |"]);
+      expect(notCancelled).toBe(false); // preventDefault: no blur, no caret move
+      expect(view.state.selection.main.head).toBe(0);
+      view.destroy();
+    } finally {
+      Object.defineProperty(window, "isSecureContext", { configurable: true, value: prevSecure });
+      if (prev === undefined) delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+      else Object.defineProperty(navigator, "clipboard", { configurable: true, value: prev });
+    }
   });
 });

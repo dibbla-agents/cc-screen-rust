@@ -35,8 +35,22 @@ your browser storage clears it; nothing else is affected.
 
 **New session** starts one: pick the machine, the tool (Claude, Codex,
 Gemini, Kimi, or a plain shell), and the working directory (with a
-directory search, so deep project paths are a few keystrokes). Two details
-worth knowing:
+directory search, so deep project paths are a few keystrokes).
+
+The panel opens aimed at **the machine you last used a session on** (from
+this browser), and the machine list is in that same most-recently-used
+order — so the common case needs no machine click at all, and the uncommon
+one finds its machine near the top. On a single-machine setup there's no
+picker to see.
+
+On a laptop the whole thing is two keystrokes: **`⌃B` `n`** opens the create
+panel directly, empty, with the folder box focused — type a few letters of
+the project and press `⏎`. (Typing `new` into the session list to find the
+button works too, and the panel still opens empty: the word that summoned
+the button isn't a folder. Type `new myproj` and the `myproj` half *does*
+carry into the folder search.)
+
+Two details worth knowing:
 
 ![Creating a session — tool, directory, options](../img/web-new-session.png)
 
@@ -52,6 +66,44 @@ worth knowing:
   tools that have such a feature (today: Claude Code).
 - Sessions survive you. Closing the browser, losing signal, even the machine
   rebooting — the agent resumes its sessions and your panes re-attach.
+
+### Restart a session
+
+Every assistant row has a **restart** button (the circular arrow, beside the
+trash). Press it once to arm the confirm, once more to fire: cc-screen types
+the assistant's `/exit`, waits for it to quit, and relaunches it in place with
+its conversation resumed. On desktop the same button sits in the focused
+pane's header bar, so you don't have to open the drawer for the session you're
+already looking at.
+
+It's the button for **anything the CLI only reads at launch** — a newly added
+MCP server is the usual one. Nothing else on the machine changes, and no other
+session is touched.
+
+What survives: the session's name, its pane (the pane blinks, it doesn't
+disappear — the name never changes, so it re-attaches by itself), its colour
+mark and label, its folder and extra folders, and its **Skip permissions** and
+**Claude app** settings.
+
+What resume actually means is worth knowing, because it isn't magic:
+
+- The conversation is resumed the same way a reboot resumes it — `--continue`
+  for Claude Code and Kimi, `resume --last` for Codex, `--resume latest` for
+  Gemini. If there's nothing resumable, the session comes back **empty rather
+  than dead**.
+- `--continue` picks the most recent conversation **in the folder the session
+  launched in**. Two cc-screen sessions in the *same* folder therefore both
+  continue whichever of them wrote last — so restarting one can resume the
+  other's conversation. It's inherent to this kind of resume (the reboot path
+  and the dashboard's Update have it too), not something the button adds.
+- The relaunch uses the session's **launch folder**, not wherever you last
+  `cd`'d inside it.
+- A turn in flight loses its last exchange. If the agent doesn't look ready,
+  the confirm says so — but it never blocks you, because "it's wedged" is a
+  perfectly good reason to restart.
+
+Restart isn't offered for plain **shell** sessions: there's no conversation to
+resume, so restarting one would just throw your shell state away.
 
 Here's the whole flow in one take — new session, directory search, Claude
 booting:
@@ -167,6 +219,8 @@ that field instead.
   inside one. (On an *empty* pane the bare arrows belong to its session
   switcher, so there you press the prefix each time.)
 - **`⌃B` `s`** opens the session list.
+- **`⌃B` `n`** starts a new session: the create panel, empty, on the machine
+  you last used. The session lands in the focused pane.
 - **`⌃B` `r`** renames the focused session (same as double-clicking its name).
 - **`⌃B` `c`** re-rolls the focused session's colour mark; **`⌃B` `⇧C`** clears
   it.
@@ -202,6 +256,25 @@ plan or review docs agents produce.
   session is deleted, so it survives drafts and resumes). No X11 or desktop
   environment is needed on the machine.
 - **Downloads:** pull any file back out, PDFs render in-app.
+
+### Tables
+
+Markdown tables render as real tables while you write, and stay that way while
+you edit them:
+
+- **Click a cell** and the caret lands *in that cell's text* — not at the top of
+  the table.
+- Only the **row you're editing** shows its raw `| … |` source; every other row
+  keeps rendering, so a thirty-row table never turns into pipe soup because you
+  fixed one number.
+- **Tab / Shift-Tab** walk cell to cell (and on to the next row) while you're on
+  a table row. Everywhere else Tab is untouched.
+- **Copy** (top-right of the table) puts the table on the clipboard as markdown
+  — your own bytes, exactly as written — ready to paste into a chat, an issue,
+  or another file.
+- Pasting a block copied from **Excel, Google Sheets, Numbers** or any web page's
+  table turns it into a well-formed, aligned markdown table. If that isn't what
+  you wanted, one **⌘Z / Ctrl-Z** puts the plain text back.
 
 ### Link to a file
 
@@ -339,6 +412,10 @@ The machines dashboard (your account page) is the admin surface:
 - **⚠ N missing · Install** — the machine lacks some coding assistants;
   installs them remotely, for that machine's user, no sudo.
 - **Update** — update a machine's assistants, then restart their sessions.
+  That's the machine-wide one: it restarts *every* session using an updated
+  CLI. To restart just one session (without updating anything), use the
+  restart button on its row — see
+  [Restart a session](#restart-a-session).
 - **Share** — invite someone to the machine.
 - **Rotate** — mint a new machine credential (the old one stops working;
   shown once).

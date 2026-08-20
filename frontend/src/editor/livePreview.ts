@@ -12,11 +12,12 @@
 
 import type { SyntaxNode } from "@lezer/common";
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { EditorState, StateField, type Extension, type Range } from "@codemirror/state";
+import { EditorState, Prec, StateField, type Extension, type Range } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
   EditorView,
+  keymap,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
@@ -24,6 +25,7 @@ import {
 import { tags } from "@lezer/highlight";
 import { writeClipboard } from "../util";
 import { noteUserCopy } from "../osc52Bus";
+import { htmlTableToMarkdown, tsvToTable } from "./tableClipboard";
 
 // A DecoSpec is a plain description of one decoration. `type`:
 //   - "replace": hide the range entirely (syntax marks off the cursor line)
@@ -46,12 +48,37 @@ export interface TableData {
   body: string[][];
 }
 
+// A TableSlice describes WHICH contiguous run of a GFM table's lines one
+// "table" spec renders (proposal 0085 Part B). Off the cursor a table is one
+// slice covering the whole block (`whole: true`) — byte-identical to the
+// pre-0085 single spec. With the caret inside, the row(s) being edited fall
+// through as raw source and each maximal run of untouched lines gets its own
+// slice, so the table keeps looking like a table while you edit one cell.
+export interface TableSlice {
+  // Does this run include the header line (and therefore its alignment
+  // delimiter — the two always reveal as a unit, Part B2)?
+  header: boolean;
+  // Half-open window into `TableData.body` this run renders.
+  bodyFrom: number;
+  bodyTo: number;
+  // The whole table block's document range. The Copy button copies exactly
+  // these bytes (Part C2, verbatim), and per-cell offsets are resolved against
+  // `blockFrom` so every slice shares one coordinate system.
+  blockFrom: number;
+  blockTo: number;
+  // The first rendered run of this table — it carries the Copy button.
+  first: boolean;
+  // True when the run IS the entire table (nothing revealed).
+  whole: boolean;
+}
+
 export interface DecoSpec {
   from: number;
   to: number;
   type: DecoType;
   cls?: string; // for "mark"/"line"
-  table?: TableData; // for "table"
+  table?: TableData; // for "table": the whole block's parsed contents
+  slice?: TableSlice; // for "table": which run of it this spec renders
   text?: string; // for "copybtn": the code-block contents to copy
   checked?: boolean; // for "checkbox": the task marker's state ([x] → true)
 }
@@ -132,6 +159,129 @@ export function parseTableSource(src: string): TableData | null {
   return { header, align, body };
 }
 
+// tableLines returns the non-blank lines of a table block together with their
+// offset inside `src` — the very lines parseTableSource works from, so a row
+// index means the same thing in both. Offsets are preserved (no trimming), so
+// they can be turned into document positions by adding the block's `from`.
+function tableLines(src: string): { text: string; start: number }[] {
+  const out: { text: string; start: number }[] = [];
+  let pos = 0;
+  for (const text of src.split("\n")) {
+    if (text.trim().length > 0) out.push({ text, start: pos });
+    pos += text.length + 1;
+  }
+  return out;
+}
+
+// rowCellRanges returns the [from,to) offsets *within `line`* of each cell,
+// mirroring splitRow's rules exactly (optional leading/trailing pipe,
+// backslash-escaped pipes) but keeping positions instead of trimming them away.
+// This is what makes a click land on the character the user aimed at even in a
+// cell containing `\|`.
+function rowCellRanges(line: string): { from: number; to: number }[] {
+  let a = 0;
+  let b = line.length;
+  while (a < b && /\s/.test(line[a])) a++;
+  while (b > a && /\s/.test(line[b - 1])) b--;
+  if (a < b && line[a] === "|") a++;
+  if (b > a && line[b - 1] === "|") b--;
+  const out: { from: number; to: number }[] = [];
+  let start = a;
+  for (let i = a; i < b; i++) {
+    if (line[i] === "\\" && i + 1 < b) {
+      i++;
+      continue;
+    }
+    if (line[i] === "|") {
+      out.push({ from: start, to: i });
+      start = i + 1;
+    }
+  }
+  out.push({ from: start, to: b });
+  return out;
+}
+
+// tableRowCells gives every cell of one table row as a [from,to) range inside
+// `src`. `row` −1 = the header line, `row` ≥ 0 = body row `row` (the alignment
+// delimiter, line 2, is never addressable). Null when the row doesn't exist.
+function tableRowCells(src: string, row: number): { from: number; to: number }[] | null {
+  const lines = tableLines(src);
+  const idx = row < 0 ? 0 : row + 2;
+  if (row < -1 || idx >= lines.length) return null;
+  const line = lines[idx];
+  return rowCellRanges(line.text).map((r) => ({
+    from: line.start + r.from,
+    to: line.start + r.to,
+  }));
+}
+
+// cellSourceOffset returns the offset *within src* (the raw source of a whole
+// GFM table block) of the first content character of cell (row, col); row −1 =
+// header, row ≥ 0 = body. Null if the cell doesn't exist. An all-whitespace
+// cell resolves to its end, i.e. the caret parks just before the closing pipe.
+export function cellSourceOffset(src: string, row: number, col: number): number | null {
+  const cells = tableRowCells(src, row);
+  if (!cells || col < 0 || col >= cells.length) return null;
+  const { from, to } = cells[col];
+  let p = from;
+  while (p < to && /\s/.test(src[p])) p++;
+  return p;
+}
+
+// serializeTable renders TableData back to GFM source: one space of padding
+// inside every pipe, columns padded to the widest cell, and an alignment row
+// derived from `align` (null → ---, left → :--, right → --:, center → :-:).
+// Ragged rows are padded with empty cells so the output always parses back to a
+// rectangular table. Bare pipes inside a cell are escaped (an already-escaped
+// `\|` is left alone), and internal newlines collapse to a space — the two
+// things that would otherwise break the row.
+//
+// It is the single place the formatting rules live. In v1 only the paste
+// converter emits it: nothing re-serializes bytes the user typed (open
+// question 1 — auto-format on exit was deliberately declined).
+export function serializeTable(data: TableData): string {
+  let cols = Math.max(data.header.length, data.align.length, 1);
+  for (const r of data.body) cols = Math.max(cols, r.length);
+
+  const esc = (c: string): string =>
+    c
+      .replace(/\r?\n/g, " ")
+      .replace(/\\\||\|/g, (m) => (m === "|" ? "\\|" : m))
+      .trim();
+  const pad = (row: string[]): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < cols; i++) out.push(esc(row[i] ?? ""));
+    return out;
+  };
+
+  const header = pad(data.header);
+  const body = data.body.map(pad);
+  const width: number[] = [];
+  for (let i = 0; i < cols; i++) {
+    // 3 is the narrowest a delimiter segment can be and still round-trip its
+    // alignment (`:-:` needs all three characters).
+    let w = Math.max(3, header[i].length);
+    for (const r of body) w = Math.max(w, r[i].length);
+    width.push(w);
+  }
+
+  const row = (cells: string[]): string =>
+    "| " + cells.map((c, i) => c.padEnd(width[i])).join(" | ") + " |";
+  const delim = width.map((w, i) => {
+    switch (data.align[i] ?? null) {
+      case "left":
+        return ":" + "-".repeat(w - 1);
+      case "right":
+        return "-".repeat(w - 1) + ":";
+      case "center":
+        return ":" + "-".repeat(w - 2) + ":";
+      default:
+        return "-".repeat(w);
+    }
+  });
+  return [row(header), row(delim), ...body.map(row)].join("\n");
+}
+
 // toggleTaskAt flips a GFM task-list checkbox at the line containing `pos`,
 // rewriting only the single box character (`[ ]` ⇄ `[x]`) so the rest of the
 // document is byte-for-byte unchanged — no reflow, clean diffs for the agent,
@@ -194,6 +344,11 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
   const specs: DecoSpec[] = [];
   const active = activeLines(state);
   const tree = syntaxTree(state);
+  // Document ranges covered by a *partial* table render. Anything the inline
+  // pass emits inside one of these is shadowed by the block widget, so it is
+  // dropped at the end — the revealed rows keep their inline decorations, the
+  // rendered runs stay as clean as the whole-block widget always was.
+  const sliceRanges: [number, number][] = [];
 
   const lineOf = (pos: number) => state.doc.lineAt(pos).number;
   const isActive = (pos: number) => active.has(lineOf(pos));
@@ -202,27 +357,68 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
     enter: (node) => {
       const name = node.name;
 
-      // GFM table: off the cursor, swap the whole block for a rendered <table>.
-      // When the selection is inside it, fall through so the raw source shows and
-      // stays editable — exactly Obsidian's live-preview behaviour.
+      // GFM table (proposal 0085 Part B). Off the cursor the whole block is one
+      // rendered <table>, as before. With the caret inside, only the row being
+      // edited falls through to raw source: every maximal run of untouched lines
+      // still renders, so the table stays a table while you fix one cell. The
+      // header line and its alignment delimiter reveal together (B2) — they
+      // define the same columns, and showing one rendered above the other's raw
+      // source would lie about what is being edited.
       if (name === "Table") {
         const first = state.doc.lineAt(node.from);
-        const last = state.doc.lineAt(node.to);
-        let tableActive = false;
-        for (let n = first.number; n <= last.number; n++) {
-          if (active.has(n)) {
-            tableActive = true;
-            break;
+        const last = state.doc.lineAt(Math.min(node.to, state.doc.length));
+        const blockFrom = first.from;
+        const blockTo = last.to;
+        const data = parseTableSource(state.doc.sliceString(blockFrom, blockTo));
+        if (!data) return; // unparseable → raw source, styled inline (as before)
+
+        const count = last.number - first.number + 1;
+        const revealed: boolean[] = [];
+        for (let i = 0; i < count; i++) revealed.push(active.has(first.number + i));
+        if (count >= 2 && (revealed[0] || revealed[1])) revealed[0] = revealed[1] = true;
+        const anyRevealed = revealed.some(Boolean);
+
+        let i = 0;
+        let firstRun = true;
+        while (i < count) {
+          if (revealed[i]) {
+            i++;
+            continue;
           }
+          let j = i;
+          while (j + 1 < count && !revealed[j + 1]) j++;
+          const runFrom = state.doc.line(first.number + i).from;
+          const runTo = state.doc.line(first.number + j).to;
+          // Line 0 = header, line 1 = the alignment delimiter, line 2+k = body
+          // row k. A run that starts at the header renders <thead> plus whatever
+          // body rows it reaches; a body-only run renders a <tbody>-only table
+          // with the same per-column alignment (it comes from `data`, which is
+          // parsed from the whole block, delimiter included).
+          const header = i === 0;
+          const bodyFrom = header ? 0 : i - 2;
+          specs.push({
+            from: runFrom,
+            to: runTo,
+            type: "table",
+            table: data,
+            slice: {
+              header,
+              bodyFrom,
+              bodyTo: Math.max(bodyFrom, j - 1),
+              blockFrom,
+              blockTo,
+              first: firstRun,
+              whole: !anyRevealed,
+            },
+          });
+          if (anyRevealed) sliceRanges.push([runFrom, runTo]);
+          firstRun = false;
+          i = j + 1;
         }
-        if (!tableActive) {
-          const data = parseTableSource(state.doc.sliceString(first.from, last.to));
-          if (data) {
-            specs.push({ from: first.from, to: last.to, type: "table", table: data });
-            return false; // replace the whole block — don't descend into cells
-          }
-        }
-        return; // editing it (or unparseable) → show source, style inline content
+        // Nothing revealed → the block is fully replaced; don't descend into the
+        // cells (byte-identical to the pre-0085 output). Otherwise descend, so
+        // the revealed row gets the ordinary inline pass.
+        return anyRevealed ? undefined : false;
       }
 
       // Backslash escape (e.g. `\*` → a literal `*`): hide just the backslash so
@@ -384,10 +580,19 @@ export function computeDecorations(state: EditorState): DecoSpec[] {
     },
   });
 
+  // Drop everything the inline pass emitted inside a rendered table run (see
+  // `sliceRanges`) — the block widget hides it anyway, and keeping the spec list
+  // honest is what lets the tests assert "this row is uncovered".
+  const kept = sliceRanges.length
+    ? specs.filter(
+        (s) => s.type === "table" || !sliceRanges.some(([f, t]) => s.from >= f && s.to <= t)
+      )
+    : specs;
+
   // Sort: by position, and at the same position put "line" decorations first
   // (they bind to the line start with the most-negative side).
-  specs.sort((a, b) => a.from - b.from || sideOf(a) - sideOf(b));
-  return specs;
+  kept.sort((a, b) => a.from - b.from || sideOf(a) - sideOf(b));
+  return kept;
 }
 
 function sideOf(s: DecoSpec): number {
@@ -515,59 +720,141 @@ function appendInline(el: HTMLElement, text: string): void {
   if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
 }
 
-// TableWidget renders parsed TableData as a real <table>. Tapping it drops the
-// cursor into the table source (`from`) so the raw markdown reveals for editing.
-class TableWidget extends WidgetType {
+// TableWidget renders one run of a GFM table (a TableSlice — the whole block
+// off the cursor, a header/body fragment while a row is being edited) as a real
+// <table>. Two interactions live on it, both on `mousedown` +
+// `preventDefault()` so a tap never blurs the editor or dismisses the soft
+// keyboard (the [0009] rule):
+//
+//   • clicking a cell drops the caret at THAT cell's first content character in
+//     the source (proposal 0085 Part A) — a click on the wrap but outside any
+//     cell still parks it at the run's start, the pre-0085 behaviour;
+//   • the Copy button (on the table's first run) puts the block's own bytes on
+//     the clipboard, verbatim, through the house `writeClipboard` path (Part C).
+//
+// `eq` compares `from`/`blockFrom` as well as the source text: two identical
+// tables at different offsets are NOT the same widget. Without that CodeMirror
+// reuses the DOM — and its closure over a stale `from` — so every per-cell
+// offset would be computed against the wrong base (Part A2).
+export class TableWidget extends WidgetType {
   constructor(
     readonly data: TableData,
-    readonly src: string,
+    readonly slice: TableSlice,
+    readonly blockSrc: string,
     readonly from: number
   ) {
     super();
   }
   eq(o: TableWidget) {
-    return o.src === this.src;
+    return (
+      o.blockSrc === this.blockSrc &&
+      o.from === this.from &&
+      o.slice.blockFrom === this.slice.blockFrom &&
+      o.slice.header === this.slice.header &&
+      o.slice.bodyFrom === this.slice.bodyFrom &&
+      o.slice.bodyTo === this.slice.bodyTo &&
+      o.slice.first === this.slice.first &&
+      o.slice.whole === this.slice.whole
+    );
   }
   toDOM(view: EditorView) {
     const wrap = document.createElement("div");
-    wrap.className = "cm-md-table-wrap";
+    // The wrap is the positioning context for the Copy button; the inner div is
+    // what scrolls, so a wide table can't push the button out of view.
+    wrap.className = "cm-md-table-wrap" + (this.slice.whole ? "" : " cm-md-table-part");
+    const scroll = document.createElement("div");
+    scroll.className = "cm-md-table-scroll";
     const table = document.createElement("table");
     table.className = "cm-md-table";
 
-    const thead = document.createElement("thead");
-    const htr = document.createElement("tr");
-    this.data.header.forEach((cell, i) => {
-      const th = document.createElement("th");
-      const a = this.data.align[i];
-      if (a) th.style.textAlign = a;
-      appendInline(th, cell);
-      htr.appendChild(th);
-    });
-    thead.appendChild(htr);
-    table.appendChild(thead);
+    // data-row: −1 for a header cell, 0.. for a body row (the index into the
+    // *whole* table's body, not this run's window — so every slice speaks the
+    // same coordinates cellSourceOffset does).
+    const cellAttrs = (el: HTMLElement, row: number, col: number) => {
+      el.setAttribute("data-row", String(row));
+      el.setAttribute("data-col", String(col));
+    };
+
+    if (this.slice.header) {
+      const thead = document.createElement("thead");
+      const htr = document.createElement("tr");
+      this.data.header.forEach((cell, i) => {
+        const th = document.createElement("th");
+        const a = this.data.align[i];
+        if (a) th.style.textAlign = a;
+        cellAttrs(th, -1, i);
+        appendInline(th, cell);
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+    }
 
     const tbody = document.createElement("tbody");
-    this.data.body.forEach((row) => {
+    for (let r = this.slice.bodyFrom; r < this.slice.bodyTo; r++) {
+      const row = this.data.body[r];
+      if (!row) continue;
       const tr = document.createElement("tr");
       row.forEach((cell, i) => {
         const td = document.createElement("td");
         const a = this.data.align[i];
         if (a) td.style.textAlign = a;
+        cellAttrs(td, r, i);
         appendInline(td, cell);
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
-    });
+    }
     table.appendChild(tbody);
-    wrap.appendChild(table);
+    scroll.appendChild(table);
+    wrap.appendChild(scroll);
 
-    // Tap to edit: put the cursor at the table start so the source reveals.
+    if (this.slice.first) wrap.appendChild(this.copyButton());
+
+    // Tap to edit: put the cursor in the cell that was clicked, so the row
+    // reveals its source with the caret already where you aimed.
     wrap.addEventListener("mousedown", (e) => {
       e.preventDefault();
-      view.dispatch({ selection: { anchor: this.from } });
+      let anchor = this.from;
+      const cell = (e.target as HTMLElement | null)?.closest?.("th,td") as HTMLElement | null;
+      const rowAttr = cell?.getAttribute("data-row");
+      const colAttr = cell?.getAttribute("data-col");
+      if (rowAttr != null && colAttr != null) {
+        const off = cellSourceOffset(this.blockSrc, Number(rowAttr), Number(colAttr));
+        if (off != null) anchor = this.slice.blockFrom + off;
+      }
+      view.dispatch({ selection: { anchor } });
+      // [0009]: refocus inside the gesture — iOS Safari doesn't honour the
+      // preventDefault above and would otherwise drop the soft keyboard.
       view.focus();
     });
     return wrap;
+  }
+  // Copy the table's OWN bytes (C2): the document slice, not a
+  // re-serialization, so nothing the user chose to write is silently reformatted.
+  private copyButton(): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cm-md-table-copy";
+    btn.textContent = "Copy";
+    btn.setAttribute("aria-label", "Copy table as markdown");
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation(); // never let the wrap handler move the caret
+      noteUserCopy(); // 0077 A10: don't let a session's OSC 52 swap this out
+      writeClipboard(this.blockSrc)
+        .then(() => {
+          btn.textContent = "Copied";
+          window.setTimeout(() => {
+            btn.textContent = "Copy";
+          }, 1200);
+        })
+        .catch(() => {});
+    });
+    return btn;
+  }
+  ignoreEvent() {
+    return true;
   }
 }
 
@@ -623,10 +910,11 @@ function buildInlineDecorations(state: EditorState): DecorationSet {
 function buildTableDecorations(state: EditorState): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   for (const s of computeDecorations(state)) {
-    if (s.type !== "table") continue;
+    if (s.type !== "table" || !s.slice) continue;
+    const sl = s.slice;
     ranges.push(
       Decoration.replace({
-        widget: new TableWidget(s.table!, state.sliceDoc(s.from, s.to), s.from),
+        widget: new TableWidget(s.table!, sl, state.sliceDoc(sl.blockFrom, sl.blockTo), s.from),
         block: true,
       }).range(s.from, s.to)
     );
@@ -790,7 +1078,46 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-md-task-done .cm-md-task": { textDecoration: "none", opacity: "1" },
   // Rendered GFM tables (the TableWidget) — mirrors the reading view's
   // `.cc-prose table` rules (index.css) so Edit<->Read stay one document.
-  ".cm-md-table-wrap": { margin: "0.9em 0", overflowX: "auto" },
+  ".cm-md-table-wrap": { margin: "0.9em 0", position: "relative" },
+  // The scroll box is the INNER element so the absolutely-positioned Copy
+  // button (anchored to the wrap) can't be scrolled out of view on a wide table.
+  ".cm-md-table-scroll": { overflowX: "auto" },
+  // A fragment of a table being edited (0085 B3): the runs above and below the
+  // revealed row are separate <table>s, so drop the block margin to keep the
+  // seam tight. Their column widths still lay out independently — accepted.
+  ".cm-md-table-part": { margin: "0" },
+  ".cm-md-table-part .cm-md-table": { width: "100%" },
+  // Copy the table as markdown (0085 Part C). Always visible (dimmed) where
+  // there is no hover — the touch PWA — and hover-revealed on desktop. The
+  // padding takes the box past a 24px hit target without looking heavy.
+  ".cm-md-table-copy": {
+    position: "absolute",
+    top: "2px",
+    right: "2px",
+    zIndex: "2",
+    fontFamily: "var(--cc-mono-font)",
+    fontSize: "0.72em",
+    lineHeight: "1",
+    minWidth: "24px",
+    minHeight: "24px",
+    color: "var(--cc-ink-faint, #9aa6b2)",
+    background: "rgba(11,17,24,0.9)",
+    border: "1px solid var(--cc-edge, #243042)",
+    borderRadius: "6px",
+    padding: "0.45em 0.6em",
+    cursor: "pointer",
+    opacity: "0.55",
+  },
+  "@media (hover: hover)": {
+    ".cm-md-table-copy": { opacity: "0" },
+    ".cm-md-table-wrap:hover .cm-md-table-copy, .cm-md-table-wrap:focus-within .cm-md-table-copy":
+      { opacity: "0.8" },
+    ".cm-md-table-copy:hover": {
+      opacity: "1",
+      color: "var(--cc-ink, #d7dade)",
+      borderColor: "var(--cc-accent, #38bdf8)",
+    },
+  },
   ".cm-md-table": { borderCollapse: "collapse", fontSize: "0.95em" },
   ".cm-md-table th, .cm-md-table td": {
     border: "1px solid var(--cc-edge, #243042)",
@@ -928,9 +1255,142 @@ const modKeyAffordance = ViewPlugin.fromClass(
   }
 );
 
+// --- Table editing: Tab walks the cells, paste understands a spreadsheet -----
+
+// tableBlockAt resolves the whole-line range of the GFM table containing `pos`,
+// or null when `pos` isn't inside one.
+function tableBlockAt(state: EditorState, pos: number): { from: number; to: number } | null {
+  const tree = syntaxTree(state);
+  for (const side of [-1, 1] as const) {
+    let n: SyntaxNode | null = tree.resolveInner(pos, side);
+    for (; n; n = n.parent) {
+      if (n.name === "Table") {
+        const first = state.doc.lineAt(n.from);
+        const last = state.doc.lineAt(Math.min(n.to, state.doc.length));
+        return { from: first.from, to: last.to };
+      }
+    }
+  }
+  return null;
+}
+
+// tableCellTarget answers where Tab (`forward`) / Shift-Tab should put the
+// caret from `pos` (proposal 0085 B5):
+//
+//   • null    — `pos` isn't on an editable table row (the alignment delimiter
+//               counts as "not a row"); the key binding must fall through, so
+//               Tab outside a table behaves exactly as it always did.
+//   • "edge"  — in a table, but there is no next/previous cell (the last cell of
+//               the last row, the first cell of the header). Consume the key:
+//               growing the table is a non-goal.
+//   • number  — the document offset of the target cell's first content char.
+export function tableCellTarget(
+  state: EditorState,
+  pos: number,
+  forward: boolean
+): number | "edge" | null {
+  const block = tableBlockAt(state, pos);
+  if (!block) return null;
+  const src = state.sliceDoc(block.from, block.to);
+  const lines = tableLines(src);
+  if (lines.length < 2) return null;
+  const li = lines.findIndex((l) => l.start === state.doc.lineAt(pos).from - block.from);
+  if (li < 0 || li === 1) return null; // off the table, or on the delimiter line
+  const row = li === 0 ? -1 : li - 2;
+  const lastRow = lines.length - 3; // body rows are lines 2..end
+  const cells = tableRowCells(src, row);
+  if (!cells || cells.length === 0) return null;
+
+  const rel = pos - block.from;
+  let col = cells.findIndex((c) => rel >= c.from && rel <= c.to);
+  if (col < 0) col = rel < cells[0].from ? 0 : cells.length - 1;
+
+  let tRow = row;
+  let tCol = col + (forward ? 1 : -1);
+  if (tCol < 0 || tCol >= cells.length) {
+    tRow = row + (forward ? 1 : -1);
+    if (tRow < -1 || tRow > lastRow) return "edge";
+    const next = tableRowCells(src, tRow);
+    if (!next || next.length === 0) return "edge";
+    tCol = forward ? 0 : next.length - 1;
+  }
+  const off = cellSourceOffset(src, tRow, tCol);
+  return off == null ? "edge" : block.from + off;
+}
+
+function tableTab(view: EditorView, forward: boolean): boolean {
+  const target = tableCellTarget(view.state, view.state.selection.main.head, forward);
+  if (target == null) return false;
+  if (target === "edge") return true;
+  view.dispatch({ selection: { anchor: target }, scrollIntoView: true });
+  return true;
+}
+
+// Tab / Shift-Tab move cell-to-cell, but ONLY on a table row — everywhere else
+// the commands return false and the (absent) default Tab behaviour is
+// untouched. Prec.high so it sits above basicSetup, which binds no Tab at all.
+const tableKeymap = Prec.high(
+  keymap.of([
+    { key: "Tab", run: (v) => tableTab(v, true) },
+    { key: "Shift-Tab", run: (v) => tableTab(v, false) },
+  ])
+);
+
+// tablePasteInsert builds the text one paste inserts, padding it with blank
+// lines when the insertion point isn't already at a block boundary — a table
+// glued to a paragraph doesn't parse as a table.
+export function tablePasteInsert(state: EditorState, from: number, to: number, md: string): string {
+  const startLine = state.doc.lineAt(from);
+  const endLine = state.doc.lineAt(to);
+  const before = state.sliceDoc(startLine.from, from);
+  const after = state.sliceDoc(to, endLine.to);
+  let prefix = "";
+  if (before.trim() !== "") prefix = "\n\n";
+  else if (startLine.number > 1 && state.doc.line(startLine.number - 1).text.trim() !== "")
+    prefix = "\n";
+  let suffix = "";
+  if (after.trim() !== "") suffix = "\n\n";
+  else if (endLine.number < state.doc.lines && state.doc.line(endLine.number + 1).text.trim() !== "")
+    suffix = "\n";
+  return prefix + md + suffix;
+}
+
+// Paste a spreadsheet block as a GFM table (proposal 0085 Part D). Detection is
+// deliberately conservative — Excel/Sheets/Numbers `text/html` carrying exactly
+// one <table>, or classic all-tabbed TSV — because a false negative pastes
+// plain text (yesterday's behaviour) while a false positive mangles the user's
+// paste. Only the event's own `clipboardData` is read (never the async
+// clipboard API, which would prompt), and the conversion is ONE transaction, so
+// a single undo restores the document as if the paste never happened.
+const tablePaste = EditorView.domEventHandlers({
+  paste: (e, view) => {
+    if (view.state.readOnly) return false;
+    const cd = e.clipboardData;
+    if (!cd) return false;
+    const html = cd.getData("text/html");
+    let data = html ? htmlTableToMarkdown(html) : null;
+    if (!data) {
+      const text = cd.getData("text/plain");
+      data = text ? tsvToTable(text) : null;
+    }
+    if (!data) return false;
+    const { from, to } = view.state.selection.main;
+    const insert = tablePasteInsert(view.state, from, to, serializeTable(data));
+    e.preventDefault();
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + insert.length },
+      userEvent: "input.paste",
+      scrollIntoView: true,
+    });
+    return true;
+  },
+});
+
 // livePreview is the full extension: the inline-decoration plugin, the table
 // state field, the theme, the clickable-link handler + its cursor affordance,
-// and the highlight-style override that strips the default heading/link underline.
+// the table cell keymap + spreadsheet paste, and the highlight-style override
+// that strips the default heading/link underline.
 export function livePreview(): Extension {
   return [
     livePreviewPlugin,
@@ -938,6 +1398,8 @@ export function livePreview(): Extension {
     livePreviewTheme,
     linkClicks,
     modKeyAffordance,
+    tableKeymap,
+    tablePaste,
     syntaxHighlighting(mdHighlight),
   ];
 }

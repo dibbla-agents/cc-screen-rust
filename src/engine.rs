@@ -34,6 +34,47 @@ const INIT_ROWS: u16 = 24;
 const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(10);
 const FORCED_STOP: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Why a per-session restart (proposal 0087) was refused **before anything was
+/// stopped** — a class distinct from a `failed` [`SessionRestartStatus`], which
+/// means the restart ran and didn't finish. Each variant maps to exactly one
+/// HTTP status, so the agent REST handler and the hub-relayed `Cmd` answer
+/// identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartRefused {
+    /// No live session by that name.
+    Unknown,
+    /// The bare `shell` tool: no resume, and restarting it would silently
+    /// discard the user's shell state (the same structural exclusion the fleet
+    /// job makes in `restart_targets`).
+    Shell,
+    /// This session is already stopping/relaunching.
+    Busy,
+    /// The fleet update job (proposal 0049) is mid-flight; its phase 2 marks
+    /// sessions `restarting` too, so the two must not overlap.
+    UpdateJobRunning,
+}
+
+impl RestartRefused {
+    /// The HTTP status this refusal is reported as.
+    pub fn code(self) -> u16 {
+        match self {
+            RestartRefused::Unknown => 404,
+            RestartRefused::Shell => 422,
+            RestartRefused::Busy | RestartRefused::UpdateJobRunning => 409,
+        }
+    }
+
+    /// A message that names what to do, not just what failed.
+    pub fn message(self) -> &'static str {
+        match self {
+            RestartRefused::Unknown => "unknown session",
+            RestartRefused::Shell => "a shell session has no conversation to resume",
+            RestartRefused::Busy => "this session is already restarting",
+            RestartRefused::UpdateJobRunning => "an assistant update is running on this machine",
+        }
+    }
+}
+
 /// Input-gated busy model (proposal 0024). "Working" is **armed by a user submit**
 /// (Enter) and **sustained by output**, not armed by output. A submit opens a work
 /// window (`busy_until = now + WORK_GRACE_SECS`); each output burst pushes the
@@ -1084,115 +1125,192 @@ impl AppState {
     ) -> Vec<SessionRestartStatus> {
         let mut out = Vec::new();
         for (name, tool_prefix) in self.restart_targets(prefixes) {
-            let mut row = SessionRestartStatus {
-                session: name.clone(),
-                tool: tool_prefix.clone(),
-                state: "stopping".into(),
-                message: None,
-            };
-            progress(&row);
-
-            let Some(sess) = self.get(&name) else {
-                // It ended between the seed and now — nothing to restart.
-                row.state = "skipped".into();
-                row.message = Some("session already gone".into());
-                progress(&row);
-                out.push(row);
-                continue;
-            };
-            // Snapshot the launch spec BEFORE stopping, so the relaunch never
-            // depends on the manifest surviving the stop. The manifest entry is
-            // authoritative (it carries colour/label/extra dirs); the live
-            // session is the fallback for a session recorded before those.
-            let entry = manifest::entries(&self.inner.config_dir)
-                .into_iter()
-                .find(|e| e.session == name);
-            let (short, dir, extra_dirs, skip_permissions, remote_control, color, label) =
-                match &entry {
-                    Some(e) => (
-                        e.short.clone(),
-                        e.dir.clone(),
-                        e.extra_dirs.clone(),
-                        e.skip_permissions,
-                        e.assistant_remote_control,
-                        e.color.clone(),
-                        e.label.clone(),
-                    ),
-                    None => (
-                        sess.short.clone(),
-                        sess.launch_dir.clone(),
-                        sess.extra_dirs.clone(),
-                        sess.skip_permissions,
-                        sess.assistant_remote_control,
-                        sess.color().unwrap_or_default(),
-                        sess.label().unwrap_or_default(),
-                    ),
-                };
-            let Some(tool) = self
-                .find_tool(&tool_prefix)
-                .or_else(|| entry.as_ref().and_then(|e| self.find_tool(&e.cmd)))
-            else {
-                row.state = "skipped".into();
-                row.message = Some(format!("no tool registered for {tool_prefix}"));
-                progress(&row);
-                out.push(row);
-                continue;
-            };
-
-            // Mark first, then stop gracefully: `/exit` lets the CLI flush its own
-            // transcript, which is exactly what `--continue` reads back.
-            self.inner.restarting.lock().unwrap().insert(name.clone());
-            sess.graceful_exit();
-            if !self.wait_gone(&name, GRACEFUL_STOP) {
-                sess.kill();
-                if !self.wait_gone(&name, FORCED_STOP) {
-                    // Leave it running and untouched — a stuck session must not
-                    // abort the rest of the job.
-                    self.inner.restarting.lock().unwrap().remove(&name);
-                    row.state = "failed".into();
-                    row.message = Some("session did not stop; left running".into());
-                    progress(&row);
-                    out.push(row);
-                    continue;
-                }
-            }
-
-            row.state = "starting".into();
-            row.message = None;
-            progress(&row);
-            match self.create(&tool, &short, &dir, extra_dirs, true, skip_permissions, remote_control)
-            {
-                Ok(new_name) => {
-                    // `create` re-records the entry blank — re-apply the saved
-                    // mark + label exactly as `restore_all` does.
-                    if !color.is_empty() {
-                        if let Some(s) = self.get(&new_name) {
-                            s.set_color(Some(color.clone()));
-                        }
-                        manifest::set_color(&self.inner.config_dir, &new_name, Some(color.clone()));
-                    }
-                    if !label.is_empty() {
-                        if let Some(s) = self.get(&new_name) {
-                            s.set_label(Some(label.clone()));
-                        }
-                        manifest::set_label(&self.inner.config_dir, &new_name, Some(label.clone()));
-                    }
-                    row.state = "resumed".into();
-                }
-                Err(e) => {
-                    // Keep it restorable rather than lost: re-record what we
-                    // snapshotted so the standing Restore path can retry it.
-                    if let Some(e0) = entry.clone() {
-                        manifest::record(&self.inner.config_dir, e0);
-                    }
-                    row.state = "failed".into();
-                    row.message = Some(e.to_string());
-                }
-            }
-            progress(&row);
-            out.push(row);
+            out.push(self.restart_session_inner(&name, &tool_prefix, &mut progress));
         }
         out
+    }
+
+    /// One session's stop-and-resume, keyed by **name** — the whole recipe,
+    /// factored out of the fleet loop above so the per-session Restart button
+    /// (proposal 0087, `docs/proposals/0087-per-session-restart-button.md`) runs
+    /// the identical steps instead of a second implementation that drifts:
+    /// snapshot the launch spec → mark `restarting` → `/exit` → escalate to
+    /// SIGKILL → relaunch with `resume = true` under the same name → re-apply
+    /// colour + label.
+    ///
+    /// `tool_prefix` is the caller's idea of the session's tool (the fleet loop
+    /// already holds it from `restart_targets`); it labels the row and seeds the
+    /// tool lookup, with the manifest's `cmd` as the fallback.
+    ///
+    /// Nothing here removes a manifest entry, and nothing here purges the
+    /// session's durable image attachments (proposal 0066) — a restart is not a
+    /// goodbye, and a resumed transcript may still reference a staged path.
+    fn restart_session_inner(
+        &self,
+        name: &str,
+        tool_prefix: &str,
+        progress: &mut impl FnMut(&SessionRestartStatus),
+    ) -> SessionRestartStatus {
+        let mut row = SessionRestartStatus {
+            session: name.to_string(),
+            tool: tool_prefix.to_string(),
+            state: "stopping".into(),
+            message: None,
+        };
+        progress(&row);
+
+        let Some(sess) = self.get(name) else {
+            // It ended between the seed and now — nothing to restart.
+            row.state = "skipped".into();
+            row.message = Some("session already gone".into());
+            progress(&row);
+            return row;
+        };
+        // Snapshot the launch spec BEFORE stopping, so the relaunch never
+        // depends on the manifest surviving the stop. The manifest entry is
+        // authoritative (it carries colour/label/extra dirs); the live
+        // session is the fallback for a session recorded before those.
+        // `skip_permissions` (0005) and `assistant_remote_control` (0082) ride
+        // along deliberately: `build_launch` re-derives the launch line on every
+        // relaunch, so dropping either bit would silently change the resumed
+        // session's policy stance.
+        let entry = manifest::entries(&self.inner.config_dir)
+            .into_iter()
+            .find(|e| e.session == name);
+        let (short, dir, extra_dirs, skip_permissions, remote_control, color, label) = match &entry
+        {
+            Some(e) => (
+                e.short.clone(),
+                e.dir.clone(),
+                e.extra_dirs.clone(),
+                e.skip_permissions,
+                e.assistant_remote_control,
+                e.color.clone(),
+                e.label.clone(),
+            ),
+            None => (
+                sess.short.clone(),
+                sess.launch_dir.clone(),
+                sess.extra_dirs.clone(),
+                sess.skip_permissions,
+                sess.assistant_remote_control,
+                sess.color().unwrap_or_default(),
+                sess.label().unwrap_or_default(),
+            ),
+        };
+        let Some(tool) = self
+            .find_tool(tool_prefix)
+            .or_else(|| entry.as_ref().and_then(|e| self.find_tool(&e.cmd)))
+        else {
+            row.state = "skipped".into();
+            row.message = Some(format!("no tool registered for {tool_prefix}"));
+            progress(&row);
+            return row;
+        };
+
+        // Mark first, then stop gracefully: `/exit` lets the CLI flush its own
+        // transcript, which is exactly what `--continue` reads back.
+        self.inner.restarting.lock().unwrap().insert(name.to_string());
+        sess.graceful_exit();
+        if !self.wait_gone(name, GRACEFUL_STOP) {
+            sess.kill();
+            if !self.wait_gone(name, FORCED_STOP) {
+                // Leave it running and untouched — a stuck session must not
+                // abort the rest of the job.
+                self.inner.restarting.lock().unwrap().remove(name);
+                row.state = "failed".into();
+                row.message = Some("session did not stop; left running".into());
+                progress(&row);
+                return row;
+            }
+        }
+
+        row.state = "starting".into();
+        row.message = None;
+        progress(&row);
+        match self.create(&tool, &short, &dir, extra_dirs, true, skip_permissions, remote_control) {
+            Ok(new_name) => {
+                // `create` re-records the entry blank — re-apply the saved
+                // mark + label exactly as `restore_all` does.
+                if !color.is_empty() {
+                    if let Some(s) = self.get(&new_name) {
+                        s.set_color(Some(color.clone()));
+                    }
+                    manifest::set_color(&self.inner.config_dir, &new_name, Some(color.clone()));
+                }
+                if !label.is_empty() {
+                    if let Some(s) = self.get(&new_name) {
+                        s.set_label(Some(label.clone()));
+                    }
+                    manifest::set_label(&self.inner.config_dir, &new_name, Some(label.clone()));
+                }
+                row.state = "resumed".into();
+            }
+            Err(e) => {
+                // Keep it restorable rather than lost: re-record what we
+                // snapshotted so the standing Restore path can retry it.
+                if let Some(e0) = entry.clone() {
+                    manifest::record(&self.inner.config_dir, e0);
+                }
+                row.state = "failed".into();
+                row.message = Some(e.to_string());
+            }
+        }
+        progress(&row);
+        row
+    }
+
+    /// Restart **one** named session and resume its conversation — proposal 0087
+    /// (`docs/proposals/0087-per-session-restart-button.md`). The canonical use is
+    /// "I added an MCP server; the assistant reads that config at launch": every
+    /// other way to do it today destroys the session (a clean `/exit` makes the
+    /// reaper forget the manifest entry; Delete forgets it on purpose).
+    ///
+    /// Runs the same body the fleet update job's phase 2 runs, keyed by name
+    /// instead of by tool prefix, and takes no part in the `UpdateJob` — it is a
+    /// synchronous ~15 s op with one row, not a job.
+    ///
+    /// `Err` is a **refusal**: nothing was stopped and the session is untouched.
+    /// `Ok(row)` means the restart ran; `row.state` is `resumed` | `failed` |
+    /// `skipped`, exactly as the fleet job reports it.
+    pub fn restart_one(&self, name: &str) -> Result<SessionRestartStatus, RestartRefused> {
+        let sess = self.get(name).ok_or(RestartRefused::Unknown)?;
+        // Structurally excluded, as in the fleet job (see `restart_targets`): the
+        // bare shell isn't an assistant, has no resume, and restarting it would
+        // silently discard the user's shell state. Surfaced as a refusal so the
+        // API is honest rather than reporting a no-op success.
+        if sess.tool == "shell" {
+            return Err(RestartRefused::Shell);
+        }
+        // The update job's phase 2 marks sessions `restarting` too, and nothing
+        // stops two writers marking the same session. Refusing while a job runs
+        // closes that race in one direction; `begin_update_job` closes the other
+        // (it refuses to start while any session is marked).
+        if self.update_job().running() {
+            return Err(RestartRefused::UpdateJobRunning);
+        }
+        // Reserve the name under the marker lock so two concurrent restarts of
+        // the SAME session can't both stop it. Two *different* sessions are safe
+        // by construction — the marker set, `wait_gone` and `create` are all
+        // per-name.
+        {
+            let mut marked = self.inner.restarting.lock().unwrap();
+            if marked.contains(name) {
+                return Err(RestartRefused::Busy);
+            }
+            marked.insert(name.to_string());
+        }
+        let tool_prefix = sess.tool.clone();
+        drop(sess);
+        let row = self.restart_session_inner(name, &tool_prefix, &mut |_| {});
+        // The reaper *consumes* the marker when the child actually exits — the
+        // `resumed` path. Any other outcome means the child never went (or never
+        // came back), so drop the reservation here or a retry would 409 forever.
+        // `remove` is idempotent, so racing the reaper is harmless.
+        if row.state != "resumed" {
+            self.inner.restarting.lock().unwrap().remove(name);
+        }
+        Ok(row)
     }
 
     /// Block until `name` leaves the live registry (the reaper drops it the
@@ -1233,6 +1351,17 @@ impl AppState {
         let mut cur = self.inner.update_job.lock().unwrap();
         if cur.running() {
             return Err(cur.clone());
+        }
+        // The other half of the 0087 A3 guard: a per-session restart marks its
+        // session `restarting`, and this job's phase 2 would mark the same
+        // session for its own stop. Refuse to start while any restart is in
+        // flight (a 10–15 s wait), and say so in the 409 body — `error` is
+        // exactly the "could not start at all" field. `restart_one` closes the
+        // other direction by refusing while a job runs.
+        if !self.inner.restarting.lock().unwrap().is_empty() {
+            let mut busy = cur.clone();
+            busy.error = Some("a session restart is in flight — try again in a moment".into());
+            return Err(busy);
         }
         *cur = job;
         Ok(cur.clone())
@@ -1880,6 +2009,190 @@ mod tests {
 
         // The other tool's session was never touched.
         assert!(state.get(&untouched).is_some(), "a codex session isn't churned because claude moved");
+
+        for s in state.list() {
+            s.kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Proposal 0087 Part A: the same recipe, keyed by NAME. The point of the
+    // whole proposal is granularity — a machine with two claude sessions must be
+    // able to restart ONE of them — so the sibling's PID is the assertion that
+    // matters, alongside the identity bits (name, colour, label, manifest entry)
+    // the fleet path already guarantees.
+    #[test]
+    fn restart_one_restarts_exactly_the_named_session() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restart1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let tool = exits_on_input("claude");
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let target = state.create(&tool, "proj", &tmp.to_string_lossy(), vec![], false, false, false).unwrap();
+        let sibling = state.create(&tool, "other", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+        let before = state.get(&target).unwrap().pid;
+        let sibling_pid = state.get(&sibling).unwrap().pid;
+        crate::handlers::set_color_core(&state, &target, Some("teal".into())).unwrap();
+        crate::handlers::set_label_core(&state, &target, Some("My project".into())).unwrap();
+
+        let row = state.restart_one(&target).expect("a live claude session may restart");
+        assert_eq!(row.state, "resumed", "{row:?}");
+        assert_eq!(row.session, target);
+        assert_eq!(row.tool, "claude");
+
+        // Same name, new process — which is what lets an attached pane re-attach
+        // with no client work.
+        let back = state.get(&target).expect("live again under the same name");
+        assert_ne!(back.pid, before, "it really is a new process");
+        assert_eq!(back.color().as_deref(), Some("teal"));
+        assert_eq!(back.label().as_deref(), Some("My project"));
+        assert!(!back.skip_permissions, "the launch policy is preserved");
+        let entry = manifest::entries(&tmp).into_iter().find(|e| e.session == target).expect("entry kept");
+        assert_eq!(entry.color, "teal");
+        assert_eq!(entry.label, "My project");
+
+        // The sibling — same tool, same machine — was never touched. This is the
+        // difference from the 0049 fleet action, which is keyed by tool prefix.
+        assert_eq!(state.get(&sibling).unwrap().pid, sibling_pid, "the other claude session is untouched");
+
+        // The marker was consumed by the reaper, not left behind.
+        assert!(!state.inner.restarting.lock().unwrap().contains(&target));
+
+        for s in state.list() {
+            s.kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Proposal 0087 A4 step 1 / 0082: the relaunch is rebuilt by `build_launch`
+    // from the SNAPSHOT, so a policy bit dropped there silently changes what the
+    // resumed session is allowed to do. Resume is precisely the re-enable vector
+    // 0082 closed, so pin both bits through a per-session restart.
+    #[test]
+    fn restart_one_carries_the_launch_policy_bits() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restart-stance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // `#` starts a shell comment, so the appended stance/yolo flags don't
+        // disturb the `read x` that makes this tool exit cleanly on /exit.
+        let mut tool = exits_on_input("claude");
+        tool.tmpl = "read x #".into();
+        tool.yolo_flag = Some("--yolo".into());
+        tool.remote_off_flag = Some("--settings off.json".into());
+        tool.remote_on_flag = Some("--rc claude-{name}".into());
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        // One session opted IN to the assistant's own remote control and to YOLO;
+        // one left both off (the defaults).
+        let on = state.create(&tool, "on", &tmp.to_string_lossy(), vec![], false, true, true).unwrap();
+        let off = state.create(&tool, "off", &tmp.to_string_lossy(), vec![], false, false, false).unwrap();
+        assert!(state.get(&on).unwrap().assistant_remote_control, "precondition");
+
+        assert_eq!(state.restart_one(&on).unwrap().state, "resumed");
+        assert_eq!(state.restart_one(&off).unwrap().state, "resumed");
+
+        let on_back = state.get(&on).expect("back");
+        assert!(on_back.assistant_remote_control, "an opted-in session keeps its registration");
+        assert!(on_back.skip_permissions, "…and its YOLO stance");
+        let off_back = state.get(&off).expect("back");
+        assert!(!off_back.assistant_remote_control, "an opted-out session stays opted out");
+        assert!(!off_back.skip_permissions);
+        // Persisted too, so a later restore/restart repeats the same stance.
+        let entries = manifest::entries(&tmp);
+        let e_on = entries.iter().find(|e| e.session == on).expect("entry kept");
+        assert!(e_on.assistant_remote_control && e_on.skip_permissions);
+        let e_off = entries.iter().find(|e| e.session == off).expect("entry kept");
+        assert!(!e_off.assistant_remote_control && !e_off.skip_permissions);
+
+        for s in state.list() {
+            s.kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Proposal 0087 A2/A3: the refusal class is distinct from a `failed` row —
+    // a refusal means nothing was stopped. Both directions of the mutual
+    // exclusion with the 0049 fleet job are pinned here.
+    #[test]
+    fn restart_one_refusals_and_the_update_job_guard() {
+        let tmp = std::env::temp_dir().join(format!("ccr-restart-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let shell = shell_tool("sleep 30"); // prefix "shell"
+        let mut assistant = exits_on_input("claude");
+        assistant.cmd = "cc".into();
+        let state = AppState::new(
+            vec![shell.clone(), assistant.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let sh = state.create(&shell, "term", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+        let cc = state.create(&assistant, "proj", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+
+        // Unknown name → the 404-shaped refusal.
+        assert_eq!(state.restart_one("claude-nope"), Err(RestartRefused::Unknown));
+        assert_eq!(RestartRefused::Unknown.code(), 404);
+        // The bare shell is structurally excluded — no resume, and restarting it
+        // would silently discard the user's shell state.
+        assert_eq!(state.restart_one(&sh), Err(RestartRefused::Shell));
+        assert_eq!(RestartRefused::Shell.code(), 422);
+        assert!(state.get(&sh).is_some(), "a refusal stops nothing");
+
+        // Already restarting → 409, and the marker is left exactly as it was.
+        state.inner.restarting.lock().unwrap().insert(cc.clone());
+        assert_eq!(state.restart_one(&cc), Err(RestartRefused::Busy));
+        assert_eq!(RestartRefused::Busy.code(), 409);
+
+        // A3, the reverse direction: the fleet job refuses to start while any
+        // session is marked, and says why in the 409 body.
+        let refused = state
+            .begin_update_job(cc_screen_protocol::UpdateJob {
+                id: "j1".into(),
+                phase: "updating".into(),
+                ..Default::default()
+            })
+            .expect_err("a restart is in flight");
+        assert!(
+            refused.error.as_deref().unwrap_or_default().contains("session restart"),
+            "the 409 names the other party: {refused:?}"
+        );
+        assert!(!state.update_job().running(), "…and no job was installed");
+
+        // Clear the marker; now the job starts — and while it runs, a per-session
+        // restart is the one refused (A2).
+        state.inner.restarting.lock().unwrap().remove(&cc);
+        state
+            .begin_update_job(cc_screen_protocol::UpdateJob {
+                id: "j2".into(),
+                phase: "updating".into(),
+                ..Default::default()
+            })
+            .expect("no restart in flight");
+        assert_eq!(state.restart_one(&cc), Err(RestartRefused::UpdateJobRunning));
+        assert_eq!(RestartRefused::UpdateJobRunning.code(), 409);
+        assert!(state.get(&cc).is_some(), "a refusal stops nothing");
 
         for s in state.list() {
             s.kill();

@@ -125,6 +125,32 @@ restarts the sessions that use them, and your panes re-attach under the same
 names. On the box: `cc-screen-rust doctor --update` (updates the CLIs only,
 restarts nothing).
 
+## The assistant can't see a newly added MCP server
+
+Every one of the supported CLIs reads its MCP configuration **at launch**, so
+a server you add while a session is running is invisible to it. Restart that
+one session: the **restart** button on its row in the session drawer (or in
+the focused pane's header on desktop) exits the assistant and brings it back
+with its conversation resumed, under the same name, in the same pane.
+
+cc-screen doesn't inspect or manage MCP configuration — the button is just an
+honest "exit and resume this CLI". Whether the server then appears is the
+assistant's own business, and its startup output is where you'll see it.
+
+Two things to know about the resume, both inherited from how the CLIs
+themselves resume:
+
+- It reopens the most recent conversation **for the folder the session
+  launched in**. If you have two cc-screen sessions in the same folder, both
+  continue whichever of them wrote last — so a restart can land you in the
+  other one's conversation. Same-folder pairs are the only case this bites.
+- The relaunch happens in the session's **launch folder**, not wherever you
+  `cd`'d to inside it — the same behaviour as a resume after a reboot.
+
+If the whole machine's assistants are out of date, use the dashboard's
+**Update** instead (above) — that updates the CLIs and restarts every session
+using them.
+
 ## "Remote Control is disabled by your organization's policy"
 
 Seen inside a cc-screen session after `/remote-control`, or when Claude Code
