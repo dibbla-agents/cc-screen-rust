@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-auth"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-hub"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-protocol"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-push"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "base64 0.22.1",
  "http",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-rust"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-summary"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "cc-screen-tui"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
