@@ -210,14 +210,26 @@ cancels. Below the tool, machine, name, and directory fields are the launch
 switches — <code>space</code> or <code>←</code>/<code>→</code> flips the focused one:</p>
 <ul>
 <li><strong>perms</strong> — <code>[YOLO]</code> (the default) launches the CLI with its
-approval-bypass flag; <code>[ask]</code> launches it with normal approval prompts, and
-the session wears a <code>safe</code> badge in the switcher.</li>
+approval-bypass mode; <code>[ask]</code> launches it with normal approval prompts, and
+the session wears a <code>safe</code> badge in the switcher. For OpenCode, YOLO is
+<code>--auto</code>: operations explicitly denied in <code>opencode.json[c]</code> still stay denied.
+For Grok, YOLO is <code>--always-approve</code>: deny rules, hooks, and some shell <code>ask</code>
+rules can still block.</li>
 <li><strong>claude</strong> — <code>[off]</code> (the default) launches Claude Code with its own remote
 control disabled: the session lives in cc-screen and nowhere else. <code>[app]</code>
 registers it with claude.ai/code and the Claude mobile app as
 <code>claude-&lt;name&gt;</code>, and the session wears an <code>app</code> badge. The row appears only
 for tools that have such a feature (today: Claude Code).</li>
 </ul>
+<p>OpenCode appears as <strong>OpenCode</strong> (<code>oc</code>) when its binary is installed. It offers
+YOLO, but no extra-folder row and no Claude-app row: OpenCode has neither a
+per-launch add-directory flag nor an equivalent remote-control registration.
+Use <code>/connect</code> in its terminal (or <code>opencode auth login</code> on the machine) for
+provider login; cc-screen never handles that credential.</p>
+<p>Grok appears as <strong>Grok</strong> (<code>gk</code>) when its binary is installed. It offers YOLO,
+but no extra-folder row and no Claude-app row. First login from a remote
+client is <code>grok login --device-auth</code> inside the session; a default launch
+would open a browser on the agent.</p>
 <p>Both choices are remembered for the session: a restart, a restore, or an
 assistant update relaunches it exactly the way you created it.</p>
 <p>Because typing searches, the switcher&#39;s commands live on Ctrl-chords:</p>
@@ -322,7 +334,7 @@ to a helper that waits for it.</p>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

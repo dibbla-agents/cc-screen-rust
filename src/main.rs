@@ -1,5 +1,5 @@
 // cc-screen-rust — a web-only, tmux-free engine for driving AI coding CLIs
-// (claude/kimi/gemini/codex) from a phone. The backend owns each session's PTY
+// (claude/kimi/gemini/codex/opencode/grok) from a phone. The backend owns each session's PTY
 // directly (no tmux), maintains a real terminal-emulator screen + scrollback
 // model (see render.rs) so (re)attach is served as a clean, size-agnostic
 // repaint, and serves the existing React PWA embedded in the binary. See
@@ -30,6 +30,7 @@ mod summary;
 mod tools;
 mod uplink;
 mod upload;
+mod vendor_guard;
 mod watch;
 
 use axum::{

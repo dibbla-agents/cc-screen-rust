@@ -275,7 +275,7 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
         "YOLO",
         "ask",
         Color::Yellow,
-        "skip permission prompts",
+        "bypass; deny rules can still block",
     ));
 
     // The assistant's own remote control (0082) — off by default, and shown only
@@ -291,6 +291,13 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
             Color::Magenta,
             "register with the Claude app",
         ));
+    }
+
+    if v.tool == "grok" {
+        lines.push(Line::from(Span::styled(
+            "         first login: grok login --device-auth",
+            dim,
+        )));
     }
 
     lines.push(Line::from(""));
@@ -966,7 +973,34 @@ mod tests {
         // The skip-permissions toggle renders with its default (YOLO on). The
         // hub-control toggle was retired by 0014 — no "view-only" affordance.
         assert!(s.contains("YOLO"), "skip-permissions toggle: {s}");
+        assert!(s.contains("deny rules can still block"), "YOLO copy: {s}");
         assert!(!s.contains("view-only"), "no retired hub-control toggle: {s}");
+        assert!(!s.contains("device-auth"), "device-code caption is Grok-only: {s}");
+    }
+
+    #[test]
+    fn grok_create_shows_device_code_and_deny_copy() {
+        let v = NewSessionView {
+            tool: "grok",
+            machine: None,
+            machine_online: true,
+            machine_pickable: true,
+            name: "proj",
+            dir: "/home/u",
+            focus: FormField::SkipPermissions,
+            candidates: &[],
+            cand_sel: None,
+            error: None,
+            skip_permissions: true,
+            assistant_remote_control: false,
+            remote_control_available: false,
+        };
+        let s = render_to(70, 16, |f| new_session(f, &v));
+        assert!(s.contains("grok"), "{s}");
+        assert!(s.contains("YOLO"), "{s}");
+        assert!(s.contains("deny rules can still block"), "{s}");
+        assert!(s.contains("grok login --device-auth"), "{s}");
+        assert!(!s.contains("register with the Claude app"), "{s}");
     }
 
     #[test]

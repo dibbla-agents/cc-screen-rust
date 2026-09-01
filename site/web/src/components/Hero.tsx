@@ -14,7 +14,7 @@ export function Hero() {
             <span className="text-accent">24/7</span> — and always a tap away.
           </h1>
           <p className="mt-5 max-w-[56ch] text-[1.08rem] text-dim">
-            For developers who run Claude, Codex, Gemini or Kimi all day — and
+            For developers who run Claude, Codex, Gemini, Kimi, OpenCode or Grok all day — and
             don't want to be at the desk they run on. See what your agents did,
             cowork on their files, keep the conversation going from wherever you
             are.

@@ -13,7 +13,7 @@ redirect for legacy links.
 ## What you'll find here
 
 - **What cc-screen is** — keep a team of AI coding agents (Claude, Codex,
-  Gemini, Kimi) running around the clock on your own machines, and check in on
+  Gemini, Kimi, OpenCode, Grok) running around the clock on your own machines, and check in on
   any of them from your phone or laptop, with real file cowork.
 - **How it works in 3 steps** — sign up at app.ccscreen.dev, paste one install
   one-liner on your dev box, type the short code it prints. Free during the

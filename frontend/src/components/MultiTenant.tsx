@@ -48,6 +48,13 @@ import {
   type ReceivedShare,
   type ShareInvite,
 } from "../api";
+import {
+  assistantInstallSelection,
+  assistantShortLabel,
+  BUILTIN_ASSISTANTS,
+  BUILTIN_ASSISTANT_PREFIXES,
+  type BuiltinAssistantPrefix,
+} from "../assistants";
 import ShareForm from "./ShareForm";
 import { RefreshIcon, ShareIcon } from "../icons";
 import { usePoll } from "../poll";
@@ -2175,30 +2182,13 @@ export function Dashboard({
   // box should BE is the right moment to ask, and the answer is then VISIBLE in
   // the command they copy — that is the consent, auditable before it runs.
   // Unticking gives today's command byte-for-byte.
-  const ASSISTANTS = ["claude", "codex", "gemini", "kimi"] as const;
-  const ASSISTANT_LABELS: Record<string, string> = {
-    claude: "Claude",
-    codex: "Codex",
-    gemini: "Gemini",
-    kimi: "Kimi",
-  };
   const [withAssistants, setWithAssistants] = useState(true);
-  const [pickedAssistants, setPickedAssistants] = useState<string[]>([...ASSISTANTS]);
-  const allPicked = pickedAssistants.length === ASSISTANTS.length;
-  const assistantsArg = !withAssistants
-    ? ""
-    : allPicked
-      ? "--assistants"
-      : pickedAssistants.length
-        ? `--assistants=${pickedAssistants.join(",")}`
-        : "";
-  const assistantsQuery = !withAssistants
-    ? ""
-    : allPicked
-      ? "&assistants=all"
-      : pickedAssistants.length
-        ? `&assistants=${encodeURIComponent(pickedAssistants.join(","))}`
-        : "";
+  const [pickedAssistants, setPickedAssistants] = useState<BuiltinAssistantPrefix[]>([
+    ...BUILTIN_ASSISTANT_PREFIXES,
+  ]);
+  const assistantSelection = assistantInstallSelection(withAssistants, pickedAssistants);
+  const assistantsArg = assistantSelection.shellArg;
+  const assistantsQuery = assistantSelection.query;
   const installShell = `curl -fsSL ${origin}/install.sh | sh -s -- ${safeName}${
     assistantsArg ? ` ${assistantsArg}` : ""
   }`;
@@ -2364,20 +2354,20 @@ export function Dashboard({
             </label>
             {withAssistants && (
               <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 pl-6">
-                {ASSISTANTS.map((k) => (
-                  <label key={k} className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                {BUILTIN_ASSISTANTS.map(({ prefix }) => (
+                  <label key={prefix} className="flex min-h-11 items-center gap-1.5 text-[11px] text-slate-400">
                     <input
                       type="checkbox"
-                      className="h-3.5 w-3.5 accent-amber"
-                      checked={pickedAssistants.includes(k)}
+                      className="h-4 w-4 accent-amber"
+                      checked={pickedAssistants.includes(prefix)}
                       onChange={(e) =>
                         setPickedAssistants((prev) =>
-                          e.target.checked ? [...prev, k] : prev.filter((x) => x !== k)
+                          e.target.checked ? [...prev, prefix] : prev.filter((x) => x !== prefix)
                         )
                       }
                     />
-                    {ASSISTANT_LABELS[k]}
-                    {osTab === "win" && k === "kimi" && (
+                    {assistantShortLabel(prefix)}
+                    {osTab === "win" && prefix === "kimi" && (
                       <span className="text-slate-600">(unverified on Windows)</span>
                     )}
                   </label>
@@ -2386,8 +2376,8 @@ export function Dashboard({
             )}
             {withAssistants && osTab === "win" && (
               <p className="mt-2 pl-6 text-[11px] text-slate-500">
-                Codex and Gemini need Node.js, which on Windows is a machine-wide installer —
-                install it once from{" "}
+                Codex, Gemini, and OpenCode need Node.js, which on Windows is a machine-wide
+                installer — install it once from{" "}
                 <a
                   href="https://nodejs.org/en/download"
                   target="_blank"
@@ -2396,7 +2386,8 @@ export function Dashboard({
                 >
                   nodejs.org
                 </a>{" "}
-                if it isn’t there. Everything else installs for your user only.
+                if it isn’t there. Everything else installs for your user only. OpenCode recommends
+                WSL for the best Windows experience.
               </p>
             )}
           </div>

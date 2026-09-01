@@ -37,11 +37,28 @@ limited time while the beta pricing transition runs.
 ## Which coding CLIs are supported?
 
 **Claude Code** (`claude`), **Codex** (`codex`), **Gemini CLI** (`gemini`),
-and **Kimi** (`kimi`) — plus a plain **shell** session, which is just your
+**Kimi** (`kimi`), **OpenCode** (`opencode`, picker command `oc`), and **Grok**
+(`grok`, picker command `gk`) — plus a
+plain **shell** session, which is just your
 shell on the box and always available. A machine only offers the CLIs it
 actually has installed; the installer's `--assistants` flag (and the
 dashboard's Install button) can install the missing ones. Self-hosters can
 also declare custom tools per machine.
+
+## Where do I connect OpenCode to a provider?
+
+Inside OpenCode itself: use `/connect` in the TUI or run `opencode auth login` on
+the machine. Provider choice, `auth.json`, configuration, and conversation data
+stay under that machine user's home. cc-screen neither asks for nor copies those
+credentials, and it runs the normal OpenCode TUI — not `opencode serve`.
+
+## How do I log Grok in from a phone?
+
+Type `grok login --device-auth` inside the session. A default `grok` launch
+would open a browser on the *agent* machine, which is the wrong device when
+you're on a phone. Device-code stays in the terminal; cc-screen never handles
+the credential, never reads `~/.grok/auth.json`, and never starts
+`grok agent serve`.
 
 ## Where does my code live? What does the hub see?
 
@@ -62,8 +79,8 @@ sessions run server-side on *your* box, not in the browser tab.
 ## And when the machine itself reboots?
 
 The agent starts on boot (it's a background service) and resumes its recorded
-sessions with each CLI's own resume flag — Claude Code sessions come back
-with their conversation intact via `--continue`. It's the same mechanism behind the
+sessions with each CLI's own resume flag — Claude Code, Kimi, OpenCode, and Grok
+sessions come back via `--continue`. It's the same mechanism behind the
 per-session **restart** button in the session drawer, which is how you make an
 assistant re-read something it only loads at launch (an MCP server, say)
 without losing the session — see

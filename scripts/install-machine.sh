@@ -6,7 +6,7 @@
 #
 #     curl -fsSL <hub>/install.sh | sh -s -- <machine-name>
 #     curl -fsSL <hub>/install.sh | sh -s -- <machine-name> --assistants
-#     curl -fsSL <hub>/install.sh | sh -s -- <machine-name> --assistants=claude,codex
+#     curl -fsSL <hub>/install.sh | sh -s -- <machine-name> --assistants=claude,opencode
 #
 # It (1) installs the cc-screen-rust binary (macOS arm64/x64 + Linux, auto-
 # detected), (2) enrolls this machine with the hub — a short code appears that
@@ -53,14 +53,14 @@ curl -fsSL "$INSTALLER_URL" | sh
 echo
 echo "==> Checking which coding assistants are installed…"
 # Best-effort preflight (the binary owns the list — see `cc-screen-rust doctor`):
-# report which of claude/codex/gemini/kimi this machine has and print the install
+# report which of claude/codex/gemini/kimi/opencode/grok this machine has and print the install
 # command for each missing one.
 #
 # `--assistants` (0050) additionally installs the missing ones, non-interactively
 # and FOR THIS USER ONLY — everything lands under $HOME/.local, no sudo, no system
 # package manager. Without the flag this is exactly today's report-only behaviour.
 # Either way a missing (or failing) assistant NEVER aborts the machine install:
-# an agent with three of four CLIs is a perfectly good agent.
+# an agent with any useful subset of the six CLIs is a perfectly good agent.
 case "$ASSISTANTS" in
   "")
     if [ -t 0 ]; then

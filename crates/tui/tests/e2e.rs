@@ -14,7 +14,7 @@ use std::time::Duration;
 use cc_screen_auth::Auth;
 use cc_screen_hub::test_support::{sess, spawn_scriptable_agent, start_hub, FakeAgentHandle};
 use cc_screen_protocol::hub::Cmd;
-use cc_screen_protocol::SessionInfo;
+use cc_screen_protocol::{SessionInfo, ToolInfo};
 use cc_screen_tui::app::{App, AppMsg};
 use cc_screen_tui::client::Rest;
 use cc_screen_tui::config::Config;
@@ -502,6 +502,102 @@ async fn create_session_lands_at_agent() {
         h.tick_until(|t| t.contains("made")).await,
         "the created session should subsequently list; got:\n{}",
         h.text()
+    );
+}
+
+#[tokio::test]
+async fn opencode_create_uses_registry_scoped_controls() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    // The agent registry is authoritative for the form: OpenCode has YOLO, but
+    // neither extra roots nor Claude-app remote control (proposal 0088).
+    h.send(AppMsg::ToolsLoaded(vec![ToolInfo {
+        cmd: "oc".into(),
+        prefix: "opencode".into(),
+        extra_dirs: None,
+        unavailable: false,
+        remote_control_available: false,
+    }]))
+    .await;
+    h.key(KeyCode::Up).await;
+    h.key(KeyCode::Enter).await;
+
+    let form = h.text();
+    assert!(form.contains("opencode"), "OpenCode should be selected:\n{form}");
+    assert!(form.contains("YOLO"), "OpenCode exposes approval bypass:\n{form}");
+    assert!(!form.contains("register with the Claude app"), "OpenCode has no Claude app control:\n{form}");
+    assert!(!form.contains("Extra folders"), "OpenCode has no extra-root control:\n{form}");
+
+    h.type_str("open-made").await;
+    h.key(KeyCode::Enter).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || {
+            a.observed().cmds.iter().any(|c| {
+                matches!(
+                    c,
+                    Cmd::Create(r)
+                        if r.name == "open-made"
+                            && r.tool == "opencode"
+                            && r.extra_dirs.is_empty()
+                            && r.skip_permissions
+                            && !r.assistant_remote_control
+                )
+            })
+        })
+        .await,
+        "OpenCode create should carry only its supported launch controls: {:?}",
+        agent.observed().cmds
+    );
+}
+
+#[tokio::test]
+async fn grok_create_uses_registry_scoped_controls() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let agent = spawn_scriptable_agent(&hub, "boxA", None, vec![sess("alpha")]).await;
+
+    let mut h = Harness::boot(&hub, 100, 30).await;
+    h.send(AppMsg::ToolsLoaded(vec![ToolInfo {
+        cmd: "gk".into(),
+        prefix: "grok".into(),
+        extra_dirs: None,
+        unavailable: false,
+        remote_control_available: false,
+    }]))
+    .await;
+    h.key(KeyCode::Up).await;
+    h.key(KeyCode::Enter).await;
+
+    let form = h.text();
+    assert!(form.contains("grok"), "Grok should be selected:\n{form}");
+    assert!(form.contains("YOLO"), "Grok exposes approval bypass:\n{form}");
+    assert!(form.contains("deny rules can still block"), "Grok YOLO copy:\n{form}");
+    assert!(form.contains("grok login --device-auth"), "device-code caption:\n{form}");
+    assert!(!form.contains("register with the Claude app"), "Grok has no Claude app control:\n{form}");
+    assert!(!form.contains("Extra folders"), "Grok has no extra-root control:\n{form}");
+
+    h.type_str("grok-made").await;
+    h.key(KeyCode::Enter).await;
+    let a = agent.clone();
+    assert!(
+        h.pump_cond(move || {
+            a.observed().cmds.iter().any(|c| {
+                matches!(
+                    c,
+                    Cmd::Create(r)
+                        if r.name == "grok-made"
+                            && r.tool == "grok"
+                            && r.extra_dirs.is_empty()
+                            && r.skip_permissions
+                            && !r.assistant_remote_control
+                )
+            })
+        })
+        .await,
+        "Grok create should carry only its supported launch controls: {:?}",
+        agent.observed().cmds
     );
 }
 

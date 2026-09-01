@@ -14,6 +14,8 @@ export default {
         kimi: "#7c8cff",
         gemini: "#4f9bff",
         codex: "#8fd17a",
+        opencode: "#79c6b3",
+        grok: "#7d9bb8", // steel — distinct from claude/gemini/kimi/codex/opencode
         shell: "#94a3b8", // slate — deliberately understated vs the AI palette
       },
       fontFamily: {

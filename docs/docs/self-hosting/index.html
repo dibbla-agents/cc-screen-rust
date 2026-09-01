@@ -253,7 +253,12 @@ below. Compose files ship in the repo.</li>
 <li><strong>Agent:</strong> the recommended containerized machine host runs hub-only (no
 inbound port at all); the mounted home volume is the sandbox — projects,
 CLI logins, and state all live there. Log the assistants in once with
-<code>docker compose exec agent claude</code> (or set API keys in <code>.env</code>).</li>
+<code>docker compose exec agent claude</code>; for OpenCode use
+<code>docker compose exec agent opencode auth login</code> (or <code>/connect</code> in its TUI).
+For Grok use <code>docker compose exec agent grok login --device-auth</code> (a default
+<code>grok</code> launch would open a browser inside the container). OpenCode&#39;s and
+Grok&#39;s credentials and sessions remain in the mounted home (<code>~/.grok/</code> for
+Grok); the hub never receives them. You can also set provider API keys in <code>.env</code>.</li>
 </ul>
 <p>Full operator detail (compose files, GHCR/CI publishing):
 <a href="https://github.com/dibbla-agents/cc-screen-rust/blob/main/docker/hub/README.md">docker/hub/README.md</a>
@@ -285,6 +290,13 @@ gate agent registration — and ideally an access policy at the edge too.</li>
 <li><strong>Browser 403s after fronting with your own domain?</strong> Add the domain to
 <code>CCWEB_ALLOWED_ORIGINS</code> (the hub&#39;s cross-origin/DNS-rebinding guard only
 auto-accepts same-origin, raw IPs, <code>localhost</code>, and <code>*.ts.net</code>).</li>
+<li><strong>Your proxy&#39;s access log is credential material</strong> if anyone uses read-only
+file links (multi-tenant only). Those URLs carry their token in the path
+(<code>/s/&lt;token&gt;</code>, <code>/api/link/&lt;token&gt;</code>); the hub stores only a hash of it and
+never logs the full path, but a proxy that logs request paths logs the live
+token. Keep those logs short-lived and tightly scoped, or filter <code>/s/*</code> and
+<code>/api/link/*</code> out of path logging. A leaked one is fixed the same way as any
+other: revoke, or mint a new URL.</li>
 </ul>
 <h2 id="environment-reference">Environment reference</h2>
 <p>Agent (<code>~/.config/cc-screen-rust/web.env</code>):</p>
@@ -445,7 +457,10 @@ moved aside to <code>&lt;name&gt;.pre-ccshim</code> once, not clobbered.</li>
 The file is <strong>all-or-nothing</strong>: a non-empty one replaces the built-in tool
 list entirely, and cc-screen then re-attaches the built-in metadata (resume
 flag, extra-dirs flag, YOLO flag, launch stance) to any tool that kept a
-known command or prefix.</p>
+known command or prefix. The OpenCode built-in is <code>cc_tool oc opencode &quot;opencode&quot;</code>; keeping either <code>opencode</code> or <code>oc</code> re-attaches its <code>--continue</code>,
+<code>--auto</code>, and durable image-path behavior automatically. The Grok built-in is
+<code>cc_tool gk grok &quot;grok&quot;</code>; keeping either <code>grok</code> or <code>gk</code> re-attaches
+<code>--continue</code> and <code>--always-approve</code>.</p>
 <pre><code class="language-conf">cc_tool cc claude &quot;claude&quot;          # &lt;cmd&gt; &lt;prefix&gt; &lt;launch template&gt;
 cc_tool_resume cc &quot;--continue&quot;      # how a session resumes
 cc_tool_yolo cc &quot;--dangerously-skip-permissions&quot;
@@ -487,7 +502,7 @@ that sets <code>X-Forwarded-Proto: https</code> — the cookie is <code>Secure</
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

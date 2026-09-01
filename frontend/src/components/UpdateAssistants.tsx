@@ -11,6 +11,7 @@ import {
   type Tool,
   type UpdateJob,
 } from "../api";
+import { assistantLabel } from "../assistants";
 
 // UpdateAssistants — the one action that keeps the coding assistants current
 // (proposal 0049): update the CLIs on the chosen machines, then restart the
@@ -54,13 +55,7 @@ interface Slot {
   installBlocked?: string;
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex CLI",
-  gemini: "Gemini CLI",
-  kimi: "Kimi CLI",
-};
-const toolLabel = (prefix: string) => TOOL_LABELS[prefix] ?? prefix;
+const toolLabel = assistantLabel;
 
 // Row glyphs. Every state is carried by text as well — the glyph and colour are
 // reinforcement, never the only signal.

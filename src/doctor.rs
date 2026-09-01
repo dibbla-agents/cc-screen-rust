@@ -111,7 +111,7 @@ pub fn run(args: &[String]) -> i32 {
     // AGENT; `doctor --update` updates the assistants it drives.
     let mut update_failed = false;
     if update {
-        if run_updates(&rows, &cfg.env_path) {
+        if run_updates(&rows, &cfg.env_path, &cfg.home) {
             update_failed = true;
         }
     }
@@ -165,13 +165,13 @@ fn only_list(args: &[String]) -> Vec<String> {
 /// Run the update for every present assistant and print a version-carrying
 /// report row each. Returns whether any update failed (only `--strict` acts on
 /// it — a failed update is reported, never fatal to a plain run).
-fn run_updates(rows: &[Row], env_path: &str) -> bool {
+fn run_updates(rows: &[Row], env_path: &str, home: &std::path::Path) -> bool {
     use crate::assistants::UpdateOutcome;
     let mut failed = false;
     println!();
     println!("Updating the installed assistants (one at a time):");
     for r in rows {
-        match crate::assistants::update_tool(&r.tool, env_path) {
+        match crate::assistants::update_tool(&r.tool, env_path, home) {
             UpdateOutcome::Updated { from, to } => {
                 println!("  ✓ {:<10} {:<14} {from} → {to}", r.bin, label(&r.tool))
             }

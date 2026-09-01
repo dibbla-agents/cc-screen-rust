@@ -91,7 +91,7 @@
   <main class="docs-content">
 <h1 id="what-is-cc-screen">What is cc-screen?</h1>
 <p>cc-screen keeps a team of AI coding <strong>agents</strong> — Claude Code, Codex, Gemini,
-Kimi — working around the clock on your own computers, and lets you check in on
+Kimi, OpenCode, and Grok — working around the clock on your own computers, and lets you check in on
 any of them from a phone, a browser, or a terminal.</p>
 <p>Four words carry the whole model:</p>
 <ul>
@@ -99,8 +99,8 @@ any of them from a phone, a browser, or a terminal.</p>
 Each one runs a small background process (the cc-screen <em>agent</em>) that you
 install with one command.</li>
 <li><strong>Sessions</strong> are real terminal sessions the agent owns on that machine. A
-session runs one coding CLI (<code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, or a plain
-shell) in a real PTY, so it keeps running whether or not you&#39;re watching.</li>
+session runs one coding CLI (<code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>opencode</code>,
+<code>grok</code>, or a plain shell) in a real PTY, so it keeps running whether or not you&#39;re watching.</li>
 <li><strong>Assistants</strong> are the coding CLIs themselves. cc-screen doesn&#39;t replace
 them — it launches, supervises, and reconnects them.</li>
 <li><strong>The hub</strong> at <a href="https://app.ccscreen.dev">app.ccscreen.dev</a> is one address
@@ -144,7 +144,7 @@ run yourself. Fully supported.</li>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

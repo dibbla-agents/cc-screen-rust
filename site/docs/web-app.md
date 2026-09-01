@@ -34,7 +34,7 @@ This list lives in *this* browser — it isn't synced between devices, and
 your browser storage clears it; nothing else is affected.
 
 **New session** starts one: pick the machine, the tool (Claude, Codex,
-Gemini, Kimi, or a plain shell), and the working directory (with a
+Gemini, Kimi, OpenCode, or a plain shell), and the working directory (with a
 directory search, so deep project paths are a few keystrokes).
 
 The panel opens aimed at **the machine you last used a session on** (from
@@ -55,15 +55,23 @@ Two details worth knowing:
 ![Creating a session — tool, directory, options](../img/web-new-session.png)
 
 - **Skip permissions** (on by default) launches the CLI with its
-  approval-bypass flag — the agent won't stop to ask before running tools.
-  Turn it off for a session you want to supervise; sessions with it off wear
-  a "safe" badge.
+  approval-bypass mode. OpenCode maps this to `--auto`, which auto-approves
+  operations its own configuration has not explicitly denied; explicit deny
+  rules still win. Turn it off for a session you want to supervise; sessions
+  with it off wear a "safe" badge.
 - **Claude app** (off by default) turns on Claude Code's *own* remote
   control, registering the session with claude.ai/code and the Claude mobile
   app under the name `claude-<session>`. Leave it off and the session stays
   inside cc-screen — one remote-access layer per session, which is the point.
   Sessions with it on wear a "claude app" badge. The switch only appears for
   tools that have such a feature (today: Claude Code).
+- **OpenCode provider login stays on the machine.** Its first terminal may ask
+  you to use `/connect`; `opencode auth login` on the box does the same job.
+  cc-screen never asks for, imports, or relays OpenCode provider credentials.
+- **Grok first login from a phone is device-code.** Type
+  `grok login --device-auth` inside the session. Otherwise Grok opens a browser
+  on the agent machine. YOLO for Grok is `--always-approve`; deny rules and
+  hooks can still block. Extra folders and Claude app are not offered.
 - Sessions survive you. Closing the browser, losing signal, even the machine
   rebooting — the agent resumes its sessions and your panes re-attach.
 
@@ -88,9 +96,11 @@ mark and label, its folder and extra folders, and its **Skip permissions** and
 What resume actually means is worth knowing, because it isn't magic:
 
 - The conversation is resumed the same way a reboot resumes it — `--continue`
-  for Claude Code and Kimi, `resume --last` for Codex, `--resume latest` for
-  Gemini. If there's nothing resumable, the session comes back **empty rather
-  than dead**.
+  for Claude Code, Kimi, OpenCode, and Grok; `resume --last` for Codex; and
+  `--resume latest` for Gemini. If there's nothing resumable, the session comes
+  back **empty rather than dead**. Grok also has `--resume <uuid>`; cc-screen
+  does not store that id, so two Grok sessions in the same folder both resume
+  whichever conversation was most recently active there.
 - `--continue` picks the most recent conversation **in the folder the session
   launched in**. Two cc-screen sessions in the *same* folder therefore both
   continue whichever of them wrote last — so restarting one can resume the
@@ -248,11 +258,11 @@ plan or review docs agents produce.
 ![The editor on a phone](../img/mobile-editor.png)
 
 - **Uploads:** drop files (up to 500 MiB) onto a machine from the browser.
-- **Clipboard images:** paste an image (Ctrl-V) straight into a Claude or
-  Codex session — it routes to the active session on whichever machine owns
+- **Clipboard images:** paste an image (Ctrl-V) straight into a Claude, Codex,
+  or OpenCode session — it routes to the active session on whichever machine owns
   it. cc-screen stages the image on that machine and delivers it the way that
-  CLI expects: Claude reads it as a local clipboard paste; Codex gets the
-  staged file attached directly (the file is kept machine-locally until the
+  CLI expects: Claude reads it as a local clipboard paste; Codex and OpenCode get
+  the staged file attached directly (the file is kept machine-locally until the
   session is deleted, so it survives drafts and resumes). No X11 or desktop
   environment is needed on the machine.
 - **Downloads:** pull any file back out, PDFs render in-app.

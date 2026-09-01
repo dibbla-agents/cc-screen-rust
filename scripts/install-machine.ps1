@@ -59,9 +59,10 @@ Write-Host "==> Checking which coding assistants are installed..."
 # only: everything lands under the user profile, nothing needs admin or Developer
 # Mode. A missing (or failing) assistant never aborts the machine install.
 #
-# NOTE Codex/Gemini need Node.js, which on Windows is a machine-scope MSI — if
+# NOTE Codex/Gemini/OpenCode need Node.js, which on Windows is a machine-scope MSI — if
 # npm isn't there, those rows report it with a link instead of guessing at a
 # user-scope Node. Install Node once from https://nodejs.org/en/download.
+# OpenCode recommends WSL for the best Windows experience.
 try {
     if (-not $Assistants) {
         & $Bin doctor

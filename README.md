@@ -5,11 +5,11 @@
 [![windows-ci](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/dibbla-agents/cc-screen-rust/actions/workflows/windows-ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Drive Claude Code, Codex, Gemini, and Kimi sessions on all your machines —
-from your phone.** cc-screen keeps your AI coding agents running 24/7 as
+**Drive Claude Code, Codex, Gemini, Kimi, OpenCode, and Grok sessions on all your
+machines — from your phone.** cc-screen keeps your AI coding agents running 24/7 as
 long-lived terminal sessions on your own computers, and lets you check in,
-type, approve, paste images (assistant-aware: Claude reads them via a
-clipboard shim, Codex gets a staged file path — no X11 needed on the box),
+type, approve, paste images (assistant-aware: Claude and Grok read them via a
+clipboard shim; Codex and OpenCode get a staged file path — no X11 needed on the box),
 copy back out (a copy made *inside* a session lands on the clipboard of the
 device you're holding, in the browser and in `ccs` — never on the agent's),
 and browse/edit files from anywhere: a phone
@@ -48,7 +48,11 @@ The hosted hub is the fastest path — **free during beta**:
    the app experience) — your machine is online, start a session.
 
 The `--assistants` flag also offers to install any missing coding CLIs
-(claude / codex / gemini / kimi) into `~/.local/bin` — no sudo. Your code and
+(claude / codex / gemini / kimi / opencode / grok) for your user — no sudo.
+OpenCode's Unix installer stays under `~/.opencode` and cc-screen exposes it
+through `~/.local/bin` without editing your shell startup files. Grok's official
+installers always rewrite shell rc / User PATH; cc-screen restores those files
+and exposes `~/.grok/bin/grok` the same way. Your code and
 terminals stay on **your** machines; the hub is a relay that owns no PTY and no
 filesystem, and each machine dials *out* to it (no inbound ports).
 

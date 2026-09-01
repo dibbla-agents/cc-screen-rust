@@ -41,8 +41,52 @@ cc-screen-rust doctor                  # what's installed, and where
 cc-screen-rust doctor --install --yes  # install everything missing
 ```
 
-On Windows, remember Codex and Gemini need Node.js first — see
-[Install on Windows](../install-windows/).
+On Windows, remember Codex, Gemini, and OpenCode need Node.js first — see
+[Install on Windows](../install-windows/). Grok's native installer does not
+need Node.
+
+### OpenCode still isn't found after its installer succeeds
+
+The official macOS/Linux installer writes `~/.opencode/bin/opencode`. The
+cc-screen installer deliberately passes `--no-modify-path` (so it never edits
+`.zshrc`/`.bashrc`) and links that binary into `~/.local/bin`. Update the
+cc-screen agent if that landing-zone step is missing, then run:
+
+```sh
+cc-screen-rust doctor
+```
+
+It must print a concrete `opencode` path. Installer exit code alone is not a
+successful cc-screen install.
+
+### OpenCode opens but asks for a provider
+
+That is OpenCode's own first-run flow, not a cc-screen error. Use `/connect` in
+the session or run `opencode auth login` on the machine. Its provider
+credentials, model choice, config, and session database stay on that machine;
+cc-screen does not import them.
+
+### Grok still isn't found after its installer succeeds
+
+The official Unix installer writes `~/.grok/bin/grok` and edits shell rc /
+User PATH. cc-screen restores those files and links the binary into
+`~/.local/bin`. Update the cc-screen agent if that restore/landing-zone step
+is missing, then run `cc-screen-rust doctor`. It must print a concrete `grok`
+path. Installer exit code alone is not a successful cc-screen install.
+
+### Grok opens a browser on the agent instead of logging in on my phone
+
+That is Grok's default OAuth loopback. Type `grok login --device-auth` inside
+the session. cc-screen never reads `~/.grok/auth.json` and never starts
+`grok agent serve`.
+
+### A pasted image doesn't attach in Grok
+
+Grok reads OS CLIPBOARD on `Ctrl+V` / `Cmd+V` (Windows screenshot paste is
+`Alt+V`). On a headless Linux agent the clipboard shim should satisfy `xclip`;
+if the composer never shows an attachment, the paste did not land — a quiet
+HTTP success is not enough. Try again after focusing the Grok prompt, or file
+it as a paste-strategy miss.
 
 ## A machine shows offline
 
@@ -178,7 +222,7 @@ update the CLI (machine dashboard row → **Update**, or
 Older cc-screen agents delivered every pasted image the same way, and Codex
 tried to read it from the machine's X11/Wayland clipboard — which a headless
 box doesn't have, so the paste failed with a clipboard/X11 connection error.
-Current agents deliver images to Codex as a staged local file instead, so
+Current agents deliver images to Codex and OpenCode as a staged local file instead, so
 **update the agent on that machine** (the machine dashboard row → Update, or
 re-run the install one-liner) and the paste works with no display server.
 You do **not** need to install Xvfb or any X11 packages.

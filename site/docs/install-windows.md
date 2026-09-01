@@ -44,14 +44,23 @@ Everything installs for your user only.
    running, the script stops it first (Windows locks a running `.exe`), so
    re-running the one-liner is also the update path.
 2. **Checks / installs the coding assistants.** With `assistants=all` every
-   missing CLI among Claude, Codex, Gemini, and Kimi is installed under your
-   user profile; use `assistants=claude,codex` to narrow it, or drop the
+   missing CLI among Claude, Codex, Gemini, Kimi, OpenCode, and Grok is installed under your
+   user profile; use `assistants=claude,opencode` to narrow it, or drop the
    parameter to just get a report. Two Windows-specific caveats:
-   - **Codex and Gemini need Node.js**, which on Windows is a machine-wide
+   - **Codex, Gemini, and OpenCode need Node.js**, which on Windows is a machine-wide
      installer. If `npm` isn't present, those rows report it with a link
      rather than guessing — install Node once from
      [nodejs.org](https://nodejs.org/en/download) and re-run.
+   - **OpenCode installs natively through `npm install -g opencode-ai`, but its
+     native-Windows launch/update/resume flow is not yet a claimed release gate.**
+     OpenCode recommends **WSL** for the best Windows experience; use that route
+     for production work until the native pass is recorded.
    - **Kimi is unverified on Windows.**
+   - **Grok uses the official PowerShell installer** (`irm https://x.ai/cli/install.ps1 | iex`)
+     and does **not** need Node. The installer prepends User PATH; cc-screen
+     restores it and copies `grok.exe` into `%USERPROFILE%\.local\bin`. Native
+     Windows support is claimed only after the `harebell` install/launch/update/
+     exit/resume pass.
 3. **Enrolls the machine.** A short code prints (like `WDJB-MJHT`); approve it
    at [app.ccscreen.dev/activate](https://app.ccscreen.dev/activate) from any
    logged-in browser. Codes expire after 10 minutes, and the installer prints

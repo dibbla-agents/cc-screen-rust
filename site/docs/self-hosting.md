@@ -159,7 +159,12 @@ docker pull ghcr.io/dibbla-agents/cc-screen-agent:latest   # a containerized mac
 - **Agent:** the recommended containerized machine host runs hub-only (no
   inbound port at all); the mounted home volume is the sandbox — projects,
   CLI logins, and state all live there. Log the assistants in once with
-  `docker compose exec agent claude` (or set API keys in `.env`).
+  `docker compose exec agent claude`; for OpenCode use
+  `docker compose exec agent opencode auth login` (or `/connect` in its TUI).
+  For Grok use `docker compose exec agent grok login --device-auth` (a default
+  `grok` launch would open a browser inside the container). OpenCode's and
+  Grok's credentials and sessions remain in the mounted home (`~/.grok/` for
+  Grok); the hub never receives them. You can also set provider API keys in `.env`.
 
 Full operator detail (compose files, GHCR/CI publishing):
 [docker/hub/README.md](https://github.com/dibbla-agents/cc-screen-rust/blob/main/docker/hub/README.md)
@@ -280,7 +285,11 @@ An agent's launch templates live in `tools.conf` in its config dir
 The file is **all-or-nothing**: a non-empty one replaces the built-in tool
 list entirely, and cc-screen then re-attaches the built-in metadata (resume
 flag, extra-dirs flag, YOLO flag, launch stance) to any tool that kept a
-known command or prefix.
+known command or prefix. The OpenCode built-in is `cc_tool oc opencode
+"opencode"`; keeping either `opencode` or `oc` re-attaches its `--continue`,
+`--auto`, and durable image-path behavior automatically. The Grok built-in is
+`cc_tool gk grok "grok"`; keeping either `grok` or `gk` re-attaches
+`--continue` and `--always-approve`.
 
 ```conf
 cc_tool cc claude "claude"          # <cmd> <prefix> <launch template>

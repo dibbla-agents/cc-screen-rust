@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSharedMap, fuzzyScore, machineAccent, sameJson, sharedEntry, sharedOwner, sharedVia, shouldSkipShortcut, statusDot } from "./util";
+import { buildSharedMap, fuzzyScore, machineAccent, sameJson, sharedEntry, sharedOwner, sharedVia, shouldSkipShortcut, statusDot, toolColor } from "./util";
 import type { ReceivedShare } from "./api";
 
 // machineAccent backs the per-pane identity bar (proposal 0021). The contract:
@@ -28,6 +28,16 @@ describe("machineAccent", () => {
     expect(acc.spine).toMatch(/^hsl\(\d{1,3} 62% 55%\)$/);
     expect(acc.text).toMatch(/^hsl\(\d{1,3} 70% 74%\)$/);
     expect(acc.tint).toMatch(/^hsl\(\d{1,3} 55% 50% \/ 0\.12\)$/);
+  });
+});
+
+describe("toolColor (proposal 0088)", () => {
+  it("uses the centralized assistant palette and keeps shell/custom fallbacks", () => {
+    expect(toolColor("opencode")).toBe("bg-opencode");
+    expect(toolColor("grok")).toBe("bg-grok");
+    expect(toolColor("claude")).toBe("bg-claude");
+    expect(toolColor("shell")).toBe("bg-shell");
+    expect(toolColor("custom")).toBe("bg-edge");
   });
 });
 

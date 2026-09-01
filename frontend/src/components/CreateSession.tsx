@@ -621,12 +621,20 @@ export default function CreateSession({
               <button
                 type="button"
                 onClick={() => onInstallTool(selectedMachine, missingSelected.prefix)}
-                className="shrink-0 rounded-md border border-amber/60 px-2 py-0.5 font-semibold text-amber transition hover:bg-amber/10"
+                className="shrink-0 min-h-11 rounded-md border border-amber/60 px-2 py-0.5 font-semibold text-amber transition hover:bg-amber/10"
               >
                 Install it
               </button>
             )}
           </div>
+        )}
+
+        {selectedTool?.prefix === "grok" && (
+          <p className="mb-1.5 px-1 text-[11px] leading-snug text-slate-500" data-grok-login>
+            First login: type{" "}
+            <code className="font-mono text-slate-400">grok login --device-auth</code> inside
+            the session. Otherwise a browser opens on the agent machine.
+          </p>
         )}
 
         <div className="mb-1.5 flex items-center gap-2">
@@ -638,8 +646,8 @@ export default function CreateSession({
             className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-slate-300 hover:bg-edge/50"
             title={
               skipPermissions
-                ? "YOLO: runs tools without asking"
-                : "Pauses for approval on risky actions"
+                ? "YOLO: uses this assistant’s approval-bypass mode (explicit deny rules can still block)"
+                : "Uses the assistant’s normal approval prompts and deny rules"
             }
           >
             <span className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${skipPermissions ? "bg-amber" : "bg-edge"}`}>

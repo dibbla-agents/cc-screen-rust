@@ -113,8 +113,39 @@ box itself, the equivalent is:</p>
 <pre><code class="language-sh">cc-screen-rust doctor                  # what&#39;s installed, and where
 cc-screen-rust doctor --install --yes  # install everything missing
 </code></pre>
-<p>On Windows, remember Codex and Gemini need Node.js first — see
-<a href="../install-windows/">Install on Windows</a>.</p>
+<p>On Windows, remember Codex, Gemini, and OpenCode need Node.js first — see
+<a href="../install-windows/">Install on Windows</a>. Grok&#39;s native installer does not
+need Node.</p>
+<h3 id="opencode-still-isn39t-found-after-its-installer-succeeds">OpenCode still isn&#39;t found after its installer succeeds</h3>
+<p>The official macOS/Linux installer writes <code>~/.opencode/bin/opencode</code>. The
+cc-screen installer deliberately passes <code>--no-modify-path</code> (so it never edits
+<code>.zshrc</code>/<code>.bashrc</code>) and links that binary into <code>~/.local/bin</code>. Update the
+cc-screen agent if that landing-zone step is missing, then run:</p>
+<pre><code class="language-sh">cc-screen-rust doctor
+</code></pre>
+<p>It must print a concrete <code>opencode</code> path. Installer exit code alone is not a
+successful cc-screen install.</p>
+<h3 id="opencode-opens-but-asks-for-a-provider">OpenCode opens but asks for a provider</h3>
+<p>That is OpenCode&#39;s own first-run flow, not a cc-screen error. Use <code>/connect</code> in
+the session or run <code>opencode auth login</code> on the machine. Its provider
+credentials, model choice, config, and session database stay on that machine;
+cc-screen does not import them.</p>
+<h3 id="grok-still-isn39t-found-after-its-installer-succeeds">Grok still isn&#39;t found after its installer succeeds</h3>
+<p>The official Unix installer writes <code>~/.grok/bin/grok</code> and edits shell rc /
+User PATH. cc-screen restores those files and links the binary into
+<code>~/.local/bin</code>. Update the cc-screen agent if that restore/landing-zone step
+is missing, then run <code>cc-screen-rust doctor</code>. It must print a concrete <code>grok</code>
+path. Installer exit code alone is not a successful cc-screen install.</p>
+<h3 id="grok-opens-a-browser-on-the-agent-instead-of-logging-in-on-my-phone">Grok opens a browser on the agent instead of logging in on my phone</h3>
+<p>That is Grok&#39;s default OAuth loopback. Type <code>grok login --device-auth</code> inside
+the session. cc-screen never reads <code>~/.grok/auth.json</code> and never starts
+<code>grok agent serve</code>.</p>
+<h3 id="a-pasted-image-doesn39t-attach-in-grok">A pasted image doesn&#39;t attach in Grok</h3>
+<p>Grok reads OS CLIPBOARD on <code>Ctrl+V</code> / <code>Cmd+V</code> (Windows screenshot paste is
+<code>Alt+V</code>). On a headless Linux agent the clipboard shim should satisfy <code>xclip</code>;
+if the composer never shows an attachment, the paste did not land — a quiet
+HTTP success is not enough. Try again after focusing the Grok prompt, or file
+it as a paste-strategy miss.</p>
 <h2 id="a-machine-shows-offline">A machine shows offline</h2>
 <p>Its agent&#39;s connection to the hub dropped — the box is asleep, offline, or
 rebooting. Nothing is lost: the agent owns its sessions locally, keeps them
@@ -182,6 +213,28 @@ CLIs first (a failed update leaves the machine untouched), then gracefully
 restarts the sessions that use them, and your panes re-attach under the same
 names. On the box: <code>cc-screen-rust doctor --update</code> (updates the CLIs only,
 restarts nothing).</p>
+<h2 id="the-assistant-can39t-see-a-newly-added-mcp-server">The assistant can&#39;t see a newly added MCP server</h2>
+<p>Every one of the supported CLIs reads its MCP configuration <strong>at launch</strong>, so
+a server you add while a session is running is invisible to it. Restart that
+one session: the <strong>restart</strong> button on its row in the session drawer (or in
+the focused pane&#39;s header on desktop) exits the assistant and brings it back
+with its conversation resumed, under the same name, in the same pane.</p>
+<p>cc-screen doesn&#39;t inspect or manage MCP configuration — the button is just an
+honest &quot;exit and resume this CLI&quot;. Whether the server then appears is the
+assistant&#39;s own business, and its startup output is where you&#39;ll see it.</p>
+<p>Two things to know about the resume, both inherited from how the CLIs
+themselves resume:</p>
+<ul>
+<li>It reopens the most recent conversation <strong>for the folder the session
+launched in</strong>. If you have two cc-screen sessions in the same folder, both
+continue whichever of them wrote last — so a restart can land you in the
+other one&#39;s conversation. Same-folder pairs are the only case this bites.</li>
+<li>The relaunch happens in the session&#39;s <strong>launch folder</strong>, not wherever you
+<code>cd</code>&#39;d to inside it — the same behaviour as a resume after a reboot.</li>
+</ul>
+<p>If the whole machine&#39;s assistants are out of date, use the dashboard&#39;s
+<strong>Update</strong> instead (above) — that updates the CLIs and restarts every session
+using them.</p>
 <h2 id="remote-control-is-disabled-by-your-organization39s-policy">&quot;Remote Control is disabled by your organization&#39;s policy&quot;</h2>
 <p>Seen inside a cc-screen session after <code>/remote-control</code>, or when Claude Code
 didn&#39;t auto-start remote control the way it does in your own terminal. It&#39;s
@@ -204,7 +257,7 @@ update the CLI (machine dashboard row → <strong>Update</strong>, or
 <p>Older cc-screen agents delivered every pasted image the same way, and Codex
 tried to read it from the machine&#39;s X11/Wayland clipboard — which a headless
 box doesn&#39;t have, so the paste failed with a clipboard/X11 connection error.
-Current agents deliver images to Codex as a staged local file instead, so
+Current agents deliver images to Codex and OpenCode as a staged local file instead, so
 <strong>update the agent on that machine</strong> (the machine dashboard row → Update, or
 re-run the install one-liner) and the paste works with no display server.
 You do <strong>not</strong> need to install Xvfb or any X11 packages.</p>
@@ -266,6 +319,23 @@ layout or press Esc first.</li>
 the session list, which is what a long pause looks like.)</li>
 </ul>
 <p>The full list of chords is in <a href="../web-app/#keyboard-shortcuts">the web app guide</a>.</p>
+<h2 id="a-file-link-opens-the-file-tree-instead-of-the-file">A file link opens the file tree instead of the file</h2>
+<p>The file isn&#39;t where the link says any more — it was renamed, moved, or
+deleted. A link is <code>(machine, path)</code>, and cc-screen deliberately never guesses
+at a new location, so it drops you in the tree with a one-line note rather than
+showing an error or retrying forever.</p>
+<p>Find the file where it is now, open it, and re-bookmark: the address bar is
+already showing the new URL. If the tree is at the wrong machine, check the
+machine name in the link — renaming a machine invalidates links that named it.</p>
+<h2 id="a-shared-link-says-that-machine-is-offline">A shared link says &quot;that machine is offline&quot;</h2>
+<p>The link is fine; the computer holding the file isn&#39;t reachable. Read-only
+links serve the <em>live</em> file, so the machine has to be online to answer — there
+is no cached copy. Wake the machine (or start the agent) and reload; the page
+has a retry button.</p>
+<p>If it instead says &quot;this link isn&#39;t available&quot;, the link itself is gone:
+revoked, expired, or the file was renamed or deleted. Those four look identical
+on purpose — see <a href="../security/#read-only-link-grants">Security</a>. Ask whoever
+shared it to mint a new one.</p>
 <h2 id="i-copied-inside-claude-and-my-clipboard-is-empty">I copied inside Claude and my clipboard is empty</h2>
 <p>Which machine&#39;s clipboard? That&#39;s the whole question.</p>
 <p>Every copy Claude Code performs — <code>/copy</code>, copy-on-select, <code>Ctrl+C</code> on a
@@ -326,7 +396,7 @@ Add your domain to <code>CCWEB_ALLOWED_ORIGINS</code> — see
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

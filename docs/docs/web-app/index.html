@@ -113,24 +113,78 @@ phone it&#39;s the first row under your thumb.</p>
 <code>ccs</code> on the same machine keeps its own (see the <a href="../faq/">FAQ</a>). Clearing
 your browser storage clears it; nothing else is affected.</p>
 <p><strong>New session</strong> starts one: pick the machine, the tool (Claude, Codex,
-Gemini, Kimi, or a plain shell), and the working directory (with a
-directory search, so deep project paths are a few keystrokes). Two details
-worth knowing:</p>
+Gemini, Kimi, OpenCode, or a plain shell), and the working directory (with a
+directory search, so deep project paths are a few keystrokes).</p>
+<p>The panel opens aimed at <strong>the machine you last used a session on</strong> (from
+this browser), and the machine list is in that same most-recently-used
+order — so the common case needs no machine click at all, and the uncommon
+one finds its machine near the top. On a single-machine setup there&#39;s no
+picker to see.</p>
+<p>On a laptop the whole thing is two keystrokes: <strong><code>⌃B</code> <code>n</code></strong> opens the create
+panel directly, empty, with the folder box focused — type a few letters of
+the project and press <code>⏎</code>. (Typing <code>new</code> into the session list to find the
+button works too, and the panel still opens empty: the word that summoned
+the button isn&#39;t a folder. Type <code>new myproj</code> and the <code>myproj</code> half <em>does</em>
+carry into the folder search.)</p>
+<p>Two details worth knowing:</p>
 <p><img src="../img/web-new-session.png" alt="Creating a session — tool, directory, options" loading="lazy" /></p>
 <ul>
 <li><strong>Skip permissions</strong> (on by default) launches the CLI with its
-approval-bypass flag — the agent won&#39;t stop to ask before running tools.
-Turn it off for a session you want to supervise; sessions with it off wear
-a &quot;safe&quot; badge.</li>
+approval-bypass mode. OpenCode maps this to <code>--auto</code>, which auto-approves
+operations its own configuration has not explicitly denied; explicit deny
+rules still win. Turn it off for a session you want to supervise; sessions
+with it off wear a &quot;safe&quot; badge.</li>
 <li><strong>Claude app</strong> (off by default) turns on Claude Code&#39;s <em>own</em> remote
 control, registering the session with claude.ai/code and the Claude mobile
 app under the name <code>claude-&lt;session&gt;</code>. Leave it off and the session stays
 inside cc-screen — one remote-access layer per session, which is the point.
 Sessions with it on wear a &quot;claude app&quot; badge. The switch only appears for
 tools that have such a feature (today: Claude Code).</li>
+<li><strong>OpenCode provider login stays on the machine.</strong> Its first terminal may ask
+you to use <code>/connect</code>; <code>opencode auth login</code> on the box does the same job.
+cc-screen never asks for, imports, or relays OpenCode provider credentials.</li>
+<li><strong>Grok first login from a phone is device-code.</strong> Type
+<code>grok login --device-auth</code> inside the session. Otherwise Grok opens a browser
+on the agent machine. YOLO for Grok is <code>--always-approve</code>; deny rules and
+hooks can still block. Extra folders and Claude app are not offered.</li>
 <li>Sessions survive you. Closing the browser, losing signal, even the machine
 rebooting — the agent resumes its sessions and your panes re-attach.</li>
 </ul>
+<h3 id="restart-a-session">Restart a session</h3>
+<p>Every assistant row has a <strong>restart</strong> button (the circular arrow, beside the
+trash). Press it once to arm the confirm, once more to fire: cc-screen types
+the assistant&#39;s <code>/exit</code>, waits for it to quit, and relaunches it in place with
+its conversation resumed. On desktop the same button sits in the focused
+pane&#39;s header bar, so you don&#39;t have to open the drawer for the session you&#39;re
+already looking at.</p>
+<p>It&#39;s the button for <strong>anything the CLI only reads at launch</strong> — a newly added
+MCP server is the usual one. Nothing else on the machine changes, and no other
+session is touched.</p>
+<p>What survives: the session&#39;s name, its pane (the pane blinks, it doesn&#39;t
+disappear — the name never changes, so it re-attaches by itself), its colour
+mark and label, its folder and extra folders, and its <strong>Skip permissions</strong> and
+<strong>Claude app</strong> settings.</p>
+<p>What resume actually means is worth knowing, because it isn&#39;t magic:</p>
+<ul>
+<li>The conversation is resumed the same way a reboot resumes it — <code>--continue</code>
+for Claude Code, Kimi, OpenCode, and Grok; <code>resume --last</code> for Codex; and
+<code>--resume latest</code> for Gemini. If there&#39;s nothing resumable, the session comes
+back <strong>empty rather than dead</strong>. Grok also has <code>--resume &lt;uuid&gt;</code>; cc-screen
+does not store that id, so two Grok sessions in the same folder both resume
+whichever conversation was most recently active there.</li>
+<li><code>--continue</code> picks the most recent conversation <strong>in the folder the session
+launched in</strong>. Two cc-screen sessions in the <em>same</em> folder therefore both
+continue whichever of them wrote last — so restarting one can resume the
+other&#39;s conversation. It&#39;s inherent to this kind of resume (the reboot path
+and the dashboard&#39;s Update have it too), not something the button adds.</li>
+<li>The relaunch uses the session&#39;s <strong>launch folder</strong>, not wherever you last
+<code>cd</code>&#39;d inside it.</li>
+<li>A turn in flight loses its last exchange. If the agent doesn&#39;t look ready,
+the confirm says so — but it never blocks you, because &quot;it&#39;s wedged&quot; is a
+perfectly good reason to restart.</li>
+</ul>
+<p>Restart isn&#39;t offered for plain <strong>shell</strong> sessions: there&#39;s no conversation to
+resume, so restarting one would just throw your shell state away.</p>
 <p>Here&#39;s the whole flow in one take — new session, directory search, Claude
 booting:</p>
 <figure>
@@ -228,6 +282,8 @@ one to keep straight: left/right moves between panes, up/down changes what&#39;s
 inside one. (On an <em>empty</em> pane the bare arrows belong to its session
 switcher, so there you press the prefix each time.)</li>
 <li><strong><code>⌃B</code> <code>s</code></strong> opens the session list.</li>
+<li><strong><code>⌃B</code> <code>n</code></strong> starts a new session: the create panel, empty, on the machine
+you last used. The session lands in the focused pane.</li>
 <li><strong><code>⌃B</code> <code>r</code></strong> renames the focused session (same as double-clicking its name).</li>
 <li><strong><code>⌃B</code> <code>c</code></strong> re-rolls the focused session&#39;s colour mark; <strong><code>⌃B</code> <code>⇧C</code></strong> clears
 it.</li>
@@ -240,6 +296,8 @@ ccscreen.dev only; elsewhere it does nothing.</li>
 <li><strong><code>⌃B</code> <code>e</code></strong> opens the file browser / editor for the focused session.</li>
 <li><strong><code>⌃B</code> <code>f</code></strong> opens it and jumps straight to find-a-file.</li>
 <li><strong><code>⌃B</code> <code>t</code></strong> opens it and jumps to the tree filter.</li>
+<li><strong><code>⌃B</code> <code>l</code></strong> copies a link to the file the editor has open (see
+<a href="#link-to-a-file">Link to a file</a>).</li>
 </ul>
 <h2 id="files-browse-edit-cowork">Files: browse, edit, cowork</h2>
 <p>Every machine gets a built-in file browser and editor, confined to that
@@ -250,15 +308,57 @@ plan or review docs agents produce.</p>
 <p><img src="../img/mobile-editor.png" alt="The editor on a phone" loading="lazy" /></p>
 <ul>
 <li><strong>Uploads:</strong> drop files (up to 500 MiB) onto a machine from the browser.</li>
-<li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude or
-Codex session — it routes to the active session on whichever machine owns
+<li><strong>Clipboard images:</strong> paste an image (Ctrl-V) straight into a Claude, Codex,
+or OpenCode session — it routes to the active session on whichever machine owns
 it. cc-screen stages the image on that machine and delivers it the way that
-CLI expects: Claude reads it as a local clipboard paste; Codex gets the
-staged file attached directly (the file is kept machine-locally until the
+CLI expects: Claude reads it as a local clipboard paste; Codex and OpenCode get
+the staged file attached directly (the file is kept machine-locally until the
 session is deleted, so it survives drafts and resumes). No X11 or desktop
 environment is needed on the machine.</li>
 <li><strong>Downloads:</strong> pull any file back out, PDFs render in-app.</li>
 </ul>
+<h3 id="tables">Tables</h3>
+<p>Markdown tables render as real tables while you write, and stay that way while
+you edit them:</p>
+<ul>
+<li><strong>Click a cell</strong> and the caret lands <em>in that cell&#39;s text</em> — not at the top of
+the table.</li>
+<li>Only the <strong>row you&#39;re editing</strong> shows its raw <code>| … |</code> source; every other row
+keeps rendering, so a thirty-row table never turns into pipe soup because you
+fixed one number.</li>
+<li><strong>Tab / Shift-Tab</strong> walk cell to cell (and on to the next row) while you&#39;re on
+a table row. Everywhere else Tab is untouched.</li>
+<li><strong>Copy</strong> (top-right of the table) puts the table on the clipboard as markdown
+— your own bytes, exactly as written — ready to paste into a chat, an issue,
+or another file.</li>
+<li>Pasting a block copied from <strong>Excel, Google Sheets, Numbers</strong> or any web page&#39;s
+table turns it into a well-formed, aligned markdown table. If that isn&#39;t what
+you wanted, one <strong>⌘Z / Ctrl-Z</strong> puts the plain text back.</li>
+</ul>
+<h3 id="link-to-a-file">Link to a file</h3>
+<p>Every file has a URL, and the address bar shows it while the file is open —
+so <strong>bookmarking a file is just ⌘D / ⭐</strong>, and the bookmark opens it again in
+one tap, on desktop and on the phone alike:</p>
+<pre><code>https://app.ccscreen.dev/file/studio/projects/planning/tasks.md
+</code></pre>
+<p>The URL names the <strong>machine</strong> and the path <strong>relative to that machine&#39;s home
+folder</strong> — a path only means something on the machine whose tree produced it,
+so a link is never rewritten for someone else&#39;s box. A trailing <code>/</code> makes it a
+folder link, which opens the tree there instead of a file.</p>
+<p>To get the URL without visiting the file: <strong>Copy link</strong> in the file tree&#39;s
+right-click / long-press menu (files <em>and</em> folders), the 🔗 button in the
+editor&#39;s toolbar, or <strong><code>⌃B</code> <code>l</code></strong> while the editor is open.</p>
+<p>Two things worth knowing:</p>
+<ul>
+<li>If you&#39;re signed out, the link takes you through sign-in and then opens the
+file — you don&#39;t lose your place.</li>
+<li>If the file has moved or been deleted, the link doesn&#39;t break in your face:
+it drops you in the file tree with a one-line note. If the machine is simply
+asleep, it says so and offers a retry.</li>
+</ul>
+<p>A <code>/file/…</code> link is <em>not</em> a permission — it&#39;s an address. It opens as <strong>you</strong>,
+with the access you already have. To let someone else read a file, see
+<a href="#share-a-read-only-link">Share a read-only link</a>.</p>
 <h2 id="notifications">Notifications</h2>
 <p>Enable notifications (the bell button) and your phone buzzes when an agent
 <strong>finishes its turn</strong> — the moment it stops working and waits for your input.
@@ -286,6 +386,30 @@ whose operator hasn&#39;t configured a mail relay (those send no mail at all).</
 <p>You can see everything shared by you and with you on the dashboard&#39;s
 <strong>Sharing</strong> card, and revoke (or leave) any of it there. Access stops
 immediately on revoke.</p>
+<h3 id="share-a-read-only-link">Share a read-only link</h3>
+<p>Sometimes the person you want to show a file to doesn&#39;t have an account and
+shouldn&#39;t need one. <strong>Share read-only link…</strong> — in the file tree&#39;s
+right-click / long-press menu, or the editor&#39;s ⋯ menu — mints a URL like:</p>
+<pre><code>https://app.ccscreen.dev/s/8Kq2…
+</code></pre>
+<p>Anyone holding that URL sees <strong>that one file</strong>, rendered and read-only. No
+account, no sign-in, and nothing else on your machine is reachable through it:
+not the folder it sits in, not the session, not the terminal. It cannot be
+edited through the link — editing means signing in.</p>
+<ul>
+<li><strong>The URL is shown once.</strong> Only a fingerprint of it is stored, so nobody
+(including us) can show it to you again. Lost it? <strong>New URL</strong> on the row
+mints a replacement and kills the old one at that instant.</li>
+<li><strong>Revoke any time</strong> from the <strong>Sharing</strong> card. Access stops immediately,
+including for anyone who has the page open.</li>
+<li>It serves text files (markdown renders as a page; code is
+syntax-highlighted). PDFs, images and other binaries get a &quot;no preview&quot;
+page rather than downloading.</li>
+<li>A rename breaks the link on purpose — a grant is never silently re-pointed
+at a different file.</li>
+</ul>
+<p>See <a href="../security/#read-only-link-grants">Security</a> for exactly what a link
+holder can and cannot learn.</p>
 <h3 id="teams">Teams</h3>
 <p>One-off shares scale badly past two people — a <strong>team</strong> replaces them with
 one standing arrangement: everyone on the team automatically sees everyone
@@ -325,7 +449,11 @@ you set up separately survive.</li>
 <li><strong>online/offline</strong> per machine, live.</li>
 <li><strong>⚠ N missing · Install</strong> — the machine lacks some coding assistants;
 installs them remotely, for that machine&#39;s user, no sudo.</li>
-<li><strong>Update</strong> — update a machine&#39;s assistants, then restart their sessions.</li>
+<li><strong>Update</strong> — update a machine&#39;s assistants, then restart their sessions.
+That&#39;s the machine-wide one: it restarts <em>every</em> session using an updated
+CLI. To restart just one session (without updating anything), use the
+restart button on its row — see
+<a href="#restart-a-session">Restart a session</a>.</li>
 <li><strong>Share</strong> — invite someone to the machine.</li>
 <li><strong>Rotate</strong> — mint a new machine credential (the old one stops working;
 shown once).</li>
@@ -357,7 +485,7 @@ you hit and how to request more — see the <a href="../faq/">FAQ</a> on plans.<
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

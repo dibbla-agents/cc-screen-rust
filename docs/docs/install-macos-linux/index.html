@@ -105,6 +105,8 @@ e.g. <code>my-laptop</code>):</p>
   ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
   ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
   ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+  ✓ opencode   (OpenCode)  /home/erik/.local/bin/opencode
+  ✓ grok       (Grok)  /home/erik/.local/bin/grok
 
   Approved — connecting as 'my-laptop'.
 
@@ -116,15 +118,28 @@ e.g. <code>my-laptop</code>):</p>
 <code>~/.local/bin/cc-screen-rust</code>. No sudo, no system package manager.</p>
 <h2 id="2-the-coding-assistants">2. The coding assistants</h2>
 <p>cc-screen <em>drives</em> the coding CLIs — it doesn&#39;t bundle them — so the installer
-checks which of <code>claude</code>, <code>codex</code>, <code>gemini</code>, and <code>kimi</code> this machine has:</p>
+checks which of <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>opencode</code>, and <code>grok</code> this machine has:</p>
 <ul>
 <li><strong><code>--assistants</code></strong> — install every missing one, non-interactively, for your
 user only. Everything lands under <code>$HOME/.local</code>; there is no sudo anywhere
 in the path. Budget several hundred MB.</li>
-<li><strong><code>--assistants=claude,codex</code></strong> — install just those.</li>
+<li><strong><code>--assistants=claude,opencode</code></strong> — install just those.</li>
 <li><strong><code>--no-assistants</code></strong> (or no flag) — report only: each missing CLI is
 listed with the command that would install it, and nothing is installed.</li>
 </ul>
+<p>The OpenCode row uses its official self-contained installer with
+<code>--no-modify-path</code>. It writes <code>~/.opencode/bin/opencode</code>; cc-screen then links
+that binary into <code>~/.local/bin</code>, which the running agent already puts on session
+PATH. No shell rc file is edited and Node.js is not installed for OpenCode on
+macOS/Linux. OpenCode&#39;s provider login is separate: use <code>/connect</code> in its TUI or
+<code>opencode auth login</code> on the machine, and its credentials remain there.</p>
+<p>The Grok row uses the official curl installer. That installer always appends a
+PATH block to shell rc files and has no skip flag; cc-screen snapshots those
+files, runs the vendor command, restores them byte-for-byte (and unlinks an rc
+the installer created from nothing), then links <code>~/.grok/bin/grok</code> into
+<code>~/.local/bin</code>. A vendor <code>agent</code> symlink in <code>~/.local/bin</code> is removed if this
+run created it. First login from a phone is <code>grok login --device-auth</code> inside
+the session; credentials stay in <code>~/.grok/</code>. Update with <code>grok update</code>.</p>
 <p>A missing assistant never aborts the install — a machine with only <code>claude</code>
 is a perfectly good machine for Claude sessions. You can install the rest
 later from the dashboard (the machine row shows <em>&quot;N missing · Install&quot;</em>) or on
@@ -166,7 +181,7 @@ machine&#39;s credential simply stops working).</p>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

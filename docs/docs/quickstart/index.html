@@ -120,6 +120,8 @@ account. Step-by-step detail is in
   ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
   ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
   ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+  ✓ opencode   (OpenCode)  /home/erik/.local/bin/opencode
+  ✓ grok       (Grok)  /home/erik/.local/bin/grok
 
   Approved — connecting as 'my-laptop'.
 
@@ -148,7 +150,12 @@ every reboot.</p>
 your first session right from the success screen — pick an assistant (say,
 Claude) and a project folder, and you&#39;re in a live terminal. You can also do
 it any time from the session list: <strong>New session</strong>, pick the machine, the
-tool, and the directory.</p>
+tool, and the directory. OpenCode appears as <strong>OpenCode</strong> (<code>oc</code>) once the
+<code>opencode</code> binary is installed; its first terminal may ask you to connect a
+provider with <code>/connect</code> (or run <code>opencode auth login</code> on that machine). Grok
+appears as <strong>Grok</strong> (<code>gk</code>); from a phone type <code>grok login --device-auth</code>
+inside the session (a default launch would open a browser on the agent). Those
+credentials stay on the machine — cc-screen never asks for or stores them.</p>
 <p>The machine also appears on your dashboard with a pulsing <strong>online</strong> dot.</p>
 <p>Try an image while you&#39;re at it: copy a screenshot and press Ctrl-V (⌘V on
 Mac) in the session — it lands in the assistant as an attachment, exactly as
@@ -177,7 +184,7 @@ it in with <code>ccs activate</code> — the same code-approve flow as step 3.</
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

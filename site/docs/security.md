@@ -29,8 +29,10 @@ why you choose who runs your hub. Use the hosted one, or
 ## The agents run YOLO — treat the machine accordingly
 
 By default, cc-screen launches the coding CLIs with their approval-bypass
-flags (Claude Code's is literally named `--dangerously-skip-permissions`).
-That's the point of unattended agents — they don't stop to ask — but it means
+modes (Claude Code's flag is literally named
+`--dangerously-skip-permissions`). OpenCode uses `--auto`, which approves
+operations its configuration has not explicitly denied; an explicit deny rule
+still wins. That's the point of unattended agents — they stop less often — but it means
 a session can do anything your user account can do on that machine.
 
 - Each session has a **Skip permissions** switch at creation (default on).
@@ -72,6 +74,12 @@ a session can do anything your user account can do on that machine.
   `~/.config/cc-screen-rust/enroll.json`, written with owner-only (`0600`)
   permissions (on Windows the filesystem's protections are weaker — the file
   relies on your user profile's ACLs).
+- **Assistant provider credentials stay on the machine.** Claude, Codex, Gemini,
+  Kimi, OpenCode, and Grok perform their own login in their own PTY/home. In particular,
+  cc-screen never reads OpenCode's `auth.json`, rewrites `opencode.json[c]`, starts
+  `opencode serve`, or exposes an OpenCode API through the hub. The same holds
+  for Grok: no `~/.grok/auth.json` import, no `grok agent serve` / `stdio` /
+  `leader`. YOLO for Grok is `--always-approve`; deny rules still win.
 - The two are independent by design: a leaked account password can't
   impersonate a machine, and a machine's credential is scoped to that one
   machine — **Rotate** or **Unlink** on the dashboard kills it instantly.

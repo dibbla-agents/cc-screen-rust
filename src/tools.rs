@@ -73,7 +73,7 @@ pub struct Tool {
 }
 
 impl Tool {
-    fn new(cmd: &str, prefix: &str, tmpl: &str) -> Tool {
+    pub(crate) fn new(cmd: &str, prefix: &str, tmpl: &str) -> Tool {
         Tool {
             cmd: cmd.into(),
             prefix: prefix.into(),
@@ -117,7 +117,7 @@ pub fn tool_info(t: &Tool, unavailable: bool) -> ToolInfo {
 // them". Consumed by the runtime guard (`create_core`'s 424), `restore_all`'s
 // skip, `GET /api/tools`' `unavailable`, and the `doctor` subcommand the shell
 // installers call — so the installer and the runtime can never disagree.
-// Adding a fifth assistant is one entry here (plus its `defaults()` tool line).
+// Adding an assistant is one entry here (plus its `defaults()` tool line).
 
 pub struct Assistant {
     /// The tool registry key this describes (`Tool.prefix`).
@@ -135,9 +135,11 @@ pub struct Assistant {
     /// Fallback URL for platforms with no one-liner (or for humans who want it).
     pub docs: &'static str,
     /// Prerequisite keys (see `PREREQS`) this assistant's install command needs
-    /// on the session PATH. Installed — user-locally — only when missing, and
-    /// only as a dependency of an assistant the user asked for (proposal 0050).
-    pub needs: &'static [&'static str],
+    /// on each platform. OpenCode is self-contained on Unix but needs npm on
+    /// native Windows (proposal 0088).
+    pub needs_macos: &'static [&'static str],
+    pub needs_linux: &'static [&'static str],
+    pub needs_windows: &'static [&'static str],
     /// Rough download footprint, shown in the confirmation dialog so a metered
     /// connection isn't surprised. Registry data, never measured at runtime; the
     /// Windows numbers are genuinely different (verified: `@openai/codex` is
@@ -155,9 +157,9 @@ pub struct Assistant {
     pub update_macos: &'static str,
     pub update_linux: &'static str,
     pub update_windows: &'static str,
-    /// The argument that prints the version. `--version` for all four (verified),
-    /// but kept per-descriptor so a fifth assistant that spells it differently
-    /// needs no code change.
+    /// The argument that prints the version. `--version` for the built-ins
+    /// (verified), but kept per-descriptor so a new assistant that spells it
+    /// differently needs no code change.
     pub version_arg: &'static str,
 }
 
@@ -237,15 +239,31 @@ pub fn prereq(key: &str) -> Option<&'static Prereq> {
     PREREQS.iter().find(|p| p.key == key)
 }
 
-/// The prerequisites a tool's *built-in* install command needs. A tool with a
-/// user-declared `cc_tool_install` has none: the self-hoster said exactly what
-/// they wanted, and rewriting it would be worse (proposal 0050 Part A).
-pub fn prereqs_for(t: &Tool) -> Vec<&'static Prereq> {
+#[derive(Clone, Copy)]
+enum AssistantPlatform { Macos, Linux, Windows }
+
+fn assistant_platform() -> AssistantPlatform {
+    if cfg!(target_os = "macos") { AssistantPlatform::Macos }
+    else if cfg!(windows) { AssistantPlatform::Windows }
+    else { AssistantPlatform::Linux }
+}
+
+fn prereqs_for_platform(t: &Tool, platform: AssistantPlatform) -> Vec<&'static Prereq> {
     if t.install_hint.is_some() {
         return Vec::new();
     }
     let Some(a) = assistant_for(t) else { return Vec::new() };
-    a.needs.iter().filter_map(|k| prereq(k)).collect()
+    let needs = match platform {
+        AssistantPlatform::Macos => a.needs_macos,
+        AssistantPlatform::Linux => a.needs_linux,
+        AssistantPlatform::Windows => a.needs_windows,
+    };
+    needs.iter().filter_map(|k| prereq(k)).collect()
+}
+
+/// The prerequisites a tool's *built-in* install command needs on this host.
+pub fn prereqs_for(t: &Tool) -> Vec<&'static Prereq> {
+    prereqs_for_platform(t, assistant_platform())
 }
 
 /// This platform's install one-liner for a prerequisite, or `None` when there
@@ -285,7 +303,7 @@ pub const ASSISTANTS: &[Assistant] = &[
             "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"",
         docs: "https://docs.claude.com/en/docs/claude-code/setup",
         // Its installer is self-contained (curl + bash / irm + iex).
-        needs: &[],
+        needs_macos: &[], needs_linux: &[], needs_windows: &[],
         size_hint: "~60 MB",
         size_hint_windows: "~60 MB",
         self_update: "claude update",
@@ -306,7 +324,7 @@ pub const ASSISTANTS: &[Assistant] = &[
         // so no prefix override is needed there.
         install_windows: "npm install -g @openai/codex",
         docs: "https://github.com/openai/codex",
-        needs: &["npm"],
+        needs_macos: &["npm"], needs_linux: &["npm"], needs_windows: &["npm"],
         size_hint: "~120 MB",
         size_hint_windows: "~407 MB", // measured on harebell (vendored binaries)
         self_update: "codex update",
@@ -322,7 +340,7 @@ pub const ASSISTANTS: &[Assistant] = &[
         install_linux: "npm install -g @google/gemini-cli",
         install_windows: "npm install -g @google/gemini-cli",
         docs: "https://github.com/google-gemini/gemini-cli",
-        needs: &["npm"],
+        needs_macos: &["npm"], needs_linux: &["npm"], needs_windows: &["npm"],
         size_hint: "~30 MB",
         size_hint_windows: "~30 MB",
         // No self-update subcommand (verified) — npm is the only route.
@@ -344,7 +362,7 @@ pub const ASSISTANTS: &[Assistant] = &[
         // verifies it on a Windows box should delete this comment.
         install_windows: "uv tool install --python 3.13 kimi-cli",
         docs: "https://github.com/MoonshotAI/kimi-cli",
-        needs: &["uv"],
+        needs_macos: &["uv"], needs_linux: &["uv"], needs_windows: &["uv"],
         size_hint: "~15 MB (+ a CPython build)",
         size_hint_windows: "~15 MB (+ a CPython build)",
         // No self-update subcommand (verified) — uv owns the install.
@@ -352,6 +370,49 @@ pub const ASSISTANTS: &[Assistant] = &[
         update_macos: "uv tool upgrade kimi-cli",
         update_linux: "uv tool upgrade kimi-cli",
         update_windows: "uv tool upgrade kimi-cli",
+        version_arg: "--version",
+    },
+    Assistant {
+        prefix: "opencode",
+        label: "OpenCode",
+        install_macos: "curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path",
+        install_linux: "curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path",
+        install_windows: "npm install -g opencode-ai",
+        docs: "https://opencode.ai/docs/",
+        needs_macos: &[], needs_linux: &[], needs_windows: &["npm"],
+        size_hint: "~180 MB",
+        size_hint_windows: "~540 MB",
+        // The self-updater detects the active install method; no duplicate-copy fallback.
+        self_update: "opencode upgrade",
+        update_macos: "",
+        update_linux: "",
+        update_windows: "",
+        version_arg: "--version",
+    },
+    Assistant {
+        prefix: "grok",
+        label: "Grok",
+        install_macos: "curl -fsSL https://x.ai/cli/install.sh | bash",
+        install_linux: "curl -fsSL https://x.ai/cli/install.sh | bash",
+        // Official PS installer is self-contained (no Node). Wrapped for
+        // `cmd.exe /C` the same way Claude's installer is (proposal 0089).
+        install_windows:
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\"",
+        docs: "https://docs.x.ai/build/overview",
+        needs_macos: &[],
+        needs_linux: &[],
+        needs_windows: &[],
+        // Measured 2026-09-01: official download ELF is 158.4 MB. Isolated
+        // install is that plus the `~/.grok/bin` symlink; a lived-in home is
+        // larger (`grok du`). Same download class on Windows until harebell.
+        size_hint: "~160 MB",
+        size_hint_windows: "~160 MB",
+        // Detects installer = "internal" / npm / etc. No curl fallback: that
+        // could plant a second copy while PATH still resolves the first.
+        self_update: "grok update",
+        update_macos: "",
+        update_linux: "",
+        update_windows: "",
         version_arg: "--version",
     },
 ];
@@ -742,6 +803,8 @@ fn defaults() -> Vec<Tool> {
         Tool::new("kc", "kimi", "kimi"),
         Tool::new("gc", "gemini", "gemini --skip-trust"),
         Tool::new("coc", "codex", "codex"),
+        Tool::new("oc", "opencode", "opencode"),
+        Tool::new("gk", "grok", "grok"),
         Tool::new("tt", "shell", SHELL_TMPL),
     ]
 }
@@ -948,6 +1011,14 @@ fn with_defaults(mut tools: Vec<Tool>, config_dir: &Path) -> Vec<Tool> {
                     t.resume_suffix = Some("resume --last".into());
                     t.resume_keep_extra = false; // codex resume rejects --add-dir
                 }
+                ("opencode", _) | (_, "oc") => {
+                    t.resume_suffix = Some("--continue".into());
+                    t.resume_keep_extra = false;
+                }
+                ("grok", _) | (_, "gk") => {
+                    t.resume_suffix = Some("--continue".into());
+                    t.resume_keep_extra = false;
+                }
                 _ => {}
             }
         }
@@ -957,6 +1028,8 @@ fn with_defaults(mut tools: Vec<Tool>, config_dir: &Path) -> Vec<Tool> {
                 ("kimi", _) | (_, "kc") => Some("-y"),
                 ("gemini", _) | (_, "gc") => Some("-y"),
                 ("codex", _) | (_, "coc") => Some("--dangerously-bypass-approvals-and-sandbox"),
+                ("opencode", _) | (_, "oc") => Some("--auto"),
+                ("grok", _) | (_, "gk") => Some("--always-approve"),
                 _ => None,
             };
             // Adopt the built-in flag only if the template doesn't already inline
@@ -973,7 +1046,7 @@ fn with_defaults(mut tools: Vec<Tool>, config_dir: &Path) -> Vec<Tool> {
         // that keeps its command or prefix — gets the bracketed-path strategy;
         // everything else (Claude, kimi, gemini, shell, unknown custom tools)
         // keeps the backward-compatible clipboard probe.
-        if matches!((t.prefix.as_str(), t.cmd.as_str()), ("codex", _) | (_, "coc")) {
+        if matches!((t.prefix.as_str(), t.cmd.as_str()), ("codex" | "opencode", _) | (_, "coc" | "oc")) {
             t.image_paste = ImagePasteStrategy::BracketedImagePath;
         }
         // The assistant's own remote control (0082). Claude Code is the only CLI
@@ -1147,6 +1220,17 @@ mod tests {
         let codex = t.iter().find(|x| x.prefix == "codex").unwrap();
         assert_eq!(codex.resume_suffix.as_deref(), Some("resume --last"));
         assert!(!codex.resume_keep_extra); // codex resume rejects --add-dir
+        let opencode = t.iter().find(|x| x.prefix == "opencode").unwrap();
+        assert_eq!(opencode.cmd, "oc");
+        assert_eq!(opencode.resume_suffix.as_deref(), Some("--continue"));
+        assert!(opencode.extra_flag.is_none());
+        assert!(opencode.remote_on_flag.is_none());
+        let grok = t.iter().find(|x| x.prefix == "grok").unwrap();
+        assert_eq!(grok.cmd, "gk");
+        assert_eq!(grok.resume_suffix.as_deref(), Some("--continue"));
+        assert!(grok.extra_flag.is_none());
+        assert!(grok.remote_on_flag.is_none());
+        assert!(!grok.resume_keep_extra);
     }
 
     #[test]
@@ -1158,6 +1242,8 @@ mod tests {
             ("kimi", "-y"),
             ("gemini", "-y"),
             ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+            ("opencode", "--auto"),
+            ("grok", "--always-approve"),
         ];
         for (prefix, flag) in want {
             let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
@@ -1174,10 +1260,10 @@ mod tests {
 
     #[test]
     fn image_paste_strategy_mapping() {
-        // Built-ins: Codex is the only bracketed-path tool (0066).
+        // Codex and OpenCode use durable bracketed image paths.
         let t = load_tools(None, &test_cfg());
         for tool in &t {
-            let want = if tool.prefix == "codex" {
+            let want = if matches!(tool.prefix.as_str(), "codex" | "opencode") {
                 ImagePasteStrategy::BracketedImagePath
             } else {
                 ImagePasteStrategy::ClipboardProbe
@@ -1190,6 +1276,8 @@ mod tests {
         assert_eq!(by_prefix[0].image_paste, ImagePasteStrategy::BracketedImagePath);
         let by_cmd = with_defaults(parse("cc_tool coc oai 'codex --profile fast'"), &test_cfg());
         assert_eq!(by_cmd[0].image_paste, ImagePasteStrategy::BracketedImagePath);
+        let open = with_defaults(parse("cc_tool xx opencode 'my-opencode-wrapper'"), &test_cfg());
+        assert_eq!(open[0].image_paste, ImagePasteStrategy::BracketedImagePath);
         // A genuinely unknown custom tool keeps the compatible probe.
         let custom = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         assert_eq!(custom[0].image_paste, ImagePasteStrategy::ClipboardProbe);
@@ -1211,6 +1299,36 @@ mod tests {
         // …and drops it from both when skip is off.
         let resumed_safe = build_launch(claude, "proj", &[], true, false, false);
         assert!(!resumed_safe.contains("--dangerously-skip-permissions"), "{resumed_safe}");
+    }
+
+    #[test]
+    fn opencode_launch_contract_is_exact() {
+        let t = load_tools(None, &test_cfg());
+        let tool = t.iter().find(|x| x.prefix == "opencode").unwrap();
+        assert_eq!(build_launch(tool, "proj", &[], false, false, false), "opencode");
+        assert_eq!(build_launch(tool, "proj", &[], false, true, false), "opencode --auto");
+        assert_eq!(build_launch(tool, "proj", &[], true, false, false), "(opencode --continue) || (opencode)");
+        let resumed = build_launch(tool, "proj", &[], true, true, false);
+        assert_eq!(resumed, "(opencode --continue --auto) || (opencode --auto)");
+        assert_eq!(resumed.matches("--auto").count(), 2);
+    }
+
+    #[test]
+    fn grok_launch_contract_is_exact() {
+        let t = load_tools(None, &test_cfg());
+        let tool = t.iter().find(|x| x.prefix == "grok").unwrap();
+        assert_eq!(build_launch(tool, "proj", &[], false, false, false), "grok");
+        assert_eq!(build_launch(tool, "proj", &[], false, true, false), "grok --always-approve");
+        assert_eq!(build_launch(tool, "proj", &[], true, false, false), "(grok --continue) || (grok)");
+        let resumed = build_launch(tool, "proj", &[], true, true, false);
+        assert_eq!(resumed, "(grok --continue --always-approve) || (grok --always-approve)");
+        assert_eq!(resumed.matches("--always-approve").count(), 2);
+        assert!(!resumed.contains("--yolo"), "do not bake the hidden alias: {resumed}");
+        let by_prefix = with_defaults(parse("cc_tool xx grok 'my-grok-wrapper'"), &test_cfg());
+        assert_eq!(by_prefix[0].yolo_flag.as_deref(), Some("--always-approve"));
+        assert_eq!(by_prefix[0].resume_suffix.as_deref(), Some("--continue"));
+        let by_cmd = with_defaults(parse("cc_tool gk oai 'grok --profile fast'"), &test_cfg());
+        assert_eq!(by_cmd[0].yolo_flag.as_deref(), Some("--always-approve"));
     }
 
     #[test]
@@ -1242,7 +1360,7 @@ mod tests {
         // The binary a session needs is the first bare token of the launch
         // template — for every built-in and for a renamed tools.conf override.
         let t = load_tools(None, &test_cfg());
-        for (prefix, bin) in [("claude", "claude"), ("kimi", "kimi"), ("gemini", "gemini"), ("codex", "codex")] {
+        for (prefix, bin) in [("claude", "claude"), ("kimi", "kimi"), ("gemini", "gemini"), ("codex", "codex"), ("opencode", "opencode"), ("grok", "grok")] {
             let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
             assert_eq!(probe_binary(tool), Some(bin), "{prefix}");
         }
@@ -1471,6 +1589,10 @@ mod tests {
         let kimi = update_commands(t.iter().find(|x| x.prefix == "kimi").unwrap());
         assert_eq!(kimi.len(), 1);
         assert!(kimi[0].contains("kimi-cli"), "{kimi:?}");
+        let grok = update_commands(t.iter().find(|x| x.prefix == "grok").unwrap());
+        assert_eq!(grok, vec!["grok update".to_string()]);
+        let open = update_commands(t.iter().find(|x| x.prefix == "opencode").unwrap());
+        assert_eq!(open, vec!["opencode upgrade".to_string()]);
         // The bare shell is not an assistant — nothing to update, ever.
         let sh = t.iter().find(|x| x.prefix == "shell").unwrap();
         assert!(update_commands(sh).is_empty());
@@ -1493,16 +1615,16 @@ mod tests {
             // …on all three platforms (0050 Part H): Windows is no longer a
             // "see <docs>" hole, which is what made install/update no-ops there.
             assert!(!a.install_windows.is_empty(), "{} install_windows", a.prefix);
-            assert!(!a.update_windows.is_empty(), "{} update_windows", a.prefix);
+            assert!(!a.self_update.is_empty() || !a.update_windows.is_empty(), "{} update_windows", a.prefix);
             // …with a size hint for the dialog, and every declared prerequisite
             // resolving to a real PREREQS entry (a typo'd key would silently
             // install nothing and then blame the assistant).
             assert!(!a.size_hint.is_empty(), "{} size_hint", a.prefix);
-            for key in a.needs {
+            for key in a.needs_macos.iter().chain(a.needs_linux.iter()).chain(a.needs_windows.iter()) {
                 assert!(prereq(key).is_some(), "{} needs unknown prerequisite '{key}'", a.prefix);
             }
             // …and (0049) a way to update it + read its version on both platforms.
-            assert!(!a.update_macos.is_empty() && !a.update_linux.is_empty(), "{} update cmd", a.prefix);
+            assert!(!a.self_update.is_empty() || (!a.update_macos.is_empty() && !a.update_linux.is_empty()), "{} update cmd", a.prefix);
             assert!(!a.version_arg.is_empty(), "{} version_arg", a.prefix);
             assert!(!update_commands(tool).is_empty(), "{} must have an update path", a.prefix);
         }
@@ -1523,6 +1645,13 @@ mod tests {
         assert_eq!(need("codex"), vec!["npm"]);
         assert_eq!(need("gemini"), vec!["npm"]);
         assert_eq!(need("kimi"), vec!["uv"]);
+        let open = t.iter().find(|x| x.prefix == "opencode").unwrap();
+        assert!(prereqs_for_platform(open, AssistantPlatform::Linux).is_empty());
+        assert_eq!(prereqs_for_platform(open, AssistantPlatform::Windows).iter().map(|p| p.key).collect::<Vec<_>>(), vec!["npm"]);
+        let grok = t.iter().find(|x| x.prefix == "grok").unwrap();
+        assert!(prereqs_for_platform(grok, AssistantPlatform::Linux).is_empty());
+        assert!(prereqs_for_platform(grok, AssistantPlatform::Macos).is_empty());
+        assert!(prereqs_for_platform(grok, AssistantPlatform::Windows).is_empty());
         // Claude's installer is self-contained (curl + bash).
         assert!(need("claude").is_empty());
         // The bare shell isn't an assistant — nothing to install, ever.
@@ -1562,7 +1691,7 @@ mod tests {
         // now, so the two agree — the "see docs" branch is the fallback for a
         // future assistant that lacks a per-OS line.
         let t = load_tools(None, &test_cfg());
-        for prefix in ["claude", "codex", "gemini", "kimi"] {
+        for prefix in ["claude", "codex", "gemini", "kimi", "opencode"] {
             let tool = t.iter().find(|x| x.prefix == prefix).unwrap();
             let cmd = install_command(tool).expect(prefix);
             assert!(!cmd.starts_with("see "), "{prefix}: {cmd}");

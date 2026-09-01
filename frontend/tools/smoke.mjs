@@ -1490,6 +1490,53 @@ try {
   await toolChip("shell").first().click();
   await page.waitForTimeout(150);
   const rcHiddenForShell = (await page.locator("[data-rc-switch]").count()) === 0;
+
+  // Proposal 0088: OpenCode is the fifth registry-driven choice. It inherits
+  // YOLO (`--auto`) but deliberately has neither extra roots nor Claude-app
+  // remote control. The tooltip must not over-promise through explicit denies.
+  const opencodeOffered = (await toolChip("opencode").count()) > 0;
+  let opencodeYoloAccurate = false;
+  let opencodeControlsScoped = false;
+  if (opencodeOffered) {
+    await toolChip("opencode").first().click();
+    await page.waitForTimeout(150);
+    const yolo = page.getByRole("switch", { name: "YOLO" });
+    opencodeYoloAccurate =
+      (await yolo.count()) === 1 && /explicit deny rules/i.test((await yolo.getAttribute("title")) || "");
+    opencodeControlsScoped =
+      (await page.locator("[data-extra-dirs]").count()) === 0 &&
+      (await page.locator("[data-rc-switch]").count()) === 0;
+  }
+  await toolChip("claude").first().click();
+  await page.waitForTimeout(150);
+
+  // Proposal 0089: Grok is the sixth registry-driven choice. YOLO maps to
+  // `--always-approve` (deny rules still win); Extra folders and Claude app
+  // stay absent. First login is in-PTY device-code, not a browser on the agent.
+  const grokOffered = (await toolChip("grok").count()) > 0;
+  let grokYoloAccurate = false;
+  let grokControlsScoped = false;
+  let grokDeviceAuth = false;
+  let grokChipReachable = false;
+  if (grokOffered) {
+    await toolChip("grok").first().click();
+    await page.waitForTimeout(150);
+    const yolo = page.getByRole("switch", { name: "YOLO" });
+    grokYoloAccurate =
+      (await yolo.count()) === 1 && /explicit deny rules/i.test((await yolo.getAttribute("title")) || "");
+    grokControlsScoped =
+      (await page.locator("[data-extra-dirs]").count()) === 0 &&
+      (await page.locator("[data-rc-switch]").count()) === 0;
+    grokDeviceAuth = (await page.locator("[data-grok-login]").count()) === 1;
+    await page.setViewportSize({ width: 360, height: 740 });
+    await toolChip("grok").first().evaluate((el) => el.scrollIntoView());
+    const chipBox = await toolChip("grok").first().boundingBox();
+    grokChipReachable = !!chipBox && chipBox.x + chipBox.width > 0;
+    const pageOverflow =
+      (await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    grokChipReachable = grokChipReachable && pageOverflow;
+    await page.setViewportSize({ width: 1280, height: 800 });
+  }
   await toolChip("claude").first().click();
   await page.waitForTimeout(150);
 
@@ -1539,6 +1586,14 @@ try {
   else if (!rcOffered) fail("claude's assistant-remote-control switch is missing from the create sheet (0082 B)");
   else if (!rcDefaultsOff) fail("the assistant-remote-control switch didn't default to off (0082 B)");
   else if (!rcHiddenForShell) fail("the assistant-remote-control switch was offered for the shell tool (0082 B)");
+  else if (!opencodeOffered) fail("OpenCode is missing from the create sheet (0088 D)");
+  else if (!opencodeYoloAccurate) fail("OpenCode YOLO copy ignores explicit deny rules (0088 B)");
+  else if (!opencodeControlsScoped) fail("OpenCode was offered Extra folders or Claude app (0088 D)");
+  else if (!grokOffered) fail("Grok is missing from the create sheet (0089 D)");
+  else if (!grokYoloAccurate) fail("Grok YOLO copy ignores explicit deny rules (0089 B)");
+  else if (!grokControlsScoped) fail("Grok was offered Extra folders or Claude app (0089 D)");
+  else if (!grokDeviceAuth) fail("Grok create sheet is missing the device-code first-login caption (0089 B)");
+  else if (!grokChipReachable) fail("Grok chip is not reachable at 360 px without page overflow (0089 D)");
   else if (dirCalls < 2) fail(`expected dir browse + descend, got ${dirCalls} /api/dirs`);
   else if (!created || !mkdirOk) fail("folder create didn't work");
   else if (!deleted || !rmdirOk) fail("folder delete didn't work");

@@ -33,6 +33,21 @@ const INIT_ROWS: u16 = 24;
 /// doesn't stall the rest of the job.
 const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(10);
 const FORCED_STOP: std::time::Duration = std::time::Duration::from_secs(5);
+const OPENCODE_EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+const GROK_EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+fn graceful_exit_input(tool: &str) -> (&'static [u8], Option<std::time::Duration>, &'static [u8]) {
+    // OpenCode (v1.18.22): a combined `/exit\r` is swallowed by autocomplete.
+    if tool == "opencode" {
+        (b"/exit", Some(OPENCODE_EXIT_SETTLE), b"\r")
+    } else if tool == "grok" {
+        // Grok 1.0.13: `/exit`/`/quit` work in an authenticated TUI, but a
+        // welcome/login screen (first run, no auth.json) ignores them. Ctrl+Q
+        // twice is the documented immediate quit and works on both surfaces.
+        (b"\x11", Some(GROK_EXIT_SETTLE), b"\x11")
+    } else {
+        (b"/exit\r", None, b"")
+    }
+}
 
 /// Why a per-session restart (proposal 0087) was refused **before anything was
 /// stopped** — a class distinct from a `failed` [`SessionRestartStatus`], which
@@ -613,9 +628,14 @@ impl Session {
     }
 
     /// Graceful end: type the agent's `/exit` + Enter (the AI CLIs quit on it).
-    /// The child then exits 0, which the reaper treats as a clean exit.
+    /// OpenCode needs the command and Enter split so autocomplete sees `/exit`.
     pub fn graceful_exit(&self) {
-        self.write_input(b"/exit\r");
+        let (first, delay, second) = graceful_exit_input(&self.tool);
+        self.write_input(first);
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+            self.write_input(second);
+        }
     }
 
     /// Subscribe to the live output stream AND capture the current repaint
@@ -1403,6 +1423,14 @@ mod tests {
     }
 
 
+    #[test]
+    fn opencode_graceful_exit_splits_command_from_enter() {
+        assert_eq!(graceful_exit_input("opencode"), (b"/exit".as_slice(), Some(OPENCODE_EXIT_SETTLE), b"\r".as_slice()));
+        assert_eq!(graceful_exit_input("claude"), (b"/exit\r".as_slice(), None, b"".as_slice()));
+        assert_eq!(graceful_exit_input("grok"), (b"\x11".as_slice(), Some(GROK_EXIT_SETTLE), b"\x11".as_slice()));
+        assert_eq!(graceful_exit_input("codex"), (b"/exit\r".as_slice(), None, b"".as_slice()));
+    }
+
     // Proposal 0050 C3. `restore_all`'s own comment says a session skipped for a
     // missing CLI comes back once the CLI is installed — nothing performed that
     // sentence's second half at the moment the CLI appeared. `restore_prefixes`
@@ -2010,6 +2038,46 @@ mod tests {
         // The other tool's session was never touched.
         assert!(state.get(&untouched).is_some(), "a codex session isn't churned because claude moved");
 
+        for s in state.list() {
+            s.kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn grok_restart_sends_exit_and_relaunches_continue_under_the_same_name() {
+        let tmp = std::env::temp_dir().join(format!("ccr-grok-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut tool = exits_on_input("grok");
+        tool.cmd = "gk".into();
+        tool.resume_suffix = Some("--continue".into());
+        tool.yolo_flag = Some("--always-approve".into());
+        let state = AppState::new(
+            vec![tool.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let name = state.create(&tool, "gkproj", &tmp.to_string_lossy(), vec![], false, true, false).unwrap();
+        crate::handlers::set_color_core(&state, &name, Some("teal".into())).unwrap();
+        crate::handlers::set_label_core(&state, &name, Some("Grok box".into())).unwrap();
+        let rows = state.restart_sessions(&["grok".to_string()], |_| {});
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session, name);
+        assert_eq!(rows[0].tool, "grok");
+        assert_eq!(rows[0].state, "resumed", "{:?}", rows[0]);
+        let back = state.get(&name).expect("same cc-screen name");
+        assert_eq!(back.color().as_deref(), Some("teal"));
+        assert_eq!(back.label().as_deref(), Some("Grok box"));
+        assert!(back.skip_permissions);
+        let line = crate::tools::build_launch(&tool, "gkproj", &[], true, true, false);
+        assert!(line.contains("--continue"), "{line}");
+        assert_eq!(line.matches("--always-approve").count(), 2, "{line}");
         for s in state.list() {
             s.kill();
         }

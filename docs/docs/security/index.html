@@ -107,8 +107,10 @@ why you choose who runs your hub. Use the hosted one, or
 <p><figure><img src="../img/docs-topology.svg" alt="Machines dial out to the hub; the hub relays bytes to your clients" loading="lazy" /><figcaption>Every arrow points at the hub: machines dial out and accept no inbound connections, and what transits the hub is a relayed view — your code and files never leave the machine.</figcaption></figure></p>
 <h2 id="the-agents-run-yolo-treat-the-machine-accordingly">The agents run YOLO — treat the machine accordingly</h2>
 <p>By default, cc-screen launches the coding CLIs with their approval-bypass
-flags (Claude Code&#39;s is literally named <code>--dangerously-skip-permissions</code>).
-That&#39;s the point of unattended agents — they don&#39;t stop to ask — but it means
+modes (Claude Code&#39;s flag is literally named
+<code>--dangerously-skip-permissions</code>). OpenCode uses <code>--auto</code>, which approves
+operations its configuration has not explicitly denied; an explicit deny rule
+still wins. That&#39;s the point of unattended agents — they stop less often — but it means
 a session can do anything your user account can do on that machine.</p>
 <ul>
 <li>Each session has a <strong>Skip permissions</strong> switch at creation (default on).
@@ -150,6 +152,12 @@ enrollment code. It&#39;s stored on the machine at
 <code>~/.config/cc-screen-rust/enroll.json</code>, written with owner-only (<code>0600</code>)
 permissions (on Windows the filesystem&#39;s protections are weaker — the file
 relies on your user profile&#39;s ACLs).</li>
+<li><strong>Assistant provider credentials stay on the machine.</strong> Claude, Codex, Gemini,
+Kimi, OpenCode, and Grok perform their own login in their own PTY/home. In particular,
+cc-screen never reads OpenCode&#39;s <code>auth.json</code>, rewrites <code>opencode.json[c]</code>, starts
+<code>opencode serve</code>, or exposes an OpenCode API through the hub. The same holds
+for Grok: no <code>~/.grok/auth.json</code> import, no <code>grok agent serve</code> / <code>stdio</code> /
+<code>leader</code>. YOLO for Grok is <code>--always-approve</code>; deny rules still win.</li>
 <li>The two are independent by design: a leaked account password can&#39;t
 impersonate a machine, and a machine&#39;s credential is scoped to that one
 machine — <strong>Rotate</strong> or <strong>Unlink</strong> on the dashboard kills it instantly.</li>
@@ -238,6 +246,49 @@ relay — see <a href="../self-hosting/#environment-reference">Self-hosting</a>.
 relay does to your messages is between you and that provider; the pixel above
 is a property of ours, not of cc-screen.</li>
 </ul>
+<h2 id="read-only-link-grants">Read-only link grants</h2>
+<p>A <strong>read-only link</strong> (<code>/s/&lt;token&gt;</code>) is the one thing in cc-screen that anyone
+can use without an account, so it&#39;s worth being exact about it.</p>
+<p><strong>What it reaches.</strong> Exactly one file, and only to read it. The link is
+resolved against its own table to a single <code>(machine, path)</code> pair; it never
+touches the sharing model, never produces the &quot;visibility&quot; that machine and
+session shares are built on, and the endpoint behind it is hardcoded to a read.
+There is no endpoint anywhere — write, list, search, attach, upload — that
+accepts a link token. It serves what our editor serves: text, up to 5 MiB.</p>
+<p><strong>What it can&#39;t reach.</strong> The folder the file is in. The other files on the
+machine. The sessions, the terminal, the machine list, your account. A link
+holder can&#39;t enumerate other links either: the token is 32 random bytes, and
+unknown, revoked, expired and deleted-file all answer with the same
+indistinguishable &quot;not found&quot;.</p>
+<p><strong>The three things a holder does learn.</strong> Be aware of them before you share:</p>
+<ol>
+<li><strong>The file&#39;s contents</strong>, until you revoke — including future edits. It&#39;s a
+live view, not a copy.</li>
+<li><strong>Whether the link is valid</strong>, trivially, by using it.</li>
+<li><strong>Whether your machine is online.</strong> A valid link on a sleeping machine
+answers &quot;this machine is offline&quot; rather than &quot;not found&quot;, so someone
+holding a live link can poll it to see when your laptop is up. That&#39;s a
+deliberate trade — a working bookmark shouldn&#39;t look dead because you
+closed your lid — but it is a presence signal about you.</li>
+</ol>
+<p><strong>The token at rest and in transit.</strong> We store only a SHA-256 fingerprint of
+it, never the token, which is why we show the URL exactly once and offer
+<strong>New URL</strong> instead of showing it again. But the token rides in the URL path,
+so it lands wherever URLs land: the holder&#39;s browser history, and the access
+logs of any reverse proxy in front of the hub. (Self-hosting? Treat those logs
+as credential material — see
+<a href="../self-hosting/#environment-reference">Self-hosting</a>.) Responses carry
+<code>no-store</code> and no cache validators, so no browser, proxy or CDN keeps the
+content after you revoke.</p>
+<p><strong>Two edges worth knowing.</strong> Renaming the file breaks the link — a grant is
+never silently re-pointed at something else. But <em>deleting</em> the file and
+creating a new one at the same path serves the new file under the old token,
+because the grant is the path. Revoke rather than rely on that.</p>
+<p><strong>Rendering.</strong> The shared page renders your file&#39;s markdown, but never as
+HTML: raw HTML in the file shows up as text, and <code>javascript:</code> links are
+stripped. A fixed banner says the content belongs to the sharer, not to
+cc-screen. Minting requires a paid account, which is also the abuse handle:
+every link is attributable.</p>
 <h2 id="transport-when-tls-is-required">Transport: when TLS is required</h2>
 <p>The agent fully trusts whatever answers at its hub URL — once connected, it
 executes what the hub sends. So:</p>
@@ -277,7 +328,7 @@ scope your shares deliberately (&quot;can view&quot; vs &quot;can use&quot;).</l
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

@@ -71,7 +71,7 @@ fi
 BIN="$(pwd)/target/release/cc-screen-rust"
 [ -x "$BIN" ] || { echo "binary not found: $BIN — run without --no-build first." >&2; exit 1; }
 
-# Preflight the assistant CLIs the agent drives (claude/codex/gemini/kimi).
+# Preflight the assistant CLIs the agent drives (claude/codex/gemini/kimi/opencode/grok).
 # Best-effort: unlike the npm/cargo guards above (build deps, hard exit), a
 # missing assistant only limits which session types work — never abort over it.
 # Interactive runs get an offer to install each missing one; piped runs just get

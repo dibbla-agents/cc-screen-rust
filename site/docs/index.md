@@ -7,7 +7,7 @@ description: Run AI coding agents on your machines and drive them from anywhere 
 # What is cc-screen?
 
 cc-screen keeps a team of AI coding **agents** — Claude Code, Codex, Gemini,
-Kimi — working around the clock on your own computers, and lets you check in on
+Kimi, OpenCode, and Grok — working around the clock on your own computers, and lets you check in on
 any of them from a phone, a browser, or a terminal.
 
 Four words carry the whole model:
@@ -16,8 +16,8 @@ Four words carry the whole model:
   Each one runs a small background process (the cc-screen *agent*) that you
   install with one command.
 - **Sessions** are real terminal sessions the agent owns on that machine. A
-  session runs one coding CLI (`claude`, `codex`, `gemini`, `kimi`, or a plain
-  shell) in a real PTY, so it keeps running whether or not you're watching.
+  session runs one coding CLI (`claude`, `codex`, `gemini`, `kimi`, `opencode`,
+  `grok`, or a plain shell) in a real PTY, so it keeps running whether or not you're watching.
 - **Assistants** are the coding CLIs themselves. cc-screen doesn't replace
   them — it launches, supervises, and reconnects them.
 - **The hub** at [app.ccscreen.dev](https://app.ccscreen.dev) is one address

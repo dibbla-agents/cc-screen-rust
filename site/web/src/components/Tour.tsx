@@ -97,7 +97,7 @@ export function Tour() {
           <Reveal className="grid items-center gap-9 md:grid-cols-2">
             <Beat n="01" title="A whole team, always on">
               Run as many agents as you like, side by side, around the clock —
-              Anthropic, Google, OpenAI, Kimi, you name it. They keep working
+              Anthropic, Google, OpenAI, Kimi, xAI, you name it. They keep working
               whether you're watching or not.
             </Beat>
             <div className="flex justify-center md:justify-end">

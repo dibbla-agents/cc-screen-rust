@@ -4,8 +4,8 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## What this is
 
-**cc-screen-rust** drives AI coding CLIs — `claude`, `codex`, `gemini`, `kimi` —
-as long-lived terminal sessions you attach to from elsewhere. It's a **web-only,
+**cc-screen-rust** drives AI coding CLIs — `claude`, `codex`, `gemini`, `kimi`,
+`opencode`, `grok` — as long-lived terminal sessions you attach to from elsewhere. It's a **web-only,
 tmux-free Rust rewrite** of cc-screen's Go `web/` daemon: each session owns a PTY
 in-process (no tmux), the backend keeps an authoritative screen model + a
 raw-output replay ring, and clients attach over a WebSocket.
@@ -226,7 +226,8 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   `cc_tool_update <cmd|prefix> "<cmd>"`), and `src/assistants.rs` runs it: ordered
   candidates (override → the CLI's own `update` → the package manager), each with
   a timeout and **no TTY**, and the verdict is a **before/after `--version`
-  compare**, never an exit code (all four exit 0 with nothing to do). It's a
+  compare**, never an exit code (a clean exit without a version change means
+  `current`, not `updated`). It's a
   **two-phase job**, not a request (`POST`/`GET /api/assistants/update` →
   `UpdateJob`): phase 1 `updating` the CLIs, phase 2 `restarting` the sessions
   that use them. Update-first is deliberate — a failed update leaves the machine
@@ -244,8 +245,9 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
 - **Install the missing assistants (0050).** [0046] made *presence* a concern and
   [0049] made *staying current* one; 0050 makes **becoming present** an action.
   One runner (`src/provision.rs`) drives the registry's install column: non
-  -interactive, **`$HOME`-only, never `sudo`**, with declared prerequisites
-  (`Assistant.needs` → `PREREQS`: `npm` for codex/gemini, `uv` for kimi) installed
+  -interactive, **`$HOME`-only, never `sudo`**, with declared, platform-specific
+  prerequisites (`Assistant.needs_*` → `PREREQS`: `npm` for codex/gemini,
+  `uv` for kimi, and `npm` for OpenCode only on native Windows) installed
   the same way. The verdict is the **re-probe on the session PATH**, never the
   exit code — which is why the **landing zone** matters: an installer that drops
   the binary in a prefix the session PATH doesn't include gets a symlink (copy on
@@ -274,6 +276,50 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
   head as a path. `resolve_on_path` returns *what* it found — `doctor` prints it
   and 0050's landing zone consumes it. Also: `--version` used to fall through to
   *serving*. See proposal 0051.
+- **OpenCode is the fifth first-class assistant (0088).** Its built-in picker
+  command is `oc`, launching `opencode` in the selected cwd. Unix installation
+  uses the official self-contained installer with `--no-modify-path`, discovers
+  `~/.opencode/bin/opencode`, and exposes it through `~/.local/bin`; native
+  Windows uses `npm install -g opencode-ai` and therefore needs an existing
+  user-visible `npm` (WSL remains upstream's recommended Windows route). Launch
+  metadata is registry-owned: resume is `--continue`, YOLO is `--auto`, there is
+  no extra-directory flag and no Claude-app-equivalent remote-control switch.
+  `--auto` approves what OpenCode has not explicitly denied — never rewrite the
+  user's `opencode.json[c]` permission rules to make it stronger. OpenCode's
+  provider login/config/session data stay in that machine user's home; cc-screen
+  never reads or relays `auth.json`, starts `opencode serve`, or adds an OpenCode
+  API/control plane. Image paste uses the same durable `BracketedImagePath` store
+  as Codex: OpenCode turns the pasted private absolute PNG path into an image
+  attachment without Enter, which works headlessly and avoids its platform-native
+  clipboard readers. One restart wrinkle is verified against v1.18.22:
+  autocomplete consumes Enter when `/exit\r` arrives as one write, so only
+  OpenCode gets `/exit`, a 150 ms settle, then Enter; every other assistant's
+  graceful-exit bytes remain unchanged. See proposal 0088.
+- **Grok is the sixth first-class assistant (0089).** Its built-in picker
+  command is `gk`, launching `grok` in the selected cwd. Unix and native Windows
+  use the official self-contained installers (`https://x.ai/cli/install.sh` /
+  `install.ps1`); those always mutate shell rc or User PATH and have no skip
+  flag, so the built-in path snapshots those files/values, runs the vendor
+  command, restores them byte-for-byte (including unlinking an rc the installer
+  created from nothing), then exposes `~/.grok/bin/grok` through `~/.local/bin`.
+  A newly created `~/.local/bin/agent` from the vendor's second name is removed;
+  `/usr/local/bin` is left unchanged. No Node/npm/uv prerequisite on any OS.
+  Launch metadata is registry-owned: resume is `--continue`, YOLO is
+  `--always-approve` (never the hidden `--yolo` alias), there is no extra-directory
+  flag and no Claude-app-equivalent remote-control switch. Deny rules, hooks, and
+  some shell `ask` rules still win — never rewrite `~/.grok/requirements.toml`.
+  First login on a phone/hub-only agent is in-PTY `grok login --device-auth`; a
+  default `grok` TUI would otherwise open a browser on the agent machine. Grok
+  credentials stay in that machine user's `~/.grok/`; cc-screen never reads
+  `auth.json` / `mcp_credentials.json`, starts `grok agent serve` / `stdio` /
+  `leader`, or adds a Grok control plane. Image paste starts as `ClipboardProbe`
+  (Grok reads OS CLIPBOARD via `Ctrl+V` / `Cmd+V`; Windows screenshot paste is
+  `Alt+V`) and is proven against a real TUI — HTTP `204` is not the verdict.
+  Graceful exit is Ctrl+Q twice (200 ms apart): `/exit`/`/quit` work in an
+  authenticated TUI but a welcome/login screen (no `auth.json`) ignores them,
+  and the documented double-press quit works on both. Claude/Codex/Gemini/Kimi
+  stay the combined `/exit\r` write; OpenCode keeps its `/exit` + Enter split.
+  See proposal 0089.
 - **Clipboard image-paste shim (0007).** A Ctrl-V image paste from the web UI is
   staged in `src/clip.rs` (per-session, 20s TTL) and the paste key sent; Claude
   Code then shells out to `xclip`/`wl-paste`/`pbpaste` to *read* the image. The
@@ -298,14 +344,15 @@ relay (`crates/hub/`: `registry`, `uplink_server`, `client_ws`, `watch_ws`,
 - **Assistant-aware image delivery (0066).** The 0007 shim contract is now the
   `ClipboardProbe` arm of a per-tool `ImagePasteStrategy` (`src/tools.rs`,
   copied immutably onto `Session` at spawn — server-owned, never client
-  input). **Codex** never runs the shims — it opens the X11/Wayland clipboard
-  natively, absent on a headless box — so its strategy is
-  `BracketedImagePath`: `clip_put` stages the PNG as a unique private file in
+  input). **Codex and OpenCode** do not rely on cc-screen's clipboard-probe path:
+  Codex opens X11/Wayland natively (absent on a headless box), while OpenCode's
+  clipboard reader differs by OS. Both use `BracketedImagePath`: `clip_put` stages
+  the PNG as a unique private file in
   the durable attachment store (`src/clip_attachment.rs`,
   `~/.config/cc-screen-rust/clip-attachments/<session>/`, 0700/0600, quotas
   64 files / 256 MiB per session / 1 GiB per agent → `507`) and
   bracketed-pastes its shell-escaped absolute path — **no Enter, no Ctrl-V**;
-  Codex recognizes a pasted readable image path and attaches it. Attachments
+  each CLI recognizes a pasted readable image path and attaches it. Attachments
   are *durable*: they survive restart/resume (a draft/transcript may still
   reference the path) and are removed only on permanent delete / clean
   non-restart exit / startup GC of unclaimed dirs. Status contract: `422` bad

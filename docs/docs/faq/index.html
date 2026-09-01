@@ -114,11 +114,24 @@ that way. If you&#39;d like to support the project (and get Pro), the founder pr
 limited time while the beta pricing transition runs.</p>
 <h2 id="which-coding-clis-are-supported">Which coding CLIs are supported?</h2>
 <p><strong>Claude Code</strong> (<code>claude</code>), <strong>Codex</strong> (<code>codex</code>), <strong>Gemini CLI</strong> (<code>gemini</code>),
-and <strong>Kimi</strong> (<code>kimi</code>) — plus a plain <strong>shell</strong> session, which is just your
+<strong>Kimi</strong> (<code>kimi</code>), <strong>OpenCode</strong> (<code>opencode</code>, picker command <code>oc</code>), and <strong>Grok</strong>
+(<code>grok</code>, picker command <code>gk</code>) — plus a
+plain <strong>shell</strong> session, which is just your
 shell on the box and always available. A machine only offers the CLIs it
 actually has installed; the installer&#39;s <code>--assistants</code> flag (and the
 dashboard&#39;s Install button) can install the missing ones. Self-hosters can
 also declare custom tools per machine.</p>
+<h2 id="where-do-i-connect-opencode-to-a-provider">Where do I connect OpenCode to a provider?</h2>
+<p>Inside OpenCode itself: use <code>/connect</code> in the TUI or run <code>opencode auth login</code> on
+the machine. Provider choice, <code>auth.json</code>, configuration, and conversation data
+stay under that machine user&#39;s home. cc-screen neither asks for nor copies those
+credentials, and it runs the normal OpenCode TUI — not <code>opencode serve</code>.</p>
+<h2 id="how-do-i-log-grok-in-from-a-phone">How do I log Grok in from a phone?</h2>
+<p>Type <code>grok login --device-auth</code> inside the session. A default <code>grok</code> launch
+would open a browser on the <em>agent</em> machine, which is the wrong device when
+you&#39;re on a phone. Device-code stays in the terminal; cc-screen never handles
+the credential, never reads <code>~/.grok/auth.json</code>, and never starts
+<code>grok agent serve</code>.</p>
 <h2 id="where-does-my-code-live-what-does-the-hub-see">Where does my code live? What does the hub see?</h2>
 <p>On your machines, full stop. The hub stores your account, your machine
 registrations, and sharing grants — never your repositories or your CLI
@@ -133,8 +146,12 @@ restart untouched. Same answer for your phone losing signal or your browser clos
 sessions run server-side on <em>your</em> box, not in the browser tab.</p>
 <h2 id="and-when-the-machine-itself-reboots">And when the machine itself reboots?</h2>
 <p>The agent starts on boot (it&#39;s a background service) and resumes its recorded
-sessions with each CLI&#39;s own resume flag — Claude Code sessions come back
-with their conversation intact via <code>--continue</code>.</p>
+sessions with each CLI&#39;s own resume flag — Claude Code, Kimi, OpenCode, and Grok
+sessions come back via <code>--continue</code>. It&#39;s the same mechanism behind the
+per-session <strong>restart</strong> button in the session drawer, which is how you make an
+assistant re-read something it only loads at launch (an MCP server, say)
+without losing the session — see
+<a href="../web-app/#restart-a-session">Restart a session</a>.</p>
 <h2 id="can-i-use-cc-screen-without-the-hosted-service">Can I use cc-screen without the hosted service?</h2>
 <p>Yes — fully. Run a single agent and connect to it directly, or run your own
 hub (even your own multi-tenant hub with signup and enrollment). Same
@@ -148,6 +165,28 @@ email. Revoke any time from the dashboard&#39;s Sharing card. Or skip the one-of
 shares and start a <strong>team</strong> — everyone on it sees everyone&#39;s sessions
 automatically, view-only. See
 <a href="../web-app/#sharing">Using the web app → Sharing</a>.</p>
+<h2 id="can-i-share-a-file-with-someone-who-doesn39t-have-an-account">Can I share a file with someone who doesn&#39;t have an account?</h2>
+<p>Yes — <strong>Share read-only link…</strong> on any file (right-click / long-press it in the
+file tree, or the editor&#39;s ⋯ menu) mints a URL that shows that one file,
+rendered and read-only, to whoever holds it. No account, no sign-in, and
+nothing else on your machine is reachable through it. It can&#39;t be edited
+through the link; editing means signing in.</p>
+<p>The URL is shown once (we store only a fingerprint of it), you can mint a
+replacement at any time, and you can revoke it from the dashboard&#39;s Sharing
+card — access stops immediately. See
+<a href="../web-app/#share-a-read-only-link">Using the web app → Share a read-only link</a>
+and <a href="../security/#read-only-link-grants">Security</a>.</p>
+<h2 id="can-i-bookmark-a-file">Can I bookmark a file?</h2>
+<p>Yes. The address bar tracks whatever file the editor has open, so ⌘D (or ⭐, or
+&quot;Add to Home Screen&quot;) captures it, and the bookmark reopens that file in one
+tap — on the phone too, where nothing was remembered before. You can also grab
+the URL without visiting the file: <strong>Copy link</strong> in the file tree&#39;s menu, the
+🔗 button in the editor toolbar, or <code>⌃B</code> <code>l</code>.</p>
+<p>A <code>/file/…</code> bookmark is an address, not a permission: it opens as you, with the
+access you already have, and a signed-out visit goes through sign-in first and
+then lands on the file. If the file has since moved, the link drops you in the
+file tree with a note instead of an error. See
+<a href="../web-app/#link-to-a-file">Using the web app → Link to a file</a>.</p>
 <h2 id="how-do-teams-work">How do teams work?</h2>
 <p>You join by accepting an email invite, and the invite states the deal before
 you do: joining makes your machines visible to the team, <strong>view-only</strong> —
@@ -288,7 +327,7 @@ behaves exactly as the hosted one did before payments existed.</p>
   </main>
 </div>
 <footer class="docs-footer">
-  <span>v0.5.6 — docs track the latest release</span>
+  <span>v0.5.7 — docs track the latest release</span>
   <span class="tagline">agents, anywhere</span>
   <a href="https://github.com/dibbla-agents/cc-screen-rust">GitHub</a>
 </footer>

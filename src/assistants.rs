@@ -78,6 +78,16 @@ pub(crate) fn run_shell(
     timeout: Duration,
     extra_env: &[(&str, String)],
 ) -> Run {
+    run_shell_ex(line, env_path, timeout, extra_env, &[])
+}
+
+pub(crate) fn run_shell_ex(
+    line: &str,
+    env_path: &str,
+    timeout: Duration,
+    extra_env: &[(&str, String)],
+    strip_env: &[&str],
+) -> Run {
     let (program, pre_args) = tools::launch_shell();
     let mut cmd = Command::new(program);
     for a in pre_args {
@@ -90,6 +100,9 @@ pub(crate) fn run_shell(
         .stderr(Stdio::piped());
     for (k, v) in extra_env {
         cmd.env(k, v);
+    }
+    for k in strip_env {
+        cmd.env_remove(k);
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -198,7 +211,7 @@ pub(crate) fn tail_error(output: &str, fallback: &str) -> String {
 /// 4. **Version after decides.** Changed → `Updated`. Unchanged but the command
 ///    succeeded → `Current`. Unchanged and it failed → try the next candidate; if
 ///    none remain → `Failed` with the command's own error text.
-pub fn update_tool(t: &Tool, env_path: &str) -> UpdateOutcome {
+pub fn update_tool(t: &Tool, env_path: &str, home: &std::path::Path) -> UpdateOutcome {
     if let Some(bin) = tools::missing_binary(t, env_path) {
         return UpdateOutcome::Skipped { reason: format!("{bin} is not installed") };
     }
@@ -211,9 +224,31 @@ pub fn update_tool(t: &Tool, env_path: &str) -> UpdateOutcome {
     let before = probe_version(t, env_path);
     let timeout = update_timeout();
     let mut last_error: Option<String> = None;
+    let wrap = crate::vendor_guard::wraps_update(t);
 
     for cmd in &cmds {
-        let run = run_shell(cmd, env_path, timeout, &[]);
+        let run = if wrap {
+            match crate::vendor_guard::Guard::begin(home) {
+                Ok(g) => {
+                    let run = g.run(cmd, env_path, timeout, &[]);
+                    if let Err(e) = g.finish() {
+                        return UpdateOutcome::Failed {
+                            version: after_or(&probe_version(t, env_path), &before),
+                            error: e,
+                        };
+                    }
+                    run
+                }
+                Err(e) => {
+                    return UpdateOutcome::Failed {
+                        version: after_or(&before, &before),
+                        error: e,
+                    };
+                }
+            }
+        } else {
+            run_shell(cmd, env_path, timeout, &[])
+        };
         let after = probe_version(t, env_path);
         if !after.is_empty() && after != before {
             return UpdateOutcome::Updated { from: before, to: after };
@@ -363,7 +398,7 @@ fn run_job(app: &AppState, selected: Vec<Tool>, restart_mode: &str, install_miss
             continue;
         }
         set_tool_state(app, &t.prefix, |row| row.state = "updating".into());
-        let outcome = update_tool(t, &env_path);
+        let outcome = update_tool(t, &env_path, &home);
         match &outcome {
             UpdateOutcome::Updated { from, to } => {
                 updated.push(t.prefix.clone());
@@ -656,7 +691,7 @@ mod tests {
         t.update_cmd = Some("do-update".into());
 
         assert_eq!(probe_version(&t, b.path()), "fake-cli 1.0.0");
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Updated { from, to } => {
                 assert_eq!(from, "fake-cli 1.0.0");
                 assert_eq!(to, "fake-cli 2.0.0");
@@ -664,10 +699,51 @@ mod tests {
             other => panic!("expected Updated, got {other:?}"),
         }
         // Running it again is a no-op → `current`, not a second "updated".
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Current { version } => assert_eq!(version, "fake-cli 2.0.0"),
             other => panic!("expected Current, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_upgrade_uses_version_probe_verdict() {
+        let b = Bin::new("opencode");
+        b.write("opencode", "#!/bin/sh\nD=$(dirname \"$0\")\nif [ \"$1\" = --version ]; then cat \"$D/ver\"; elif [ \"$1\" = upgrade ]; then echo 'opencode 1.18.23' > \"$D/ver\"; fi\n");
+        std::fs::write(b.0.join("ver"), "opencode 1.18.22\n").unwrap();
+        let tools = crate::tools::load_tools(None, &b.0);
+        let tool = tools.iter().find(|t| t.prefix == "opencode").unwrap();
+        assert_eq!(crate::tools::update_commands(tool), vec!["opencode upgrade"]);
+        assert!(matches!(update_tool(tool, b.path(), &b.0), UpdateOutcome::Updated { .. }));
+        assert!(matches!(update_tool(tool, b.path(), &b.0), UpdateOutcome::Current { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_update_uses_version_probe_and_restores_rc() {
+        let b = Bin::new("grok-upd");
+        let home = b.0.join("home");
+        std::fs::create_dir_all(home.join(".local").join("bin")).unwrap();
+        std::fs::write(home.join(".bashrc"), "keep\n").unwrap();
+        b.write(
+            "grok",
+            &format!(
+                "#!/bin/sh\nD=$(dirname \"$0\")\nif [ \"$1\" = --version ]; then cat \"$D/ver\"; elif [ \"$1\" = update ]; then echo mutated >> \"{h}/.bashrc\"; echo 'grok 1.0.14' > \"$D/ver\"; fi\n",
+                h = home.display()
+            ),
+        );
+        std::fs::write(b.0.join("ver"), "grok 1.0.13\n").unwrap();
+        let tools = crate::tools::load_tools(None, &b.0);
+        let tool = tools.iter().find(|t| t.prefix == "grok").unwrap();
+        assert_eq!(crate::tools::update_commands(tool), vec!["grok update"]);
+        match update_tool(tool, b.path(), &home) {
+            UpdateOutcome::Updated { from, to } => {
+                assert!(from.contains("1.0.13"), "{from}");
+                assert!(to.contains("1.0.14"), "{to}");
+            }
+            other => panic!("expected Updated, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".bashrc")).unwrap(), "keep\n");
     }
 
     #[cfg(unix)]
@@ -680,7 +756,7 @@ mod tests {
         b.write("fake-cli", "#!/bin/sh\necho 'fake-cli 1.0.0'\n");
         let mut t = tool("fake", "fake-cli");
         t.update_cmd = Some("true".into());
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Current { version } => assert_eq!(version, "fake-cli 1.0.0"),
             other => panic!("expected Current, got {other:?}"),
         }
@@ -694,7 +770,7 @@ mod tests {
         b.write("do-update", "#!/bin/sh\necho 'npm ERR! EACCES permission denied' >&2\nexit 13\n");
         let mut t = tool("fake", "fake-cli");
         t.update_cmd = Some("do-update".into());
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Failed { version, error } => {
                 assert_eq!(version, "fake-cli 1.0.0", "the row still shows what's installed");
                 assert!(error.contains("EACCES"), "actionable error text: {error}");
@@ -722,12 +798,12 @@ mod tests {
         // Simulate the registry's second candidate by chaining: the runner tries
         // each entry of update_commands in order, so exercise it via a compound
         // override that fails, then a real one.
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Failed { .. } => {}
             other => panic!("a lone failing candidate is Failed, got {other:?}"),
         }
         t.update_cmd = Some("self-update || pkg-update".into());
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Updated { from, to } => {
                 assert_eq!((from.as_str(), to.as_str()), ("1.0.0", "3.0.0"));
             }
@@ -741,14 +817,14 @@ mod tests {
         let b = Bin::new("skip");
         // Not installed at all.
         let t = tool("ghost", "ghost-cli");
-        match update_tool(&t, b.path()) {
+        match update_tool(&t, b.path(), &b.0) {
             UpdateOutcome::Skipped { reason } => assert!(reason.contains("not installed"), "{reason}"),
             other => panic!("expected Skipped, got {other:?}"),
         }
         // Installed, but a custom tool with no descriptor and no cc_tool_update.
         b.write("plain-cli", "#!/bin/sh\necho 1.0\n");
         let t2 = tool("plain", "plain-cli");
-        match update_tool(&t2, b.path()) {
+        match update_tool(&t2, b.path(), &b.0) {
             UpdateOutcome::Skipped { reason } => assert!(reason.contains("no known update command"), "{reason}"),
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -763,7 +839,7 @@ mod tests {
         t.update_cmd = Some("sleep 30".into());
         std::env::set_var("CCWEB_UPDATE_TIMEOUT_SECS", "1");
         let started = Instant::now();
-        let out = update_tool(&t, b.path());
+        let out = update_tool(&t, b.path(), &b.0);
         std::env::remove_var("CCWEB_UPDATE_TIMEOUT_SECS");
         assert!(started.elapsed() < Duration::from_secs(15), "the timeout must bound the job");
         match out {

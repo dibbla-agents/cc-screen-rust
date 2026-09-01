@@ -48,6 +48,8 @@ Here's the one-liner running, end to end (~15 s):
   ✓ codex      (Codex CLI)  /home/erik/.local/bin/codex
   ✓ gemini     (Gemini CLI)  /home/erik/.local/bin/gemini
   ✓ kimi       (Kimi CLI)  /home/erik/.local/bin/kimi
+  ✓ opencode   (OpenCode)  /home/erik/.local/bin/opencode
+  ✓ grok       (Grok)  /home/erik/.local/bin/grok
 
   Approved — connecting as 'my-laptop'.
 
@@ -89,7 +91,12 @@ The activation page flows straight into it: once the machine dials in, start
 your first session right from the success screen — pick an assistant (say,
 Claude) and a project folder, and you're in a live terminal. You can also do
 it any time from the session list: **New session**, pick the machine, the
-tool, and the directory.
+tool, and the directory. OpenCode appears as **OpenCode** (`oc`) once the
+`opencode` binary is installed; its first terminal may ask you to connect a
+provider with `/connect` (or run `opencode auth login` on that machine). Grok
+appears as **Grok** (`gk`); from a phone type `grok login --device-auth`
+inside the session (a default launch would open a browser on the agent). Those
+credentials stay on the machine — cc-screen never asks for or stores them.
 
 The machine also appears on your dashboard with a pulsing **online** dot.
 

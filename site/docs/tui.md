@@ -166,13 +166,27 @@ cancels. Below the tool, machine, name, and directory fields are the launch
 switches — `space` or `←`/`→` flips the focused one:
 
 - **perms** — `[YOLO]` (the default) launches the CLI with its
-  approval-bypass flag; `[ask]` launches it with normal approval prompts, and
-  the session wears a `safe` badge in the switcher.
+  approval-bypass mode; `[ask]` launches it with normal approval prompts, and
+  the session wears a `safe` badge in the switcher. For OpenCode, YOLO is
+  `--auto`: operations explicitly denied in `opencode.json[c]` still stay denied.
+  For Grok, YOLO is `--always-approve`: deny rules, hooks, and some shell `ask`
+  rules can still block.
 - **claude** — `[off]` (the default) launches Claude Code with its own remote
   control disabled: the session lives in cc-screen and nowhere else. `[app]`
   registers it with claude.ai/code and the Claude mobile app as
   `claude-<name>`, and the session wears an `app` badge. The row appears only
   for tools that have such a feature (today: Claude Code).
+
+OpenCode appears as **OpenCode** (`oc`) when its binary is installed. It offers
+YOLO, but no extra-folder row and no Claude-app row: OpenCode has neither a
+per-launch add-directory flag nor an equivalent remote-control registration.
+Use `/connect` in its terminal (or `opencode auth login` on the machine) for
+provider login; cc-screen never handles that credential.
+
+Grok appears as **Grok** (`gk`) when its binary is installed. It offers YOLO,
+but no extra-folder row and no Claude-app row. First login from a remote
+client is `grok login --device-auth` inside the session; a default launch
+would open a browser on the agent.
 
 Both choices are remembered for the session: a restart, a restore, or an
 assistant update relaunches it exactly the way you created it.

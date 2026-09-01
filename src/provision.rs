@@ -144,6 +144,10 @@ pub fn install_env(env_path: &str, home: &Path) -> InstallEnv {
     if let Some(p) = &prefix {
         vars.push(("npm_config_prefix", p.to_string_lossy().into_owned()));
     }
+    vars.push(("HOME", home.to_string_lossy().into_owned()));
+    if cfg!(windows) {
+        vars.push(("USERPROFILE", home.to_string_lossy().into_owned()));
+    }
 
     // The install PATH: the session PATH, plus the bin dirs a prerequisite we
     // just installed populates. Prepended so a fresh `npm` wins over none.
@@ -172,6 +176,8 @@ pub fn install_env(env_path: &str, home: &Path) -> InstallEnv {
         prefix.clone(),
         Some(node_dir.join("bin")),
         Some(local_bin.clone()),
+        Some(home.join(".opencode").join("bin")),
+        Some(home.join(".grok").join("bin")),
         Some(home.join(".local").join("share").join("uv").join("tools")),
     ]
     .into_iter()
@@ -346,7 +352,25 @@ pub fn install_tool(t: &Tool, env_path: &str, home: &Path) -> InstallOutcome {
         }
     }
 
-    let run = assistants::run_shell(&cmd, &env.path, install_timeout(), &env.vars);
+    let wrap = crate::vendor_guard::wraps_install(t);
+    let guard = if wrap {
+        match crate::vendor_guard::Guard::begin(home) {
+            Ok(g) => Some(g),
+            Err(e) => return InstallOutcome::Failed { error: e },
+        }
+    } else {
+        None
+    };
+    let run = if let Some(g) = &guard {
+        g.run(&cmd, &env.path, install_timeout(), &env.vars)
+    } else {
+        assistants::run_shell(&cmd, &env.path, install_timeout(), &env.vars)
+    };
+    if let Some(g) = guard {
+        if let Err(e) = g.finish() {
+            return InstallOutcome::Failed { error: e };
+        }
+    }
 
     // Land it: an install that dropped the binary into a prefix the session PATH
     // doesn't include is the common case (a human does this by hand today).
@@ -534,6 +558,218 @@ mod tests {
         assert!(b.home.join(".local/bin/newcli").symlink_metadata().unwrap().file_type().is_symlink());
         // Re-running is a no-op, never a second install.
         assert!(matches!(install_tool(&t, &env_path, &b.home), InstallOutcome::AlreadyPresent { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_official_destination_is_in_install_search() {
+        let b = Box_::new("opencode");
+        let dir = b.home.join(".opencode/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("opencode");
+        std::fs::write(&bin, "#!/bin/sh\necho opencode 1.18.22\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = install_env(&b.env_path(), &b.home);
+        assert!(env.search.contains(&dir));
+        assert_eq!(land_in_local_bin("opencode", &env, &b.home).unwrap(), Some(b.home.join(".local/bin/opencode")));
+        assert_eq!(std::fs::read_link(b.home.join(".local/bin/opencode")).unwrap(), bin);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_official_destination_is_in_install_search() {
+        let b = Box_::new("grok-search");
+        let dir = b.home.join(".grok/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("grok");
+        std::fs::write(&bin, "#!/bin/sh\necho grok 1.0.13\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = install_env(&b.env_path(), &b.home);
+        assert!(env.search.contains(&dir));
+        assert_eq!(land_in_local_bin("grok", &env, &b.home).unwrap(), Some(b.home.join(".local/bin/grok")));
+        assert_eq!(std::fs::read_link(b.home.join(".local/bin/grok")).unwrap(), bin);
+    }
+
+    fn grok_tool() -> Tool {
+        let tools = tools::load_tools(None, &PathBuf::from("/cfg"));
+        tools.into_iter().find(|t| t.prefix == "grok").unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_fake_install_lands_and_restores_rc_on_success() {
+        let b = Box_::new("grok-ok");
+        let bashrc = b.home.join(".bashrc");
+        std::fs::write(&bashrc, "# mine\n").unwrap();
+        let extra = b.home.join("usr-local-bin");
+        std::fs::create_dir_all(&extra).unwrap();
+        // Override the built-in curl with a fake installer that mutates rc,
+        // writes ~/.grok/bin/grok, plants an agent landing-zone link, a bak
+        // sibling, and an extra-home binary.
+        b.write(
+            "fake-grok-install",
+            &format!(
+                r#"#!/bin/sh
+set -e
+mkdir -p "$HOME/.grok/bin" "$HOME/.local/bin"
+printf '#!/bin/sh\necho grok 1.0.13\n' > "$HOME/.grok/bin/grok"
+chmod 755 "$HOME/.grok/bin/grok"
+printf '#!/bin/sh\necho agent\n' > "$HOME/.local/bin/agent"
+chmod 755 "$HOME/.local/bin/agent"
+echo '# >>> grok installer >>>' >> "$HOME/.bashrc"
+echo '# grok' > "$HOME/.bashrc.bak.1725000000"
+mkdir -p "{extra}"
+printf '#!/bin/sh\necho extra\n' > "{extra}/grok"
+chmod 755 "{extra}/grok"
+"#,
+                extra = extra.display()
+            ),
+        );
+        let mut t = grok_tool();
+        t.install_hint = Some("fake-grok-install".into());
+        // Override still skips the wrapper — pin that, then run the built-in path.
+        assert!(!crate::vendor_guard::wraps_install(&t));
+        t.install_hint = None;
+        // Point the registry command at our fake by putting it on PATH as the
+        // whole install line... we can't rewrite ASSISTANTS, so use install_hint
+        // together with a direct Guard to prove restore, and install_tool with
+        // a grok-prefix tool whose hint is empty by swapping tmpl/install via a
+        // custom tool that still wraps? wraps_install requires prefix grok AND
+        // no hint. So we run Guard + fake command ourselves, then land.
+        let g = crate::vendor_guard::Guard::begin_with(&b.home, &extra).unwrap();
+        let run = g.run("fake-grok-install", &b.env_path(), Duration::from_secs(5), &[]);
+        assert!(run.ok, "{}", run.error.unwrap_or_default());
+        g.finish().unwrap();
+        assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "# mine\n");
+        assert!(!b.home.join(".bashrc.bak.1725000000").exists());
+        assert!(!b.home.join(".local/bin/agent").exists());
+        assert!(!extra.join("grok").exists());
+        assert!(b.home.join(".grok/bin/grok").is_file());
+        let env = install_env(&b.env_path(), &b.home);
+        land_in_local_bin("grok", &env, &b.home).unwrap();
+        assert!(tools::binary_on_path("grok", &b.env_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_restore_unlinks_installer_created_bashrc_and_keeps_symlink_identity() {
+        let b = Box_::new("grok-rc");
+        let target = b.home.join("dotfiles").join("zshrc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "orig\n").unwrap();
+        std::os::unix::fs::symlink(&target, b.home.join(".zshrc")).unwrap();
+        let extra = b.home.join("usr-local-bin");
+        std::fs::create_dir_all(&extra).unwrap();
+        b.write(
+            "fake-grok-install",
+            r#"#!/bin/sh
+echo mutated >> "$HOME/.zshrc"
+echo '# >>> grok >>>' > "$HOME/.bashrc"
+"#,
+        );
+        let g = crate::vendor_guard::Guard::begin_with(&b.home, &extra).unwrap();
+        assert!(g.run("fake-grok-install", &b.env_path(), Duration::from_secs(5), &[]).ok);
+        g.finish().unwrap();
+        assert!(b.home.join(".zshrc").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(b.home.join(".zshrc")).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "orig\n");
+        assert!(!b.home.join(".bashrc").exists(), "installer-created rc must be unlinked");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_outside_home_symlink_fails_before_the_vendor_command() {
+        let b = Box_::new("grok-out");
+        std::os::unix::fs::symlink("/etc/passwd", b.home.join(".bashrc")).unwrap();
+        let extra = b.home.join("usr-local-bin");
+        std::fs::create_dir_all(&extra).unwrap();
+        let err = match crate::vendor_guard::Guard::begin_with(&b.home, &extra) {
+            Err(e) => e,
+            Ok(_) => panic!("expected outside-home symlink to fail the row"),
+        };
+        assert!(err.contains("outside $HOME"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_restore_runs_after_timeout_and_still_reverts_rc() {
+        let b = Box_::new("grok-to");
+        let bashrc = b.home.join(".bashrc");
+        std::fs::write(&bashrc, "keep\n").unwrap();
+        let extra = b.home.join("usr-local-bin");
+        std::fs::create_dir_all(&extra).unwrap();
+        b.write(
+            "slow-grok-install",
+            r#"#!/bin/sh
+echo mutated >> "$HOME/.bashrc"
+sleep 30
+"#,
+        );
+        let g = crate::vendor_guard::Guard::begin_with(&b.home, &extra).unwrap();
+        let run = g.run("slow-grok-install", &b.env_path(), Duration::from_secs(1), &[]);
+        assert!(!run.ok);
+        assert!(run.error.as_deref().unwrap_or("").contains("timed out"));
+        g.finish().unwrap();
+        assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_override_skips_the_wrapper() {
+        let b = Box_::new("grok-ov");
+        std::fs::write(b.home.join(".bashrc"), "keep\n").unwrap();
+        b.write(
+            "my-mirror",
+            r#"#!/bin/sh
+echo mutated >> "$HOME/.bashrc"
+mkdir -p "$HOME/.grok/bin"
+printf '#!/bin/sh\necho grok 9\n' > "$HOME/.grok/bin/grok"
+chmod 755 "$HOME/.grok/bin/grok"
+"#,
+        );
+        let mut t = grok_tool();
+        t.install_hint = Some("my-mirror".into());
+        assert!(!crate::vendor_guard::wraps_install(&t));
+        match install_tool(&t, &b.env_path(), &b.home) {
+            InstallOutcome::Installed { .. } => {}
+            other => panic!("expected Installed, got {other:?}"),
+        }
+        // Wrapper skipped → the operator-owned mutation stays.
+        assert!(std::fs::read_to_string(b.home.join(".bashrc")).unwrap().contains("mutated"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_vendor_command_does_not_inherit_grok_env() {
+        let b = Box_::new("grok-env");
+        let extra = b.home.join("usr-local-bin");
+        std::fs::create_dir_all(&extra).unwrap();
+        b.write(
+            "show-env",
+            r#"#!/bin/sh
+for k in GROK_BIN_DIR GROK_HOME GROK_CHANNEL GROK_DEPLOYMENT_KEY GROK_PROXY_URL XAI_API_KEY; do
+  eval "v=\$$k"
+  if [ -n "$v" ]; then echo "LEAKED $k=$v"; fi
+done
+"#,
+        );
+        std::env::set_var("GROK_BIN_DIR", "/tmp/should-not-leak");
+        std::env::set_var("XAI_API_KEY", "secret-token");
+        let g = crate::vendor_guard::Guard::begin_with(&b.home, &extra).unwrap();
+        let run = g.run("show-env", &b.env_path(), Duration::from_secs(5), &[]);
+        g.finish().unwrap();
+        std::env::remove_var("GROK_BIN_DIR");
+        std::env::remove_var("XAI_API_KEY");
+        assert!(run.ok, "{:?}", run.error);
+        assert!(!run.output.contains("LEAKED"), "vendor env leaked: {}", run.output);
+        assert!(!run.output.contains("secret-token"));
+        assert!(!run.output.contains("auth.json"));
     }
 
     #[cfg(unix)]

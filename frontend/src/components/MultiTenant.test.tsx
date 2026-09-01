@@ -12,6 +12,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ActivatePage,
+  Dashboard,
   LimitCard,
   TeamInviteForm,
   canResendInvite,
@@ -33,6 +34,29 @@ import { approveDevice, createOrgInvite, listAgents } from "../api";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const plan: MePlan = { name: "free", maxAgents: 10, maxSessions: 50, agents: 10 };
+
+describe("Add-machine assistant consent (proposal 0088/0089)", () => {
+  it("shows all six checked assistants before the all-assistants shorthand", () => {
+    const me: MeInfo = {
+      multiTenant: true,
+      googleEnabled: false,
+      authenticated: true,
+      email: "owner@x.com",
+      mail: false,
+    };
+    const html = renderToStaticMarkup(
+      <Dashboard me={me} onClose={() => {}} onLoggedOut={() => {}} />
+    );
+    for (const label of ["Claude", "Codex", "Gemini", "Kimi", "OpenCode", "Grok"]) {
+      expect(html).toContain(label);
+    }
+    expect(html).toContain("--assistants");
+    expect(html).not.toMatch(/Grok need/i);
+    expect((html.match(/type=\"checkbox\"/g) ?? []).length).toBeGreaterThanOrEqual(6);
+    expect((html.match(/checked=\"\"/g) ?? []).length).toBeGreaterThanOrEqual(6);
+    expect(html).toContain("min-h-11");
+  });
+});
 
 describe("LimitCard (proposals 0056 Part B / 0058 C2)", () => {
   it("renders the mailto-primary card on a self-hosted hub (billing off)", () => {
