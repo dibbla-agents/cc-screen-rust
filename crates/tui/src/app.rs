@@ -779,6 +779,8 @@ pub struct App {
     /// `None` = the real stdout, which is what production wants; a test hands
     /// in a buffer, because a `TestBackend` run has no terminal to write to.
     clip_sink: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// The host terminal title last emitted, so it's only rewritten on change.
+    last_title: String,
     cfg: Config,
     tools: Vec<ToolInfo>,
     /// Connected agents (hub mode). Empty + `hub_mode == false` means a direct,
@@ -899,6 +901,7 @@ impl App {
         Self {
             rest,
             clip_sink: None,
+            last_title: String::new(),
             cfg,
             tools: Vec::new(),
             machines: Vec::new(),
@@ -982,6 +985,9 @@ impl App {
 
         self.init().await;
         self.draw(term)?;
+        if opts.spawn_term_events {
+            self.flush_title();
+        }
 
         while let Some(msg) = rx.recv().await {
             self.handle_msg(msg).await;
@@ -997,6 +1003,9 @@ impl App {
             // already flushed, and OSC 52 moves no cursor and changes no screen
             // state, so this cannot corrupt what was just drawn.
             self.flush_clipboard();
+            if opts.spawn_term_events {
+                self.flush_title();
+            }
         }
         Ok(())
     }
@@ -1020,6 +1029,16 @@ impl App {
                 }
                 None => crate::term::emit_osc52(&text),
             }
+        }
+    }
+
+    /// Retitle the host terminal when the focused session (or its name) changed.
+    /// Between frames, like the OSC 52 flush: the sequence moves no cursor.
+    fn flush_title(&mut self) {
+        let t = self.window_title();
+        if t != self.last_title {
+            crate::term::set_title(&t);
+            self.last_title = t;
         }
     }
 
@@ -1978,6 +1997,57 @@ impl App {
         self.scroll_mode = false; // leaving the live pane view exits scroll mode
     }
 
+    /// The grid the highlighted layout would produce, by simulating
+    /// `set_layout` without mutating: the focused box moves to slot 0, then the
+    /// list is cut or padded to the layout's box count. Named from the live
+    /// session list so the palette shows what the user calls each session.
+    fn palette_preview(&self, hi: usize) -> ui::overlay::PalettePreview {
+        let n = Layout::ALL[hi.min(Layout::ALL.len() - 1)].count();
+        let mut order: Vec<Option<&Pane>> = self.panes.iter().map(Option::as_ref).collect();
+        if self.active != 0 && self.active < order.len() {
+            order.swap(0, self.active);
+        }
+        let occupant = |p: &Pane| {
+            let info = self.sessions.iter().find(|s| s.name == p.session && s.machine == p.machine);
+            let crumb = info.and_then(|s| ui::util::session_crumb(&s.cwd));
+            let machine = (!p.machine.is_empty()).then(|| self.machine_label(&p.machine));
+            ui::overlay::PaletteBox {
+                name: info.map(display_name).unwrap_or(p.session.as_str()).to_string(),
+                context: match (machine, crumb) {
+                    (None, c) => c,
+                    (Some(m), None) => Some(m),
+                    (Some(m), Some(c)) => Some(format!("{m}:{c}")),
+                },
+            }
+        };
+        let dropped = order.iter().skip(n).flatten().map(|p| occupant(p).name).collect();
+        let mut boxes: Vec<_> = order.iter().take(n).map(|p| p.map(occupant)).collect();
+        boxes.resize(n, None);
+        ui::overlay::PalettePreview { boxes, dropped }
+    }
+
+    /// The host terminal's window/tab title: the focused session's name while
+    /// in the grid (so a tab strip of `ccs` windows reads as sessions, not as a
+    /// row of identical "ccs"), plain `ccs` in the switcher.
+    pub fn window_title(&self) -> String {
+        let focused = match self.mode {
+            Mode::Grid => self.panes.get(self.active).and_then(Option::as_ref),
+            _ => None,
+        };
+        match focused {
+            Some(p) => {
+                let name = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.name == p.session && s.machine == p.machine)
+                    .map(display_name)
+                    .unwrap_or(p.session.as_str());
+                format!("{name} · ccs")
+            }
+            None => "ccs".to_string(),
+        }
+    }
+
     fn key_palette(&mut self, k: KeyEvent) {
         let hi = if let GridOverlay::Palette(hi) = &self.grid_overlay { *hi } else { return };
         match k.code {
@@ -2650,7 +2720,9 @@ impl App {
                 );
                 match &self.grid_overlay {
                     GridOverlay::None => {}
-                    GridOverlay::Palette(hi) => ui::overlay::layout_palette(f, *hi),
+                    GridOverlay::Palette(hi) => {
+                        ui::overlay::layout_palette(f, *hi, &self.palette_preview(*hi))
+                    }
                     GridOverlay::Menu { target, selected, query } => {
                         let rows = self.menu_rows(self.box_has_session(*target), query);
                         // Machine chips in multi-machine hub mode, for the rows
@@ -3113,6 +3185,49 @@ mod tests {
         let mut s = sess(name);
         s.machine = machine.into();
         s
+    }
+
+    fn test_pane(id: u64, name: &str, machine: &str) -> Pane {
+        let (tx, _rx) = mpsc::channel(4);
+        Pane::new(id, name.into(), machine.into(), 40, 10, tx, tokio::spawn(async {}))
+    }
+
+    #[tokio::test]
+    async fn palette_preview_simulates_set_layout_by_name() {
+        let mut api = sess_on("cc-api", "pine");
+        api.label = Some("Billing fix".into());
+        api.cwd = "/home/u/dev/api".into();
+        let docs = sess_on("cc-docs", "pine");
+        let mut a = App::test_fixture_hub(
+            vec![api, docs],
+            vec![MachineInfo { machine: "pine".into(), hostname: "pine.local".into(), online: true }],
+            "s",
+        );
+        a.mode = Mode::Grid;
+        a.layout = Layout::Stacked;
+        a.panes = vec![Some(test_pane(1, "cc-docs", "pine")), Some(test_pane(2, "cc-api", "pine"))];
+        a.active = 1; // focused: the labelled session in box 2
+
+        // Quad (idx 5): the focused box moves to slot 0, the rest pad empty.
+        let quad = a.palette_preview(5);
+        assert_eq!(quad.boxes.len(), 4);
+        let first = quad.boxes[0].as_ref().unwrap();
+        assert_eq!(first.name, "Billing fix");
+        assert_eq!(first.context.as_deref(), Some("pine.local:dev/api"));
+        assert_eq!(quad.boxes[1].as_ref().unwrap().name, "cc-docs");
+        assert!(quad.boxes[2].is_none() && quad.boxes[3].is_none());
+        assert!(quad.dropped.is_empty());
+
+        // Single (idx 0): only the focused session stays; the other is named as leaving.
+        let single = a.palette_preview(0);
+        assert_eq!(single.boxes.len(), 1);
+        assert_eq!(single.boxes[0].as_ref().unwrap().name, "Billing fix");
+        assert_eq!(single.dropped, vec!["cc-docs".to_string()]);
+
+        // The host terminal title follows the focused session's display name.
+        assert_eq!(a.window_title(), "Billing fix · ccs");
+        a.mode = Mode::Switcher;
+        assert_eq!(a.window_title(), "ccs");
     }
 
     #[test]
@@ -3675,7 +3790,6 @@ mod tests {
         assert_eq!(a.selected_session().unwrap().name, "cherry");
     }
 
-    #[test]
     /// Proposal 0078 — the `Recent` section is lifted above the machine groups,
     /// in stored (MRU) order, and vanishes entirely while filtering.
     #[test]

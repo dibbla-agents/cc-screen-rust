@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::app::{FormField, MenuItem, MenuRow};
 use crate::client::DirEntry;
-use crate::ui::util::{dir_crumb, truncate, truncate_w};
+use crate::ui::util::{name_with_crumb, session_crumb, truncate, truncate_w};
 
 const PANEL_BG: Color = Color::Rgb(20, 28, 38);
 
@@ -313,9 +313,28 @@ pub fn new_session(f: &mut Frame, v: &NewSessionView) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// One box's occupant in the layout palette's preview: the session's display
+/// name and its dim `machine:folder` context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteBox {
+    pub name: String,
+    pub context: Option<String>,
+}
+
+/// What the grid would hold if the highlighted layout were applied now
+/// (`App::palette_preview` simulates `set_layout`): box `i` → its occupant, and
+/// the sessions that would leave the grid (they keep running on the server).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PalettePreview {
+    pub boxes: Vec<Option<PaletteBox>>,
+    pub dropped: Vec<String>,
+}
+
 /// The layout palette: six box-glyph thumbnails (Layout::ALL order), the
-/// `highlight` one in accent. Mirrors the web `LayoutPalette`.
-pub fn layout_palette(f: &mut Frame, highlight: usize) {
+/// `highlight` one in accent, and below them a preview naming the session each
+/// box would show under that layout — so picking a layout never means guessing
+/// where your sessions end up. Mirrors the web `LayoutPalette`.
+pub fn layout_palette(f: &mut Frame, highlight: usize, preview: &PalettePreview) {
     const GLYPHS: [[&str; 3]; 6] = [
         ["╭───╮", "│   │", "╰───╯"], // single
         ["╭───╮", "├───┤", "╰───╯"], // stacked
@@ -326,7 +345,14 @@ pub fn layout_palette(f: &mut Frame, highlight: usize) {
     ];
     const LABELS: [&str; 6] = ["single", "stack", "cols", "left-L", "right-L", "quad"];
 
-    let inner = panel(f, centered(f.area(), 54, 10), " layout ");
+    const W: u16 = 54;
+    let dropped_rows = u16::from(!preview.dropped.is_empty());
+    let preview_rows = if preview.boxes.is_empty() {
+        0
+    } else {
+        1 + preview.boxes.len() as u16 + dropped_rows
+    };
+    let inner = panel(f, centered(f.area(), W, 10 + preview_rows), " layout ");
 
     let hi = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
@@ -351,6 +377,37 @@ pub fn layout_palette(f: &mut Frame, highlight: usize) {
         format!("{d:^7}")
     }));
     lines.push(Line::from(""));
+    if !preview.boxes.is_empty() {
+        // "  1  name · machine:folder" — the box number, then the same
+        // name-first identity cell the menu and switcher use.
+        let cell_w = (W as usize).saturating_sub(2 + 6);
+        for (i, b) in preview.boxes.iter().enumerate() {
+            let mut spans = vec![Span::styled(format!("  {:>2}  ", i + 1), dim)];
+            match b {
+                Some(b) => spans.extend(name_with_crumb(
+                    &b.name,
+                    b.context.as_deref(),
+                    cell_w,
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                    dim,
+                )),
+                None => spans.push(Span::styled(
+                    "empty",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                )),
+            }
+            lines.push(Line::from(spans));
+        }
+        if !preview.dropped.is_empty() {
+            let names = preview.dropped.join(", ");
+            let txt = format!("   ✕  leaves the grid: {names} (keeps running)");
+            lines.push(Line::from(Span::styled(
+                truncate_w(&txt, cell_w + 6),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
     lines.push(Line::from(Span::styled(
         " ←/→ move · 1-6 jump · enter apply · esc cancel",
         Style::default().fg(Color::DarkGray),
@@ -418,22 +475,30 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
     // A divider that spans the inner width (inset one column each side).
     let sep = || Line::from(Span::styled(format!(" {} ", "─".repeat(inner_w.saturating_sub(2))), dim));
 
-    // The session rows' display name: the operator label (0059 C1) when set,
-    // else the folder breadcrumb — web `displayName` parity with the switcher.
-    let named = |s: &SessionInfo| match s.label.as_deref() {
-        Some(l) if !l.is_empty() => l.to_string(),
-        _ => dir_crumb(&s.cwd, &s.name),
+    // The session rows' identity, name-first (web parity, proposal 0033): the
+    // display name — operator label (0059 C1) or slug — then the dim folder
+    // breadcrumb (0025), which gives way first when the column is tight.
+    let crumb_of = |s: &SessionInfo| session_crumb(&s.cwd);
+    // The breadcrumb's share of the column is capped so one deep path can't
+    // starve every row's summary; the leaf survives any cut.
+    const CRUMB_CAP: usize = 28;
+    let ident_w = |s: &SessionInfo| {
+        let name = crate::app::display_name(s).width();
+        match crumb_of(s) {
+            Some(c) => name + 3 + c.width().min(CRUMB_CAP),
+            None => name,
+        }
     };
 
-    // Size the name column to the longest display name so names show in full;
-    // the tool column is fixed and the trailing summary takes whatever's left
-    // (it's the croppable one). lead = marker (2) + attached dot (2) + ready
+    // Size the identity column to the longest name · folder so they show in
+    // full; the tool column is fixed and the trailing summary takes whatever's
+    // left (it's the croppable one). lead = marker (2) + attached dot (2) + ready
     // marker (2); the two inter-column gaps add 2 more. All column math is in
     // display COLUMNS (unicode-width), not chars — a double-width CJK name
     // would otherwise misalign the tool column and overrun the border.
     const TOOL_W: usize = 7;
     let lead = 6usize;
-    let longest = v.sessions.iter().map(|s| named(s).width()).max().unwrap_or(0);
+    let longest = v.sessions.iter().map(ident_w).max().unwrap_or(0);
     let name_cap = inner_w.saturating_sub(lead + 2 + TOOL_W + 8).max(12); // keep ≥8 for the tail
     let name_w = longest.clamp(12, name_cap);
     let preview_w = inner_w.saturating_sub(lead + name_w + 2 + TOOL_W);
@@ -486,18 +551,18 @@ pub fn grid_menu(f: &mut Frame, v: &MenuView) {
                         work,
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ),
-                    {
-                        // Width-aware padding: `{:<name_w$}` pads by chars, so a
-                        // CJK name would leave the column ~2x too wide.
-                        let name = truncate_w(&named(s), name_w);
-                        let pad = " ".repeat(name_w.saturating_sub(name.width()));
-                        Span::styled(
-                            format!("{name}{pad} "),
-                            if sel { sel_style } else { gray },
-                        )
-                    },
-                    Span::styled(format!("{:<TOOL_W$} ", truncate(&s.tool, TOOL_W)), dim),
                 ];
+                spans.extend(name_with_crumb(
+                    crate::app::display_name(s),
+                    crumb_of(s).as_deref(),
+                    name_w,
+                    if sel { sel_style } else { gray },
+                    dim,
+                ));
+                spans.extend([
+                    Span::raw(" "),
+                    Span::styled(format!("{:<TOOL_W$} ", truncate(&s.tool, TOOL_W)), dim),
+                ]);
                 let mut avail = preview_w;
                 // The inline machine chip (filtering, multi-machine): the group
                 // headers are suppressed, so the row itself says where the
@@ -931,11 +996,26 @@ mod tests {
 
     #[test]
     fn layout_palette_renders_glyphs_and_highlight() {
-        let s = render_to(60, 14, |f| layout_palette(f, 5)); // quad highlighted
+        let s = render_to(60, 14, |f| layout_palette(f, 5, &PalettePreview::default())); // quad
         assert!(s.contains("layout"), "{s}");
         assert!(s.contains("single"), "{s}");
         assert!(s.contains("quad"), "{s}");
         assert!(s.contains("[6]"), "highlighted digit: {s}");
+    }
+
+    #[test]
+    fn layout_palette_previews_box_occupants_and_drops() {
+        let preview = PalettePreview {
+            boxes: vec![Some(PaletteBox {
+                name: "api-refactor".into(),
+                context: Some("pine:dev/api".into()),
+            })],
+            dropped: vec!["docs".into()],
+        };
+        let s = render_to(60, 20, |f| layout_palette(f, 0, &preview));
+        assert!(s.contains("api-refactor · pine:dev/api"), "occupant + where: {s}");
+        assert!(s.contains("leaves the grid: docs"), "dropped session: {s}");
+        assert!(s.contains("esc cancel"), "hints still fit: {s}");
     }
 
     #[test]

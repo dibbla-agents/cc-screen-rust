@@ -585,10 +585,10 @@ async fn multi_machine_lists_and_routes_by_machine() {
         "box 1 routes to boxB; got:\n{}",
         h.text()
     );
-    // Bordered layout titles carry the machine tag (machine/session).
+    // Bordered layout titles lead with the session name, then its machine.
     let t = h.text();
-    assert!(t.contains("boxA/alpha"), "box 0 titled by machine; got:\n{t}");
-    assert!(t.contains("boxB/bravo"), "box 1 titled by machine; got:\n{t}");
+    assert!(t.contains("alpha · boxA"), "box 0 titled by machine; got:\n{t}");
+    assert!(t.contains("bravo · boxB"), "box 1 titled by machine; got:\n{t}");
     assert!(t.contains("SNAP:boxA:alpha"), "box 0 still shows boxA's snapshot; got:\n{t}");
 }
 
