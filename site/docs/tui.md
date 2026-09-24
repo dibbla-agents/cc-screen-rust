@@ -110,8 +110,18 @@ sessions you were last *working in*, most recent first — with the cursor
 already on the first of them, so `Enter` takes you straight back to the
 session you just left. Pick sessions into the **grid** — the same six
 layouts as the web app, and panes from different machines can sit side by
-side, each titled `machine/name`. Each pane is a full terminal emulator with
-multi-thousand-line scrollback.
+side. Each pane is a full terminal emulator with multi-thousand-line
+scrollback.
+
+Everywhere a session appears, **its name comes first**: the name you gave it
+(rename with `Ctrl-R`, or from the web app), or its own name if you haven't,
+followed by the folder it's working in, dimmed — `Billing fix · dev/billing`.
+That holds in the switcher, the `Ctrl-A d` menu, each pane's border (with the
+machine in front of the folder: `Billing fix · pine:dev/billing`), and the
+bottom bar, which in the single-pane layout is where the name lives. On a
+narrow screen the folder gives way first; the name stays. Your terminal's
+window or tab title follows the focused session too, so a row of `ccs` tabs
+reads as sessions.
 
 ![The ccs switcher — every session across the fleet in one list](../img/tui-switcher.png "The switcher: session labels, colours, tools, and each one's latest line")
 
@@ -215,6 +225,11 @@ Inside the grid the prefix key is **Ctrl-A** (tmux-style):
 - click or move spatially to focus panes
 
 ![The visual layout palette open over the grid](../img/tui-layouts.png "Ctrl-A l opens the layout palette — six layouts, applied live")
+
+`Ctrl-A l` opens the layout palette. Under the six layouts it previews, by
+name, which session each box will hold in the one you've highlighted — the
+focused session always takes box 1 — and names any session that won't fit
+("leaves the grid"; it keeps running, you can pick it back from the menu).
 
 Everything else you type goes straight to the focused session's PTY.
 

@@ -165,8 +165,17 @@ sessions you were last <em>working in</em>, most recent first — with the curso
 already on the first of them, so <code>Enter</code> takes you straight back to the
 session you just left. Pick sessions into the <strong>grid</strong> — the same six
 layouts as the web app, and panes from different machines can sit side by
-side, each titled <code>machine/name</code>. Each pane is a full terminal emulator with
-multi-thousand-line scrollback.</p>
+side. Each pane is a full terminal emulator with multi-thousand-line
+scrollback.</p>
+<p>Everywhere a session appears, <strong>its name comes first</strong>: the name you gave it
+(rename with <code>Ctrl-R</code>, or from the web app), or its own name if you haven&#39;t,
+followed by the folder it&#39;s working in, dimmed — <code>Billing fix · dev/billing</code>.
+That holds in the switcher, the <code>Ctrl-A d</code> menu, each pane&#39;s border (with the
+machine in front of the folder: <code>Billing fix · pine:dev/billing</code>), and the
+bottom bar, which in the single-pane layout is where the name lives. On a
+narrow screen the folder gives way first; the name stays. Your terminal&#39;s
+window or tab title follows the focused session too, so a row of <code>ccs</code> tabs
+reads as sessions.</p>
 <p><figure><img src="../img/tui-switcher.png" alt="The ccs switcher — every session across the fleet in one list" loading="lazy" /><figcaption>The switcher: session labels, colours, tools, and each one's latest line</figcaption></figure></p>
 <p>Jump straight to a session — handy from a script or muscle memory:</p>
 <pre><code class="language-sh">ccs alpha            # attach directly (exact name, machine/name, prefix, or fuzzy)
@@ -256,6 +265,10 @@ normal mode snaps back to live</li>
 <li>click or move spatially to focus panes</li>
 </ul>
 <p><figure><img src="../img/tui-layouts.png" alt="The visual layout palette open over the grid" loading="lazy" /><figcaption>Ctrl-A l opens the layout palette — six layouts, applied live</figcaption></figure></p>
+<p><code>Ctrl-A l</code> opens the layout palette. Under the six layouts it previews, by
+name, which session each box will hold in the one you&#39;ve highlighted — the
+focused session always takes box 1 — and names any session that won&#39;t fit
+(&quot;leaves the grid&quot;; it keeps running, you can pick it back from the menu).</p>
 <p>Everything else you type goes straight to the focused session&#39;s PTY.</p>
 <h3 id="scrolling">Scrolling</h3>
 <p>What the wheel does in a pane depends on what the app inside it is doing:</p>
