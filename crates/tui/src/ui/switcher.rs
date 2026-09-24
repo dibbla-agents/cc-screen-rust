@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use crate::app::{App, SwitcherRow};
-use crate::ui::util::{ago, color_token_to_color, dir_crumb, truncate};
+use crate::ui::util::{ago, color_token_to_color, name_with_crumb, session_crumb, truncate};
 
 const BAR_BG: Color = Color::Rgb(15, 23, 32);
 const SEL_BG: Color = Color::Rgb(30, 41, 59);
@@ -120,6 +120,9 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
     let recent = app.recent_count();
     let mut nth_session = 0usize;
     let rows = app.switcher_rows();
+    // One identity column for the whole list, so the tool column lines up.
+    let longest = app.sessions().iter().map(identity_len).max().unwrap_or(0);
+    let id_w = identity_width(row_width, longest);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
@@ -127,7 +130,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
             SwitcherRow::Session(i) => {
                 let in_section = nth_session < recent;
                 nth_session += 1;
-                session_item(app, *i, multi && (filtering || in_section), row_width)
+                session_item(app, *i, multi && (filtering || in_section), row_width, id_w)
             }
         })
         .collect();
@@ -158,7 +161,7 @@ fn header_item(label: &str, online: bool, row_width: usize) -> ListItem<'static>
     ListItem::new(Line::from(spans))
 }
 
-fn session_item(app: &App, idx: usize, chip: bool, row_width: usize) -> ListItem<'static> {
+fn session_item(app: &App, idx: usize, chip: bool, row_width: usize, id_w: usize) -> ListItem<'static> {
     let s = &app.sessions()[idx];
     // A web-set session colour (proposal 0029) tints the attach dot as the
     // row's accent; absent/unknown token → today's green/grey (no
@@ -174,27 +177,28 @@ fn session_item(app: &App, idx: usize, chip: bool, row_width: usize) -> ListItem
     // glance then shows which agents are working vs done — mirrors the
     // web PWA's "running" badge. (See the server's WORK_GRACE_SECS.)
     let work = if s.waiting { "  " } else { "● " };
-    // Prefer the operator display label (0059 C1) when set; otherwise the
-    // folder breadcrumb (parent/leaf from the live cwd, proposal 0025) so
-    // two same-named sessions in different dirs read apart at a glance —
-    // itself falling back to the slug with no cwd.
-    let named = match s.label.as_deref() {
-        Some(l) if !l.is_empty() => l.to_string(),
-        _ => dir_crumb(&s.cwd, &s.name),
-    };
-    let mut spans = vec![
-        Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
-        Span::styled(
-            format!("{:<26}", truncate(&named, 26)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+    // Name-first, web parity (proposal 0033): the session's name — the
+    // operator label when set (0059 C1), else its slug — leads bold, and the
+    // folder breadcrumb (proposal 0025) trails dim, so two same-named sessions
+    // in different dirs still read apart. `id_w` is fitted to the list.
+    let crumb = session_crumb(&s.cwd);
+    let mut spans = vec![Span::styled(format!("{dot} "), Style::default().fg(dot_color))];
+    spans.extend(name_with_crumb(
+        crate::app::display_name(s),
+        crumb.as_deref(),
+        id_w,
+        Style::default().add_modifier(Modifier::BOLD),
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.extend([
+        Span::raw(" "),
         Span::styled(format!("{:<8}", truncate(&s.tool, 8)), Style::default().fg(Color::Cyan)),
         Span::styled(format!("{:>5}  ", ago(s.activity)), Style::default().fg(Color::DarkGray)),
         Span::styled(work, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    ];
+    ]);
     // Badge the one remaining non-default policy state: the rare session
     // launched with normal permission prompts (0014 removed view-only).
-    let mut prefix_cols = 2 + 26 + 8 + 7 + 2; // dot+crumb+tool+ago+work
+    let mut prefix_cols = 2 + id_w + 1 + 8 + 7 + 2; // dot+identity+gap+tool+ago+work
     if s.skip_permissions == Some(false) {
         spans.push(Span::styled(
             "safe ",
@@ -238,6 +242,21 @@ fn session_item(app: &App, idx: usize, chip: bool, row_width: usize) -> ListItem
         spans.push(Span::styled(truncate(tail, avail), style));
     }
     ListItem::new(Line::from(spans))
+}
+
+/// The switcher's identity (name · folder) column width: fitted to the longest
+/// `name · folder` in the list, at least 26 (the pre-0033 column) and at most
+/// 48 or two fifths of the row, so a wide screen shows both in full without a
+/// sea of padding before the tool column.
+fn identity_width(row_width: usize, longest: usize) -> usize {
+    longest.clamp(26, (row_width * 2 / 5).clamp(26, 48))
+}
+
+/// The display width of a session's `name · folder` identity cell, unclipped.
+fn identity_len(s: &cc_screen_protocol::SessionInfo) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let name = crate::app::display_name(s).width();
+    session_crumb(&s.cwd).map_or(name, |c| name + 3 + c.width())
 }
 
 /// Map the cursor (an index into `visible_sessions()`) to its row in the
@@ -328,6 +347,22 @@ mod tests {
         assert!(text.contains("codex-api"), "session 2 missing:\n{text}");
         assert!(text.contains("Running tests"), "preview missing:\n{text}");
         assert!(text.contains("2 session(s)"), "status bar missing:\n{text}");
+    }
+
+    #[test]
+    fn row_leads_with_session_name_then_folder() {
+        // No label: the slug names the row (web parity), the folder trails it.
+        let mut plain = sess("cc-myproj", "claude", false, true, "");
+        plain.short = "myproj".into();
+        plain.cwd = "/home/u/dev/api-server".into();
+        // A label replaces the slug, never the folder.
+        let mut named = sess("cc-other", "claude", false, true, "");
+        named.label = Some("Billing fix".into());
+        named.cwd = "/home/u/dev/billing".into();
+        let app = App::test_fixture(vec![plain, named], "s");
+        let text = rendered(&app, 120, 8);
+        assert!(text.contains("myproj · dev/api-server"), "name then folder:\n{text}");
+        assert!(text.contains("Billing fix · dev/billing"), "label then folder:\n{text}");
     }
 
     #[test]

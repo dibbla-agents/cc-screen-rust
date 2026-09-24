@@ -2,7 +2,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ratatui::style::Color;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::Span,
+};
 
 /// Map a curated session-mark palette token (proposal 0029,
 /// `cc_screen_protocol::SESSION_COLOR_TOKENS`) to a concrete terminal colour, so
@@ -83,6 +86,74 @@ pub fn dir_crumb(cwd: &str, name: &str) -> String {
     }
 }
 
+/// A session's folder breadcrumb (proposal 0025) — `None` when the agent
+/// couldn't read the cwd, so a caller never shows the slug twice (unlike
+/// `dir_crumb`, which falls back to a name for surfaces that need *something*).
+pub fn session_crumb(cwd: &str) -> Option<String> {
+    let c = dir_crumb(cwd, "");
+    (!c.is_empty()).then_some(c)
+}
+
+/// Keep the TAIL of `s` within `max` display columns, prefixing `…` when cut —
+/// for a path, whose leaf is the part that identifies it.
+pub fn truncate_w_left(s: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max - 1; // one column for the ellipsis
+    let mut tail: Vec<char> = Vec::new();
+    let mut w = 0usize;
+    for c in s.chars().rev() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        tail.push(c);
+        w += cw;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
+/// The name-first identity cell (web parity, proposal 0033): the session's
+/// display name, then — dim, and first to give way — `· <where>` (a folder
+/// breadcrumb, optionally machine-qualified). Exactly `width` display columns,
+/// padded, so it can sit in a fixed column. The name always wins the space; the
+/// breadcrumb is only drawn when a useful sliver of it fits, and is cut from
+/// the LEFT so its leaf survives.
+pub fn name_with_crumb(
+    name: &str,
+    crumb: Option<&str>,
+    width: usize,
+    name_style: Style,
+    crumb_style: Style,
+) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    const SEP: &str = " · ";
+    const MIN_CRUMB: usize = 6;
+    let name = truncate_w(name, width);
+    let mut used = name.width();
+    let mut spans = vec![Span::styled(name, name_style)];
+    if let Some(c) = crumb.filter(|c| !c.is_empty()) {
+        let room = width.saturating_sub(used + SEP.width());
+        if room >= MIN_CRUMB.min(c.width()) && room > 0 {
+            let c = truncate_w_left(c, room);
+            used += SEP.width() + c.width();
+            spans.push(Span::styled(SEP, crumb_style.add_modifier(Modifier::DIM)));
+            spans.push(Span::styled(c, crumb_style));
+        }
+    }
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    spans
+}
+
 /// Compact "time ago" from a unix-seconds timestamp (the session's last
 /// activity). Returns "-" for an unknown (zero) or future-ish timestamp.
 pub fn ago(unix_secs: i64) -> String {
@@ -132,6 +203,47 @@ mod tests {
         assert_eq!(dir_crumb("", "fallback"), "fallback");
         // Trailing slash is ignored (empty segments filtered).
         assert_eq!(dir_crumb("/a/b/c/", "x"), "b/c");
+    }
+
+    #[test]
+    fn session_crumb_is_none_without_a_cwd() {
+        assert_eq!(session_crumb("/home/erik/dev/api").as_deref(), Some("dev/api"));
+        assert_eq!(session_crumb(""), None);
+        assert_eq!(session_crumb("/"), None);
+    }
+
+    #[test]
+    fn truncate_w_left_keeps_the_leaf() {
+        assert_eq!(truncate_w_left("development/api", 20), "development/api");
+        assert_eq!(truncate_w_left("development/api", 8), "…ent/api");
+        assert_eq!(truncate_w_left("画面/共有", 5), "…共有");
+        assert_eq!(truncate_w_left("abc", 0), "");
+    }
+
+    fn cell(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn name_with_crumb_is_name_first_and_fixed_width() {
+        use unicode_width::UnicodeWidthStr;
+        let st = Style::default();
+        // Room for both: name, dim separator, full crumb, padded to width.
+        let c = cell(&name_with_crumb("api", Some("dev/api"), 20, st, st));
+        assert_eq!(c, "api · dev/api       ");
+        // Tight: the crumb gives way from the left, the name stays whole.
+        let c = cell(&name_with_crumb("refactor", Some("development/api"), 20, st, st));
+        assert_eq!(c, "refactor · …ment/api");
+        // No sliver worth drawing → name alone.
+        let c = cell(&name_with_crumb("a-long-session-name", Some("dev/api"), 22, st, st));
+        assert_eq!(c, "a-long-session-name   ");
+        // Name longer than the cell → truncated name, no crumb.
+        let c = cell(&name_with_crumb("a-very-long-name", Some("x/y"), 8, st, st));
+        assert_eq!(c, "a-very-…");
+        // No cwd → name alone, still padded.
+        let c = cell(&name_with_crumb("shell", None, 8, st, st));
+        assert_eq!(c.width(), 8);
+        assert_eq!(c.trim_end(), "shell");
     }
 
     #[test]

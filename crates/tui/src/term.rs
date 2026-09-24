@@ -2,6 +2,7 @@
 //! shell in raw mode / on the alternate screen.
 
 use std::io::{self, Stdout, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use crossterm::{
@@ -38,6 +39,12 @@ pub fn enter() -> Result<Tui> {
         EnableFocusChange,
         cursor::Hide
     )?;
+    // Save the user's window title (XTWINOPS 22) so `restore` can put it back
+    // after `set_title` has named the focused session. Emulators without a
+    // title stack ignore it — then the last session name simply lingers.
+    let _ = write!(out, "\x1b[22;0t");
+    let _ = out.flush();
+    TITLE_PUSHED.store(true, Ordering::SeqCst);
     install_panic_hook();
     Ok(Terminal::new(AnchoredBackend::new(out))?)
 }
@@ -45,6 +52,10 @@ pub fn enter() -> Result<Tui> {
 /// Undo `enter()`. Safe to call more than once.
 pub fn restore() -> Result<()> {
     let mut out = io::stdout();
+    // Pop only what `enter` pushed — `restore` may run twice (panic hook + exit).
+    if TITLE_PUSHED.swap(false, Ordering::SeqCst) {
+        let _ = write!(out, "\x1b[23;0t");
+    }
     execute!(
         out,
         cursor::Show,
@@ -56,6 +67,22 @@ pub fn restore() -> Result<()> {
     disable_raw_mode()?;
     out.flush()?;
     Ok(())
+}
+
+/// Whether `enter` pushed the user's title, i.e. `restore` owes one pop.
+static TITLE_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// OSC 2 window/tab title. Control characters are stripped so a session label
+/// can never smuggle a terminator (and with it another sequence) out.
+pub fn write_title<W: Write>(out: &mut W, title: &str) -> io::Result<()> {
+    let clean: String = title.chars().filter(|c| !c.is_control()).collect();
+    write!(out, "\x1b]2;{clean}\x07")?;
+    out.flush()
+}
+
+/// `write_title` onto the real stdout, between frames.
+pub fn set_title(title: &str) {
+    let _ = write_title(&mut io::stdout(), title);
 }
 
 /// Write one OSC 52 clipboard-store for `text` (cc-screen-saas proposal 0077
@@ -94,4 +121,16 @@ fn install_panic_hook() {
         let _ = restore();
         prev(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_strips_control_characters() {
+        let mut out = Vec::new();
+        write_title(&mut out, "api\x07\x1b]52;c;evil\x07 · ccs").unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b]2;api]52;c;evil · ccs\x07");
+    }
 }

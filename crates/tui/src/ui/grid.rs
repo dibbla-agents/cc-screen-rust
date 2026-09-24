@@ -6,7 +6,7 @@ use cc_screen_protocol::SessionInfo;
 use ratatui::{
     layout::{Alignment, Constraint, Layout as RLayout, Rect},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
@@ -14,6 +14,7 @@ use ratatui::{
 use crate::layout::{bordered, tiles, Layout};
 use crate::pane::Pane;
 use crate::ui::statusbar;
+use crate::ui::util::{name_with_crumb, session_crumb};
 
 const FOCUS: Color = Color::Cyan;
 const DIM_BORDER: Color = Color::Rgb(60, 70, 85);
@@ -51,20 +52,45 @@ pub fn render(
     );
 }
 
-/// A pane's box title: `machine/label` when aggregated through a hub, else the
-/// label — resolving the operator display name (0059 C1) by identity from the
-/// session list, falling back to the pane's session name when it isn't listed.
-fn pane_title(p: &Pane, sessions: &[SessionInfo]) -> String {
-    let base = sessions
-        .iter()
-        .find(|s| s.name == p.session && s.machine == p.machine)
-        .map(crate::app::display_name)
-        .unwrap_or(p.session.as_str());
-    if p.machine.is_empty() {
-        base.to_string()
-    } else {
-        format!("{}/{}", p.machine, base)
+/// A pane's box title, name-first (web parity, proposal 0033): the session's
+/// display name — the operator label (0059 C1) resolved by identity from the
+/// live list, else the pane's session name — in the title style, then dim
+/// context: the machine when aggregated through a hub, and the folder
+/// breadcrumb (0025). Fits `max` columns; the context gives way before the
+/// name does, and the folder is cut from the left so its leaf survives.
+fn pane_title(p: &Pane, sessions: &[SessionInfo], max: usize, ts: Style) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let info = sessions.iter().find(|s| s.name == p.session && s.machine == p.machine);
+    let name = info.map(crate::app::display_name).unwrap_or(p.session.as_str());
+    let crumb = info.and_then(|s| session_crumb(&s.cwd));
+    let context = match (p.machine.is_empty(), crumb) {
+        (true, None) => None,
+        (true, Some(c)) => Some(c),
+        (false, None) => Some(p.machine.clone()),
+        (false, Some(c)) => Some(format!("{}:{c}", p.machine)),
+    };
+    // " name · context " — the padding spaces are part of the budget.
+    let inner = max.saturating_sub(2);
+    let mut spans = name_with_crumb(
+        name,
+        context.as_deref(),
+        inner,
+        ts,
+        Style::default().fg(Color::DarkGray),
+    );
+    // `name_with_crumb` pads to a fixed column; a border title wants none.
+    if let Some(last) = spans.last() {
+        if !last.content.is_empty() && last.content.trim().is_empty() {
+            spans.pop();
+        }
     }
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let mut line = vec![Span::raw(" ")];
+    line.extend(spans);
+    if used > 0 {
+        line.push(Span::raw(" "));
+    }
+    Line::from(line)
 }
 
 fn render_box(
@@ -97,14 +123,13 @@ fn render_box(
         (false, Some(c)) => (Style::default().fg(c), Style::default().fg(Color::Gray)),
         (false, None) => (Style::default().fg(DIM_BORDER), Style::default().fg(Color::Gray)),
     };
+    // The title may use the whole top edge bar the two corners.
+    let max = rect.width.saturating_sub(2) as usize;
     let title = match pane {
-        Some(p) => pane_title(p, sessions),
-        None => "empty".to_string(),
+        Some(p) => pane_title(p, sessions, max, ts),
+        None => Line::from(Span::styled(" empty ", ts)),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(bs)
-        .title(Span::styled(format!(" {title} "), ts));
+    let block = Block::default().borders(Borders::ALL).border_style(bs).title(title);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -130,6 +155,39 @@ mod tests {
     fn dummy(id: u64, name: &str) -> Pane {
         let (tx, _rx) = mpsc::channel(4);
         Pane::new(id, name.into(), String::new(), 40, 10, tx, tokio::spawn(async {}))
+    }
+
+    #[tokio::test]
+    async fn box_title_and_bar_name_the_session_and_its_folder() {
+        let mut info: SessionInfo = serde_json::from_value(serde_json::json!({
+            "name": "cc-api", "tool": "claude", "short": "api", "attached": true,
+            "activity": 0, "preview": "", "cwd": "/home/u/dev/api-server",
+            "label": "Billing fix"
+        }))
+        .unwrap();
+        info.machine = String::new();
+        let panes = vec![Some(dummy(1, "cc-api")), None];
+        let sessions = vec![info];
+        let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        t.draw(|f| render(f, Layout::Stacked, &panes, &sessions, 0, "^A", false, false, None, None))
+            .unwrap();
+        let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(s.contains(" Billing fix · dev/api-server "), "box title: {s:?}");
+
+        // Single has no border, so the bar is where the folder shows.
+        let one = vec![Some(dummy(1, "cc-api"))];
+        let mut t = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        t.draw(|f| render(f, Layout::Single, &one, &sessions, 0, "^A", false, false, None, None))
+            .unwrap();
+        let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(s.contains(" Billing fix   dev/api-server  connecting"), "bar name + folder: {s:?}");
+
+        // Narrow: the folder gives way, the name stays.
+        let mut t = Terminal::new(TestBackend::new(24, 12)).unwrap();
+        t.draw(|f| render(f, Layout::Stacked, &panes, &sessions, 0, "^A", false, false, None, None))
+            .unwrap();
+        let s: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(s.contains("Billing fix"), "name survives a narrow box: {s:?}");
     }
 
     #[tokio::test]

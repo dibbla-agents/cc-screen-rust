@@ -14,6 +14,8 @@ use cc_screen_protocol::SessionInfo;
 
 use crate::layout::Layout;
 use crate::pane::{ConnState, Pane};
+use crate::ui::util::{session_crumb, truncate_w_left};
+use unicode_width::UnicodeWidthStr;
 
 const BAR_BG: Color = Color::Rgb(15, 23, 32);
 /// Amber accent for the ready-session toast (0018 §3), matching the web toast.
@@ -46,6 +48,7 @@ pub fn render(
     f.render_widget(Block::default().style(Style::default().bg(BAR_BG)), area);
 
     let mut left: Vec<Span> = Vec::new();
+    let mut where_: Option<String> = None;
     match focused {
         Some(p) => {
             let (cols, rows) = p.size();
@@ -54,15 +57,20 @@ pub fn render(
                 ConnState::Open => ("● live", Color::Green),
                 ConnState::Closed => ("✕ closed", Color::Red),
             };
-            let name = sessions
-                .iter()
-                .find(|s| s.name == p.session && s.machine == p.machine)
-                .map(crate::app::display_name)
-                .unwrap_or(p.session.as_str());
+            let info = sessions.iter().find(|s| s.name == p.session && s.machine == p.machine);
+            let name = info.map(crate::app::display_name).unwrap_or(p.session.as_str());
             left.push(Span::styled(
                 format!(" {name} "),
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             ));
+            // Where the session lives — machine and folder — right after its
+            // name. Only this is elastic: it's sized once the rest is known.
+            let crumb = info.and_then(|s| session_crumb(&s.cwd));
+            where_ = match (p.machine.is_empty(), crumb) {
+                (true, c) => c,
+                (false, None) => Some(p.machine.clone()),
+                (false, Some(c)) => Some(format!("{}:{c}", p.machine)),
+            };
             left.push(Span::styled(format!("  {state_txt}"), Style::default().fg(state_col)));
             left.push(Span::styled(format!("  {cols}×{rows}"), Style::default().fg(Color::DarkGray)));
             if scroll_mode || p.scroll_offset() > 0 {
@@ -95,7 +103,6 @@ pub fn render(
             Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
-    f.render_widget(Paragraph::new(Line::from(left)), area);
 
     // The right segment is the ready-session toast when one is up (0018 §3),
     // otherwise the usual key hints. The toast is non-modal — it lives in the
@@ -123,5 +130,19 @@ pub fn render(
             Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
         }
     };
+
+    // The focused session's machine:folder, in whatever room the fixed left
+    // segments and the right segment leave — dropped rather than overlapping.
+    if let Some(w) = where_ {
+        let fixed: usize = left.iter().map(|s| s.content.width()).sum::<usize>() + right.width();
+        let room = (area.width as usize).saturating_sub(fixed + 2 + 2);
+        if room >= 8.min(w.width()) && room > 0 {
+            left.insert(
+                1,
+                Span::styled(format!("  {}", truncate_w_left(&w, room)), Style::default().fg(Color::Gray)),
+            );
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(left)), area);
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }
