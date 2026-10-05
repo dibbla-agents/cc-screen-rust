@@ -49,8 +49,9 @@ export function errMsg(e: unknown): string {
 
 // Extensions the editor opens on tap. Markdown is the headline use; plain text
 // and common config/code files come along for the ride (the editor highlights
-// code via CodeMirror's language-data). Anything else (images, archives,
-// binaries) keeps the download/share behaviour. Extensionless files are treated
+// code via CodeMirror's language-data). PDFs and raster images open in their
+// read-only viewers (see canOpenInEditor); anything else (archives, binaries)
+// keeps the download/share behaviour. Extensionless files are treated
 // as text (READMEs, LICENSE, Dockerfile, …) — the server's binary guard still
 // catches anything that isn't actually text.
 const EDITABLE_EXTS = new Set([
@@ -86,11 +87,25 @@ export function isPdfFile(name: string): boolean {
   return name.toLowerCase().endsWith(".pdf");
 }
 
+// Raster images the browser decodes natively, shown read-only in the editor's
+// image viewer. SVG is deliberately absent — it stays in EDITABLE_EXTS and opens
+// as source. HEIC is absent too: Chrome can't decode it.
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif"]);
+
+// isImageFile decides whether the editor opens a file in the read-only image
+// viewer. Like PDFs, images never go through the text read/write path — see
+// EditorOverlay's "image" status.
+export function isImageFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  return dot > 0 && IMAGE_EXTS.has(lower.slice(dot + 1));
+}
+
 // canOpenInEditor is the routing predicate the file trees use to decide whether
-// a tap opens the editor overlay (text editor or PDF viewer) vs. falling through
-// to download. It's the union of the editable-text set and PDFs.
+// a tap opens the editor overlay (text editor, PDF or image viewer) vs. falling
+// through to download. It's the union of the editable-text set, PDFs and images.
 export function canOpenInEditor(name: string): boolean {
-  return isEditableFile(name) || isPdfFile(name);
+  return isEditableFile(name) || isPdfFile(name) || isImageFile(name);
 }
 
 export interface TreeSection {

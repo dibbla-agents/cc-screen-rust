@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { resolveWatchDir, buildTreeFilter, type DirContents, type TreeSection } from "./dirTree";
+import {
+  resolveWatchDir,
+  buildTreeFilter,
+  isImageFile,
+  canOpenInEditor,
+  type DirContents,
+  type TreeSection,
+} from "./dirTree";
 import type { DirEntry, FileEntry } from "../api";
 
 // resolveWatchDir maps an /api/watch frame's `dir` to the cache key to re-list.
@@ -105,5 +112,24 @@ describe("buildTreeFilter", () => {
     expect(r.matchedFiles.size).toBe(0);
     expect(r.matchedDirs.size).toBe(0);
     expect(r.rows.length).toBe(0);
+  });
+});
+
+// Raster images open in the editor's read-only image viewer instead of falling
+// through to download; SVG stays a text file and HEIC isn't decodable in Chrome.
+describe("isImageFile / canOpenInEditor", () => {
+  it("recognises browser-decodable raster images, case-insensitively", () => {
+    for (const n of ["a.png", "B.JPG", "c.jpeg", "d.gif", "e.webp", "f.avif", "dir.v2/shot.Png"]) {
+      expect(isImageFile(n)).toBe(true);
+      expect(canOpenInEditor(n)).toBe(true);
+    }
+  });
+  it("leaves SVG, HEIC, lookalikes and dotfiles alone", () => {
+    for (const n of ["logo.svg", "IMG_1.heic", "png", ".png", "notes.png.md", "archive.zip"]) {
+      expect(isImageFile(n)).toBe(false);
+    }
+    expect(canOpenInEditor("logo.svg")).toBe(true); // as text
+    expect(canOpenInEditor("IMG_1.heic")).toBe(false);
+    expect(canOpenInEditor("archive.zip")).toBe(false);
   });
 });

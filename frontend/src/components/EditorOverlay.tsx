@@ -38,6 +38,7 @@ import {
   errMsg,
   isMarkdownFile,
   isPdfFile,
+  isImageFile,
   canOpenInEditor,
   fmtAge,
   useDirTree,
@@ -57,6 +58,7 @@ import { noteUserCopy } from "../osc52Bus";
 // pdf.js is heavy and only needed for PDFs — keep it (and its worker) out of the
 // editor's chunk, loaded only when a PDF is first opened.
 const PdfViewer = lazy(() => import("./PdfViewer"));
+const ImageViewer = lazy(() => import("./ImageViewer"));
 import {
   XIcon,
   FilePlusIcon,
@@ -148,9 +150,10 @@ interface Props {
   onShareLink?: (subject: { title: string; machine: string; path: string; relPath: string }) => void;
 }
 
-// "ready" = a text file is loaded and editable; "pdf" = the active file is a PDF
-// shown read-only in the pdf.js viewer (no text read/write happens for it).
-type Status = "empty" | "loading" | "ready" | "error" | "noteditable" | "pdf";
+// "ready" = a text file is loaded and editable; "pdf" / "image" = the active file
+// is a PDF / raster image shown read-only in its viewer (no text read/write
+// happens for either).
+type Status = "empty" | "loading" | "ready" | "error" | "noteditable" | "pdf" | "image";
 
 // Editor font size (px), shared across markdown live-preview + reading view via
 // the --cc-editor-font CSS variable. Persisted so it survives reopen/reload.
@@ -926,12 +929,13 @@ export default function EditorOverlay({
       setConflict(false);
       return;
     }
-    // PDFs are binary — skip the text read entirely and hand the path to the
-    // pdf.js viewer. The text-editor toolbar controls all gate on status
+    // PDFs and images are binary — skip the text read entirely and hand the
+    // path to their viewer. The text-editor toolbar controls all gate on status
     // "ready", so they self-hide in this mode.
-    if (isPdfFile(activePath)) {
+    const viewer = isPdfFile(activePath) ? "pdf" : isImageFile(activePath) ? "image" : null;
+    if (viewer) {
       setName(basename(activePath));
-      setStatus("pdf");
+      setStatus(viewer);
       setContent("");
       setLoaded("");
       setError("");
@@ -1520,11 +1524,11 @@ export default function EditorOverlay({
           </select>
         )}
 
-        {/* Download the open file. Shown for both the text editor and the PDF
-            viewer (which gates its other controls off), on desktop and phone —
+        {/* Download the open file. Shown for the text editor and the PDF/image
+            viewers (which gate its other controls off), on desktop and phone —
             so "save this file to my device" is always one tap from whatever's
             open, mirroring the per-row ⬇ in the tree. */}
-        {(status === "ready" || status === "pdf") && activePath && (
+        {(status === "ready" || status === "pdf" || status === "image") && activePath && (
           <button
             onClick={() => onDownload({ name, path: activePath, size: 0, mtime: 0 })}
             disabled={downloading === activePath}
@@ -2040,6 +2044,11 @@ export default function EditorOverlay({
               }
             >
               <PdfViewer path={activePath} name={name} machine={fileMachine} />
+            </Suspense>
+          )}
+          {status === "image" && activePath && (
+            <Suspense fallback={null}>
+              <ImageViewer key={activePath} path={activePath} name={name} machine={fileMachine} />
             </Suspense>
           )}
           {status === "ready" &&
