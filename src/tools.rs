@@ -14,13 +14,15 @@ use cc_screen_protocol::{ExtraDirs, ToolInfo};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ImagePasteStrategy {
     /// Send Ctrl-V (0x16); the assistant shells out to xclip/wl-paste/pbpaste
-    /// and the cc-screen shim serves the staged PNG (proposal 0007). Claude
-    /// Code's contract, and the backward-compatible default for every tool.
+    /// and the cc-screen shim serves the staged PNG (proposal 0007). The
+    /// backward-compatible default for an unknown custom tool.
     ClipboardProbe,
     /// Stage the PNG as a private local file and bracketed-paste its
     /// shell-escaped absolute path — no Enter, no Ctrl-V. Codex reads the
-    /// clipboard natively via X11/Wayland (absent on a headless box), but it
-    /// recognises an explicitly pasted readable image path and attaches it.
+    /// clipboard natively via X11/Wayland (absent on a headless box), and
+    /// Claude Code reads it via `osascript` on macOS / PowerShell on Windows —
+    /// the real pasteboard, which the shim can't answer — but each recognises
+    /// an explicitly pasted readable image path and attaches it.
     BracketedImagePath,
 }
 
@@ -1042,11 +1044,16 @@ fn with_defaults(mut tools: Vec<Tool>, config_dir: &Path) -> Vec<Tool> {
                 }
             }
         }
-        // Image-paste delivery (0066): Codex — including a tools.conf override
-        // that keeps its command or prefix — gets the bracketed-path strategy;
-        // everything else (Claude, kimi, gemini, shell, unknown custom tools)
-        // keeps the backward-compatible clipboard probe.
-        if matches!((t.prefix.as_str(), t.cmd.as_str()), ("codex" | "opencode", _) | (_, "coc" | "oc")) {
+        // Image-paste delivery (0066): Claude, Codex and OpenCode — including a
+        // tools.conf override that keeps the command or prefix — get the
+        // bracketed-path strategy on every OS. Claude moved off the probe
+        // because on macOS/Windows it reads the real pasteboard, not the shim.
+        // Everything else (kimi, gemini, shell, unknown custom tools) keeps
+        // the backward-compatible clipboard probe.
+        if matches!(
+            (t.prefix.as_str(), t.cmd.as_str()),
+            ("claude" | "codex" | "opencode", _) | (_, "cc" | "coc" | "oc")
+        ) {
             t.image_paste = ImagePasteStrategy::BracketedImagePath;
         }
         // The assistant's own remote control (0082). Claude Code is the only CLI
@@ -1260,10 +1267,10 @@ mod tests {
 
     #[test]
     fn image_paste_strategy_mapping() {
-        // Codex and OpenCode use durable bracketed image paths.
+        // Claude, Codex and OpenCode use durable bracketed image paths.
         let t = load_tools(None, &test_cfg());
         for tool in &t {
-            let want = if matches!(tool.prefix.as_str(), "codex" | "opencode") {
+            let want = if matches!(tool.prefix.as_str(), "claude" | "codex" | "opencode") {
                 ImagePasteStrategy::BracketedImagePath
             } else {
                 ImagePasteStrategy::ClipboardProbe
@@ -1278,6 +1285,12 @@ mod tests {
         assert_eq!(by_cmd[0].image_paste, ImagePasteStrategy::BracketedImagePath);
         let open = with_defaults(parse("cc_tool xx opencode 'my-opencode-wrapper'"), &test_cfg());
         assert_eq!(open[0].image_paste, ImagePasteStrategy::BracketedImagePath);
+        // So does a Claude override, by prefix or by command — including the
+        // documented `--rc` opt-in template (0015).
+        let claude = with_defaults(parse("cc_tool xx claude 'my-claude-wrapper'"), &test_cfg());
+        assert_eq!(claude[0].image_paste, ImagePasteStrategy::BracketedImagePath);
+        let rc = with_defaults(parse("cc_tool cc claude \"claude --rc 'claude-{name}'\""), &test_cfg());
+        assert_eq!(rc[0].image_paste, ImagePasteStrategy::BracketedImagePath);
         // A genuinely unknown custom tool keeps the compatible probe.
         let custom = with_defaults(parse("cc_tool yy other 'other-cli'"), &test_cfg());
         assert_eq!(custom[0].image_paste, ImagePasteStrategy::ClipboardProbe);

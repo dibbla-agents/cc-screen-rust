@@ -1,7 +1,7 @@
 // Clipboard image relay — the phone-screenshot-into-Claude path. The UI POSTs a
 // PNG to /api/clip?session=<name>; we stage it (per-session slot, TTL) and write
-// the paste key (Ctrl-V = 0x16) to that session's PTY. Claude Code then reads its
-// clipboard via the cc-screen clipboard shim (`scripts/clip-shim.sh`, shipped by
+// the paste key (Ctrl-V = 0x16) to that session's PTY. A clipboard-probing tool
+// then reads its clipboard via the cc-screen clipboard shim (`scripts/clip-shim.sh`, shipped by
 // this agent's installer as xclip/wl-paste/pbpaste). The shim reads the staged
 // image from, in order: a per-session local FILE (`$CCWEB_CLIP_FILE`, the only
 // path that works when a hub-only agent has no HTTP bind) → `$CCWEB_CLIP_URL`
@@ -33,7 +33,7 @@ use serde::Deserialize;
 use crate::engine::AppState;
 
 const TTL: Duration = Duration::from_secs(20);
-pub const PASTE_BYTE: u8 = 0x16; // Ctrl-V — the key Claude Code reads the clipboard on
+pub const PASTE_BYTE: u8 = 0x16; // Ctrl-V — the key a clipboard-probing tool reads the clipboard on
 
 // ── local file drop (so the shim works with no HTTP bind) ────────────────────
 //
@@ -164,12 +164,14 @@ pub struct ClipReadQuery {
 //
 // Delivery is assistant-aware (proposal 0066), dispatched on the session's
 // server-owned `image_paste` strategy — never on client input:
-//   - ClipboardProbe (Claude & default): stage in the ClipStore + drop file,
-//     send Ctrl-V; the clipboard shim serves the image (proposal 0007).
-//   - BracketedImagePath (Codex): stage a unique durable private PNG and
-//     bracketed-paste its shell-escaped absolute path — no Enter, no Ctrl-V.
-//     Codex attaches a recognized pasted image path itself; its native
-//     clipboard read needs X11/Wayland a headless box doesn't have.
+//   - ClipboardProbe (unknown custom tools): stage in the ClipStore + drop
+//     file, send Ctrl-V; the clipboard shim serves the image (proposal 0007).
+//   - BracketedImagePath (Claude, Codex, OpenCode): stage a unique durable
+//     private PNG and bracketed-paste its shell-escaped absolute path — no
+//     Enter, no Ctrl-V. Each attaches a recognized pasted image path itself;
+//     their native clipboard reads need X11/Wayland a headless box doesn't
+//     have, or (Claude on macOS/Windows) the real pasteboard the shim can't
+//     answer.
 //
 // A 204 means the bytes were staged and the PTY write completed — not that the
 // assistant has parsed the attachment.
