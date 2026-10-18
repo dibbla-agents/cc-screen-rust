@@ -58,8 +58,10 @@ const EXIT_ECHO_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 ///   the Enter of a combined `/exit\r` — Codex never quit at all that way.
 ///
 /// Grok: Ctrl+Q twice is the documented immediate quit, and the only one that
-/// also works on its welcome/login screen. Gemini, Kimi and custom tools keep the
-/// plain `/exit\r` — no authenticated copy was available to verify a change.
+/// also works on its welcome/login screen. Gemini, Kimi and custom tools get no
+/// Ctrl+C — no authenticated copy was available to verify what it does there —
+/// but their Enter is split off too, so it gets the same echo check: Gemini also
+/// asks whether to trust a folder, and a blind Enter would answer it.
 fn graceful_exit_input(tool: &str) -> &'static [(&'static [u8], std::time::Duration)] {
     match tool {
         "claude" | "codex" | "opencode" => &[
@@ -68,7 +70,7 @@ fn graceful_exit_input(tool: &str) -> &'static [(&'static [u8], std::time::Durat
             (b"\r", NO_SETTLE),
         ],
         "grok" => &[(b"\x11", GROK_EXIT_SETTLE), (b"\x11", NO_SETTLE)],
-        _ => &[(b"/exit\r", NO_SETTLE)],
+        _ => &[(b"/exit", EXIT_STEP_SETTLE), (b"\r", NO_SETTLE)],
     }
 }
 
@@ -1492,8 +1494,9 @@ mod tests {
             assert!(graceful_exit_input(t)[1].1 >= EXIT_STEP_SETTLE, "{t}");
         }
         assert_eq!(keys("grok"), vec![b"\x11".as_slice(), b"\x11"]);
-        assert_eq!(keys("gemini"), vec![b"/exit\r".as_slice()]);
-        assert_eq!(keys("something-custom"), vec![b"/exit\r".as_slice()]);
+        for t in ["gemini", "kimi", "something-custom"] {
+            assert_eq!(keys(t), vec![b"/exit".as_slice(), b"\r"], "{t}");
+        }
     }
 
     // Proposal 0050 C3. `restore_all`'s own comment says a session skipped for a
