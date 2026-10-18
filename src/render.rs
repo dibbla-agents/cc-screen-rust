@@ -139,6 +139,21 @@ impl Emulator {
         String::new()
     }
 
+    /// How many times `needle` appears on the visible screen (not scrollback),
+    /// row by row. A graceful exit compares this before and after typing
+    /// `/exit` to learn whether the keystrokes reached a composer at all.
+    pub fn screen_count(&self, needle: &str) -> usize {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        (0..grid.screen_lines() as i32)
+            .map(|li| {
+                let row = &grid[Line(li)];
+                let s: String = (0..cols).map(|c| row[Column(c)].c).collect();
+                s.matches(needle).count()
+            })
+            .sum()
+    }
+
     /// Plain-text render of the last `max_lines` non-blank rows of the buffer
     /// (scrollback + screen), one row per line, no ANSI/SGR. This is the LLM
     /// context window for the session summary (proposal 0022): `snapshot()` is
@@ -432,6 +447,15 @@ fn named_code(n: NamedColor, fg: bool) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_count_sees_only_the_visible_screen() {
+        let mut e = Emulator::new(40, 3);
+        e.process(b"/exit in history\r\n\r\n\r\n\r\n"); // scrolled off
+        assert_eq!(e.screen_count("/exit"), 0);
+        e.process(b"> /exit\r\n  /exit  Exit the REPL");
+        assert_eq!(e.screen_count("/exit"), 2);
+    }
 
     /// Full buffer text (scrollback + screen), one row per line, trailing-trimmed.
     fn full_text(e: &Emulator) -> String {

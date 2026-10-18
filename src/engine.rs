@@ -39,6 +39,9 @@ const FORCED_STOP: std::time::Duration = std::time::Duration::from_secs(5);
 const EXIT_STEP_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 const GROK_EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 const NO_SETTLE: std::time::Duration = std::time::Duration::ZERO;
+/// How long a typed `/exit` gets to appear on screen before the Enter that
+/// would submit it is withheld (see [`Session::graceful_exit`]).
+const EXIT_ECHO_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The keystrokes that ask `tool` to quit, each followed by a pause.
 ///
@@ -648,13 +651,50 @@ impl Session {
     }
 
     /// Graceful end: type the agent's `/exit` + Enter (the AI CLIs quit on it).
-    /// OpenCode needs the command and Enter split so autocomplete sees `/exit`.
+    ///
+    /// A bare Enter is only sent once the command typed before it shows up on
+    /// the screen. A session parked on a question — Codex's "Update available"
+    /// or "Do you trust this directory?", Claude's folder-trust check — ignores
+    /// the typed `/exit`, and a blind Enter would *answer* it: Codex 0.147 on
+    /// its update screen took Ctrl+C as "skip", showed the trust question, and
+    /// the Enter trusted the folder. Without the Enter the restart just falls
+    /// through to the kill, and the session comes back on the same question.
     pub fn graceful_exit(&self) {
+        let mut typed: Option<(&str, usize)> = None;
         for (bytes, settle) in graceful_exit_input(&self.tool) {
+            if *bytes == b"\r" {
+                if let Some((cmd, before)) = typed {
+                    if !self.wait_for_echo(cmd, before, EXIT_ECHO_WAIT) {
+                        tracing::info!(session = %self.name, "restart: {cmd} not echoed (a prompt is open?) — not pressing Enter");
+                        return;
+                    }
+                }
+            } else if let Some(cmd) = std::str::from_utf8(bytes).ok().filter(|s| s.starts_with('/')) {
+                typed = Some((cmd, self.screen_count(cmd)));
+            }
             self.write_input(bytes);
             if !settle.is_zero() {
                 std::thread::sleep(*settle);
             }
+        }
+    }
+
+    fn screen_count(&self, needle: &str) -> usize {
+        self.state.lock().map(|s| s.emu.screen_count(needle)).unwrap_or(0)
+    }
+
+    /// Whether `needle` appears on screen more often than the `before` count
+    /// within `limit` — i.e. whether what was just typed was echoed.
+    fn wait_for_echo(&self, needle: &str, before: usize, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if self.screen_count(needle) > before {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 
@@ -1963,6 +2003,55 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         false
+    }
+
+    // A session parked on a question (Codex's update/trust screens, Claude's
+    // folder check) doesn't echo the typed `/exit`, and the Enter after it would
+    // answer the question — Codex trusted a folder that way. The Enter is only
+    // sent when `/exit` showed up on screen. Both children run in raw mode and
+    // record every byte; only the echo differs.
+    #[test]
+    fn graceful_exit_withholds_enter_when_the_command_is_not_echoed() {
+        let tmp = std::env::temp_dir().join(format!("ccr-exitecho-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let recorder = |stty: &str, out: &str| {
+            let mut t = shell_tool(&format!("stty {stty}; cat > {}", tmp.join(out).display()));
+            t.prefix = "codex".into();
+            t
+        };
+        let prompt = recorder("raw -echo", "prompt.bin");
+        let composer = recorder("raw", "composer.bin");
+        let state = AppState::new(
+            vec![prompt.clone(), composer.clone()],
+            std::env::var("PATH").unwrap_or_default(),
+            String::new(),
+            tmp.clone(),
+            tmp.clone(),
+            "test-agent".into(),
+            crate::auth::Auth::load(&tmp, None, None),
+            cc_screen_auth::OriginPolicy::default(),
+        );
+        let dir = tmp.to_string_lossy().to_string();
+        let read = |f: &str| std::fs::read(tmp.join(f)).unwrap_or_default();
+        let done = |f: &str, len: usize| wait_until(|| read(f).len() >= len);
+
+        let p = state.create(&prompt, "prompt", &dir, vec![], false, true, false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300)); // let stty land
+        state.get(&p).unwrap().graceful_exit();
+        assert!(done("prompt.bin", 6));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(read("prompt.bin"), b"\x03/exit", "no Enter into a prompt that ignored /exit");
+
+        let c = state.create(&composer, "composer", &dir, vec![], false, true, false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        state.get(&c).unwrap().graceful_exit();
+        assert!(done("composer.bin", 7));
+        assert_eq!(read("composer.bin"), b"\x03/exit\r", "an echoed /exit is submitted");
+
+        for s in [p, c] {
+            state.get(&s).unwrap().kill();
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // The load-bearing rule of proposal 0049: a CLEAN exit is normally a
