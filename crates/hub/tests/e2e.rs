@@ -21,7 +21,8 @@ use cc_screen_hub::test_support::{
     await_machine, connect, read_until, send, spawn_fake_agent, spawn_fake_agent_marked, start_hub,
 };
 use cc_screen_protocol::hub::{
-    decode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_AGENT_UPDATE, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
+    decode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_AGENT_UPDATE, CAP_ASSISTANT_UPDATE, CAP_SESSION_RESTART,
+    HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
@@ -612,4 +613,59 @@ async fn agent_self_update_is_relayed_only_to_agents_that_can() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+// A single-session restart is synchronous on the agent and may legitimately take
+// its full 10 s graceful + 5 s forced stop plus the relaunch. The hub used to
+// give up after its default 10 s and answer 504 — a red "agent did not respond"
+// for a restart that went on to succeed. A slow reply must still arrive.
+#[tokio::test]
+async fn a_slow_session_restart_still_reaches_the_client() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    let mut ws = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "slowbox".into(),
+            hostname: "slowbox".into(),
+            agent_version: "0.5.9".into(),
+            tools: vec![],
+            caps: vec![CAP_SESSION_RESTART.to_string()],
+        },
+        b"",
+    )
+    .await;
+    let session = cc_screen_hub::test_support::sess("opencode-proj");
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![session] }, b"").await;
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Binary(buf) = msg else { continue };
+            let Ok((HubMsg::Command { req, cmd: Cmd::RestartSession { session } }, _)) = decode_frame::<HubMsg>(&buf)
+            else {
+                continue;
+            };
+            // Longer than the hub's default request deadline.
+            tokio::time::sleep(Duration::from_secs(11)).await;
+            let row = cc_screen_protocol::SessionRestartStatus {
+                session,
+                tool: "opencode".into(),
+                state: "resumed".into(),
+                message: None,
+            };
+            send(&mut ws, &AgentMsg::Reply { req, result: CmdResult::Json(serde_json::to_value(row).unwrap()) }, b"")
+                .await;
+        }
+    });
+    await_machine(&hub).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{hub}/api/session/restart?machine=slowbox"))
+        .json(&serde_json::json!({ "session": "opencode-proj" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "not a 504");
+    let row: cc_screen_protocol::SessionRestartStatus = resp.json().await.unwrap();
+    assert_eq!(row.state, "resumed");
 }

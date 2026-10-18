@@ -493,9 +493,15 @@ pub async fn restart_session(
             .into_response();
     }
     // `update_send` is the generic "reply is JSON or an error status" mapper —
-    // the restart's one-row `SessionRestartStatus` rides it unchanged.
-    update_send(agent, Cmd::RestartSession { session: b.session }).await
+    // the restart's one-row `SessionRestartStatus` rides it unchanged. Its own
+    // deadline, comfortably past the agent's worst case (10 s graceful + 5 s
+    // forced + relaunch): with the default 10 s a slow stop was reported as a
+    // 504 while the restart went on to succeed.
+    update_send_within(agent, Cmd::RestartSession { session: b.session }, RESTART_REPLY_TIMEOUT).await
 }
+
+/// How long the hub waits for a single-session restart's reply.
+const RESTART_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Deserialize)]
 pub struct ColorBody {
@@ -656,7 +662,19 @@ fn update_target_caps(
 /// the *running* job as its body (the agent JSON-encodes it into `msg`), so the
 /// client can switch to watching that job instead of racing a second one.
 async fn update_send(agent: std::sync::Arc<crate::registry::AgentConn>, cmd: Cmd) -> Response {
-    match agent.request(cmd).await {
+    reply_response(agent.request(cmd).await)
+}
+
+async fn update_send_within(
+    agent: std::sync::Arc<crate::registry::AgentConn>,
+    cmd: Cmd,
+    timeout: std::time::Duration,
+) -> Response {
+    reply_response(agent.request_within(cmd, timeout).await)
+}
+
+fn reply_response(reply: Result<CmdResult, RequestErr>) -> Response {
+    match reply {
         Ok(CmdResult::Json(v)) => Json(v).into_response(),
         Ok(CmdResult::Error { code, msg }) => {
             let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);

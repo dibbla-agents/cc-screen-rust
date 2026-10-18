@@ -416,6 +416,15 @@ impl AgentConn {
     /// request id). Returns `Offline` if the uplink is gone, `Timeout` if the
     /// agent doesn't answer in time.
     pub async fn request(&self, cmd: Cmd) -> Result<CmdResult, RequestErr> {
+        self.request_within(cmd, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::request`] with its own deadline, for an op the agent answers
+    /// synchronously but slowly — a single-session restart (proposal 0087) can
+    /// take its full 10 s graceful + 5 s forced stop plus the relaunch, and a
+    /// reply that arrives after the default deadline became a 504 for a restart
+    /// that had in fact succeeded.
+    pub async fn request_within(&self, cmd: Cmd, timeout: Duration) -> Result<CmdResult, RequestErr> {
         let req = self.next_req.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
@@ -424,7 +433,7 @@ impl AgentConn {
             self.pending.lock().unwrap().remove(&req);
             return Err(RequestErr::Offline);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => Ok(result),
             // Timed out, or the sender was dropped (agent went offline → pending
             // drained). Clean up the slot either way.

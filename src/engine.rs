@@ -33,19 +33,39 @@ const INIT_ROWS: u16 = 24;
 /// doesn't stall the rest of the job.
 const GRACEFUL_STOP: std::time::Duration = std::time::Duration::from_secs(10);
 const FORCED_STOP: std::time::Duration = std::time::Duration::from_secs(5);
-const OPENCODE_EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+/// The pause between the steps of a graceful exit, so each lands as its own
+/// keypress: OpenCode and Codex both swallow the Enter of a combined `/exit\r`
+/// into their slash-command menu.
+const EXIT_STEP_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 const GROK_EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
-fn graceful_exit_input(tool: &str) -> (&'static [u8], Option<std::time::Duration>, &'static [u8]) {
-    // OpenCode (v1.18.22): a combined `/exit\r` is swallowed by autocomplete.
-    if tool == "opencode" {
-        (b"/exit", Some(OPENCODE_EXIT_SETTLE), b"\r")
-    } else if tool == "grok" {
-        // Grok 1.0.13: `/exit`/`/quit` work in an authenticated TUI, but a
-        // welcome/login screen (first run, no auth.json) ignores them. Ctrl+Q
-        // twice is the documented immediate quit and works on both surfaces.
-        (b"\x11", Some(GROK_EXIT_SETTLE), b"\x11")
-    } else {
-        (b"/exit\r", None, b"")
+const NO_SETTLE: std::time::Duration = std::time::Duration::ZERO;
+
+/// The keystrokes that ask `tool` to quit, each followed by a pause.
+///
+/// Claude Code, Codex and OpenCode get **Ctrl+C, then `/exit`, then Enter**,
+/// verified against Claude 2.1.302, Codex 0.147 and OpenCode 1.18.22/1.19.0 in a
+/// real PTY:
+/// - Ctrl+C first, because `/exit` is TYPED into the composer: with an unsent
+///   draft there it became "draft/exit", which OpenCode then sent to the model
+///   (and Claude would too) instead of quitting — the restart then waited out
+///   its 10 s and killed the session mid-reply. Ctrl+C clears a draft (even a
+///   multi-line one; Ctrl+U clears only the current line), interrupts a reply in
+///   progress, and on an empty idle composer is at worst a "press again" hint.
+/// - Enter as its own write, because OpenCode's and Codex's slash menus consume
+///   the Enter of a combined `/exit\r` — Codex never quit at all that way.
+///
+/// Grok: Ctrl+Q twice is the documented immediate quit, and the only one that
+/// also works on its welcome/login screen. Gemini, Kimi and custom tools keep the
+/// plain `/exit\r` — no authenticated copy was available to verify a change.
+fn graceful_exit_input(tool: &str) -> &'static [(&'static [u8], std::time::Duration)] {
+    match tool {
+        "claude" | "codex" | "opencode" => &[
+            (b"\x03", EXIT_STEP_SETTLE),
+            (b"/exit", EXIT_STEP_SETTLE),
+            (b"\r", NO_SETTLE),
+        ],
+        "grok" => &[(b"\x11", GROK_EXIT_SETTLE), (b"\x11", NO_SETTLE)],
+        _ => &[(b"/exit\r", NO_SETTLE)],
     }
 }
 
@@ -630,11 +650,11 @@ impl Session {
     /// Graceful end: type the agent's `/exit` + Enter (the AI CLIs quit on it).
     /// OpenCode needs the command and Enter split so autocomplete sees `/exit`.
     pub fn graceful_exit(&self) {
-        let (first, delay, second) = graceful_exit_input(&self.tool);
-        self.write_input(first);
-        if let Some(delay) = delay {
-            std::thread::sleep(delay);
-            self.write_input(second);
+        for (bytes, settle) in graceful_exit_input(&self.tool) {
+            self.write_input(bytes);
+            if !settle.is_zero() {
+                std::thread::sleep(*settle);
+            }
         }
     }
 
@@ -1424,11 +1444,16 @@ mod tests {
 
 
     #[test]
-    fn opencode_graceful_exit_splits_command_from_enter() {
-        assert_eq!(graceful_exit_input("opencode"), (b"/exit".as_slice(), Some(OPENCODE_EXIT_SETTLE), b"\r".as_slice()));
-        assert_eq!(graceful_exit_input("claude"), (b"/exit\r".as_slice(), None, b"".as_slice()));
-        assert_eq!(graceful_exit_input("grok"), (b"\x11".as_slice(), Some(GROK_EXIT_SETTLE), b"\x11".as_slice()));
-        assert_eq!(graceful_exit_input("codex"), (b"/exit\r".as_slice(), None, b"".as_slice()));
+    fn graceful_exit_clears_the_composer_and_sends_enter_on_its_own() {
+        let keys = |t: &str| graceful_exit_input(t).iter().map(|(b, _)| *b).collect::<Vec<_>>();
+        for t in ["claude", "codex", "opencode"] {
+            assert_eq!(keys(t), vec![b"\x03".as_slice(), b"/exit", b"\r"], "{t}");
+            // A real pause between the steps, or the slash menu eats the Enter.
+            assert!(graceful_exit_input(t)[1].1 >= EXIT_STEP_SETTLE, "{t}");
+        }
+        assert_eq!(keys("grok"), vec![b"\x11".as_slice(), b"\x11"]);
+        assert_eq!(keys("gemini"), vec![b"/exit\r".as_slice()]);
+        assert_eq!(keys("something-custom"), vec![b"/exit\r".as_slice()]);
     }
 
     // Proposal 0050 C3. `restore_all`'s own comment says a session skipped for a
