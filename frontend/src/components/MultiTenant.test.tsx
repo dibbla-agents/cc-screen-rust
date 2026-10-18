@@ -83,10 +83,31 @@ describe("LimitCard (proposals 0056 Part B / 0058 C2)", () => {
     expect(html).toContain("mailto:erik@dibbla.com");
   });
 
+  // The founder window is a fixed date (FOUNDER_DEADLINE), so pin the clock on
+  // either side of it — a real clock turned this test red the day it closed.
   it("offers the founder price to a beta user inside the window (billing on)", () => {
-    const beta: MePlan = { name: "beta", maxAgents: 10, maxSessions: 50, agents: 10 };
-    const html = renderToStaticMarkup(<LimitCard plan={beta} what="machines" billing />);
-    expect(html).toContain("$5/mo founder price");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-15T12:00:00Z"));
+    try {
+      const beta: MePlan = { name: "beta", maxAgents: 10, maxSessions: 50, agents: 10 };
+      const html = renderToStaticMarkup(<LimitCard plan={beta} what="machines" billing />);
+      expect(html).toContain("$5/mo founder price");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops the founder price once the window has closed", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-02T12:00:00Z"));
+    try {
+      const beta: MePlan = { name: "beta", maxAgents: 10, maxSessions: 50, agents: 10 };
+      const html = renderToStaticMarkup(<LimitCard plan={beta} what="machines" billing />);
+      expect(html).not.toContain("founder price");
+      expect(html).toContain("Upgrade to Pro");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders the session-cap card and stays useful with no plan / no support", () => {
