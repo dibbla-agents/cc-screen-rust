@@ -834,83 +834,98 @@ function MachineRow({
 
   return (
     <li className="mt-rise rounded-xl border border-edge bg-bar/50 p-4">
-      <div className="flex items-center gap-3">
-        <span
-          className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-            a.online ? "bg-amber mt-dot-on" : "bg-slate-700"
-          }`}
-          title={a.online ? "online" : "offline"}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-sm font-semibold text-slate-100">{a.machine}</div>
-          <div className="text-[11px] text-slate-500">
-            {a.online ? <span className="text-amber">online</span> : "offline"} · added {timeAgo(a.createdAt)}
+      {/* Wide screens: the name on the left, every action on one line to the
+          right. Narrower: the actions drop below the name, indented under it
+          (dot + gap) — using it on one line, administering it on the next,
+          each free to wrap. The name column never shrinks to nothing: a
+          non-shrinking button row beside it once squeezed it to zero width. */}
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-4">
+        <div className="flex min-w-0 items-center gap-3 lg:w-52 lg:shrink-0">
+          <span
+            className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+              a.online ? "bg-amber mt-dot-on" : "bg-slate-700"
+            }`}
+            title={a.online ? "online" : "offline"}
+          />
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-mono text-sm font-semibold text-slate-100" title={a.machine}>
+              {a.machine}
+            </div>
+            <div className="truncate text-[11px] text-slate-500">
+              {a.online ? <span className="text-amber">online</span> : "offline"} · added {timeAgo(a.createdAt)}
+            </div>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {/* The one action a new user actually wants from a machine row
-              (proposal 0056 A2): start a session on it. Online machines only. */}
-          {onStartSession && a.online && (
-            <button
-              onClick={() => onStartSession(a.machine)}
-              className="flex items-center gap-1 rounded-md border border-accent/60 px-2.5 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
-              title="Start a session on this machine"
-            >
-              New session
-            </button>
+        <div className="flex flex-col gap-1.5 pl-[1.375rem] lg:flex-1 lg:flex-row lg:flex-wrap lg:gap-x-4 lg:pl-0">
+          {a.online && (onStartSession || onUpdate) && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* The one action a new user actually wants from a machine row
+                  (proposal 0056 A2): start a session on it. Online machines only. */}
+              {onStartSession && a.online && (
+                <button
+                  onClick={() => onStartSession(a.machine)}
+                  className="flex items-center gap-1 rounded-md border border-accent/60 px-2.5 py-1.5 text-xs font-semibold text-accent transition hover:bg-accent/10"
+                  title="Start a session on this machine"
+                >
+                  New session
+                </button>
+              )}
+              {/* A linked machine that's short of assistants says so BEFORE it bites
+                  (proposal 0050 F2) — otherwise the gap only surfaces as a failed
+                  create. Opens the same dialog scoped to this machine, with the
+                  install box ticked. Disappears on the next dashboard reload after a
+                  successful install, because the agent re-advertises its tools. */}
+              {onUpdate && a.online && !!a.missing?.length && (
+                <button
+                  onClick={() => onUpdate(a.machine, a.missing)}
+                  className="flex items-center gap-1 rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber transition hover:border-amber hover:bg-amber/10"
+                  title={`Not installed here: ${a.missing.join(", ")}. Install them for this machine's user.`}
+                >
+                  ⚠ {a.missing.length} missing · Install
+                </button>
+              )}
+              {onUpdate && a.online && (
+                <button
+                  onClick={() => onUpdate(a.machine)}
+                  className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
+                  title="Update this machine's coding assistants, then restart its sessions"
+                >
+                  <RefreshIcon className="h-3.5 w-3.5" />
+                  Update
+                </button>
+              )}
+            </div>
           )}
-          {/* A linked machine that's short of assistants says so BEFORE it bites
-              (proposal 0050 F2) — otherwise the gap only surfaces as a failed
-              create. Opens the same dialog scoped to this machine, with the
-              install box ticked. Disappears on the next dashboard reload after a
-              successful install, because the agent re-advertises its tools. */}
-          {onUpdate && a.online && !!a.missing?.length && (
+          <div className="flex flex-wrap items-center gap-1.5 lg:ml-auto">
             <button
-              onClick={() => onUpdate(a.machine, a.missing)}
-              className="flex items-center gap-1 rounded-md border border-amber/60 px-2.5 py-1.5 text-xs text-amber transition hover:border-amber hover:bg-amber/10"
-              title={`Not installed here: ${a.missing.join(", ")}. Install them for this machine's user.`}
+              onClick={() => setSharing((v) => !v)}
+              className={`flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition ${
+                sharing ? "border-accent text-accent" : "border-edge text-slate-300 hover:border-accent hover:text-accent"
+              }`}
+              title="Invite another user to this machine"
             >
-              ⚠ {a.missing.length} missing · Install
+              <ShareIcon className="h-3.5 w-3.5" />
+              Share
             </button>
-          )}
-          {onUpdate && a.online && (
             <button
-              onClick={() => onUpdate(a.machine)}
-              className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
-              title="Update this machine's coding assistants, then restart its sessions"
+              onClick={async () => {
+                setBusy(true);
+                setToken(await rotateAgent(a.machine));
+                setBusy(false);
+              }}
+              disabled={busy}
+              className="rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent disabled:opacity-40"
+              title="Issue a new uplink token (the old one stops working)"
             >
-              <RefreshIcon className="h-3.5 w-3.5" />
-              Update
+              Rotate
             </button>
-          )}
-          <button
-            onClick={() => setSharing((v) => !v)}
-            className={`flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition ${
-              sharing ? "border-accent text-accent" : "border-edge text-slate-300 hover:border-accent hover:text-accent"
-            }`}
-            title="Invite another user to this machine"
-          >
-            <ShareIcon className="h-3.5 w-3.5" />
-            Share
-          </button>
-          <button
-            onClick={async () => {
-              setBusy(true);
-              setToken(await rotateAgent(a.machine));
-              setBusy(false);
-            }}
-            disabled={busy}
-            className="rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent disabled:opacity-40"
-            title="Issue a new uplink token (the old one stops working)"
-          >
-            Rotate
-          </button>
-          <button
-            onClick={() => setConfirming(true)}
-            className="rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
-          >
-            Unlink
-          </button>
+            <button
+              onClick={() => setConfirming(true)}
+              className="rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+            >
+              Unlink
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2208,80 +2223,34 @@ export function Dashboard({
 
   return (
     <Backdrop>
-      <div className="w-full max-w-lg">
-        <div className="mb-4 flex items-center justify-between">
-          <Wordmark />
-        </div>
-        <Window path="~/machines" className="mb-4">
-          <div className="mb-5 flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="font-mono text-base font-semibold text-slate-100">Your machines</h2>
-              <p className="truncate text-xs text-slate-500">{me.email}</p>
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <button
-                onClick={onClose}
-                className="rounded-lg border border-edge px-3 py-2 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
-              >
-                ← Back to terminal
-              </button>
-              <button
-                onClick={async () => {
-                  await logout();
-                  onLoggedOut();
-                }}
-                className="rounded-lg border border-edge px-3 py-2 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
-              >
-                Log out
-              </button>
-            </div>
+      <div className="w-full max-w-4xl">
+        <Wordmark />
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="min-w-0 truncate text-xs text-slate-500">
+            Signed in as <span className="text-slate-300">{me.email}</span>
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg border border-edge px-3 py-2 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
+            >
+              ← Back to terminal
+            </button>
+            <button
+              onClick={async () => {
+                await logout();
+                onLoggedOut();
+              }}
+              className="rounded-lg border border-edge px-3 py-2 text-xs text-slate-400 transition hover:border-claude hover:text-claude"
+            >
+              Log out
+            </button>
           </div>
+        </div>
 
-          {agents === null ? (
-            <div className="py-10 text-center font-mono text-sm text-slate-500">loading…</div>
-          ) : agents.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-edge px-4 py-8 text-center">
-              <div className="text-sm text-slate-300">No machines yet</div>
-              <div className="mt-1 text-xs text-slate-500">Connect your first box below.</div>
-            </div>
-          ) : (
-            <ul className="space-y-2.5">
-              {agents.map((a) => (
-                <MachineRow
-                  key={a.agentId}
-                  a={a}
-                  onChanged={reload}
-                  onUpdate={onUpdateAssistants}
-                  onStartSession={onStartSession}
-                  mail={me.mail}
-                />
-              ))}
-            </ul>
-          )}
-        </Window>
-
-        {/* Plan & billing (proposal 0058 C3) — renders nothing on a hub without
-            Stripe configured. Above the fold, under the machines it caps. */}
-        <PlanCard me={me} billingPending={billingPending} />
-
-        {/* Team (proposals 0063/0065): the plan, then the team it pays for,
-            then personal shares. Renders nothing for an org-less user on a
-            billing-less hub. */}
-        <TeamCard me={me} onChanged={onMeChanged} />
-
-        {/* Sharing — who has access to what, and take it back */}
-        <SharedCard />
-
-        {/* The team audit log (proposal 0063 D3) — owners/admins only. */}
-        {(me.org?.role === "owner" || me.org?.role === "admin") && <AuditCard />}
-
-        {/* Terminal clients (proposal 0060 B4): every `ccs activate` sign-in,
-            with per-token revoke — the browser-side kill switch. Hidden when
-            empty (most users meet ccs later, if at all). */}
-        <TerminalClientsCard />
-
-        {/* Add a machine */}
-        <Window path="~/add-machine">
+        {/* Add a machine — first, because it's the first thing anyone comes
+            here to do, and a fleet's list below can't push it off-screen. */}
+        <Window path="~/add-machine" className="mb-4">
           <h3 className="mb-1 font-mono text-sm font-semibold text-slate-100">Add a machine</h3>
           {/* Cheap cap preemption (proposal 0056 B2): learn about the machine
               cap BEFORE running an installer on a box. Live agent count. */}
@@ -2416,6 +2385,51 @@ export function Dashboard({
             then <code className="font-mono text-slate-400">ccs activate</code> — the same code-approve flow.
           </p>
         </Window>
+
+        <Window path="~/machines" className="mb-4">
+          <h2 className="mb-4 font-mono text-base font-semibold text-slate-100">Your machines</h2>
+          {agents === null ? (
+            <div className="py-10 text-center font-mono text-sm text-slate-500">loading…</div>
+          ) : agents.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-edge px-4 py-8 text-center">
+              <div className="text-sm text-slate-300">No machines yet</div>
+              <div className="mt-1 text-xs text-slate-500">Connect your first box above.</div>
+            </div>
+          ) : (
+            <ul className="space-y-2.5">
+              {agents.map((a) => (
+                <MachineRow
+                  key={a.agentId}
+                  a={a}
+                  onChanged={reload}
+                  onUpdate={onUpdateAssistants}
+                  onStartSession={onStartSession}
+                  mail={me.mail}
+                />
+              ))}
+            </ul>
+          )}
+        </Window>
+
+        {/* Plan & billing (proposal 0058 C3) — renders nothing on a hub without
+            Stripe configured. Above the fold, under the machines it caps. */}
+        <PlanCard me={me} billingPending={billingPending} />
+
+        {/* Team (proposals 0063/0065): the plan, then the team it pays for,
+            then personal shares. Renders nothing for an org-less user on a
+            billing-less hub. */}
+        <TeamCard me={me} onChanged={onMeChanged} />
+
+        {/* Sharing — who has access to what, and take it back */}
+        <SharedCard />
+
+        {/* The team audit log (proposal 0063 D3) — owners/admins only. */}
+        {(me.org?.role === "owner" || me.org?.role === "admin") && <AuditCard />}
+
+        {/* Terminal clients (proposal 0060 B4): every `ccs activate` sign-in,
+            with per-token revoke — the browser-side kill switch. Hidden when
+            empty (most users meet ccs later, if at all). */}
+        <TerminalClientsCard />
       </div>
     </Backdrop>
   );
