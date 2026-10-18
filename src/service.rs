@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SYSTEMD_UNIT: &str = "cc-screen-rust.service";
-const LAUNCHD_LABEL: &str = "com.dibbla.cc-screen-rust";
+pub(crate) const LAUNCHD_LABEL: &str = "com.dibbla.cc-screen-rust";
 /// The Task Scheduler task name on Windows (the systemd-unit / launchd-label
 /// analogue). Backslash-free so it lands at the schedule root.
 const WINDOWS_TASK_NAME: &str = "cc-screen-rust";

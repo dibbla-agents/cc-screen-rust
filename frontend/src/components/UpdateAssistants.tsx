@@ -32,6 +32,12 @@ import { assistantLabel } from "../assistants";
 // every CLI it would install, its exact command, its prerequisites and a rough
 // size — and the button label follows, so the action never under-promises. With
 // nothing missing, this dialog is byte-for-byte 0049's.
+//
+// Proposal 0091 adds the agent itself: where a machine's agent can replace
+// itself (it advertises `agent-update`), a ticked box makes the job's first step
+// "install the latest cc-screen release and restart into it". The machine drops
+// off the hub for a few seconds while the new agent starts; that agent then
+// finishes the job, so the panel just keeps watching through the gap.
 
 // A machine's slot in this dialog. `key` is the `?machine=` value — "" for a
 // standalone agent with no hub, where the whole roster collapses to one row.
@@ -53,7 +59,14 @@ interface Slot {
   // Set when this machine can't install (an agent too old → 501), while it can
   // still take part in a plain update.
   installBlocked?: string;
+  // The agent's own version, and whether it can replace itself (0091).
+  agentVersion?: string;
+  agentUpdate?: boolean;
 }
+
+// How long a machine may stay unreachable after its agent said "restarting"
+// before the panel stops treating the gap as expected.
+const AGENT_RESTART_GRACE_MS = 120_000;
 
 const toolLabel = assistantLabel;
 
@@ -64,6 +77,7 @@ const GLYPH: Record<string, string> = {
   installing: "⟳",
   installed: "✓",
   updating: "⟳",
+  restarting: "⟳",
   stopping: "⟳",
   starting: "⟳",
   updated: "✓",
@@ -77,6 +91,7 @@ const TONE: Record<string, string> = {
   installing: "text-accent",
   installed: "text-amber",
   updating: "text-accent",
+  restarting: "text-accent",
   stopping: "text-accent",
   starting: "text-accent",
   updated: "text-amber",
@@ -159,6 +174,13 @@ export default function UpdateAssistants({
   // the blast radius and the button label changes with it, so it never does more
   // than it says. Default-off would just reproduce the status quo.
   const [installMissing, setInstallMissing] = useState(true);
+  // Ticked by default for the same reason: pressing Update on a machine whose
+  // agent is behind should bring the agent along. Only machines that can do it
+  // are counted, and the button label says so.
+  const [updateAgent, setUpdateAgent] = useState(true);
+  // When each machine's agent first reported "restarting" — the start of the
+  // gap during which an unreachable machine is expected, not an error.
+  const restartingSince = useRef<Record<string, number>>({});
   const [showCommands, setShowCommands] = useState(false);
   const [running, setRunning] = useState(false);
   const [jobs, setJobs] = useState<Record<string, UpdateJob>>({});
@@ -184,7 +206,13 @@ export default function UpdateAssistants({
     const targets: Slot[] =
       roster.length === 0 && !scopeMachine
         ? [{ key: "", label: "this machine", online: true }]
-        : roster.map((m) => ({ key: m.machine, label: m.machine, online: m.online }));
+        : roster.map((m) => ({
+            key: m.machine,
+            label: m.machine,
+            online: m.online,
+            agentVersion: m.agentVersion,
+            agentUpdate: m.agentUpdate,
+          }));
     setSlots(targets);
     setPicked(new Set(targets.filter((t) => t.online).map((t) => t.key)));
     Promise.all(
@@ -232,7 +260,12 @@ export default function UpdateAssistants({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, scopeMachine, (scopeTools ?? []).join(","), machines.map((m) => `${m.machine}:${m.online}`).join(",")]);
+  }, [
+    open,
+    scopeMachine,
+    (scopeTools ?? []).join(","),
+    machines.map((m) => `${m.machine}:${m.online}:${m.agentUpdate ? 1 : 0}`).join(","),
+  ]);
 
   // Esc closes (watching only — the job runs on).
   useEffect(() => {
@@ -254,8 +287,44 @@ export default function UpdateAssistants({
     const id = window.setInterval(() => {
       Object.keys(jobs).forEach((key) => {
         fetchUpdateJob(key)
-          .then((j) => setJobs((prev) => ({ ...prev, [key]: j })))
-          .catch((e) => setErrors((prev) => ({ ...prev, [key]: reasonOf(e) })));
+          .then((j) =>
+            setJobs((prev) => {
+              const before = prev[key];
+              // The new agent came up without the handover (it never got the
+              // marker): don't let the job silently vanish into "idle".
+              if (j.phase === "idle" && before?.agent?.state === "restarting") {
+                return {
+                  ...prev,
+                  [key]: {
+                    ...before,
+                    phase: "done",
+                    agent: {
+                      ...before.agent,
+                      state: "failed",
+                      message: "the agent restarted without reporting back — check its version on the machines page",
+                    },
+                  },
+                };
+              }
+              if (j.agent?.state === "restarting") restartingSince.current[key] ??= Date.now();
+              else delete restartingSince.current[key];
+              return { ...prev, [key]: j };
+            })
+          )
+          .then(() => setErrors((prev) => (key in prev ? omit(prev, key) : prev)))
+          .catch((e) => {
+            // The machine is SUPPOSED to be unreachable for a moment while its
+            // new agent starts. Only a gap that outlasts the grace is an error.
+            const since = restartingSince.current[key];
+            if (since !== undefined && Date.now() - since < AGENT_RESTART_GRACE_MS) return;
+            setErrors((prev) => ({
+              ...prev,
+              [key]:
+                since !== undefined
+                  ? "the machine hasn’t come back since its agent restarted — check it"
+                  : reasonOf(e),
+            }));
+          });
       });
     }, 1500);
     return () => window.clearInterval(id);
@@ -288,7 +357,10 @@ export default function UpdateAssistants({
             restart: restartAll ? "all" : "updated",
             // Never ask a machine that can't install to install.
             installMissing: installMissing && !t.installBlocked && !!t.missing?.length,
+            // …nor an agent that can't replace itself to do so (the hub would 501).
+            updateAgent: updateAgent && !!t.agentUpdate,
           });
+          delete restartingSince.current[t.key];
           setJobs((prev) => ({ ...prev, [t.key]: j }));
         } catch (e) {
           // A per-machine failure is a row, never fatal to the rest.
@@ -296,7 +368,7 @@ export default function UpdateAssistants({
         }
       })
     );
-  }, [slots, picked, restartAll, installMissing, scopeTools]);
+  }, [slots, picked, restartAll, installMissing, updateAgent, scopeTools]);
 
   if (!open) return null;
 
@@ -314,6 +386,8 @@ export default function UpdateAssistants({
   }
   const installable = planRows.filter((i) => !i.unsupported);
   const willInstall = installMissing && installable.length > 0;
+  const agentCapable = chosen.filter((s) => s.agentUpdate);
+  const willUpdateAgent = updateAgent && agentCapable.length > 0;
   const phase = running
     ? anyRunning
       ? Object.values(jobs).some((j) => j.phase === "updating")
@@ -333,7 +407,13 @@ export default function UpdateAssistants({
       >
         <div className="shrink-0 border-b border-edge px-4 py-3">
           <div className="text-sm font-semibold text-slate-100">
-            {running ? "Updating coding assistants" : "Update coding assistants"}
+            {willUpdateAgent
+              ? running
+                ? "Updating cc-screen and assistants"
+                : "Update cc-screen and assistants"
+              : running
+                ? "Updating coding assistants"
+                : "Update coding assistants"}
           </div>
           <div className="text-xs text-slate-400">
             {running
@@ -359,10 +439,10 @@ export default function UpdateAssistants({
           {!running &&
             slots.map((s) => {
               const disabled = !!s.blocked;
-              const versions = (s.job?.tools ?? [])
-                .filter((t) => t.to)
-                .map((t) => `${t.tool} ${t.to}`)
-                .join(" · ");
+              const versions = [
+                ...(s.agentVersion ? [`cc-screen ${s.agentVersion}`] : []),
+                ...(s.job?.tools ?? []).filter((t) => t.to).map((t) => `${t.tool} ${t.to}`),
+              ].join(" · ");
               const available = (s.tools ?? []).map((t) => t.prefix).join(" · ");
               const missingLine = s.missing?.length
                 ? `${s.missing.length} missing: ${s.missing.map((t) => toolLabel(t.prefix)).join(", ")}`
@@ -424,6 +504,21 @@ export default function UpdateAssistants({
                       {j && <span className="text-[11px] text-slate-500">{j.phase}</span>}
                     </div>
                     {err && <div className="py-1 text-[12px] text-claude">{err}</div>}
+                    {j?.agent && (
+                      <StateRow
+                        state={j.agent.state}
+                        title={j.agent.label || "cc-screen agent"}
+                        detail={
+                          j.agent.state === "updated"
+                            ? `${j.agent.from ?? "?"} → ${j.agent.to ?? "?"}`
+                            : j.agent.state === "restarting"
+                              ? `restarting into ${j.agent.to ?? "the new version"}…`
+                              : j.agent.state === "current"
+                                ? j.agent.message || `already current${j.agent.to ? ` (${j.agent.to})` : ""}`
+                                : j.agent.message || undefined
+                        }
+                      />
+                    )}
                     {(j?.tools ?? []).map((t) => (
                       <StateRow
                         key={t.tool}
@@ -513,6 +608,24 @@ export default function UpdateAssistants({
               </div>
             </div>
           )}
+          {!running && agentCapable.length > 0 && (
+            <label className="mb-3 flex items-start gap-2 text-[12px] text-slate-300">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 shrink-0 accent-amber"
+                checked={updateAgent}
+                onChange={(e) => setUpdateAgent(e.target.checked)}
+              />
+              <span className="min-w-0 flex-1">
+                Also update cc-screen itself
+                {agentCapable.length < chosen.length ? ` on ${agentCapable.length} of ${chosen.length} machines` : ""}
+                <span className="block text-[11px] text-slate-500">
+                  Installs the latest release if it’s newer, then restarts the agent — the machine is offline
+                  for a few seconds and every session resumes.
+                </span>
+              </span>
+            </label>
+          )}
           {!running && (
             <label className="mb-3 flex items-center gap-2 text-[12px] text-slate-400">
               <input
@@ -554,6 +667,12 @@ export default function UpdateAssistants({
       </div>
     </>
   );
+}
+
+function omit<T>(o: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...o };
+  delete next[key];
+  return next;
 }
 
 function reasonOf(e: unknown): string {

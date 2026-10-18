@@ -852,7 +852,8 @@ function MachineRow({
               {a.machine}
             </div>
             <div className="truncate text-[11px] text-slate-500">
-              {a.online ? <span className="text-amber">online</span> : "offline"} · added {timeAgo(a.createdAt)}
+              {a.online ? <span className="text-amber">online</span> : "offline"}
+              {a.agentVersion ? ` · v${a.agentVersion}` : ""} · added {timeAgo(a.createdAt)}
             </div>
           </div>
         </div>
@@ -888,7 +889,11 @@ function MachineRow({
                 <button
                   onClick={() => onUpdate(a.machine)}
                   className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-accent hover:text-accent"
-                  title="Update this machine's coding assistants, then restart its sessions"
+                  title={
+                  a.agentUpdate
+                    ? "Update cc-screen and this machine's coding assistants, then restart its sessions"
+                    : "Update this machine's coding assistants, then restart its sessions"
+                }
                 >
                   <RefreshIcon className="h-3.5 w-3.5" />
                   Update

@@ -272,11 +272,19 @@ pub struct CreateResp {
 /// One connected agent, as returned by the hub's `/api/machines` (absent on a
 /// standalone agent — clients treat a 404 there as "single, unnamed machine").
 /// Enough for the machine picker + offline greying.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MachineInfo {
     pub machine: String,
     pub hostname: String,
     pub online: bool,
+    /// The agent's own version, as it registered (proposal 0091). Omitted when
+    /// unknown, so an older client parses this unchanged.
+    #[serde(rename = "agentVersion", default, skip_serializing_if = "String::is_empty")]
+    pub agent_version: String,
+    /// Whether the agent can replace itself from the Update dialog (it
+    /// advertised `agent-update`, proposal 0091). Omitted when false.
+    #[serde(rename = "agentUpdate", default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_update: bool,
 }
 
 // ── POST /api/session/delete ─────────────────────────────────────────────────
@@ -314,6 +322,13 @@ pub struct UpdateJob {
     pub tools: Vec<UpdateToolStatus>,
     #[serde(default)]
     pub sessions: Vec<SessionRestartStatus>,
+    /// The agent's own row (proposal 0091), present only when the job was asked
+    /// to update the agent. Its `state` adds "restarting" — the agent has
+    /// installed the new release and is exiting so its service manager starts
+    /// it; the machine is briefly offline and the NEW agent finishes the row.
+    /// A field a pre-0091 client ignores, rather than a new `phase`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<UpdateToolStatus>,
     /// Set when the job could not start at all (e.g. another one is running).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -384,6 +399,11 @@ pub struct UpdateReq {
     /// `false`, so an older client's request behaves exactly as it does today.
     #[serde(default)]
     pub install_missing: bool,
+    /// Replace this machine's cc-screen agent with the latest release first, and
+    /// restart into it (proposal 0091). Default `false`, so an older client's
+    /// request behaves exactly as it does today.
+    #[serde(default)]
+    pub update_agent: bool,
 }
 
 fn default_restart() -> String {
@@ -392,7 +412,7 @@ fn default_restart() -> String {
 
 impl Default for UpdateReq {
     fn default() -> Self {
-        Self { tools: Vec::new(), restart: default_restart(), install_missing: false }
+        Self { tools: Vec::new(), restart: default_restart(), install_missing: false, update_agent: false }
     }
 }
 
@@ -625,7 +645,7 @@ mod tests {
         // The PWA sends `installMissing`; a snake_case field here would be
         // silently dropped and the user would believe something was installed
         // (proposal 0050 C1/D4). Both directions are asserted.
-        let r = UpdateReq { tools: vec!["kimi".into()], restart: "updated".into(), install_missing: true };
+        let r = UpdateReq { tools: vec!["kimi".into()], restart: "updated".into(), install_missing: true, update_agent: false };
         let v = serde_json::to_string(&r).unwrap();
         assert!(v.contains(r#""installMissing":true"#), "{v}");
         // An older client omits it entirely → today's update-only behaviour.
@@ -635,6 +655,27 @@ mod tests {
         // …and a client that sends it round-trips.
         let back: UpdateReq = serde_json::from_str(&v).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn update_agent_is_camel_case_defaults_off_and_its_row_is_optional() {
+        // Proposal 0091. Same trap as `installMissing`: the PWA sends
+        // `updateAgent`, and a snake_case field would be silently dropped.
+        let r = UpdateReq { update_agent: true, ..Default::default() };
+        let v = serde_json::to_string(&r).unwrap();
+        assert!(v.contains(r#""updateAgent":true"#), "{v}");
+        let old: UpdateReq = serde_json::from_str(r#"{"tools":[],"restart":"updated"}"#).unwrap();
+        assert!(!old.update_agent, "an older client never asks the agent to replace itself");
+        // The job's agent row is omitted unless the job was asked to update the
+        // agent, so a pre-0091 client sees exactly today's snapshot…
+        let j = UpdateJob { phase: "updating".into(), ..Default::default() };
+        assert!(!serde_json::to_string(&j).unwrap().contains("agent"));
+        // …and a 0091 snapshot still parses on a client that knows the row.
+        let j2: UpdateJob = serde_json::from_str(
+            r#"{"phase":"updating","agent":{"tool":"cc-screen","label":"cc-screen agent","state":"restarting","from":"0.5.9","to":"0.5.10"}}"#,
+        )
+        .unwrap();
+        assert_eq!(j2.agent.unwrap().state, "restarting");
     }
 
     #[test]

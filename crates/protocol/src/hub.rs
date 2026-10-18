@@ -84,6 +84,18 @@ pub const CAP_ASSISTANT_INSTALL: &str = "assistant-install";
 /// honest `501`.
 pub const CAP_SESSION_RESTART: &str = "session-restart";
 
+/// Capability token: this agent can **replace itself** with the latest release
+/// and restart into it, as the first step of [`Cmd::UpdateAssistants`] with
+/// `update_agent` set (proposal 0091).
+///
+/// Advertised only when the agent can actually do it — a POSIX agent running
+/// from the installer's own path under its service manager (launchd/systemd),
+/// which is what brings it back after it exits. A hand-built agent running out
+/// of a source tree, a foreground run, or a Windows agent omits it, and the hub
+/// answers `501` with the manual command instead of starting a job that would
+/// either update a binary nobody runs or exit with nothing to restart it.
+pub const CAP_AGENT_UPDATE: &str = "agent-update";
+
 /// WebSocket close code the hub uses to reject an agent uplink whose token is
 /// **unauthorized** — unknown, or revoked because the machine was unlinked from
 /// the dashboard. In the private-use range (4000–4999); echoes HTTP 401. The
@@ -234,11 +246,18 @@ pub enum Cmd {
     /// that aren't on the machine at all, for the local user, before updating the
     /// ones that are. Gated on [`CAP_ASSISTANT_INSTALL`] — see that constant for
     /// why the capability, not the field, is what keeps this honest.
+    ///
+    /// `update_agent` (proposal 0091) first replaces the agent itself with the
+    /// latest release and restarts into it; the new agent finishes the job. Gated
+    /// on [`CAP_AGENT_UPDATE`] for the same reason `install_missing` is gated: an
+    /// older agent would silently drop the field.
     UpdateAssistants {
         tools: Vec<String>,
         restart: String,
         #[serde(default)]
         install_missing: bool,
+        #[serde(default)]
+        update_agent: bool,
     },
     /// Read the current-or-last update job (proposal 0049) → [`CmdResult::Json`].
     UpdateStatus,
@@ -436,10 +455,12 @@ mod tests {
             HubMsg::Command { req: 4, cmd: Cmd::SessionRoot { session: None } },
             HubMsg::Command { req: 5, cmd: Cmd::SetColor { session: "claude-x".into(), color: Some("teal".into()) } },
             HubMsg::Command { req: 6, cmd: Cmd::SetColor { session: "claude-x".into(), color: None } },
-            HubMsg::Command { req: 7, cmd: Cmd::UpdateAssistants { tools: vec!["claude".into()], restart: "updated".into(), install_missing: false } },
+            HubMsg::Command { req: 7, cmd: Cmd::UpdateAssistants { tools: vec!["claude".into()], restart: "updated".into(), install_missing: false, update_agent: false } },
             HubMsg::Command { req: 8, cmd: Cmd::UpdateStatus },
             // Proposal 0050: installing what's missing, and asking what that would run.
-            HubMsg::Command { req: 9, cmd: Cmd::UpdateAssistants { tools: vec![], restart: "updated".into(), install_missing: true } },
+            HubMsg::Command { req: 9, cmd: Cmd::UpdateAssistants { tools: vec![], restart: "updated".into(), install_missing: true, update_agent: false } },
+            // Proposal 0091: replace the agent itself first.
+            HubMsg::Command { req: 12, cmd: Cmd::UpdateAssistants { tools: vec![], restart: "updated".into(), install_missing: false, update_agent: true } },
             HubMsg::Command { req: 10, cmd: Cmd::InstallPlan { tools: vec!["kimi".into()] } },
             // Proposal 0087: restart one named session and resume it.
             HubMsg::Command { req: 11, cmd: Cmd::RestartSession { session: "claude-x".into() } },

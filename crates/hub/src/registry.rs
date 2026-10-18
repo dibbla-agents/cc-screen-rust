@@ -298,6 +298,10 @@ pub struct AgentConn {
     /// corresponding op with a clear `501` rather than routing a `Cmd` the agent
     /// can't deserialize and waiting out a `504`.
     pub caps: Vec<String>,
+    /// The version the agent registered with (proposal 0091) — shown in the
+    /// dashboard so a machine that's behind is visible, and how a client sees an
+    /// agent update land (it reconnects reporting the new one).
+    agent_version: Mutex<String>,
     online: AtomicBool,
     last_sessions: Mutex<Vec<SessionInfo>>,
     /// Encoded `HubMsg` frames → the agent's WS writer (drained by the uplink
@@ -327,6 +331,19 @@ impl AgentConn {
     /// The sender for encoded `HubMsg` frames to this agent.
     pub fn to_agent(&self) -> &mpsc::Sender<Vec<u8>> {
         &self.to_agent
+    }
+
+    pub fn set_agent_version(&self, v: &str) {
+        *self.agent_version.lock().unwrap() = v.to_string();
+    }
+
+    pub fn agent_version(&self) -> String {
+        self.agent_version.lock().unwrap().clone()
+    }
+
+    /// Whether this agent can replace itself (it advertised `agent-update`).
+    pub fn can_update_agent(&self) -> bool {
+        self.caps.iter().any(|c| c == cc_screen_protocol::hub::CAP_AGENT_UPDATE)
     }
 
     pub fn set_sessions(&self, sessions: Vec<SessionInfo>) {
@@ -488,6 +505,7 @@ impl Registry {
             hostname: hostname.to_string(),
             tools: Mutex::new(tools),
             caps,
+            agent_version: Mutex::new(String::new()),
             online: AtomicBool::new(true),
             last_sessions: Mutex::new(carried),
             to_agent,
@@ -673,6 +691,10 @@ impl Registry {
                 machine: c.machine_id.clone(),
                 hostname: c.hostname.clone(),
                 online: c.online(),
+                // Version and self-update are the owner's administrative detail;
+                // a session-only grantee sees the box, not how it's maintained.
+                agent_version: if vis.owns_agent(c) { c.agent_version() } else { String::new() },
+                agent_update: vis.owns_agent(c) && c.can_update_agent(),
             })
             .collect();
         v.sort_by(|a, b| a.machine.cmp(&b.machine));

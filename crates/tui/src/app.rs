@@ -3200,7 +3200,7 @@ mod tests {
         let docs = sess_on("cc-docs", "pine");
         let mut a = App::test_fixture_hub(
             vec![api, docs],
-            vec![MachineInfo { machine: "pine".into(), hostname: "pine.local".into(), online: true }],
+            vec![MachineInfo { machine: "pine".into(), hostname: "pine.local".into(), online: true, ..Default::default() }],
             "s",
         );
         a.mode = Mode::Grid;
@@ -3694,7 +3694,7 @@ mod tests {
     // ── switcher search (proposal 0062) ──────────────────────────────────────
 
     fn machine(id: &str, hostname: &str, online: bool) -> MachineInfo {
-        MachineInfo { machine: id.into(), hostname: hostname.into(), online }
+        MachineInfo { machine: id.into(), hostname: hostname.into(), online, ..Default::default() }
     }
 
     fn ctrl(c: char) -> KeyEvent {

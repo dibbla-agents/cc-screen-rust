@@ -329,17 +329,51 @@ pub fn start_job(app: &AppState, req: &UpdateReq) -> Result<UpdateJob, UpdateJob
             })
             .collect(),
         sessions: Vec::new(),
+        agent: req.update_agent.then(crate::self_update::pending_row),
         error: None,
     };
     let started = app.begin_update_job(job)?;
 
     let app = app.clone();
-    let restart_mode = req.restart.clone();
-    let install_missing = req.install_missing;
+    let req = req.clone();
     // A dedicated thread, like the reaper: these are blocking `Command` calls
     // with no business on the async runtime.
-    std::thread::spawn(move || run_job(&app, selected, &restart_mode, install_missing));
+    std::thread::spawn(move || {
+        // Proposal 0091: the agent first, so the assistants are then updated by
+        // the new agent. A proven install hands the rest of the job to the next
+        // process (through a marker) and exits for the service manager.
+        if req.update_agent
+            && crate::self_update::run_agent_step(&app, &req) == crate::self_update::AgentStep::Restart
+        {
+            crate::self_update::exit_into_new_binary();
+        }
+        run_job(&app, selected, &req.restart, req.install_missing)
+    });
     Ok(started)
+}
+
+/// Carry on with a job the previous agent started and handed over when it
+/// replaced itself (proposal 0091): same id, its agent row already decided, the
+/// assistants step still to run.
+pub fn continue_job(app: &AppState, mut job: UpdateJob, req: &UpdateReq) {
+    let selected = selected_tools(app, &req.tools);
+    job.phase = "updating".into();
+    job.finished_at = None;
+    job.tools = selected
+        .iter()
+        .map(|t| UpdateToolStatus {
+            tool: t.prefix.clone(),
+            label: tools::assistant_for(t).map(|a| a.label.to_string()).unwrap_or_else(|| t.prefix.clone()),
+            state: "pending".into(),
+            ..Default::default()
+        })
+        .collect();
+    if app.begin_update_job(job).is_err() {
+        return;
+    }
+    let app = app.clone();
+    let (restart, install_missing) = (req.restart.clone(), req.install_missing);
+    std::thread::spawn(move || run_job(&app, selected, &restart, install_missing));
 }
 
 /// The worker: phase 1 (update each CLI, one at a time), then phase 2 (restart

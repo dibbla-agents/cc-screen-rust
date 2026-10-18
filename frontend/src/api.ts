@@ -78,6 +78,11 @@ export interface MachineInfo {
   machine: string;
   hostname: string;
   online: boolean;
+  // The agent's own version, and whether Update can replace it with the latest
+  // release (proposal 0091). Absent on an older hub, for a machine you don't
+  // own, and (agentUpdate) where the agent can't do it.
+  agentVersion?: string;
+  agentUpdate?: boolean;
 }
 
 // withMachine threads the owning agent onto a request URL — the single shared
@@ -299,6 +304,9 @@ export interface AgentInfo {
   // Absent on an older hub, and empty once everything's there — so the
   // dashboard's "N missing · Install" affordance simply doesn't render.
   missing?: string[];
+  // The agent's version and whether Update can replace it (proposal 0091).
+  agentVersion?: string;
+  agentUpdate?: boolean;
 }
 
 export async function listAgents(): Promise<AgentInfo[]> {
@@ -876,6 +884,10 @@ export interface UpdateJob {
   finishedAt?: number;
   tools?: UpdateToolStatus[];
   sessions?: SessionRestartStatus[];
+  // The agent's own row (proposal 0091), present when the job was asked to
+  // update the agent. Its `restarting` state means the machine is briefly
+  // offline while the new agent starts; that agent then finishes the job.
+  agent?: UpdateToolStatus;
   error?: string;
 }
 
@@ -900,7 +912,14 @@ export async function fetchUpdateJob(machine?: string): Promise<UpdateJob> {
 // old to install — never a silent update-only run.
 export async function startAssistantUpdate(
   machine?: string,
-  opts?: { tools?: string[]; restart?: "updated" | "all" | "none"; installMissing?: boolean }
+  opts?: {
+    tools?: string[];
+    restart?: "updated" | "all" | "none";
+    installMissing?: boolean;
+    // Replace the cc-screen agent itself first (proposal 0091). A hub answers
+    // 501 when that agent can't — never a silent assistants-only run.
+    updateAgent?: boolean;
+  }
 ): Promise<UpdateJob> {
   const r = await fetch(withMachine("/api/assistants/update", machine), {
     method: "POST",
@@ -909,6 +928,7 @@ export async function startAssistantUpdate(
       tools: opts?.tools ?? [],
       restart: opts?.restart ?? "updated",
       installMissing: opts?.installMissing ?? false,
+      updateAgent: opts?.updateAgent ?? false,
     }),
   });
   const text = (await r.text()).trim();

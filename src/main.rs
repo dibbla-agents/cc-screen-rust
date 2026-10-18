@@ -24,6 +24,7 @@ mod manifest;
 mod ops;
 mod provision;
 mod push;
+mod self_update;
 mod render;
 mod service;
 mod summary;
@@ -252,6 +253,9 @@ async fn main() {
             tracing::info!("cc-screen-rust: restored {:?} failed {:?}", restored, failed);
         }
     }
+    // An update job the previous agent handed over when it replaced itself
+    // (proposal 0091) — after restore, so its restart step sees live sessions.
+    self_update::resume_after_restart(&state);
 
     // Watch for agents finishing their turn (busy→waiting) and buzz subscribed
     // phones via Web Push. Cheap idle poll; no-op until a device subscribes.

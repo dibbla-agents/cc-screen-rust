@@ -21,7 +21,7 @@ use cc_screen_hub::test_support::{
     await_machine, connect, read_until, send, spawn_fake_agent, spawn_fake_agent_marked, start_hub,
 };
 use cc_screen_protocol::hub::{
-    decode_frame, AgentMsg, CmdResult, HubMsg, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
+    decode_frame, AgentMsg, Cmd, CmdResult, HubMsg, CAP_AGENT_UPDATE, CAP_ASSISTANT_UPDATE, HUB_PROTO_VERSION,
 };
 use cc_screen_protocol::{SessionInfo, ToolInfo, UpdateJob};
 use futures_util::{SinkExt, StreamExt};
@@ -526,4 +526,90 @@ async fn asking_an_update_only_agent_to_install_is_501() {
     // The plan route needs the install capability too.
     let resp = reqwest::get(format!("http://{hub}/api/assistants/plan?machine=updateonly")).await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+}
+
+// Proposal 0091. Asking the agent to replace itself must (a) reach an agent that
+// advertises `agent-update` — `updateAgent` is camelCase on the wire, and a slip
+// would silently drop it — and (b) be refused with an actionable 501 by one that
+// doesn't, rather than quietly running an assistants-only job. `/api/machines`
+// tells the dialog which is which, and the version it registered with.
+#[tokio::test]
+async fn agent_self_update_is_relayed_only_to_agents_that_can() {
+    let hub = start_hub(Auth::new(None, None, [0u8; 32]), &[]).await;
+    // `boxA`: today's fake agent — updates and installs, can't replace itself.
+    spawn_fake_agent(&hub, "boxA", None, "shell-x").await;
+    // `boxB`: advertises agent-update and echoes what it was asked.
+    let mut ws = connect(&format!("ws://{hub}/agent/ws"), None).await.expect("agent connects");
+    send(
+        &mut ws,
+        &AgentMsg::Register {
+            proto: HUB_PROTO_VERSION,
+            machine_id: "boxB".into(),
+            hostname: "boxB".into(),
+            agent_version: "0.5.8".into(),
+            tools: vec![],
+            caps: vec![CAP_ASSISTANT_UPDATE.to_string(), CAP_AGENT_UPDATE.to_string()],
+        },
+        b"",
+    )
+    .await;
+    send(&mut ws, &AgentMsg::Sessions { sessions: vec![] }, b"").await;
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws.next().await {
+            let Message::Binary(buf) = msg else { continue };
+            let Ok((HubMsg::Command { req, cmd }, _)) = decode_frame::<HubMsg>(&buf) else { continue };
+            let id = match cmd {
+                Cmd::UpdateAssistants { update_agent, .. } => format!("agent={update_agent}"),
+                _ => "other".into(),
+            };
+            let job = UpdateJob { id, phase: "done".into(), ..Default::default() };
+            send(&mut ws, &AgentMsg::Reply { req, result: CmdResult::Json(serde_json::to_value(job).unwrap()) }, b"")
+                .await;
+        }
+    });
+    for _ in 0..100 {
+        let n = reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json::<Vec<serde_json::Value>>().await.unwrap().len();
+        if n == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let machines: Vec<serde_json::Value> =
+        reqwest::get(format!("http://{hub}/api/machines")).await.unwrap().json().await.unwrap();
+    let b = machines.iter().find(|m| m["machine"] == "boxB").unwrap();
+    assert_eq!(b["agentVersion"], "0.5.8");
+    assert_eq!(b["agentUpdate"], true);
+    let a = machines.iter().find(|m| m["machine"] == "boxA").unwrap();
+    assert!(a.get("agentUpdate").is_none(), "omitted when the agent can't: {a}");
+
+    let client = reqwest::Client::new();
+    let job: UpdateJob = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxB"))
+        .json(&serde_json::json!({ "updateAgent": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(job.id, "agent=true", "updateAgent must reach the agent");
+
+    let resp = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .json(&serde_json::json!({ "updateAgent": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    assert!(resp.text().await.unwrap().contains("cc-screen-rust update"), "names the manual command");
+
+    // …and the same machine still serves a plain assistants update.
+    let resp = client
+        .post(format!("http://{hub}/api/assistants/update?machine=boxA"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }

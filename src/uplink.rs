@@ -189,21 +189,8 @@ async fn connect_and_serve(
         // Availability-probed (0046) so a hub-relayed picker greys out a tool
         // whose CLI is missing on THIS machine, same as a direct client's.
         tools: state.tool_infos(),
-        // What this agent can do beyond the base envelope (0049). Advertised
-        // rather than version-sniffed: the hub refuses an op an agent doesn't
-        // list with a clear 501, instead of routing a Cmd the agent can't
-        // deserialize and timing out into a 504.
-        caps: vec![
-            cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string(),
-            // …and installing the missing ones for the local user (0050). The
-            // hub answers 501 rather than letting an older agent silently ignore
-            // `install_missing` and report an update-only job as an install.
-            cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL.to_string(),
-            // …and restarting ONE named session, resuming its conversation
-            // (0087). Without the token the hub answers 501 rather than routing
-            // a `Cmd` variant an older agent can't deserialize (→ a 504).
-            cc_screen_protocol::hub::CAP_SESSION_RESTART.to_string(),
-        ],
+        // What this agent can do beyond the base envelope (0049, …, 0091).
+        caps: register_caps(&state),
     };
     let _ = out_tx.send(WsOut::Bin(encode_frame(&register, b""))).await;
 
@@ -533,6 +520,32 @@ fn spawn_channel(
         }
     });
     ev_tx
+}
+
+/// What this agent can do beyond the base envelope (0049). Advertised rather
+/// than version-sniffed: the hub refuses an op an agent doesn't list with a clear
+/// 501, instead of routing a Cmd the agent can't deserialize and timing out into
+/// a 504.
+fn register_caps(state: &AppState) -> Vec<String> {
+    let mut caps = vec![
+        cc_screen_protocol::hub::CAP_ASSISTANT_UPDATE.to_string(),
+        // …and installing the missing ones for the local user (0050). The
+        // hub answers 501 rather than letting an older agent silently ignore
+        // `install_missing` and report an update-only job as an install.
+        cc_screen_protocol::hub::CAP_ASSISTANT_INSTALL.to_string(),
+        // …and restarting ONE named session, resuming its conversation
+        // (0087). Without the token the hub answers 501 rather than routing
+        // a `Cmd` variant an older agent can't deserialize (→ a 504).
+        cc_screen_protocol::hub::CAP_SESSION_RESTART.to_string(),
+    ];
+    // …and replacing ITSELF with the latest release (0091) — only where that can
+    // work: from the installer's path, under launchd/systemd. Anywhere else the
+    // hub answers 501 with the manual command.
+    match crate::self_update::support(&state.inner.home) {
+        Ok(_) => caps.push(cc_screen_protocol::hub::CAP_AGENT_UPDATE.to_string()),
+        Err(why) => tracing::info!("uplink: agent self-update unavailable here: {why}"),
+    }
+    caps
 }
 
 #[cfg(test)]

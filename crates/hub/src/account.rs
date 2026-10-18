@@ -116,12 +116,18 @@ pub async fn list(State(hub): State<HubState>, headers: HeaderMap) -> Response {
             // extra round-trips. Empty (and omitted client-side) when it's
             // complete or offline; kept honest by `AgentMsg::Tools`.
             let missing: Vec<String> = conn.as_ref().map(|c| c.missing_tools()).unwrap_or_default();
+            // The agent's own version and whether Update can replace it
+            // (proposal 0091) — so a machine that's behind is visible on its row.
+            let agent_version = conn.as_ref().filter(|c| c.online()).map(|c| c.agent_version()).unwrap_or_default();
+            let agent_update = conn.as_ref().is_some_and(|c| c.online() && c.can_update_agent());
             json!({
                 "agentId": a.agent_id,
                 "machine": a.machine_id,
                 "online": online,
                 "createdAt": a.created_at,
                 "missing": missing,
+                "agentVersion": agent_version,
+                "agentUpdate": agent_update,
             })
         })
         .collect();

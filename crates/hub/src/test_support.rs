@@ -292,10 +292,16 @@ pub async fn spawn_fake_agent(hub: &str, machine_id: &str, token: Option<&str>, 
                 }
                 HubMsg::Command { req, cmd } => {
                     let result = match cmd {
-                        Cmd::UpdateAssistants { install_missing, .. } => CmdResult::Json(
+                        Cmd::UpdateAssistants { install_missing, update_agent, .. } => CmdResult::Json(
                             serde_json::to_value(UpdateJob {
                                 id: format!("install={install_missing}"),
                                 phase: "done".into(),
+                                // Proposal 0091: echo `update_agent` as the agent row.
+                                agent: update_agent.then(|| cc_screen_protocol::UpdateToolStatus {
+                                    tool: "cc-screen".into(),
+                                    state: "current".into(),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
                             })
                             .unwrap(),

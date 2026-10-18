@@ -594,7 +594,7 @@ fn update_target(
     scope: &Visibility,
     machine: &str,
 ) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
-    update_target_caps(hub, scope, machine, false)
+    update_target_caps(hub, scope, machine, false, false)
 }
 
 /// As `update_target`, but additionally requires `assistant-install` when the
@@ -603,11 +603,17 @@ fn update_target(
 /// IS a newer agent capability, and the field that carries it is additive, so
 /// without this check a 0049-era agent would quietly run an update-only job and
 /// the user would believe a CLI had been installed.
+///
+/// …and `agent-update` when it asks the agent to **replace itself** (proposal
+/// 0091), for the same silent-drop reason — plus a second one: an agent that
+/// doesn't advertise it is one that *can't* do it here (a source-tree build, a
+/// foreground run, Windows), so the answer is the manual command.
 fn update_target_caps(
     hub: &HubState,
     scope: &Visibility,
     machine: &str,
     needs_install: bool,
+    needs_agent_update: bool,
 ) -> Result<std::sync::Arc<crate::registry::AgentConn>, Response> {
     let agent = hub
         .registry
@@ -633,6 +639,13 @@ fn update_target_caps(
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             "this machine's agent is too old to install assistants — run `cc-screen-rust update` on it",
+        )
+            .into_response());
+    }
+    if needs_agent_update && !agent.can_update_agent() {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "this machine's agent can't update itself from here — run `cc-screen-rust update` on it",
         )
             .into_response());
     }
@@ -671,6 +684,9 @@ pub struct UpdateBody {
     restart: Option<String>,
     #[serde(default)]
     install_missing: bool,
+    /// `updateAgent` (proposal 0091) — camelCase for the same reason.
+    #[serde(default)]
+    update_agent: bool,
 }
 
 pub async fn update_assistants(
@@ -680,7 +696,7 @@ pub async fn update_assistants(
     body: Option<Json<UpdateBody>>,
 ) -> Response {
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    let agent = match update_target_caps(&hub, &scope, &q.machine, b.install_missing) {
+    let agent = match update_target_caps(&hub, &scope, &q.machine, b.install_missing, b.update_agent) {
         Ok(a) => a,
         Err(resp) => return resp,
     };
@@ -688,6 +704,7 @@ pub async fn update_assistants(
         tools: b.tools,
         restart: b.restart.unwrap_or_else(|| "updated".into()),
         install_missing: b.install_missing,
+        update_agent: b.update_agent,
     };
     update_send(agent, cmd).await
 }
@@ -700,7 +717,7 @@ pub async fn install_plan(
     Extension(scope): Extension<Visibility>,
     Query(q): Query<MachineQ>,
 ) -> Response {
-    match update_target_caps(&hub, &scope, &q.machine, true) {
+    match update_target_caps(&hub, &scope, &q.machine, true, false) {
         Ok(agent) => update_send(agent, Cmd::InstallPlan { tools: Vec::new() }).await,
         Err(resp) => resp,
     }

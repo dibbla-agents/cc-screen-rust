@@ -386,7 +386,7 @@ mod tests {
     // ── proposal 0062 ────────────────────────────────────────────────────────
 
     fn machine(id: &str, hostname: &str, online: bool) -> cc_screen_protocol::MachineInfo {
-        cc_screen_protocol::MachineInfo { machine: id.into(), hostname: hostname.into(), online }
+        cc_screen_protocol::MachineInfo { machine: id.into(), hostname: hostname.into(), online, ..Default::default() }
     }
 
     fn sess_on(name: &str, m: &str) -> SessionInfo {

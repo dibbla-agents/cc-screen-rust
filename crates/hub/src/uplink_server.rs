@@ -71,9 +71,9 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
 
     // The first frame must be Register; it gates the (machine, token) pairing and
     // resolves the owning tenant.
-    let (machine_id, user_id, agent_id, hostname, tools, caps) = match ws_read.next().await {
+    let (machine_id, user_id, agent_id, hostname, tools, caps, agent_version) = match ws_read.next().await {
         Some(Ok(Message::Binary(buf))) => match decode_frame::<AgentMsg>(&buf) {
-            Ok((AgentMsg::Register { proto, machine_id, hostname, tools, caps, .. }, _)) => {
+            Ok((AgentMsg::Register { proto, machine_id, hostname, tools, caps, agent_version }, _)) => {
                 // Negotiate a version *range* instead of demanding exact equality
                 // (proposal 0001 §9.3): accept any agent in
                 // [MIN_SUPPORTED_PROTO, HUB_PROTO_VERSION] so a staggered fleet
@@ -117,7 +117,7 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
                     let _ = ws_write.send(Message::Close(None)).await;
                     return;
                 }
-                (machine_id, user_id, agent_id, hostname, tools, caps)
+                (machine_id, user_id, agent_id, hostname, tools, caps, agent_version)
             }
             _ => {
                 tracing::warn!("agent uplink: first frame was not Register; closing");
@@ -131,6 +131,7 @@ async fn serve_agent(hub: HubState, socket: WebSocket, token: Option<String>) {
     // WS sink and drains it.
     let (to_agent_tx, mut to_agent_rx) = mpsc::channel::<Vec<u8>>(1024);
     let conn = hub.registry.register_agent(&agent_id, &user_id, &machine_id, &hostname, tools, caps, to_agent_tx);
+    conn.set_agent_version(&agent_version);
     tracing::info!("agent {machine_id} registered ({hostname}) [agent_id={agent_id} user={user_id}]");
 
     let writer = tokio::spawn(async move {
