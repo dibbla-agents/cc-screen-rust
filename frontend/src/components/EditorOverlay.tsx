@@ -47,6 +47,7 @@ import {
 } from "./dirTree";
 import { readViewerState, switchRestores, writeViewerState, viewerKey } from "./viewerState";
 import { fileLinkUrl, relFromHome, type EditorLocation } from "../fileLink";
+import { isWithin } from "../linkSession";
 import MarkdownEditor from "./MarkdownEditor";
 import { toggleTaskAt } from "../editor/livePreview";
 import EditorTree from "./EditorTree";
@@ -836,23 +837,36 @@ export default function EditorOverlay({
   // $HOME: `expand` only opens the node it is given, and an unexpanded ancestor
   // means the folder is loaded but invisible. Waits for `tree.homePath` — the
   // bootstrap listing — because without it there is no chain to walk.
+  //
+  // A FILE that was asked for walks the same chain to its folder, so it shows up
+  // placed in the tree rather than behind collapsed folders: under the session's
+  // project root when the session's folder holds it (a file link picks that
+  // session — see linkSession.ts), under Home when there is no session. With a
+  // session whose folder does NOT hold it, nothing is expanded — unfolding Home
+  // beside a project would just be noise. It doesn't set `linkDir`: the file is
+  // what's open.
   const treeExpand = tree.expand;
+  const revealDir = initialDir ?? (initialPath ? dirname(initialPath) : null);
   useEffect(() => {
-    if (!open || !initialDir) return;
-    setLinkDir(initialDir);
-    const home = tree.homePath;
-    if (!home) return;
-    const rel = relFromHome(home, initialDir);
+    if (!open || !revealDir) return;
+    if (initialDir) setLinkDir(initialDir);
+    let base = tree.homePath;
+    if (!initialDir && session) {
+      if (!tree.projectPath || !isWithin(tree.projectPath, revealDir)) return;
+      base = tree.projectPath;
+    }
+    if (!base) return;
+    const rel = relFromHome(base, revealDir);
     if (rel === null) return;
-    let acc = home;
-    const chain = [home];
+    let acc = base;
+    const chain = [base];
     for (const seg of rel.split("/").filter(Boolean)) {
       acc = `${acc}/${seg}`;
       chain.push(acc);
     }
     for (const p of chain) void treeExpand(p);
-    if (!isDesktop) setTreePanelOpen(true);
-  }, [open, initialDir, tree.homePath, treeExpand, isDesktop]);
+    if (initialDir && !isDesktop) setTreePanelOpen(true);
+  }, [open, revealDir, initialDir, session, tree.homePath, tree.projectPath, treeExpand, isDesktop]);
 
   // Proposal 0083 Part B — report where the viewer is pointing. App is the
   // single writer of the address bar; this is its only input.

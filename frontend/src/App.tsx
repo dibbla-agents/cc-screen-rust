@@ -37,7 +37,8 @@ import {
   PANES_KEY,
   type PaneState,
 } from "./paneState";
-import { SessionRecentsStore, type RecentRef } from "./sessionRecents";
+import { SessionRecentsStore, recentKey, type RecentRef } from "./sessionRecents";
+import { sessionForPath } from "./linkSession";
 import { machineMruOrder, mruDefaultMachine } from "./machineMru";
 import TerminalView, { type ConnState } from "./components/TerminalView";
 import SessionDrawer, { type CreateSeed, type PaneSwitcherProps } from "./components/SessionDrawer";
@@ -435,6 +436,11 @@ export default function App() {
     // Proposal 0083: the folder form of a deep link (`/file/<m>/dir/`) — the
     // tree opens here instead of a file buffer.
     dir: string | null;
+    // A file link that no live session's folder holds opens with NO session —
+    // no agent column, no session chip — instead of beside whatever the grid
+    // had focused. Cleared as soon as the focused session changes (picking one
+    // from the viewer's switcher, ⌃B arrows), so the viewer follows again.
+    detached: boolean;
     focusSearchSeq: number;
     // Proposal 0038: `Ctrl+B /` bumps this to focus the in-tree "Filter tree"
     // field (mirror of focusSearchSeq for [0027]'s find-file bar).
@@ -444,6 +450,7 @@ export default function App() {
     path: null,
     machine: "",
     dir: null,
+    detached: false,
     focusSearchSeq: 0,
     focusTreeFilterSeq: 0,
   }));
@@ -789,7 +796,11 @@ export default function App() {
   // folder form opens the tree instead of a buffer. Both default to "follow the
   // pane / no folder", so every pre-0083 call site behaves exactly as before.
   const openEditor = useCallback(
-    (path: string | null, focusSearch = false, opts?: { machine?: string; dir?: string | null }) => {
+    (
+      path: string | null,
+      focusSearch = false,
+      opts?: { machine?: string; dir?: string | null; detached?: boolean }
+    ) => {
       closeAllSheets();
       setEditor((s) => ({
         ...s,
@@ -797,6 +808,7 @@ export default function App() {
         path,
         machine: opts?.machine ?? "",
         dir: opts?.dir ?? null,
+        detached: opts?.detached ?? false,
         focusSearchSeq: s.focusSearchSeq + (focusSearch ? 1 : 0),
       }));
     },
@@ -815,7 +827,7 @@ export default function App() {
     }));
   }, [closeAllSheets]);
   const closeEditor = useCallback(
-    () => setEditor((s) => ({ ...s, open: false, path: null, machine: "", dir: null })),
+    () => setEditor((s) => ({ ...s, open: false, path: null, machine: "", dir: null, detached: false })),
     []
   );
 
@@ -1049,12 +1061,27 @@ export default function App() {
     fileLinkDone.current = true;
     const link = FILE_LINK;
     let cancelled = false;
-    fetchFiles(undefined, undefined, link.machine)
-      .then((r) => {
+    // The session list rides along: the link names a file, and the session to
+    // open it beside is the one whose folder holds it (linkSession.ts). Waiting
+    // for a fresh list matters on a cold open — the poll may not have landed
+    // yet, and choosing from an empty list would wrongly mean "no session".
+    const sessionList = fetchSessions().catch(() => sessionsRef.current);
+    Promise.all([fetchFiles(undefined, undefined, link.machine), sessionList])
+      .then(([r, list]) => {
         if (cancelled) return;
         const abs = joinHome(r.home, link.relPath);
-        if (link.isDir) openEditor(null, false, { machine: link.machine, dir: abs });
-        else openEditor(abs, false, { machine: link.machine });
+        const match = sessionForPath(list, link.machine, abs, r.home, recentsStore.list().map(recentKey));
+        if (match) {
+          applySessionList(list);
+          const ref = { name: match.name, machine: match.machine ?? "" };
+          const at = panesRef.current.findIndex((p) => p?.name === ref.name && p?.machine === ref.machine);
+          // Already on screen: focus that pane rather than moving it.
+          if (at >= 0) setActive(at);
+          else mountAt(activeRef.current, ref);
+        }
+        const opts = { machine: link.machine, detached: !match };
+        if (link.isDir) openEditor(null, false, { ...opts, dir: abs });
+        else openEditor(abs, false, opts);
       })
       .catch(() => {
         // Unknown machine, offline agent, expired cookie mid-flight: open the
@@ -1067,7 +1094,18 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [authed, openEditor]);
+  }, [authed, openEditor, applySessionList, mountAt, setActive, recentsStore]);
+
+  // A detached viewer (a link no session holds) follows the grid again the
+  // moment the focused session changes. The ref starts at the current key so
+  // the link's own open — which doesn't change it — never clears the flag.
+  const focusedKey = currentSession ? sessionKey(currentSession) : "";
+  const detachedFrom = useRef(focusedKey);
+  useEffect(() => {
+    if (detachedFrom.current === focusedKey) return;
+    detachedFrom.current = focusedKey;
+    setEditor((s) => (s.detached ? { ...s, detached: false } : s));
+  }, [focusedKey]);
 
   // Warm-open notification tap: the service worker focuses this window and asks
   // it to mount the notified session instead of leaving the user on the prior
@@ -3134,13 +3172,13 @@ export default function App() {
             // Proposal 0083: the folder form of a deep link — the tree opens
             // here (and its ancestors expand) instead of a file buffer.
             initialDir={editor.dir}
-            session={currentSession?.name ?? null}
+            session={editor.detached ? null : (currentSession?.name ?? null)}
             machines={machines}
             multiMachine={multiMachine}
             // A deep link names the machine whose $HOME the path belongs to and
             // must win over the pane-derived default; "" falls back to today's.
             initialMachine={editor.machine || currentSession?.machine || firstOnlineMachine}
-            agentMachine={currentSession?.machine ?? ""}
+            agentMachine={editor.detached ? "" : (currentSession?.machine ?? "")}
             isDesktop={isDesktop}
             onClose={closeEditor}
             // The agent mirror renders at the active pane's true grid size so it
